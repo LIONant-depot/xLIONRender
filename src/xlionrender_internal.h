@@ -8,10 +8,13 @@
 // linkage is enough. "No one submits shapes except internally to this DLL" is literally what this is.
 #include "xlionrender_primitive.h"
 #include "dependencies/xmath/source/xmath.h"
+#include <cstdint>
 
 namespace xlionrender
 {
-    void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Color) noexcept;
+    // EntityValue (xecs::component::entity::m_Value) - not touched by SubmitInternal itself, just
+    // carried through to the renderer's draw list so Draw can find the selected item again later.
+    void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept;
 
     // The live render system (set in its OnCreate, cleared in OnDestroy) - Draw asks it to collect.
     struct system;

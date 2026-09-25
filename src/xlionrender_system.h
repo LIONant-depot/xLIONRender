@@ -40,13 +40,13 @@ namespace xlionrender
             Query.m_Must.AddFromComponents<xlioncore::physics::rigid_body, primitive>();
             auto S = Search(Query);
 
-            Foreach(S, [&](const xlioncore::physics::rigid_body& RB, const primitive& Prim) noexcept
+            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::physics::rigid_body& RB, const primitive& Prim) noexcept
             {
                 // Rotation isn't tracked back from box3d yet (xlioncore::physics::system only syncs
                 // position) - translation-only for now, a natural follow-up once rigid_body's rotation
                 // is kept in sync too.
                 const auto L2W = xmath::fmat4::fromTranslation(RB.m_Position);
-                SubmitInternal(Prim.m_Shape, L2W, Prim.m_Color);
+                SubmitInternal(Prim.m_Shape, L2W, Prim.m_Color, Ent.m_Value);
             });
         }
 

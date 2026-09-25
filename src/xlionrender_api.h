@@ -27,7 +27,10 @@
 namespace xlionrender
 {
     XLIONRENDER_API bool Init (xgpu::device& Device) noexcept;
-    XLIONRENDER_API void Draw (xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C) noexcept;
+
+    // ViewportW/H (pixels) size the selected entity's outline width in screen space - see
+    // xlionrender_renderer.h's own comment on the outline pass.
+    XLIONRENDER_API void Draw (xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept;
 
     // CPU ray-pick against every rendered entity's rigid_body AABB (xeditor_tools::picking, shared
     // with xskeleton.plugin's own bone picking) - closest hit wins. Returns
@@ -35,6 +38,10 @@ namespace xlionrender
     // host never needs to include xecs.h just to call this; it already keys its own scene entity maps
     // (m_RuntimeToLocal) by this same raw value.
     XLIONRENDER_API std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir) noexcept;
+
+    // The entity (raw xecs::component::entity::m_Value, or invalid_entity_v for none) to draw with an
+    // outline this frame - the host calls this once per frame with its own current selection.
+    XLIONRENDER_API void SetSelectedEntity(std::uint64_t EntityValue) noexcept;
 }
 
 #endif // XLIONRENDER_API_H
