@@ -54,16 +54,38 @@ namespace xlionrender
             xmath::fmat4 m_L2C;
             xmath::fvec4 m_Color;
         };
+        // Legacy radial-from-pivot outline (96 bytes). Kept as fallback when the projected OBB is
+        // unusable (near-plane cross, missing/degenerate bbox after axis validation).
         struct outline_push_constants
         {
             xmath::fmat4 m_L2C;
             xmath::fvec4 m_ViewportAndRadius; // x width, y height, z radius (pixels), w unused
             xmath::fvec4 m_Color;
         };
+        // Preferred OBB screen-space expand outline (128 bytes std140: mat4 + 4 vec4).
+        struct outline_obb_push_constants
+        {
+            xmath::fmat4 m_L2C;
+            xmath::fvec4 m_ViewportAndRadius; // xy viewport px; z radius px; w max fractional expand
+            xmath::fvec4 m_Color;
+            xmath::fvec4 m_Bounds;             // xy projected OBB center px; zw half-extents in axis frame
+            xmath::fvec4 m_Axis;               // xy normalized long axis in viewport px; zw unused
+        };
 
         static bool Ok(xgpu::device::error* pErr) noexcept;
         bool BuildMesh(xgpu::device& Device, mesh& Mesh, const xprim_geom::mesh& GeneratedMesh) noexcept;
         void DrawItem(xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, const draw_item& Item) noexcept;
+
+        // Local AABB half-extents of the mesh built for Shape (matches xprim_geom Generate sizes in Init).
+        static xmath::fvec3 ShapeLocalHalfExtents(shape Shape) noexcept;
+
+        // Projected OBB of LocalHalfExtents under L2C into viewport pixels (same NDC->px as the OBB
+        // shader). Returns false on near-plane cross / unusable extents - caller must use legacy.
+        static bool ComputeProjectedOutlineObb( const xmath::fmat4& L2C
+                                              , float ViewportW, float ViewportH
+                                              , const xmath::fvec3& LocalHalfExtents
+                                              , xmath::fvec4& OutBounds
+                                              , xmath::fvec2& OutAxis ) noexcept;
 
         xgpu::device*           m_pDevice = nullptr;
         bool                    m_bReady  = false;
@@ -71,13 +93,13 @@ namespace xlionrender
         xgpu::pipeline          m_Pipeline;
         xgpu::pipeline_instance m_Instance;
 
-        // Outline pass: expanded-along-normal silhouette, drawn behind the selected item's own normal
-        // draw (xlionrender_outline_vert/frag.glsl) - cull FRONT (render only back faces, so the real
-        // object's front-face draw fully covers the interior, leaving only the perimeter "skirt"
-        // visible) and a depth bias (pushed slightly away from the camera) so it never z-fights the
-        // real surface on coplanar/glancing faces. Reuses m_VD - same Position+Normal vertex layout.
+        // Outline pass: expanded silhouette, drawn behind the selected item's own normal draw
+        // (cull FRONT so the real front-face fill covers the interior). Depth writes off; existing
+        // depth-bias settings left unchanged. Preferred path = OBB expand; legacy = radial-from-pivot.
         xgpu::pipeline          m_OutlinePipeline;
         xgpu::pipeline_instance m_OutlineInstance;
+        xgpu::pipeline          m_OutlineObbPipeline;
+        xgpu::pipeline_instance m_OutlineObbInstance;
 
         mesh                    m_Meshes[4]; // indexed by shape
         std::vector<draw_item>  m_DrawList;

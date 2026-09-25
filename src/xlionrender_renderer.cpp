@@ -1,4 +1,7 @@
 #include "xlionrender_renderer.h"
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 
 namespace xlionrender
 {
@@ -17,6 +20,14 @@ namespace xlionrender
     inline constexpr std::uint32_t g_OutlineFragShader[] =
     {
         #include "xlionrender_outline_frag.h"
+    };
+    inline constexpr std::uint32_t g_OutlineObbVertShader[] =
+    {
+        #include "xlionrender_outline_obb_vert.h"
+    };
+    inline constexpr std::uint32_t g_OutlineObbFragShader[] =
+    {
+        #include "xlionrender_outline_obb_frag.h"
     };
 
     bool renderer::Ok(xgpu::device::error* pErr) noexcept
@@ -46,8 +57,122 @@ namespace xlionrender
         return true;
     }
 
+    xmath::fvec3 renderer::ShapeLocalHalfExtents(shape Shape) noexcept
+    {
+        // Matches the xprim_geom::Generate sizes used in Init - all current primitives fit in a
+        // unit cube centered at the origin (half-extents 0.5). Capsule(Height=1,Radius=0.5) too.
+        (void)Shape;
+        return xmath::fvec3(0.5f, 0.5f, 0.5f);
+    }
+
+    bool renderer::ComputeProjectedOutlineObb( const xmath::fmat4& L2C
+                                             , float ViewportW, float ViewportH
+                                             , const xmath::fvec3& LocalHalfExtents
+                                             , xmath::fvec4& OutBounds
+                                             , xmath::fvec2& OutAxis ) noexcept
+    {
+        if (ViewportW <= 0.0f || ViewportH <= 0.0f) return false;
+        if (LocalHalfExtents.m_X <= 0.0f || LocalHalfExtents.m_Y <= 0.0f || LocalHalfExtents.m_Z <= 0.0f) return false;
+
+        constexpr float kNearW = 0.00001f;
+        const float hx = LocalHalfExtents.m_X;
+        const float hy = LocalHalfExtents.m_Y;
+        const float hz = LocalHalfExtents.m_Z;
+
+        xmath::fvec2 pixels[8];
+        float        centerX = 0.0f, centerY = 0.0f;
+
+        // Same viewport-local mapping as xlionrender_outline_obb_vert.glsl / xGPU's positive-height
+        // Vulkan viewport (y=0 at top, height > 0): px = (ndc * 0.5 + 0.5) * viewportPx.
+        for (int i = 0; i < 8; ++i)
+        {
+            const float sx = (i & 1) ? hx : -hx;
+            const float sy = (i & 2) ? hy : -hy;
+            const float sz = (i & 4) ? hz : -hz;
+            const xmath::fvec4 clip = L2C * xmath::fvec4(sx, sy, sz, 1.0f);
+
+            // v1 near-plane: any corner behind/crossing near (w<=eps or z not in [0,w]) → unusable.
+            if (clip.m_W <= kNearW) return false;
+            if (clip.m_Z < 0.0f || clip.m_Z > clip.m_W) return false;
+
+            const float invW = 1.0f / clip.m_W;
+            const float ndcX = clip.m_X * invW;
+            const float ndcY = clip.m_Y * invW;
+            pixels[i] = xmath::fvec2((ndcX * 0.5f + 0.5f) * ViewportW
+                                   , (ndcY * 0.5f + 0.5f) * ViewportH);
+            centerX += pixels[i].m_X;
+            centerY += pixels[i].m_Y;
+        }
+
+        centerX *= 0.125f;
+        centerY *= 0.125f;
+        const xmath::fvec2 center(centerX, centerY);
+
+        // Project the three local OBB axes (through L2C) into viewport pixels; pick the longest.
+        // Axis Y in the shader is screen-space perpendicular(axisX) - we do NOT pass a second 3D axis.
+        auto ProjectAxis = [&](float ax, float ay, float az) -> xmath::fvec2
+        {
+            const xmath::fvec4 c0 = L2C * xmath::fvec4(-ax, -ay, -az, 1.0f);
+            const xmath::fvec4 c1 = L2C * xmath::fvec4( ax,  ay,  az, 1.0f);
+            if (c0.m_W <= kNearW || c1.m_W <= kNearW) return xmath::fvec2(0.0f, 0.0f);
+            if (c0.m_Z < 0.0f || c0.m_Z > c0.m_W) return xmath::fvec2(0.0f, 0.0f);
+            if (c1.m_Z < 0.0f || c1.m_Z > c1.m_W) return xmath::fvec2(0.0f, 0.0f);
+            const float i0 = 1.0f / c0.m_W;
+            const float i1 = 1.0f / c1.m_W;
+            const xmath::fvec2 p0((c0.m_X * i0 * 0.5f + 0.5f) * ViewportW, (c0.m_Y * i0 * 0.5f + 0.5f) * ViewportH);
+            const xmath::fvec2 p1((c1.m_X * i1 * 0.5f + 0.5f) * ViewportW, (c1.m_Y * i1 * 0.5f + 0.5f) * ViewportH);
+            return p1 - p0;
+        };
+
+        const xmath::fvec2 axisCandidates[3] =
+        { ProjectAxis(hx, 0.0f, 0.0f)
+        , ProjectAxis(0.0f, hy, 0.0f)
+        , ProjectAxis(0.0f, 0.0f, hz)
+        };
+
+        int   iBest = -1;
+        float bestLenSq = 0.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            const float lenSq = axisCandidates[i].LengthSq();
+            if (lenSq > bestLenSq) { bestLenSq = lenSq; iBest = i; }
+        }
+
+        constexpr float kMinAxisLenSq = 1.0e-4f; // ~0.01 px
+        xmath::fvec2 axisX;
+        if (iBest < 0 || bestLenSq < kMinAxisLenSq)
+        {
+            // Degenerate projected axes: screen-aligned bound from projected corners (still OBB path).
+            axisX = xmath::fvec2(1.0f, 0.0f);
+        }
+        else
+        {
+            axisX = axisCandidates[iBest].NormalizeCopy();
+        }
+        const xmath::fvec2 axisY(-axisX.m_Y, axisX.m_X);
+
+        float halfX = 0.0f, halfY = 0.0f;
+        for (int i = 0; i < 8; ++i)
+        {
+            const xmath::fvec2 d = pixels[i] - center;
+            halfX = std::max(halfX, std::fabs(d.Dot(axisX)));
+            halfY = std::max(halfY, std::fabs(d.Dot(axisY)));
+        }
+
+        constexpr float kMinHalf = 0.5f; // sub-pixel / empty → unusable for expand
+        if (halfX < kMinHalf || halfY < kMinHalf) return false;
+
+        OutBounds = xmath::fvec4(center.m_X, center.m_Y, halfX, halfY);
+        OutAxis   = axisX;
+        return true;
+    }
+
     bool renderer::Init(xgpu::device& Device) noexcept
     {
+        static_assert(sizeof(outline_obb_push_constants) == 128,
+            "outline_obb_push_constants must be 128 bytes (mat4 + 4 vec4, std140)");
+        static_assert(sizeof(outline_push_constants) == 96,
+            "legacy outline_push_constants must stay 96 bytes");
         if (m_bReady) return true;
         m_pDevice = &Device;
 
@@ -79,10 +204,7 @@ namespace xlionrender
             if (!Ok(Device.Create(m_Instance, { .m_PipeLine = m_Pipeline }))) return false;
         }
 
-        // Outline pass pipeline - see xlionrender_renderer.h's own comment on the member. Cull FRONT
-        // (render only back faces - the real object's own front-face draw, done after, fully covers
-        // the interior projection of those expanded back faces) and a depth bias pushing it slightly
-        // further from the camera so coplanar/glancing faces don't z-fight the real surface.
+        // Legacy radial-from-pivot outline pipeline (fallback).
         {
             xgpu::shader Vert, Frag;
             if (!Shader(Vert, xgpu::shader::type::bit::VERTEX,   g_OutlineVertShader, std::size(g_OutlineVertShader))) return false;
@@ -97,6 +219,21 @@ namespace xlionrender
             if (!Ok(Device.Create(m_OutlineInstance, { .m_PipeLine = m_OutlinePipeline }))) return false;
         }
 
+        // Preferred OBB screen-space expand outline pipeline.
+        {
+            xgpu::shader Vert, Frag;
+            if (!Shader(Vert, xgpu::shader::type::bit::VERTEX,   g_OutlineObbVertShader, std::size(g_OutlineObbVertShader))) return false;
+            if (!Shader(Frag, xgpu::shader::type::bit::FRAGMENT, g_OutlineObbFragShader, std::size(g_OutlineObbFragShader))) return false;
+            auto Shaders = std::array<const xgpu::shader*, 2>{ &Frag, &Vert };
+            if (!Ok(Device.Create(m_OutlineObbPipeline, xgpu::pipeline::setup{ .m_VertexDescriptor = m_VD, .m_Shaders = Shaders
+                , .m_PushConstantsSize = sizeof(outline_obb_push_constants)
+                , .m_Primitive    = { .m_Cull = xgpu::pipeline::primitive::cull::FRONT }
+                , .m_DepthStencil = { .m_DepthBiasConstantFactor = 1.25f, .m_DepthBiasSlopeFactor = 1.75f
+                                     , .m_bDepthWriteEnable = false, .m_bDepthBiasEnable = true }
+                }))) return false;
+            if (!Ok(Device.Create(m_OutlineObbInstance, { .m_PipeLine = m_OutlineObbPipeline }))) return false;
+        }
+
         m_bReady = true;
         return true;
     }
@@ -104,6 +241,8 @@ namespace xlionrender
     void renderer::Release(void) noexcept
     {
         if (!m_pDevice) return;
+        m_pDevice->Destroy(std::move(m_OutlineObbInstance));
+        m_pDevice->Destroy(std::move(m_OutlineObbPipeline));
         m_pDevice->Destroy(std::move(m_OutlineInstance));
         m_pDevice->Destroy(std::move(m_OutlinePipeline));
         m_pDevice->Destroy(std::move(m_Instance));
@@ -151,14 +290,49 @@ namespace xlionrender
         {
             const auto& Item = m_DrawList[iSelected];
             auto& Mesh = m_Meshes[static_cast<int>(Item.m_Shape)];
+            const xmath::fmat4 L2C = W2C * Item.m_L2W;
 
-            CmdBuffer.setPipelineInstance(m_OutlineInstance);
-            outline_push_constants OutlinePC
-            { .m_L2C              = W2C * Item.m_L2W
-            , .m_ViewportAndRadius = { ViewportW, ViewportH, 6.0f, 0.0f }
-            , .m_Color             = { 1.0f, 0.65f, 0.0f, 1.0f }
-            };
-            CmdBuffer.setPushConstants(OutlinePC);
+            // Keep the selection outline alive without making it distracting. This is computed
+            // here, on the host side, so the preferred OBB path and the legacy fallback share the
+            // exact same pulse. One second per cycle gives the editor a moderate, ~1 Hz rhythm.
+            // 2s cycle; keep the trough bright enough that the outline never looks muddy.
+            constexpr float kOutlinePulsePeriodSeconds = 3.0f;
+            constexpr float kTwoPi = 6.28318530717958647692f;
+            static const auto s_OutlinePulseStart = std::chrono::steady_clock::now();
+            const float elapsedSeconds = std::chrono::duration<float>(
+                std::chrono::steady_clock::now() - s_OutlinePulseStart).count();
+            const float pulse = 300.975f + 0.125f * std::sin(elapsedSeconds * (kTwoPi / kOutlinePulsePeriodSeconds));
+            const xmath::fvec4 OutlineColor{ std::min(1.0f,pulse), std::min(1.0f, pulse * 0.65f), std::min(1.0f, pulse * 0.15f), 1.0f };
+
+            xmath::fvec4 ObbBounds;
+            xmath::fvec2 ObbAxis;
+            const bool bUseObb = ComputeProjectedOutlineObb( L2C, ViewportW, ViewportH
+                                                           , ShapeLocalHalfExtents(Item.m_Shape)
+                                                           , ObbBounds, ObbAxis );
+
+            if (bUseObb)
+            {
+                CmdBuffer.setPipelineInstance(m_OutlineObbInstance);
+                outline_obb_push_constants OutlinePC
+                { .m_L2C               = L2C
+                , .m_ViewportAndRadius = { ViewportW, ViewportH, 6.0f, 0.08f }
+                , .m_Color             = OutlineColor
+                , .m_Bounds            = ObbBounds
+                , .m_Axis              = { ObbAxis.m_X, ObbAxis.m_Y, 0.0f, 0.0f }
+                };
+                CmdBuffer.setPushConstants(OutlinePC);
+            }
+            else
+            {
+                // Near-plane / degenerate / no usable bbox → legacy radial-from-pivot.
+                CmdBuffer.setPipelineInstance(m_OutlineInstance);
+                outline_push_constants OutlinePC
+                { .m_L2C               = L2C
+                , .m_ViewportAndRadius = { ViewportW, ViewportH, 6.0f, 0.0f }
+                , .m_Color             = OutlineColor
+                };
+                CmdBuffer.setPushConstants(OutlinePC);
+            }
             CmdBuffer.setBuffer(Mesh.m_Indices);
             CmdBuffer.setBuffer(Mesh.m_Verts);
             CmdBuffer.Draw(Mesh.m_IndexCount);

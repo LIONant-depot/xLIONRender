@@ -1,4 +1,4 @@
-// Self-registration entry points - same ABI Game.dll and xLIONCore already use
+﻿// Self-registration entry points - same ABI Game.dll and xLIONCore already use
 // (dependencies/xECSV2/src/xecs_plugin_api.h). xLION.exe resolves these via
 // GetModuleHandle+GetProcAddress, never naming xlionrender::primitive/system directly. This is the
 // ONLY translation unit that calls RegisterComponents<primitive>()/RegisterSystems<system>() - both
@@ -21,9 +21,10 @@ void XecsPlugin_RegisterComponents(xecs::game_mgr::instance& GameMgr, xecs::plug
 extern "C" __declspec(dllexport)
 void XecsPlugin_RegisterSystems(xecs::game_mgr::instance& GameMgr) noexcept
 {
-    // rigid_body is registered by LIONCore.dll, so only ITS info_v copy got a bit at Lock - resolve
-    // this DLL's own copy (and its built-ins) by GUID before the system below is created and queries it.
+    // transform + rigid_body are registered by LIONCore.dll, so only ITS info_v copies got bits at
+    // Lock - resolve this DLL's own copies (and its built-ins) by GUID before the system below is
+    // created and queries them.
     GameMgr.m_ComponentMgr.LockComponentTypes();
-    xecs::component::mgr::SyncLocalBitIDs<xlioncore::physics::rigid_body>();
+    xecs::component::mgr::SyncLocalBitIDs<xlioncore::transform, xlioncore::physics::rigid_body>();
     GameMgr.RegisterSystems<xlionrender::system>();
 }

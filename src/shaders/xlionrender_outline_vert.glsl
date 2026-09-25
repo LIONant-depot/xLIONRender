@@ -2,6 +2,58 @@
 #extension GL_ARB_separate_shader_objects : enable
 
 layout(location = 0) in vec3 inPosition;
+layout(location = 1) in vec3 inNormal; // Kept for input compatibility; unused.
+
+layout(std140, push_constant) uniform PushConstants
+{
+    mat4 L2C;
+    vec4 ViewportAndRadius; // x width, y height, z radius in pixels
+    vec4 Color;
+} uniforms;
+
+void main()
+{
+    vec4 clip = uniforms.L2C * vec4(inPosition, 1.0);
+
+    float width  = uniforms.ViewportAndRadius.x;
+    float height = uniforms.ViewportAndRadius.y;
+    float radius = uniforms.ViewportAndRadius.z;
+
+    // With the existing inputs, local (0, 0, 0) is our object pivot.
+    vec4 pivotClip = uniforms.L2C * vec4(0.0, 0.0, 0.0, 1.0);
+
+    if (clip.w > 0.00001 && pivotClip.w > 0.00001)
+    {
+        vec2 vertexNDC = clip.xy / clip.w;
+        vec2 pivotNDC  = pivotClip.xy / pivotClip.w;
+
+        // Direction from the projected pivot, measured in screen pixels.
+        vec2 fromPivotPixels =
+            (vertexNDC - pivotNDC) * vec2(width, height) * 0.5;
+
+        float distancePixels = length(fromPivotPixels);
+
+        if (distancePixels > 0.00001)
+        {
+            const float maxExpansion = 0.08; // At most 8% farther from the pivot
+            float scale = 1.0 + min(radius / distancePixels, maxExpansion);
+
+            vec2 expandedNDC = pivotNDC + (vertexNDC - pivotNDC) * scale;
+
+            clip.xy = expandedNDC * clip.w;
+        }
+    }
+
+    gl_Position = clip;
+}
+
+
+// No very nice version
+/*
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
+
+layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 
 // Both stages declare the identical block - this codebase's own push-constant convention requires
@@ -19,6 +71,8 @@ layout(std140, push_constant) uniform PushConstants
 // every point on the surface the same outline width regardless of the mesh's shape. L2C's own
 // rotation part doubles as the normal matrix here since every object in this DLL is translation-only
 // (see xlionrender_system.h's own comment) - revisit with a proper inverse-transpose if that changes.
+
+
 void main()
 {
     vec4 clip = uniforms.L2C * vec4(inPosition, 1.0);
@@ -44,3 +98,4 @@ void main()
 
     gl_Position = clip;
 }
+*/
