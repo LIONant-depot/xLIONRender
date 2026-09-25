@@ -301,7 +301,7 @@ namespace xlionrender
             static const auto s_OutlinePulseStart = std::chrono::steady_clock::now();
             const float elapsedSeconds = std::chrono::duration<float>(
                 std::chrono::steady_clock::now() - s_OutlinePulseStart).count();
-            const float pulse = 300.975f + 0.125f * std::sin(elapsedSeconds * (kTwoPi / kOutlinePulsePeriodSeconds));
+            const float pulse = 0.875f + 0.125f * std::sin(elapsedSeconds * (kTwoPi / kOutlinePulsePeriodSeconds));
             const xmath::fvec4 OutlineColor{ std::min(1.0f,pulse), std::min(1.0f, pulse * 0.65f), std::min(1.0f, pulse * 0.15f), 1.0f };
 
             xmath::fvec4 ObbBounds;
