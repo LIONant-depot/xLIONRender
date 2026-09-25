@@ -21,9 +21,9 @@ namespace xlionrender
         g_Renderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH);
     }
 
-    std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir) noexcept
+    std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT) noexcept
     {
-        return g_pSystem ? g_pSystem->Pick(Origin, Dir) : xecs::component::entity::invalid_entity_v;
+        return g_pSystem ? g_pSystem->Pick(Origin, Dir, MaxT) : xecs::component::entity::invalid_entity_v;
     }
 
     void SetSelectedEntity(std::uint64_t EntityValue) noexcept
