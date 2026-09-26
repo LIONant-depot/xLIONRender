@@ -5,9 +5,10 @@
 // The render component: registered and consumed entirely inside LIONRender.dll (see
 // xlionrender_plugin_entry.cpp) - xLION.exe never includes this header. Deliberately carries no
 // pose of its own - the system queries it together with xlioncore::transform (Scale/Rotation/Position)
-// and rigid_body (Dynamic / runtime body; authored size is Transform.Scale only).
+// and physics_body_properties (Dynamic / runtime body; authored size is Transform.Scale only).
 #include "dependencies/xECSV2/src/xecs.h"
 #include "dependencies/xmath/source/xmath.h"
+#include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"
 
 namespace xlionrender
 {
@@ -33,7 +34,8 @@ namespace xlionrender
         , obj_member<"Color", &primitive::m_Color>
         )
     };
-    XPROPERTY_REG(primitive)
+    // After Transform (0) and Physics (10..40) so Transform stays at the top of the inspector.
+    XSCRIPT_REGISTER_COMPONENT(primitive, "Rendering", 50)
 }
 
 #endif // XLIONRENDER_PRIMITIVE_H
