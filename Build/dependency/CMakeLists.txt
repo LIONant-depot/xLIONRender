@@ -1,4 +1,4 @@
-include(${CMAKE_BINARY_DIR}/_deps/xcmake_tools/Common.cmake)
+﻿include(${CMAKE_BINARY_DIR}/_deps/xcmake_tools/Common.cmake)
 
 # Defensive - FetchAndPopulate is idempotent, a no-op if the host project already fetched these. Not
 # fetching xLIONCore here (unlike xECSV2/xGPU/xprim_geom): its own Build/dependency/CMakeLists.txt has
@@ -63,10 +63,30 @@ target_include_directories(xLIONRender PRIVATE
   "${CMAKE_BINARY_DIR}/sprv_shaders_h"
 )
 target_compile_definitions(xLIONRender PRIVATE XECS_BUILD_SHARED XLIONRENDER_BUILD_SHARED XLIONRENDER_EXPORTS)
-# xecs.h (pulled in transitively via xlioncore's rigid_body component) is built with XECS_BUILD_SHARED
+# xecs.h (pulled in transitively via xlioncore's physics_body_properties component) is built with XECS_BUILD_SHARED
 # here, so xtextfile/xproperty symbols it declares dllimport need xLIONCore's own import lib to
 # resolve at link time - xLIONCore.dll is the one binary that actually exports them.
 target_link_libraries(xLIONRender PRIVATE xGPU xprim_geom xLIONCore)
 if(WIN32)
   target_link_libraries(xLIONRender PRIVATE Advapi32.lib)
 endif()
+
+# Every header under src/ (xlionrender_api.h, xlionrender_internal.h, xlionrender_primitive.h,
+# xlionrender_system.h) was never listed above - only the .cpp files that actually compile into
+# this DLL were - so none of it was visible in xLIONRender's own Visual Studio project, same gap
+# fixed in xLIONCore's own Build/dependency/CMakeLists.txt (see its comment). GLOB_RECURSE here (not
+# a hand-maintained list, unlike add_library's own source list above) is deliberate: this is IDE
+# browsability only, never build correctness, so a new header just needs one reconfigure to appear.
+file(GLOB_RECURSE XLIONRENDER_HEADERS CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../src/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../src/*.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../src/*.inl"
+)
+target_sources(xLIONRender PRIVATE ${XLIONRENDER_HEADERS})
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/../../src" PREFIX "src"
+  FILES ${XLIONRENDER_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_renderer.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_api.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_plugin_entry.cpp"
+)
+source_group("Shaders" FILES ${XLIONRENDER_GENERATED_HEADERS})
