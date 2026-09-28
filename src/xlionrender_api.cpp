@@ -34,8 +34,8 @@ namespace xlionrender
     // Not exported (no header declares it outside this DLL) - only system::Collect, compiled into
     // this same DLL (xlionrender_system.h), ever calls this. "No one submits shapes except internally
     // to this DLL" - this is the one function that makes that literally true.
-    void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept
+    void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Scale, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept
     {
-        g_Renderer.Submit(Shape, L2W, Color, EntityValue);
+        g_Renderer.Submit(Shape, L2W, Scale, Color, EntityValue);
     }
 }

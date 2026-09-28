@@ -14,7 +14,11 @@ namespace xlionrender
 {
     // EntityValue (xecs::component::entity::m_Value) - not touched by SubmitInternal itself, just
     // carried through to the renderer's draw list so Draw can find the selected item again later.
-    void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept;
+    // Scale (Transform.Scale, the same vector setupSRT folded into L2W) is ALSO carried through
+    // separately, unmodified - the capsule draw path needs it split back out from L2W's rotation to
+    // keep its hemisphere caps round instead of stretched (see renderer::DrawItem); every other shape
+    // ignores it.
+    void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Scale, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept;
 
     // The live render system (set in its OnCreate, cleared in OnDestroy) - Draw asks it to collect.
     struct system;

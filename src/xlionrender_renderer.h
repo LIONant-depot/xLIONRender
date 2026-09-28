@@ -24,8 +24,10 @@ namespace xlionrender
 
         // Called by system::Collect (compiled into this same DLL) once per entity per frame - just
         // appends to m_DrawList, no GPU work here. EntityValue (xecs::component::entity::m_Value) is
-        // only used to find the selected item again at Draw time - see SetSelected.
-        void Submit  (shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept;
+        // only used to find the selected item again at Draw time - see SetSelected. Scale is the same
+        // vector already folded into L2W - carried separately too, only for the capsule draw path
+        // (see DrawItem); every other shape ignores it.
+        void Submit  (shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Scale, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept;
 
         // The one entity (if any) to outline this frame - xlionrender::SetSelectedEntity forwards here.
         void SetSelected(std::uint64_t EntityValue) noexcept { m_SelectedEntity = EntityValue; }
@@ -46,6 +48,7 @@ namespace xlionrender
         {
             shape         m_Shape;
             xmath::fmat4  m_L2W;
+            xmath::fvec3  m_Scale;
             xmath::fvec3  m_Color;
             std::uint64_t m_EntityValue;
         };
@@ -53,6 +56,17 @@ namespace xlionrender
         {
             xmath::fmat4 m_L2C;
             xmath::fvec4 m_Color;
+        };
+        // Capsule only (see DrawItem) - L2C here carries world ROTATION+TRANSLATION but NOT Scale
+        // (stripped via Item.m_L2W * fromScale(1/Item.m_Scale)); Scale is reapplied by the vertex
+        // shader with the cap radius decoupled from the body's length, so hemisphere caps stay round
+        // at any Scale instead of stretching into cones (direct user report: "the top and the bottom"
+        // - the caps - "looks more like a sphere... specially when you scale it in Y").
+        struct capsule_push_constants
+        {
+            xmath::fmat4 m_L2C;
+            xmath::fvec4 m_Color;
+            xmath::fvec4 m_RadiusHeightScale; // x local radius (xprim_geom Generate's Radius, Init); y Scale.x; z Scale.z; w Scale.y
         };
         // Legacy radial-from-pivot outline (96 bytes). Kept as fallback when the projected OBB is
         // unusable (near-plane cross, missing/degenerate bbox after axis validation).
@@ -100,6 +114,10 @@ namespace xlionrender
         xgpu::pipeline_instance m_OutlineInstance;
         xgpu::pipeline          m_OutlineObbPipeline;
         xgpu::pipeline_instance m_OutlineObbInstance;
+
+        // Capsule's own pipeline (see capsule_push_constants) - Cube/Sphere/Cylinder still share m_Pipeline/m_Instance.
+        xgpu::pipeline          m_CapsulePipeline;
+        xgpu::pipeline_instance m_CapsuleInstance;
 
         mesh                    m_Meshes[4]; // indexed by shape
         std::vector<draw_item>  m_DrawList;

@@ -59,7 +59,7 @@ namespace xlionrender
                 // this same L2W (Item.m_L2W shared with the solid draw).
                 xmath::fmat4 L2W;
                 L2W.setupSRT(T.m_Scale, T.m_Rotation, T.m_Position);
-                SubmitInternal(Prim.m_Shape, L2W, Prim.m_Color, Ent.m_Value);
+                SubmitInternal(Prim.m_Shape, L2W, T.m_Scale, Prim.m_Color, Ent.m_Value);
             });
         }
 

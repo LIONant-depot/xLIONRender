@@ -29,6 +29,18 @@ namespace xlionrender
     {
         #include "xlionrender_outline_obb_frag.h"
     };
+    inline constexpr std::uint32_t g_CapsuleVertShader[] =
+    {
+        #include "xlionrender_capsule_vert.h"
+    };
+    inline constexpr std::uint32_t g_CapsuleFragShader[] =
+    {
+        #include "xlionrender_capsule_frag.h"
+    };
+
+    // Must match xprim_geom::capsule::Generate's own Radius argument in Init - the vertex shader
+    // needs the UNIT mesh's radius to recover each vertex's spine point (see xlionrender_capsule_vert.glsl).
+    inline constexpr float kCapsuleUnitRadius = 0.25f;
 
     bool renderer::Ok(xgpu::device::error* pErr) noexcept
     {
@@ -60,7 +72,9 @@ namespace xlionrender
     xmath::fvec3 renderer::ShapeLocalHalfExtents(shape Shape) noexcept
     {
         // Matches the xprim_geom::Generate sizes used in Init - all current primitives fit in a
-        // unit cube centered at the origin (half-extents 0.5). Capsule(Height=1,Radius=0.5) too.
+        // unit cube centered at the origin (half-extents 0.5), used here as a conservative bound for
+        // the selection outline cage. Capsule's actual X/Z half-extent is 0.25 (Radius, see Init) -
+        // this stays 0.5 uniformly since a slightly oversized outline cage is harmless.
         (void)Shape;
         return xmath::fvec3(0.5f, 0.5f, 0.5f);
     }
@@ -173,6 +187,8 @@ namespace xlionrender
             "outline_obb_push_constants must be 128 bytes (mat4 + 4 vec4, std140)");
         static_assert(sizeof(outline_push_constants) == 96,
             "legacy outline_push_constants must stay 96 bytes");
+        static_assert(sizeof(capsule_push_constants) == 96,
+            "capsule_push_constants must be 96 bytes (mat4 + 2 vec4, std140)");
         if (m_bReady) return true;
         m_pDevice = &Device;
 
@@ -185,7 +201,12 @@ namespace xlionrender
 
         // One mesh per shape - built once here, drawn many times per frame
         if (!BuildMesh(Device, m_Meshes[static_cast<int>(shape::CUBE)],     xprim_geom::cube::Generate(0, 0, 0, 0, { 1.0f, 1.0f, 1.0f })))    return false;
-        if (!BuildMesh(Device, m_Meshes[static_cast<int>(shape::CAPSULE)],  xprim_geom::capsule::Generate(4, 12, 0.5f, 1.0f)))                 return false;
+        // Radius=0.25 (not 0.5) is deliberate: at Radius=0.5 the cylinder section (Height - 2*Radius)
+        // is zero, so the "capsule" was actually two hemispheres glued together - a sphere, not a
+        // pill (direct user report: "looks more like a sphere... specially when you scale it in Y").
+        // 0.25 gives a real cylinder body (50% of the height) with a hemispherical cap on each end
+        // (25% each) - the same radius-to-height ratio as Unity's default capsule (radius = height/4).
+        if (!BuildMesh(Device, m_Meshes[static_cast<int>(shape::CAPSULE)],  xprim_geom::capsule::Generate(4, 12, kCapsuleUnitRadius, 1.0f)))    return false;
         if (!BuildMesh(Device, m_Meshes[static_cast<int>(shape::SPHERE)],   xprim_geom::uvsphere::Generate(8, 12, 1.0f, 0.5f)))                return false;
         if (!BuildMesh(Device, m_Meshes[static_cast<int>(shape::CYLINDER)], xprim_geom::cylinder::Generate(4, 12, 1.0f, 0.5f, 0.5f)))          return false;
 
@@ -234,6 +255,18 @@ namespace xlionrender
             if (!Ok(Device.Create(m_OutlineObbInstance, { .m_PipeLine = m_OutlineObbPipeline }))) return false;
         }
 
+        // Capsule's own solid-fill pipeline (see capsule_push_constants) - same vertex layout/topology
+        // as the shared m_Pipeline, ordinary (not outline) culling/depth settings.
+        {
+            xgpu::shader Vert, Frag;
+            if (!Shader(Vert, xgpu::shader::type::bit::VERTEX,   g_CapsuleVertShader, std::size(g_CapsuleVertShader))) return false;
+            if (!Shader(Frag, xgpu::shader::type::bit::FRAGMENT, g_CapsuleFragShader, std::size(g_CapsuleFragShader))) return false;
+            auto Shaders = std::array<const xgpu::shader*, 2>{ &Frag, &Vert };
+            if (!Ok(Device.Create(m_CapsulePipeline, xgpu::pipeline::setup{ .m_VertexDescriptor = m_VD, .m_Shaders = Shaders
+                , .m_PushConstantsSize = sizeof(capsule_push_constants) }))) return false;
+            if (!Ok(Device.Create(m_CapsuleInstance, { .m_PipeLine = m_CapsulePipeline }))) return false;
+        }
+
         m_bReady = true;
         return true;
     }
@@ -241,6 +274,8 @@ namespace xlionrender
     void renderer::Release(void) noexcept
     {
         if (!m_pDevice) return;
+        m_pDevice->Destroy(std::move(m_CapsuleInstance));
+        m_pDevice->Destroy(std::move(m_CapsulePipeline));
         m_pDevice->Destroy(std::move(m_OutlineObbInstance));
         m_pDevice->Destroy(std::move(m_OutlineObbPipeline));
         m_pDevice->Destroy(std::move(m_OutlineInstance));
@@ -250,14 +285,36 @@ namespace xlionrender
         m_bReady = false;
     }
 
-    void renderer::Submit(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept
+    void renderer::Submit(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Scale, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept
     {
-        m_DrawList.push_back({ Shape, L2W, Color, EntityValue });
+        m_DrawList.push_back({ Shape, L2W, Scale, Color, EntityValue });
     }
 
     void renderer::DrawItem(xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, const draw_item& Item) noexcept
     {
         auto& Mesh = m_Meshes[static_cast<int>(Item.m_Shape)];
+
+        if (Item.m_Shape == shape::CAPSULE)
+        {
+            // Strip Scale back out of L2W (Item.m_L2W = T*R*S*v, see setupSRT) by right-multiplying
+            // its exact inverse - leaves pure world rotation+translation. The vertex shader reapplies
+            // Scale itself, asymmetrically (see xlionrender_capsule_vert.glsl), so it needs it removed
+            // here first rather than baked flat into L2C like every other shape.
+            const xmath::fmat4 L2W_RotTrans = Item.m_L2W * xmath::fmat4::fromScale(xmath::fvec3(1.0f / Item.m_Scale.m_X, 1.0f / Item.m_Scale.m_Y, 1.0f / Item.m_Scale.m_Z));
+            capsule_push_constants PushConstants
+            { .m_L2C               = W2C * L2W_RotTrans
+            , .m_Color             = xmath::fvec4(Item.m_Color, 1.0f)
+            , .m_RadiusHeightScale = { kCapsuleUnitRadius, Item.m_Scale.m_X, Item.m_Scale.m_Z, Item.m_Scale.m_Y }
+            };
+            CmdBuffer.setPipelineInstance(m_CapsuleInstance);
+            CmdBuffer.setPushConstants(PushConstants);
+            CmdBuffer.setBuffer(Mesh.m_Indices);
+            CmdBuffer.setBuffer(Mesh.m_Verts);
+            CmdBuffer.Draw(Mesh.m_IndexCount);
+            CmdBuffer.setPipelineInstance(m_Instance); // restore - Draw()'s loop assumes m_Instance is bound between items
+            return;
+        }
+
         push_constants PushConstants
         { .m_L2C   = W2C * Item.m_L2W
         , .m_Color = xmath::fvec4(Item.m_Color, 1.0f)
