@@ -44,6 +44,16 @@ namespace xlionrender
 
             Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& T, xlioncore::physics::physics_body_properties&, const primitive& Prim) noexcept
             {
+                // setupSRT asserts on a zero/non-finite scale (a degenerate world matrix has no
+                // inverse, breaking anything downstream that needs one) - correct as a contract
+                // check on ITS OWN inputs, but Transform.Scale here comes from arbitrary upstream
+                // data (a saved level, a script, a gizmo drag, hand-typed Inspector zeros), any one
+                // of which corrupting a single entity must not crash the whole render loop for
+                // every OTHER entity too. Direct user report: a zeroed Scale on one entity in a
+                // saved level asserted (Debug) on load. Skip just that entity's draw instead.
+                if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f)
+                    return;
+
                 // Unit mesh half-extents are 0.5 (ShapeLocalHalfExtents). Size is Transform.Scale
                 // only: setupSRT(Scale, ...) => world half-extents = 0.5 * Scale. Outline Draw uses
                 // this same L2W (Item.m_L2W shared with the solid draw).
@@ -65,6 +75,11 @@ namespace xlionrender
             xeditor_tools::picking::closest_hit<std::uint64_t> Hit;
             Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& T, xlioncore::physics::physics_body_properties&, const primitive&) noexcept
             {
+                // Same degenerate-scale guard as Collect() above - a zeroed OBB shouldn't ever be
+                // hit, but there's no reason to feed RayOBBIntersect garbage either.
+                if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f)
+                    return;
+
                 float THit;
                 const xmath::fvec3 LocalHalfExtents = T.m_Scale * 0.5f;
                 if (xeditor_tools::picking::RayOBBIntersect(Origin, Dir, T.m_Position, T.m_Rotation, LocalHalfExtents, THit)
