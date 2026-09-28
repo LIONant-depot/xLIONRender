@@ -1,15 +1,13 @@
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
 
-// Must match the OBB vertex stage's push-constant block (128 bytes std140) - this codebase
-// requires every stage that touches the range to declare the identical struct.
 layout(std140, push_constant) uniform PushConstants
 {
     mat4 L2C;
-    vec4 ViewportAndRadius;
+    vec4 ViewportAndRadius; // xy viewport px; z radius px; w max fractional expansion
     vec4 Color;
-    vec4 Bounds;
-    vec4 Axis;
+    vec4 Bounds;            // xyz local box center; w cage growth in local units
+    vec4 Axis;              // xyz local box half-extents; w near-parallel rejection angle (degrees)
 } uniforms;
 
 layout(location = 0) out vec4 outColor;

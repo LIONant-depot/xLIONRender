@@ -296,19 +296,19 @@ namespace xlionrender
             // here, on the host side, so the preferred OBB path and the legacy fallback share the
             // exact same pulse. One second per cycle gives the editor a moderate, ~1 Hz rhythm.
             // 2s cycle; keep the trough bright enough that the outline never looks muddy.
-            constexpr float kOutlinePulsePeriodSeconds = 3.0f;
+            constexpr float kOutlinePulsePeriodSeconds = 1.0f;
             constexpr float kTwoPi = 6.28318530717958647692f;
             static const auto s_OutlinePulseStart = std::chrono::steady_clock::now();
             const float elapsedSeconds = std::chrono::duration<float>(
                 std::chrono::steady_clock::now() - s_OutlinePulseStart).count();
-            const float pulse = 0.875f + 0.125f * std::sin(elapsedSeconds * (kTwoPi / kOutlinePulsePeriodSeconds));
+            const float pulse = 0.975f + 0.125f * std::sin(elapsedSeconds * (kTwoPi / kOutlinePulsePeriodSeconds));
             const xmath::fvec4 OutlineColor{ std::min(1.0f,pulse), std::min(1.0f, pulse * 0.65f), std::min(1.0f, pulse * 0.15f), 1.0f };
 
-            xmath::fvec4 ObbBounds;
-            xmath::fvec2 ObbAxis;
-            const bool bUseObb = ComputeProjectedOutlineObb( L2C, ViewportW, ViewportH
-                                                           , ShapeLocalHalfExtents(Item.m_Shape)
-                                                           , ObbBounds, ObbAxis );
+            // The six-face outline uses the local 3D bounds directly. Do not reject the
+            // whole outline when a projected corner crosses the near plane.
+            const xmath::fvec3 LocalHalf = ShapeLocalHalfExtents(Item.m_Shape);
+            const bool bUseObb = ViewportW > 0.0f && ViewportH > 0.0f
+                && LocalHalf.m_X > 0.0f && LocalHalf.m_Y > 0.0f && LocalHalf.m_Z > 0.0f;
 
             if (bUseObb)
             {
@@ -317,8 +317,8 @@ namespace xlionrender
                 { .m_L2C               = L2C
                 , .m_ViewportAndRadius = { ViewportW, ViewportH, 6.0f, 0.08f }
                 , .m_Color             = OutlineColor
-                , .m_Bounds            = ObbBounds
-                , .m_Axis              = { ObbAxis.m_X, ObbAxis.m_Y, 0.0f, 0.0f }
+                , .m_Bounds            = { 0.0f, 0.0f, 0.0f, 0.15f } // local center + cage growth
+                , .m_Axis              = { LocalHalf.m_X, LocalHalf.m_Y, LocalHalf.m_Z, 32.0f } // half + reject angle
                 };
                 CmdBuffer.setPushConstants(OutlinePC);
             }
