@@ -28,7 +28,7 @@ namespace xlionrender
     struct system : xecs::system::instance
     {
         constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Render" };
-        using query = std::tuple<xecs::query::must<xlioncore::transform, xlioncore::physics::physics_body_properties, primitive>>;
+        using query = std::tuple<xecs::query::must<const xlioncore::transform, const xlioncore::physics::physics_body_properties, const primitive>>;
 
         system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr) {}
 
