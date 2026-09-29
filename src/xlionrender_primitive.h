@@ -4,8 +4,8 @@
 
 // The render component: registered and consumed entirely inside LIONRender.dll (see
 // xlionrender_plugin_entry.cpp) - xLION.exe never includes this header. Deliberately carries no
-// pose of its own - the system queries it together with xlioncore::transform (Scale/Rotation/Position)
-// and physics_body_properties (Dynamic / runtime body; authored size is Transform.Scale only).
+// pose of its own - the system queries it together with xlioncore::transform (Scale/Rotation/Position;
+// size is Transform.Scale only).
 #include "dependencies/xECSV2/src/xecs.h"
 #include "dependencies/xmath/source/xmath.h"
 #include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"

@@ -15,11 +15,10 @@ void XecsPlugin_RegisterComponents(xecs::game_mgr::instance& GameMgr, xecs::plug
 extern "C" __declspec(dllexport)
 void XecsPlugin_RegisterSystems(xecs::game_mgr::instance& GameMgr) noexcept
 {
-    // transform + physics_body_properties are registered by LIONCore.dll, so only ITS info_v copies got bits at
-    // Lock - resolve this DLL's own copies (and its built-ins) by GUID before the system below is
-    // created and queries them.
+    // transform is registered by LIONCore.dll, so only ITS info_v copy got a bit at Lock - resolve
+    // this DLL's own copy (and its built-ins) by GUID before the system below is created and queries it.
     GameMgr.m_ComponentMgr.LockComponentTypes();
-    xecs::component::mgr::SyncLocalBitIDs<xlioncore::transform, xlioncore::physics::physics_body_properties>();
+    xecs::component::mgr::SyncLocalBitIDs<xlioncore::transform>();
     GameMgr.RegisterSystems<xlionrender::system>();
 }
 

@@ -33,7 +33,7 @@ namespace xlionrender
     // xlionrender_renderer.h's own comment on the outline pass.
     XLIONRENDER_API void Draw (xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept;
 
-    // CPU ray-pick against every rendered entity's physics_body_properties AABB (xeditor_tools::picking, shared
+    // CPU ray-pick against every rendered entity's transform box (xeditor_tools::picking, shared
     // with xskeleton.plugin's own bone picking) - closest hit wins. MaxT caps the ray so a closer
     // ground/grid hit can occlude entities behind the floor without a GPU ID buffer. Returns
     // xecs::component::entity::invalid_entity_v (0xFFFFFFFFFFFFFFFF) as raw m_Value on a miss, so the
