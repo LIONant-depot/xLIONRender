@@ -20,9 +20,9 @@ namespace xlionrender
     // ignores it.
     void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Scale, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept;
 
-    // The live render system (set in its OnCreate, cleared in OnDestroy) - Draw asks it to collect.
+    // The live render system of one world (set in its OnCreate, cleared in OnDestroy) - Draw asks it to collect.
     struct system;
-    void SetActiveSystemInternal(system* pSystem) noexcept;
+    void SetActiveSystemInternal(const void* pWorld, system* pSystem) noexcept;
 }
 
 #endif // XLIONRENDER_INTERNAL_H

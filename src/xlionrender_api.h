@@ -31,7 +31,8 @@ namespace xlionrender
 
     // ViewportW/H (pixels) size the selected entity's outline width in screen space - see
     // xlionrender_renderer.h's own comment on the outline pass.
-    XLIONRENDER_API void Draw (xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept;
+    // pWorld: the xecs::game_mgr::instance whose entities to draw (each open Level has its own).
+    XLIONRENDER_API void Draw (const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept;
 
     // CPU ray-pick against every rendered entity's transform box (xeditor_tools::picking, shared
     // with xskeleton.plugin's own bone picking) - closest hit wins. MaxT caps the ray so a closer
@@ -39,7 +40,7 @@ namespace xlionrender
     // xecs::component::entity::invalid_entity_v (0xFFFFFFFFFFFFFFFF) as raw m_Value on a miss, so the
     // host never needs to include xecs.h just to call this; it already keys its own scene entity maps
     // (m_RuntimeToLocal) by this same raw value.
-    XLIONRENDER_API std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max()) noexcept;
+    XLIONRENDER_API std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max()) noexcept;
 
     // The entity (raw xecs::component::entity::m_Value, or invalid_entity_v for none) to draw with an
     // outline this frame - the host calls this once per frame with its own current selection.

@@ -30,10 +30,12 @@ namespace xlionrender
         constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Render" };
         using query = std::tuple<xecs::query::must<const xlioncore::transform, const primitive>>;
 
-        system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr) {}
+        system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr), m_pWorld(&GameMgr) {}
 
-        void OnCreate(void)  noexcept { SetActiveSystemInternal(this); }
-        void OnDestroy(void) noexcept { SetActiveSystemInternal(nullptr); }
+        const void* m_pWorld;   // the world this system belongs to (the key the host names when it draws or picks)
+
+        void OnCreate(void)  noexcept { SetActiveSystemInternal(m_pWorld, this); }
+        void OnDestroy(void) noexcept { SetActiveSystemInternal(m_pWorld, nullptr); }
         void OnUpdate(void)  noexcept {} // required by xECS (else it Foreach's operator()); work is in Collect
 
         void Collect(void) noexcept

@@ -2,28 +2,43 @@
 #include "xlionrender_renderer.h"
 #include "xlionrender_internal.h"
 #include "xlionrender_system.h"
+#include <unordered_map>
 
 namespace xlionrender
 {
     inline renderer g_Renderer;
-    inline system*  g_pSystem = nullptr;
 
-    void SetActiveSystemInternal(system* pSystem) noexcept { g_pSystem = pSystem; }
+    // One render system per live world (every open Level has its own xecs::game_mgr::instance); the host names the
+    // world it is drawing/picking for by that instance's address.
+    inline std::unordered_map<const void*, system*> g_Systems;
+
+    void SetActiveSystemInternal(const void* pWorld, system* pSystem) noexcept
+    {
+        if (pSystem) g_Systems[pWorld] = pSystem;
+        else         g_Systems.erase(pWorld);
+    }
+
+    static system* FindSystem(const void* pWorld) noexcept
+    {
+        auto It = g_Systems.find(pWorld);
+        return It == g_Systems.end() ? nullptr : It->second;
+    }
 
     bool Init(xgpu::device& Device) noexcept
     {
         return g_Renderer.Init(Device);
     }
 
-    void Draw(xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept
+    void Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept
     {
-        if (g_pSystem) g_pSystem->Collect();
+        if (auto* pSystem = FindSystem(pWorld)) pSystem->Collect();
         g_Renderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH);
     }
 
-    std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT) noexcept
+    std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT) noexcept
     {
-        return g_pSystem ? g_pSystem->Pick(Origin, Dir, MaxT) : xecs::component::entity::invalid_entity_v;
+        auto* pSystem = FindSystem(pWorld);
+        return pSystem ? pSystem->Pick(Origin, Dir, MaxT) : xecs::component::entity::invalid_entity_v;
     }
 
     void SetSelectedEntity(std::uint64_t EntityValue) noexcept
