@@ -45,6 +45,23 @@ namespace xlionrender
     // The entity (raw xecs::component::entity::m_Value, or invalid_entity_v for none) to draw with an
     // outline this frame - the host calls this once per frame with its own current selection.
     XLIONRENDER_API void SetSelectedEntity(std::uint64_t EntityValue) noexcept;
+
+    // The same four calls as a pure virtual interface that a COPY of this DLL hands out (xlionrender_editor.cpp, factory CreateEditorName): the editor calls the copy that belongs to the copy of the core
+    // its world is in, found by the name of that module (GetProcAddress), instead of importing these functions - an import is bound to the one DLL the exe was linked with. Everything that crosses is
+    // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
+    struct xRenderEditor
+    {
+        static constexpr std::uint32_t kVersion = 1;
+        virtual std::uint32_t Version() const noexcept = 0;
+        virtual void          Release() noexcept = 0;
+        virtual bool          Init(xgpu::device& Device) noexcept = 0;
+        virtual void          Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept = 0;
+        virtual std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT) noexcept = 0;
+        virtual void          SetSelectedEntity(std::uint64_t EntityValue) noexcept = 0;
+    };
+
+    constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";
+    using pfn_create_editor = xRenderEditor* (*)() noexcept;
 }
 
 #endif // XLIONRENDER_API_H
