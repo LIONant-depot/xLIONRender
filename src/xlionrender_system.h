@@ -24,6 +24,7 @@
 #include "dependencies/xLIONCore/src/resources/xlioncore_resources_api.h"
 #include "dependencies/xGPU/source/xgpu.h"
 #include "dependencies/xLIONCore/src/transform/xlioncore_transform.h"
+#include "dependencies/xLIONCore/src/transform/xlioncore_hierarchy.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics.h"
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
 #include <cstring>
@@ -117,7 +118,7 @@ namespace xlionrender
 
         // The axes of the text in the world, as long as the scale of the entity (the shader replaces them when the text faces the camera, keeping the lengths).
         // Screen size mode ignores the scale: the size is in pixels, only the position places the text.
-        static void TextAxes(const xlioncore::transform& T, const text& Tx, xmath::fvec3& AxisX, xmath::fvec3& AxisY) noexcept
+        static void TextAxes(const xlioncore::world_pose& T, const text& Tx, xmath::fvec3& AxisX, xmath::fvec3& AxisY) noexcept
         {
             xmath::fmat4 L2W;
             L2W.setupSRT(T.m_Scale, T.m_Rotation, T.m_Position);
@@ -139,8 +140,9 @@ namespace xlionrender
             Query.m_Must.AddFromComponents<xlioncore::transform, text>();
             auto S = Search(Query);
             int nSeen = 0, nWithLayout = 0;
-            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& T, const text& Tx) noexcept
+            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent) noexcept
             {
+                const auto T = xlioncore::WorldOf(Local, pParent);   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 ++nSeen;
                 const auto* pLayout = LayoutOf(Ent.m_Value, Tx);
                 if (!pLayout) return;
@@ -160,13 +162,15 @@ namespace xlionrender
 
         void Collect(void) noexcept
         {
+            xlioncore::PropagateHierarchy(*this);       // the world pose of every child, from the Transforms as they are now (this is after everything that moves things)
             CollectText();
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
             auto S = Search(Query);
 
-            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& T, const primitive& Prim) noexcept
+            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive& Prim, const xecs::component::parent* pParent) noexcept
             {
+                const auto T = xlioncore::WorldOf(Local, pParent);   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 // setupSRT asserts on a zero/non-finite scale (a degenerate world matrix has no
                 // inverse, breaking anything downstream that needs one) - correct as a contract
                 // check on ITS OWN inputs, but Transform.Scale here comes from arbitrary upstream
@@ -196,8 +200,9 @@ namespace xlionrender
             auto S = Search(Query);
 
             xeditor_tools::picking::closest_hit<std::uint64_t> Hit;
-            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& T, const primitive&) noexcept
+            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive&, const xecs::component::parent* pParent) noexcept
             {
+                const auto T = xlioncore::WorldOf(Local, pParent);   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 // Same degenerate-scale guard as Collect() above - a zeroed OBB shouldn't ever be
                 // hit, but there's no reason to feed RayOBBIntersect garbage either.
                 if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f)
@@ -215,8 +220,9 @@ namespace xlionrender
             xecs::query::instance TextQuery;
             TextQuery.m_Must.AddFromComponents<xlioncore::transform, text>();
             auto TS = Search(TextQuery);
-            Foreach(TS, [&](const xecs::component::entity& Ent, const xlioncore::transform& T, const text& Tx) noexcept
+            Foreach(TS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent) noexcept
             {
+                const auto T = xlioncore::WorldOf(Local, pParent);   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 if (Tx.m_SizeMode == text_size_mode::SCREEN || Tx.m_Opacity <= 0.0f) return;
                 if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return;
                 const auto* pLayout = LayoutOf(Ent.m_Value, Tx);
