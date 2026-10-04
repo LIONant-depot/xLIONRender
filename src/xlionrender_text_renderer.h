@@ -37,8 +37,10 @@ namespace xlionrender
         void Draw    (xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept;
 
         // What the last Draw did, for the tests and the tools.
-        struct stats { int m_Labels = 0; int m_Glyphs = 0; int m_Draws = 0; int m_Dropped = 0; };
+        struct stats { int m_Labels = 0; int m_Glyphs = 0; int m_Draws = 0; int m_Dropped = 0; int m_Calls = 0; int m_Seen = 0; int m_WithLayout = 0; bool m_bReady = false; };
         const stats& getLastStats(void) const noexcept { return m_LastStats; }
+        // What the system found this frame: the Text entities it visited, and how many of them had a layout (the font is loaded). The diagnosis of "my text is not drawn".
+        void NoteCollected(int Seen, int WithLayout) noexcept { m_Seen = Seen; m_WithLayout = WithLayout; }
 
     private:
         // One glyph for the GPU: the layout of xlionrender_text_vert.glsl's inputs. 84 bytes, no padding (the vertex descriptor packs the attributes tight).
@@ -99,6 +101,7 @@ namespace xlionrender
         std::vector<instance>       m_Instances;
         std::vector<label>          m_Labels;
         stats                       m_LastStats;
+        int                         m_nCalls = 0, m_Seen = 0, m_WithLayout = 0;
     };
 
     inline text_renderer g_TextRenderer;

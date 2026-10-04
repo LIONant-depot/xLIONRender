@@ -138,10 +138,13 @@ namespace xlionrender
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, text>();
             auto S = Search(Query);
+            int nSeen = 0, nWithLayout = 0;
             Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& T, const text& Tx) noexcept
             {
+                ++nSeen;
                 const auto* pLayout = LayoutOf(Ent.m_Value, Tx);
                 if (!pLayout) return;
+                ++nWithLayout;
 
                 // The same guard as the Primitive: one entity with a degenerate scale must not take the frame down.
                 if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return;
@@ -151,6 +154,7 @@ namespace xlionrender
                 g_TextRenderer.Submit(m_Texts[Ent.m_Value].m_Font, *pLayout, Tx, T.m_Position, AxisX, AxisY);
             });
 
+            g_TextRenderer.NoteCollected(nSeen, nWithLayout);
             std::erase_if(m_Texts, [&](const auto& Pair) noexcept { return Pair.second.m_Frame != m_Frame; });
         }
 

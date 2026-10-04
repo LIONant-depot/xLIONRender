@@ -123,6 +123,7 @@ namespace xlionrender
     void text_renderer::Draw(xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept
     {
         m_LastStats = {};
+        m_LastStats.m_Calls = ++m_nCalls; m_LastStats.m_Seen = m_Seen; m_LastStats.m_WithLayout = m_WithLayout; m_LastStats.m_bReady = m_bReady;
         if (!m_bReady || m_Labels.empty()) { m_Labels.clear(); m_Instances.clear(); return; }
 
         // The order labels are drawn in: the ones that did not ask to be sorted by font and depth mode, then the sorted ones from far to near.

@@ -80,7 +80,7 @@ namespace xlionrender
             {
                 if (!pOut || Capacity <= 0) return -1;
                 const auto& S = g_TextRenderer.getLastStats();
-                const std::string Text = std::format("DescribeTextDraw: ok\nLabels={}\nGlyphs={}\nDraws={}\nDropped={}",S.m_Labels, S.m_Glyphs, S.m_Draws, S.m_Dropped);
+                const std::string Text = std::format("DescribeTextDraw: ok\nLabels={}\nGlyphs={}\nDraws={}\nDropped={}\nCalls={}\nSeen={}\nWithLayout={}\nReady={}", S.m_Labels, S.m_Glyphs, S.m_Draws, S.m_Dropped, S.m_Calls, S.m_Seen, S.m_WithLayout, S.m_bReady ? 1 : 0);
                 const int Length = static_cast<int>(std::min<std::size_t>(Text.size(), static_cast<std::size_t>(Capacity - 1)));
                 std::memcpy(pOut, Text.data(), static_cast<std::size_t>(Length));
                 pOut[Length] = 0;
