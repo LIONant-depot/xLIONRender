@@ -248,9 +248,11 @@ namespace xlionrender
             auto Shaders = std::array<const xgpu::shader*, 2>{ &Frag, &Vert };
             if (!Ok(Device.Create(m_OutlineObbPipeline, xgpu::pipeline::setup{ .m_VertexDescriptor = m_VD, .m_Shaders = Shaders
                 , .m_PushConstantsSize = sizeof(outline_obb_push_constants)
-                , .m_Primitive    = { .m_Cull = xgpu::pipeline::primitive::cull::FRONT }
-                , .m_DepthStencil = { .m_DepthBiasConstantFactor = 1.25f, .m_DepthBiasSlopeFactor = 1.75f
-                                     , .m_bDepthWriteEnable = false, .m_bDepthBiasEnable = true }
+                , .m_Primitive    = { .m_Cull = xgpu::pipeline::primitive::cull::NONE }
+                , .m_DepthStencil = { .m_DepthBiasConstantFactor = -1.25f, .m_DepthBiasSlopeFactor = -1.75f ,
+                                      .m_bDepthWriteEnable = false
+                                       , .m_bDepthBiasEnable = true
+                                    }
                 }))) return false;
             if (!Ok(Device.Create(m_OutlineObbInstance, { .m_PipeLine = m_OutlineObbPipeline }))) return false;
         }
