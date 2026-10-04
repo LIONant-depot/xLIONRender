@@ -15,7 +15,7 @@ FetchAndPopulate("https://github.com/LIONant-depot/xprim_geom.git" "main")
 set(XLIONRENDER_GLSLC "${CMAKE_SOURCE_DIR}/dependencies/Shaderc/bin/glslc.exe")
 set(XLIONRENDER_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../src/shaders")
 set(XLIONRENDER_GENERATED_HEADERS)
-foreach(STAGE_PAIR "frag:primitive_frag" "vert:primitive_vert" "frag:outline_frag" "vert:outline_vert" "frag:outline_obb_frag" "vert:outline_obb_vert" "frag:capsule_frag" "vert:capsule_vert")
+foreach(STAGE_PAIR "frag:primitive_frag" "vert:primitive_vert" "frag:outline_frag" "vert:outline_vert" "frag:outline_obb_frag" "vert:outline_obb_vert" "frag:capsule_frag" "vert:capsule_vert" "frag:text_frag" "vert:text_vert")
   string(REPLACE ":" ";" STAGE_PAIR_LIST ${STAGE_PAIR})
   list(GET STAGE_PAIR_LIST 0 STAGE)
   list(GET STAGE_PAIR_LIST 1 NAME)
@@ -41,6 +41,7 @@ add_library(xLIONRender SHARED
   "${CMAKE_SOURCE_DIR}/dependencies/xproperty/source/xcore/my_properties.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_renderer.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_api.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_text_renderer.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_plugin_entry.cpp"
   ${XLIONRENDER_GENERATED_HEADERS}
 )
@@ -62,7 +63,7 @@ target_include_directories(xLIONRender PRIVATE
   "${CMAKE_SOURCE_DIR}/dependencies/box3d/include"
   "${CMAKE_BINARY_DIR}/sprv_shaders_h"
 )
-target_compile_definitions(xLIONRender PRIVATE XECS_BUILD_SHARED XLIONRENDER_BUILD_SHARED XLIONRENDER_EXPORTS)
+target_compile_definitions(xLIONRender PRIVATE XECS_BUILD_SHARED XLIONRENDER_BUILD_SHARED XLIONRENDER_EXPORTS XLIONCORE_BUILD_SHARED)
 # xecs.h (pulled in transitively via xlioncore's physics_body_properties component) is built with XECS_BUILD_SHARED
 # here, so xtextfile/xproperty symbols it declares dllimport need xLIONCore's own import lib to
 # resolve at link time - xLIONCore.dll is the one binary that actually exports them.

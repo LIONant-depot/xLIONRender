@@ -51,13 +51,18 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 1;
+        static constexpr std::uint32_t kVersion = 2;
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
         virtual void          Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept = 0;
         virtual std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT) noexcept = 0;
         virtual void          SetSelectedEntity(std::uint64_t EntityValue) noexcept = 0;
+        // What the layout of the Text of an entity is (lines, glyphs, the box of the text, or why there is none yet: the font is not loaded), as lines of text written to pOut (at most Capacity
+        // bytes, zero ended). Returns the length written, or -1 when the entity has no Text. Version 2.
+        virtual int           DescribeText(const void* pWorld, std::uint64_t EntityValue, char* pOut, int Capacity) noexcept = 0;
+        // What the last draw of the Texts did (labels and glyphs sent, draw calls made, labels dropped for lack of room), written like DescribeText. Returns the length written. Version 2.
+        virtual int           DescribeTextDraw(char* pOut, int Capacity) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";

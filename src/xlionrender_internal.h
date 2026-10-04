@@ -10,6 +10,8 @@
 #include "dependencies/xmath/source/xmath.h"
 #include <cstdint>
 
+namespace xgpu { struct device; }
+
 namespace xlionrender
 {
     // EntityValue (xecs::component::entity::m_Value) - not touched by SubmitInternal itself, just
@@ -19,6 +21,9 @@ namespace xlionrender
     // keep its hemisphere caps round instead of stretched (see renderer::DrawItem); every other shape
     // ignores it.
     void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Scale, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept;
+
+    // The device the host gave Init (null before): what the resource system of the core makes textures on.
+    xgpu::device* GetDeviceInternal() noexcept;
 
     // The live render system of one world (set in its OnCreate, cleared in OnDestroy) - Draw asks it to collect.
     struct system;
