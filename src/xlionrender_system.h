@@ -16,6 +16,7 @@
 // of Play state (see xlionrender_api.cpp). Editor-created entities only become visible to Search/Foreach
 // after xecs::archetype::mgr::UpdateStructuralChanges() flushes their pending pool append - the host
 // calls that unconditionally each frame too (xlevel_session.h), not just while Playing.
+#include "xlionrender_view.h"
 #include "xlionrender_primitive.h"
 #include "xlionrender_text.h"
 #include "xlionrender_text_layout.h"
@@ -25,6 +26,7 @@
 #include "dependencies/xGPU/source/xgpu.h"
 #include "dependencies/xLIONCore/src/transform/xlioncore_transform.h"
 #include "dependencies/xLIONCore/src/transform/xlioncore_hierarchy.h"
+#include "dependencies/xLIONCore/src/tags/xlioncore_tags.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics.h"
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
 #include <cstring>
@@ -129,8 +131,16 @@ namespace xlionrender
             if (Tx.m_SizeMode == text_size_mode::SCREEN) { AxisX.NormalizeSafe(); AxisY.NormalizeSafe(); }
         }
 
+        // What a view leaves out of the world: what the game says is not drawn (no_render, in every view) and, in the editor's scene view, what the editor hid (editor_no_render). An entity with
+        // an exclusive disable tag (the game's or the editor's) is not in any query to begin with.
+        static void LeaveOut(xecs::query::instance& Query, view View) noexcept
+        {
+            Query.m_NoneOf.AddFromComponents<xlioncore::no_render_tag>();
+            if (View == view::SCENE) Query.m_NoneOf.AddFromComponents<xecs::editor::no_render_tag>();
+        }
+
         // The Texts of the world: their layouts are kept up to date (the drawing of them comes next to this). The resource system of the core starts here, the first time there is a device.
-        void CollectText(void) noexcept
+        void CollectText(view View) noexcept
         {
             ++m_Frame;
             if (auto* pDevice = GetDeviceInternal())
@@ -138,6 +148,7 @@ namespace xlionrender
 
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, text>();
+            LeaveOut(Query, View);
             auto S = Search(Query);
             int nSeen = 0, nWithLayout = 0;
             Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent) noexcept
@@ -157,15 +168,16 @@ namespace xlionrender
             });
 
             g_TextRenderer.NoteCollected(nSeen, nWithLayout);
-            std::erase_if(m_Texts, [&](const auto& Pair) noexcept { return Pair.second.m_Frame != m_Frame; });
+            std::erase_if(m_Texts, [&](const auto& Pair) noexcept { return m_Frame - Pair.second.m_Frame > 3; });       // (not "this one": two views collect in turn, and each sees entities the other does not)
         }
 
-        void Collect(void) noexcept
+        void Collect(view View = view::SCENE) noexcept
         {
             xlioncore::PropagateHierarchy(*this);       // the world pose of every child, from the Transforms as they are now (this is after everything that moves things)
-            CollectText();
+            CollectText(View);
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
+            LeaveOut(Query, View);
             auto S = Search(Query);
 
             Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive& Prim, const xecs::component::parent* pParent) noexcept
@@ -193,10 +205,11 @@ namespace xlionrender
         // Ray-vs-OBB: Transform Position/Rotation + half-extents 0.5*Scale (matches Collect L2W).
         // Closest hit wins. MaxT caps the ray (e.g. ground-plane hit) so empty floor clears
         // selection instead of selecting through distant AABBs.
-        std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max()) noexcept
+        std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max(), view View = view::SCENE) noexcept
         {
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
+            LeaveOut(Query, View);
             auto S = Search(Query);
 
             xeditor_tools::picking::closest_hit<std::uint64_t> Hit;
@@ -219,6 +232,7 @@ namespace xlionrender
             // direction: the roll of the camera is not known here). Screen size texts are not picked: their size in the world depends on the camera, which a ray does not carry.
             xecs::query::instance TextQuery;
             TextQuery.m_Must.AddFromComponents<xlioncore::transform, text>();
+            LeaveOut(TextQuery, View);
             auto TS = Search(TextQuery);
             Foreach(TS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent) noexcept
             {

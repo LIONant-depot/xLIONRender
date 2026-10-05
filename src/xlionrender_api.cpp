@@ -37,17 +37,17 @@ namespace xlionrender
 
     xgpu::device* GetDeviceInternal() noexcept { return g_pDevice; }
 
-    void Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept
+    void Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View) noexcept
     {
-        if (auto* pSystem = FindSystem(pWorld)) pSystem->Collect();
+        if (auto* pSystem = FindSystem(pWorld)) pSystem->Collect(View);
         g_Renderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH);
         g_TextRenderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH);          // after the solids: the text is blended over them
     }
 
-    std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT) noexcept
+    std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View) noexcept
     {
         auto* pSystem = FindSystem(pWorld);
-        return pSystem ? pSystem->Pick(Origin, Dir, MaxT) : xecs::component::entity::invalid_entity_v;
+        return pSystem ? pSystem->Pick(Origin, Dir, MaxT, View) : xecs::component::entity::invalid_entity_v;
     }
 
     void SetSelectedEntity(std::uint64_t EntityValue) noexcept
@@ -62,8 +62,8 @@ namespace xlionrender
             std::uint32_t Version() const noexcept override { return kVersion; }
             void          Release() noexcept override { delete this; }
             bool          Init(xgpu::device& Device) noexcept override { return xlionrender::Init(Device); }
-            void          Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float W, float H) noexcept override { xlionrender::Draw(pWorld, CmdBuffer, W2C, W, H); }
-            std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT) noexcept override { return xlionrender::Pick(pWorld, Origin, Dir, MaxT); }
+            void          Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float W, float H, view View) noexcept override { xlionrender::Draw(pWorld, CmdBuffer, W2C, W, H, View); }
+            std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View) noexcept override { return xlionrender::Pick(pWorld, Origin, Dir, MaxT, View); }
             void          SetSelectedEntity(std::uint64_t EntityValue) noexcept override { xlionrender::SetSelectedEntity(EntityValue); }
             int           DescribeText(const void* pWorld, std::uint64_t EntityValue, char* pOut, int Capacity) noexcept override
             {
