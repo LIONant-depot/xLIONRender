@@ -151,9 +151,9 @@ namespace xlionrender
             LeaveOut(Query, View);
             auto S = Search(Query);
             int nSeen = 0, nWithLayout = 0;
-            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent) noexcept
+            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
-                const auto T = xlioncore::WorldOf(Local, pParent);   // a child's Transform is relative to its parent: what is drawn is at its world pose
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender);   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 ++nSeen;
                 const auto* pLayout = LayoutOf(Ent.m_Value, Tx);
                 if (!pLayout) return;
@@ -180,9 +180,9 @@ namespace xlionrender
             LeaveOut(Query, View);
             auto S = Search(Query);
 
-            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive& Prim, const xecs::component::parent* pParent) noexcept
+            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive& Prim, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
-                const auto T = xlioncore::WorldOf(Local, pParent);   // a child's Transform is relative to its parent: what is drawn is at its world pose
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender);   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 // setupSRT asserts on a zero/non-finite scale (a degenerate world matrix has no
                 // inverse, breaking anything downstream that needs one) - correct as a contract
                 // check on ITS OWN inputs, but Transform.Scale here comes from arbitrary upstream
@@ -213,9 +213,9 @@ namespace xlionrender
             auto S = Search(Query);
 
             xeditor_tools::picking::closest_hit<std::uint64_t> Hit;
-            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive&, const xecs::component::parent* pParent) noexcept
+            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive&, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
-                const auto T = xlioncore::WorldOf(Local, pParent);   // a child's Transform is relative to its parent: what is drawn is at its world pose
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender);   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 // Same degenerate-scale guard as Collect() above - a zeroed OBB shouldn't ever be
                 // hit, but there's no reason to feed RayOBBIntersect garbage either.
                 if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f)
@@ -234,9 +234,9 @@ namespace xlionrender
             TextQuery.m_Must.AddFromComponents<xlioncore::transform, text>();
             LeaveOut(TextQuery, View);
             auto TS = Search(TextQuery);
-            Foreach(TS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent) noexcept
+            Foreach(TS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
-                const auto T = xlioncore::WorldOf(Local, pParent);   // a child's Transform is relative to its parent: what is drawn is at its world pose
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender);   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 if (Tx.m_SizeMode == text_size_mode::SCREEN || Tx.m_Opacity <= 0.0f) return;
                 if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return;
                 const auto* pLayout = LayoutOf(Ent.m_Value, Tx);
