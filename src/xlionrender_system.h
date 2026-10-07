@@ -140,7 +140,7 @@ namespace xlionrender
         }
 
         // The Texts of the world: their layouts are kept up to date (the drawing of them comes next to this). The resource system of the core starts here, the first time there is a device.
-        void CollectText(view View) noexcept
+        void CollectText(view View, const roles* pRoles = nullptr) noexcept
         {
             ++m_Frame;
             if (auto* pDevice = GetDeviceInternal())
@@ -153,6 +153,7 @@ namespace xlionrender
             int nSeen = 0, nWithLayout = 0;
             Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
+                if (pRoles && (pRoles->IsHidden(Ent.m_Value) || pRoles->IsContext(Ent.m_Value))) return;       // the Texts of the context are not drawn (the fade quad is for solids), nor those of the hidden instance
                 const auto T = xlioncore::WorldOf(Local, pParent, pRender, xlioncore::FixedInterpolateOf(getGameMgr()));   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 ++nSeen;
                 const auto* pLayout = LayoutOf(Ent.m_Value, Tx);
@@ -171,10 +172,11 @@ namespace xlionrender
             std::erase_if(m_Texts, [&](const auto& Pair) noexcept { return m_Frame - Pair.second.m_Frame > 3; });       // (not "this one": two views collect in turn, and each sees entities the other does not)
         }
 
-        void Collect(view View = view::SCENE) noexcept
+        // pRoles (the editor's session, null: every entity is the document): the hidden entities are not submitted; the context ones are, and the renderer draws them first, faded (xlionrender::roles).
+        void Collect(view View = view::SCENE, const roles* pRoles = nullptr) noexcept
         {
             xlioncore::PropagateHierarchy(*this);       // the world pose of every child, from the Transforms as they are now (this is after everything that moves things)
-            CollectText(View);
+            CollectText(View, pRoles);
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
             LeaveOut(Query, View);
@@ -182,6 +184,7 @@ namespace xlionrender
 
             Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive& Prim, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
+                if (pRoles && pRoles->IsHidden(Ent.m_Value)) return;
                 const auto T = xlioncore::WorldOf(Local, pParent, pRender, xlioncore::FixedInterpolateOf(getGameMgr()));   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 // setupSRT asserts on a zero/non-finite scale (a degenerate world matrix has no
                 // inverse, breaking anything downstream that needs one) - correct as a contract
@@ -205,7 +208,7 @@ namespace xlionrender
         // Ray-vs-OBB: Transform Position/Rotation + half-extents 0.5*Scale (matches Collect L2W).
         // Closest hit wins. MaxT caps the ray (e.g. ground-plane hit) so empty floor clears
         // selection instead of selecting through distant AABBs.
-        std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max(), view View = view::SCENE) noexcept
+        std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max(), view View = view::SCENE, const roles* pRoles = nullptr) noexcept
         {
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
@@ -213,8 +216,11 @@ namespace xlionrender
             auto S = Search(Query);
 
             xeditor_tools::picking::closest_hit<std::uint64_t> Hit;
+            // The context and the hidden are never picked: nothing of them has an id to find (editing in context, prefabs_plan.md phase 7).
+            const auto NotPickable = [&](std::uint64_t Entity) noexcept { return pRoles && (pRoles->IsContext(Entity) || pRoles->IsHidden(Entity)); };
             Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive&, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
+                if (NotPickable(Ent.m_Value)) return;
                 const auto T = xlioncore::WorldOf(Local, pParent, pRender, xlioncore::FixedInterpolateOf(getGameMgr()));   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 // Same degenerate-scale guard as Collect() above - a zeroed OBB shouldn't ever be
                 // hit, but there's no reason to feed RayOBBIntersect garbage either.
@@ -236,6 +242,7 @@ namespace xlionrender
             auto TS = Search(TextQuery);
             Foreach(TS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const text& Tx, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
+                if (NotPickable(Ent.m_Value)) return;
                 const auto T = xlioncore::WorldOf(Local, pParent, pRender, xlioncore::FixedInterpolateOf(getGameMgr()));   // a child's Transform is relative to its parent: what is drawn is at its world pose
                 if (Tx.m_SizeMode == text_size_mode::SCREEN || Tx.m_Opacity <= 0.0f) return;
                 if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return;

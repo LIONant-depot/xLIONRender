@@ -33,7 +33,7 @@ namespace xlionrender
     // ViewportW/H (pixels) size the selected entity's outline width in screen space - see
     // xlionrender_renderer.h's own comment on the outline pass.
     // pWorld: the xecs::game_mgr::instance whose entities to draw (each open Level has its own).
-    XLIONRENDER_API void Draw (const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View = view::SCENE) noexcept;
+    XLIONRENDER_API void Draw (const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View = view::SCENE, const roles* pRoles = nullptr) noexcept;
 
     // CPU ray-pick against every rendered entity's transform box (xeditor_tools::picking, shared
     // with xskeleton.plugin's own bone picking) - closest hit wins. MaxT caps the ray so a closer
@@ -41,7 +41,7 @@ namespace xlionrender
     // xecs::component::entity::invalid_entity_v (0xFFFFFFFFFFFFFFFF) as raw m_Value on a miss, so the
     // host never needs to include xecs.h just to call this; it already keys its own scene entity maps
     // (m_RuntimeToLocal) by this same raw value.
-    XLIONRENDER_API std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max(), view View = view::SCENE) noexcept;
+    XLIONRENDER_API std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max(), view View = view::SCENE, const roles* pRoles = nullptr) noexcept;
 
     // The entity (raw xecs::component::entity::m_Value, or invalid_entity_v for none) to draw with an
     // outline this frame - the host calls this once per frame with its own current selection.
@@ -52,7 +52,7 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 3;                // 3: Draw and Pick say which view asks
+        static constexpr std::uint32_t kVersion = 4;                // 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
@@ -64,6 +64,12 @@ namespace xlionrender
         virtual int           DescribeText(const void* pWorld, std::uint64_t EntityValue, char* pOut, int Capacity) noexcept = 0;
         // What the last draw of the Texts did (labels and glyphs sent, draw calls made, labels dropped for lack of room), written like DescribeText. Returns the length written. Version 2.
         virtual int           DescribeTextDraw(char* pOut, int Capacity) noexcept = 0;
+        // Draw and Pick with the roles of the entities of the world in this editing session (xlionrender::roles: the context is drawn first and faded, never picked; the hidden are not drawn nor picked). The host
+        // owns the arrays for the call. Draw and Pick above are these with no roles. Version 4.
+        virtual void          DrawRoles(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View, const roles& Roles) noexcept = 0;
+        virtual std::uint64_t PickRoles(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View, const roles& Roles) noexcept = 0;
+        // What the last draw did with the roles (items of the context, items of the document, whether the fade was drawn), written like DescribeTextDraw. Returns the length written. Version 4.
+        virtual int           DescribeRoleDraw(char* pOut, int Capacity) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";

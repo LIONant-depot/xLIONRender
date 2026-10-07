@@ -37,17 +37,17 @@ namespace xlionrender
 
     xgpu::device* GetDeviceInternal() noexcept { return g_pDevice; }
 
-    void Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View) noexcept
+    void Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View, const roles* pRoles) noexcept
     {
-        if (auto* pSystem = FindSystem(pWorld)) pSystem->Collect(View);
-        g_Renderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH);
+        if (auto* pSystem = FindSystem(pWorld)) pSystem->Collect(View, pRoles);
+        g_Renderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH, pRoles);
         g_TextRenderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH);          // after the solids: the text is blended over them
     }
 
-    std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View) noexcept
+    std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View, const roles* pRoles) noexcept
     {
         auto* pSystem = FindSystem(pWorld);
-        return pSystem ? pSystem->Pick(Origin, Dir, MaxT, View) : xecs::component::entity::invalid_entity_v;
+        return pSystem ? pSystem->Pick(Origin, Dir, MaxT, View, pRoles) : xecs::component::entity::invalid_entity_v;
     }
 
     void SetSelectedEntity(std::uint64_t EntityValue) noexcept
@@ -65,6 +65,18 @@ namespace xlionrender
             void          Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float W, float H, view View) noexcept override { xlionrender::Draw(pWorld, CmdBuffer, W2C, W, H, View); }
             std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View) noexcept override { return xlionrender::Pick(pWorld, Origin, Dir, MaxT, View); }
             void          SetSelectedEntity(std::uint64_t EntityValue) noexcept override { xlionrender::SetSelectedEntity(EntityValue); }
+            void          DrawRoles(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float W, float H, view View, const roles& Roles) noexcept override { xlionrender::Draw(pWorld, CmdBuffer, W2C, W, H, View, &Roles); }
+            std::uint64_t PickRoles(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View, const roles& Roles) noexcept override { return xlionrender::Pick(pWorld, Origin, Dir, MaxT, View, &Roles); }
+            int           DescribeRoleDraw(char* pOut, int Capacity) noexcept override
+            {
+                if (!pOut || Capacity <= 0) return -1;
+                const auto& S = g_Renderer.getLastRoleStats();
+                const std::string Text = std::format("DescribeRoleDraw: ok\nDrawnContext={}\nDrawnDocument={}\nFaded={}", S.m_Context, S.m_Document, S.m_bFaded ? 1 : 0);
+                const int Length = static_cast<int>(std::min<std::size_t>(Text.size(), static_cast<std::size_t>(Capacity - 1)));
+                std::memcpy(pOut, Text.data(), static_cast<std::size_t>(Length));
+                pOut[Length] = 0;
+                return Length;
+            }
             int           DescribeText(const void* pWorld, std::uint64_t EntityValue, char* pOut, int Capacity) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);

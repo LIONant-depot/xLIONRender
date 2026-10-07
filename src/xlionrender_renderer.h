@@ -11,6 +11,7 @@
 #include "dependencies/xmath/source/xmath.h"
 #include "dependencies/xprim_geom/source/xprim_geom.h"
 #include "xlionrender_primitive.h"
+#include "xlionrender_view.h"
 #include <vector>
 #include <cstdint>
 
@@ -35,7 +36,13 @@ namespace xlionrender
         // Called once per frame by the exported xlionrender::Draw (xlionrender_api.h), from the host's
         // own render callback - issues the real draw calls for everything Submitted since the last
         // Draw, then clears the list. ViewportW/H (pixels) size the selected item's outline width.
-        void Draw    (xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept;
+        // pRoles (null: everything is the document): the items that are CONTEXT are drawn first, then a full screen quad of the fade color (only where something was drawn: the depth of an
+        // empty pixel is the cleared one), then the rest: the context is there to see and is in the way of nothing (editing in context, prefabs_plan.md phase 7).
+        void Draw    (xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, const roles* pRoles = nullptr) noexcept;
+
+        // What the last Draw did with the roles: the items of the context, the items of the document, whether the fade quad was drawn.
+        struct role_stats { int m_Context = 0; int m_Document = 0; bool m_bFaded = false; };
+        const role_stats& getLastRoleStats() const noexcept { return m_LastRoleStats; }
 
     private:
         struct mesh
@@ -89,6 +96,7 @@ namespace xlionrender
         static bool Ok(xgpu::device::error* pErr) noexcept;
         bool BuildMesh(xgpu::device& Device, mesh& Mesh, const xprim_geom::mesh& GeneratedMesh) noexcept;
         void DrawItem(xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, const draw_item& Item) noexcept;
+        void DrawFade(xgpu::cmd_buffer& CmdBuffer, const roles& Roles) noexcept;
 
         // Local AABB half-extents of the mesh built for Shape (matches xprim_geom Generate sizes in Init).
         static xmath::fvec3 ShapeLocalHalfExtents(shape Shape) noexcept;
@@ -118,6 +126,12 @@ namespace xlionrender
         // Capsule's own pipeline (see capsule_push_constants) - Cube/Sphere/Cylinder still share m_Pipeline/m_Instance.
         xgpu::pipeline          m_CapsulePipeline;
         xgpu::pipeline_instance m_CapsuleInstance;
+
+        // The fade quad of the context (see Draw): the primitive shaders with a quad that fills the screen at the far plane, blended, tested NOT_EQUAL to the cleared depth, writing nothing.
+        xgpu::pipeline          m_FadePipeline;
+        xgpu::pipeline_instance m_FadeInstance;
+        mesh                    m_FadeMesh;
+        role_stats              m_LastRoleStats;
 
         mesh                    m_Meshes[4]; // indexed by shape
         std::vector<draw_item>  m_DrawList;

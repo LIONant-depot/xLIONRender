@@ -269,6 +269,30 @@ namespace xlionrender
             if (!Ok(Device.Create(m_CapsuleInstance, { .m_PipeLine = m_CapsulePipeline }))) return false;
         }
 
+        // The fade quad of the context: the primitive shaders again (the normal is up, so the shade is 1: the color goes out as it is), alpha blended, both sides, depth tested NOT_EQUAL to the cleared
+        // depth (1): where something was drawn the quad blends, where nothing was it leaves the background alone. Writes no depth: what is drawn after it is tested against the context.
+        {
+            xprim_geom::mesh Quad;
+            const xprim_geom::float3 Up{ 0.0f, 1.0f, 0.0f };
+            const xprim_geom::plane  NoTangent{ 0, 0, 0, 0 };
+            const xprim_geom::float3 Corners[4] = { { -1.0f, -1.0f, 1.0f }, { 1.0f, -1.0f, 1.0f }, { 1.0f, 1.0f, 1.0f }, { -1.0f, 1.0f, 1.0f } };
+            for (const auto& C : Corners) Quad.m_Vertices.push_back({ C, Up, NoTangent, { 0, 0, 0 } });
+            Quad.m_Indices = { 0, 1, 2, 0, 2, 3 };
+            if (!BuildMesh(Device, m_FadeMesh, Quad)) return false;
+
+            xgpu::shader Vert, Frag;
+            if (!Shader(Vert, xgpu::shader::type::bit::VERTEX,   g_VertShader, std::size(g_VertShader))) return false;
+            if (!Shader(Frag, xgpu::shader::type::bit::FRAGMENT, g_FragShader, std::size(g_FragShader))) return false;
+            auto Shaders = std::array<const xgpu::shader*, 2>{ &Frag, &Vert };
+            if (!Ok(Device.Create(m_FadePipeline, xgpu::pipeline::setup{ .m_VertexDescriptor = m_VD, .m_Shaders = Shaders
+                , .m_PushConstantsSize = sizeof(push_constants)
+                , .m_Primitive    = { .m_Cull = xgpu::pipeline::primitive::cull::NONE }
+                , .m_DepthStencil = { .m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::NOT_EQUAL, .m_bDepthTestEnable = true, .m_bDepthWriteEnable = false }
+                , .m_Blend        = xgpu::pipeline::blend::getAlphaOriginal()
+                }))) return false;
+            if (!Ok(Device.Create(m_FadeInstance, { .m_PipeLine = m_FadePipeline }))) return false;
+        }
+
         m_bReady = true;
         return true;
     }
@@ -276,6 +300,8 @@ namespace xlionrender
     void renderer::Release(void) noexcept
     {
         if (!m_pDevice) return;
+        m_pDevice->Destroy(std::move(m_FadeInstance));
+        m_pDevice->Destroy(std::move(m_FadePipeline));
         m_pDevice->Destroy(std::move(m_CapsuleInstance));
         m_pDevice->Destroy(std::move(m_CapsulePipeline));
         m_pDevice->Destroy(std::move(m_OutlineObbInstance));
@@ -327,8 +353,20 @@ namespace xlionrender
         CmdBuffer.Draw(Mesh.m_IndexCount);
     }
 
-    void renderer::Draw(xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH) noexcept
+    void renderer::DrawFade(xgpu::cmd_buffer& CmdBuffer, const roles& Roles) noexcept
     {
+        push_constants PushConstants{ .m_L2C = xmath::fmat4::fromIdentity(), .m_Color = xmath::fvec4(Roles.m_FadeColor[0], Roles.m_FadeColor[1], Roles.m_FadeColor[2], Roles.m_FadeAlpha) };
+        CmdBuffer.setPipelineInstance(m_FadeInstance);
+        CmdBuffer.setPushConstants(PushConstants);
+        CmdBuffer.setBuffer(m_FadeMesh.m_Indices);
+        CmdBuffer.setBuffer(m_FadeMesh.m_Verts);
+        CmdBuffer.Draw(m_FadeMesh.m_IndexCount);
+        CmdBuffer.setPipelineInstance(m_Instance);
+    }
+
+    void renderer::Draw(xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, const roles* pRoles) noexcept
+    {
+        m_LastRoleStats = {};
         if (!m_bReady || m_DrawList.empty()) { m_DrawList.clear(); return; }
 
         // Find the selected item, if any, so its normal draw can be skipped in the first pass and
@@ -339,10 +377,21 @@ namespace xlionrender
                 if (m_DrawList[i].m_EntityValue == m_SelectedEntity) { iSelected = i; break; }
 
         CmdBuffer.setPipelineInstance(m_Instance);
+
+        // The context first, then the fade over it; what is not context (the document) comes after, over the fade.
+        const auto isContext = [&](int i) noexcept { return pRoles && pRoles->IsContext(m_DrawList[i].m_EntityValue); };
+        if (pRoles && pRoles->m_nContext > 0)
+        {
+            for (int i = 0, end = static_cast<int>(m_DrawList.size()); i < end; ++i)
+                if (isContext(i)) { DrawItem(CmdBuffer, W2C, m_DrawList[i]); ++m_LastRoleStats.m_Context; }
+            if (m_LastRoleStats.m_Context > 0 && pRoles->m_FadeAlpha > 0.0f) { DrawFade(CmdBuffer, *pRoles); m_LastRoleStats.m_bFaded = true; }
+        }
+
         for (int i = 0, end = static_cast<int>(m_DrawList.size()); i < end; ++i)
         {
-            if (i == iSelected) continue;
+            if (i == iSelected || isContext(i)) continue;
             DrawItem(CmdBuffer, W2C, m_DrawList[i]);
+            ++m_LastRoleStats.m_Document;
         }
 
         if (iSelected >= 0)
@@ -398,6 +447,7 @@ namespace xlionrender
 
             CmdBuffer.setPipelineInstance(m_Instance);
             DrawItem(CmdBuffer, W2C, Item);
+            ++m_LastRoleStats.m_Document;
         }
 
         m_DrawList.clear();
