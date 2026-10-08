@@ -12,7 +12,11 @@ FetchAndPopulate("https://github.com/LIONant-depot/xprim_geom.git" "main")
 # Shader compilation - self-contained (not relying on xLION's own GLSLC variable, which may not be
 # set yet at the point this depot gets fetched - resolves the same relative path xLION's own
 # CMakeLists.txt uses, independent of fetch ordering).
-set(XLIONRENDER_GLSLC "${CMAKE_SOURCE_DIR}/dependencies/Shaderc/bin/glslc.exe")
+if(WIN32)
+  set(XLIONRENDER_GLSLC "${CMAKE_SOURCE_DIR}/dependencies/Shaderc/bin/glslc.exe")
+else()
+  find_program(XLIONRENDER_GLSLC glslc REQUIRED) # Linux port: the distro's glslc
+endif()
 set(XLIONRENDER_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../src/shaders")
 set(XLIONRENDER_GENERATED_HEADERS)
 foreach(STAGE_PAIR "frag:primitive_frag" "vert:primitive_vert" "frag:outline_frag" "vert:outline_vert" "frag:outline_obb_frag" "vert:outline_obb_vert" "frag:capsule_frag" "vert:capsule_vert" "frag:text_frag" "vert:text_vert")
