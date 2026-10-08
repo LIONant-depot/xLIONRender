@@ -10,7 +10,7 @@
 // DLL) already collected what to draw via the renderer's internal Submit - see
 // xlionrender_renderer.h's own comment for that split. Named XLIONRENDER_API (not XECS_API - that
 // name is specific to the ECS's own cross-DLL symbols, this is a different, render-specific boundary).
-#include "dependencies/xGPU/source/xgpu.h"
+#include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xmath/source/xmath.h"
 #include "xlionrender_view.h"
 #include <cstdint>

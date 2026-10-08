@@ -23,7 +23,7 @@
 #include "xlionrender_text_renderer.h"
 #include "xlionrender_internal.h"
 #include "dependencies/xLIONCore/src/resources/xlioncore_resources_api.h"
-#include "dependencies/xGPU/source/xgpu.h"
+#include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xLIONCore/src/transform/xlioncore_transform.h"
 #include "dependencies/xLIONCore/src/transform/xlioncore_hierarchy.h"
 #include "dependencies/xLIONCore/src/tags/xlioncore_tags.h"

@@ -9,7 +9,7 @@
 //
 // Order: labels that do not ask to be sorted are drawn first, grouped by font and depth mode (they are expected to be in front of something solid: no sorting costs nothing); the ones that ask
 // (text::m_bSort) are drawn after them from the farthest to the nearest, in runs of consecutive labels that share a font and a depth mode.
-#include "dependencies/xGPU/source/xgpu.h"
+#include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xmath/source/xmath.h"
 #include "dependencies/xLIONCore/src/resources/xlioncore_resources_api.h"
 #include "xlionrender_text.h"

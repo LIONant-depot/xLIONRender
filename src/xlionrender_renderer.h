@@ -7,7 +7,7 @@
 // simple unlit pipeline, and a per-frame submit/draw list. Purely internal to this DLL: nothing
 // outside LIONRender.dll ever touches this class directly, not even xLION.exe (see xlionrender_api.h
 // for the two functions that DO cross the boundary) - so it needs no export macro at all.
-#include "dependencies/xGPU/source/xgpu.h"
+#include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xmath/source/xmath.h"
 #include "dependencies/xprim_geom/source/xprim_geom.h"
 #include "xlionrender_primitive.h"
