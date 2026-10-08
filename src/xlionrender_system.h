@@ -24,10 +24,22 @@
 #include "xlionrender_internal.h"
 #include "dependencies/xLIONCore/src/resources/xlioncore_resources_api.h"
 #include "dependencies/xGPU/source/xGPU.h"
+// LIONCore.dll owns (registers) these components; this DLL only needs their types/reflection, so
+// they are read import-only (see xscript_registration.h). Without this, every compiler that runs
+// the dynamic initializers of the headers' inline g_AutoReg_* variables (clang/gcc always do; MSVC
+// happens to drop the unreferenced ones) gives LIONRender its own registration of transform,
+// static_tag, the physics components, ... - a second bit per GUID, and whichever copy sorts last
+// wins findComponentTypeInfo, leaving LIONCore's own info_v copies (which its systems query)
+// pointing at a bit no entity has (Linux: the ground's static_tag was invisible to physics, so it
+// became a kinematic body). The few LIONCore types this DLL queries are synced by GUID in
+// XecsPlugin_RegisterSystems (xlionrender_plugin_entry.cpp).
+#define XSCRIPT_IMPORT_ONLY
 #include "dependencies/xLIONCore/src/transform/xlioncore_transform.h"
 #include "dependencies/xLIONCore/src/transform/xlioncore_hierarchy.h"
 #include "dependencies/xLIONCore/src/tags/xlioncore_tags.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics.h"
+#undef  XSCRIPT_IMPORT_ONLY
+#include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"   // registering macro back for anything after
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
 #include <cstring>
 #include <format>
