@@ -85,12 +85,15 @@ namespace xlionrender
         , CELLS                 // the world cell's list of the lights that reach it (the same image as EXACT)
         , SAMPLED               // the cell's head_v most important lights exactly + one tail light, sampled (unbiased, noisy)
         };
-        light_mode                                 m_LightMode     = light_mode::EXACT;
+        light_mode                                 m_LightMode     = light_mode::CELLS;     // the default: the same image as EXACT, a fraction of the shading (research doc: lab)
         int                                        m_LightHead     = 4;
         int                                        m_LightTailSamples = 1;     // SAMPLED: stratified tail samples per pixel
         float                                      m_LightCellSize = 2.0f;     // level 0 cells, world units
         // CPU time of the last render's cell build (ms)
                       double               getLightBuildMs( void ) const                                        noexcept { return m_LightBuildMs; }
+        // The last render's cell data (uints; 0 when the mode was EXACT or fell back to it) and the mode it used
+                      int                  getLightCellUints( void ) const                                      noexcept { return m_LightCellUints; }
+                      light_mode           getLightModeUsed( void ) const                                       noexcept { return m_LightModeUsed; }
         // How many clipmap tiles + local light maps the last Render drew (a static scene: 0 after its first frame)
                       int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
 
@@ -197,6 +200,8 @@ namespace xlionrender
         std::uint64_t               m_LightFrame            = ~0ull;
         std::uint32_t               m_LightSeed             = 0;
         double                      m_LightBuildMs          = 0;
+        int                         m_LightCellUints        = 0;
+        light_mode                  m_LightModeUsed         = light_mode::EXACT;
         xgpu::buffer                m_MaterialUBO;
         xgpu::buffer                m_FullscreenVB;
         xgpu::buffer                m_FullscreenIB;

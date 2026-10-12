@@ -128,6 +128,8 @@ namespace xlionrender
             }
         }
 
+        m_LightModeUsed  = Mode;
+        m_LightCellUints = Mode == light_mode::EXACT ? 0 : int(m_LightCells.m_Data.size());
         Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_LightHead) };
         Light.m_LocalBase  = { float(LightBase), float(CellBase), m_LightCellSize, float(m_LightTailSamples) };
         for( int L = 0; L < light_cells::levels_v; ++L )

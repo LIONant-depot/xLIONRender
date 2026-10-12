@@ -94,6 +94,75 @@ int main()
             for (std::uint32_t k = 1; k < Count; ++k) CHECK(Cells.m_Data[entries_v + 2 * (First + k)] > Cells.m_Data[entries_v + 2 * (First + k - 1)], "A cell's list is not in light order");
         }
 
+        // Boundaries (the invariant: a list may hold extra lights, never miss one that contributes): points just inside each
+        // light's radius in 26 directions, just inside spot cones, lights at negative coordinates, a light enclosing the camera,
+        // a very narrow cone, a camera far in negative space (other cell windows and slots), every level
+        {
+            std::vector<xlionrender::local_light> B = MakeLights(64, 0.5f, 9.0f, 21);
+            B.push_back({ .m_Position = { 0.5f, 3.0f, -2.0f }, .m_Radius = 40.0f });                                            // encloses the camera
+            B.push_back({ .m_Type = xlionrender::local_light::type::SPOT, .m_Position = { -3, 2, -5 }, .m_Direction = { 0.2f, -1, 0.3f }
+                        , .m_Radius = 12.0f, .m_InnerAngle = 0.02f, .m_OuterAngle = 0.05f });                                     // very narrow
+            for (auto& l : B) if (l.m_Type == xlionrender::local_light::type::SPOT) l.m_Direction = l.m_Direction.NormalizeCopy();
+            const auto Contributes = [](const xlionrender::local_light& l, const xmath::fvec3& Q)
+            {
+                const xmath::fvec3 V = Q - l.m_Position;
+                const float d = V.Length();
+                if (d >= l.m_Radius) return false;
+                return l.m_Type == xlionrender::local_light::type::POINT || (d > 0 && V.Dot(l.m_Direction) / d > std::cos(l.m_OuterAngle));
+            };
+            for (const xmath::fvec3 Eye2 : { xmath::fvec3{ 0.5f, 3.0f, -2.0f }, xmath::fvec3{ -37.3f, -11.0f, -58.9f } })
+            {
+                std::vector<xlionrender::light_cells::light> BL;
+                for (auto& l : B) BL.push_back({ l.m_Position + (Eye2 - xmath::fvec3{ 0.5f, 3.0f, -2.0f }), l.m_Radius, 1.0f, l.m_Direction
+                                               , l.m_Type == xlionrender::local_light::type::SPOT ? l.m_OuterAngle : -1.0f });
+                Cells.Build(BL, Eye2, 2.0f, 0);
+                const auto CellOf = [&](const xmath::fvec3& Q)
+                {
+                    for (int Lv = 0; Lv < xlionrender::light_cells::levels_v; ++Lv)
+                    {
+                        const float S = 2.0f * float(1 << Lv);
+                        const int   C[3] = { int(std::floor(Q.m_X / S)), int(std::floor(Q.m_Y / S)), int(std::floor(Q.m_Z / S)) };
+                        bool bIn = true;
+                        for (int a = 0; a < 3; ++a) bIn &= C[a] >= Cells.m_Origin[Lv][a] && C[a] < Cells.m_Origin[Lv][a] + xlionrender::light_cells::cells_v;
+                        if (bIn) return Lv * xlionrender::light_cells::level_cells_v + Cells.Slot(C[0], C[1], C[2]);
+                    }
+                    return -1;
+                };
+                int nChecked = 0;
+                for (std::uint32_t i = 0; i < BL.size(); ++i)
+                {
+                    xlionrender::local_light l = B[i];
+                    l.m_Position = BL[i].m_Position;
+                    std::vector<xmath::fvec3> Points;
+                    for (int x = -1; x <= 1; ++x) for (int y = -1; y <= 1; ++y) for (int z = -1; z <= 1; ++z)
+                        if (x || y || z) Points.push_back(l.m_Position + xmath::fvec3(float(x), float(y), float(z)).NormalizeCopy() * (l.m_Radius * 0.9999f));
+                    if (l.m_Type == xlionrender::local_light::type::SPOT)
+                    {
+                        xmath::fvec3 R, U;
+                        xlionrender::shadows::FaceBasis(l.m_Direction, R, U);
+                        for (int k = 0; k < 16; ++k)
+                        {
+                            const float A = k * 0.3927f, Edge = l.m_OuterAngle * 0.999f;
+                            const xmath::fvec3 Dir = (l.m_Direction * std::cos(Edge) + (R * std::cos(A) + U * std::sin(A)) * std::sin(Edge)).NormalizeCopy();
+                            for (float t : { 0.1f, 0.5f, 0.99f }) Points.push_back(l.m_Position + Dir * (l.m_Radius * t));
+                        }
+                    }
+                    for (const auto& Q : Points)
+                    {
+                        if (!Contributes(l, Q)) continue;
+                        const int Cell = CellOf(Q);
+                        if (Cell < 0) continue;                                         // outside the cells: the shader loops every light
+                        const std::uint32_t First = Cells.m_Data[Cell * 4], Count = Cells.m_Data[Cell * 4 + 1];
+                        bool bListed = false;
+                        for (std::uint32_t k = 0; k < Count && !bListed; ++k) bListed = Cells.m_Data[entries_v + 2 * (First + k)] == i;
+                        CHECK(bListed, "Boundary: light %u reaches (%f %f %f) but is not in its cell's list", i, Q.m_X, Q.m_Y, Q.m_Z);
+                        ++nChecked;
+                    }
+                }
+                CHECK(nChecked > 500, "Only %d boundary points checked", nChecked);
+            }
+        }
+
         // SAMPLED split: the head + the tail's cumulative probabilities end at 1 and grow
         Cells.Build(CL, Eye, 2.0f, 4);
         int nSplit = 0;
@@ -209,6 +278,36 @@ int main()
 
     std::printf("GPU scene: exact %.3f ms, cells %.3f ms, sampled %.3f ms (%dx%d); CPU cell build: cells %.3f ms, sampled %.3f ms (%d lights)\n"
                , ExactMs, CellsMs, SampledMs, size_v, size_v, CellsBuild, SampledBuild, int(Scene.m_LocalLights.size()));
+
+    // Benchmark (XLIONRENDER_LAB_BENCH=1; build Release): 1280x720, 256 / 1024 / 4096 lights over a wider area, each mode: GPU
+    // scene time (mean of 16 frames), CPU cell build, cell data size, the mode actually used (a full cell buffer falls back)
+    if (std::getenv("XLIONRENDER_LAB_BENCH"))
+    {
+        xlionrender::render_view Big;
+        CHECK(!Renderer.CreateView(Big, { .m_Width = 1280, .m_Height = 720 }), "CreateView 1280x720");
+        Camera.LookAt(xmath::fvec3{ 0, 10.0f, -24.0f }, xmath::fvec3{ 0, 0, 6.0f });
+        for (int n : { 256, 1024, 4096 })
+        {
+            auto Lights = MakeLights(n, 2.0f, 5.0f, 99);
+            for (auto& l : Lights) { l.m_Position.m_X *= 4.0f; l.m_Position.m_Z = l.m_Position.m_Z * 4.0f + 10.0f; }
+            Scene.m_LocalLights = Lights;
+            for (mode M : { mode::EXACT, mode::CELLS, mode::SAMPLED })
+            {
+                Renderer.m_LightMode = M;
+                double Gpu = 0, Build = 0; int nGpu = 0;
+                for (int f = 0; f < 24; ++f)
+                {
+                    CHECK(App.RenderFrame(Scene, Big, Camera), "Bench render");
+                    if (f >= 8) { Gpu += App.m_LastTimes.m_SceneMs; Build += Renderer.getLightBuildMs(); ++nGpu; }
+                }
+                static const char* Names[] = { "EXACT", "CELLS", "SAMPLED" };
+                std::printf("bench %4d lights %-7s: GPU scene %7.3f ms, CPU cell build %6.3f ms, cell data %7.1f KB, used %s\n"
+                           , n, Names[int(M)], Gpu / nGpu, Build / nGpu, Renderer.getLightCellUints() * 4 / 1024.0, Names[int(Renderer.getLightModeUsed())]);
+            }
+        }
+        Renderer.m_LightMode = mode::EXACT;
+        Renderer.DestroyView(Big);
+    }
 
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);

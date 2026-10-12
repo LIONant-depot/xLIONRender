@@ -586,14 +586,33 @@ buffers (up to 4096; the first 32 keep shadow maps); cells: 3 levels x 16^3, lev
 each render (`features/lights/xlionrender_light_cells.h`), spot cones culled conservatively (a light is left out of a
 cell only where it is exactly 0). Measured at 160x160, 256 lights of radius 3-7 (RTX 4070 Ti SUPER, Debug build):
 - CELLS == EXACT bit for bit (few and dense lights); SAMPLED == CELLS bit for bit when every light fits in the heads.
-- SAMPLED is unbiased: the mean error of N frames falls as 1/sqrt(N) (0.32 -> 0.12 from 8 to 64 frames).
+- SAMPLED: no bias detected - the mean error of N frames falls as expected for an unbiased estimator (0.32 -> 0.12 from
+  8 to 64 frames). Consistent with unbiasedness, not a proof (a bias floor can appear later; ensembles of seeds against
+  CELLS are the stronger test).
 - But one frame is very noisy: 0.81 mean relative error with 1 tail sample, 0.44 with 4, 0.19 with 16 stratified
-  samples (one pass over the tail's cumulative probabilities). Not usable without a denoiser or many more samples.
-- GPU scene: exact 0.166 ms, cells 0.098, sampled 0.049 (1 sample) / 0.096 (16) - too small an image to rank them.
-- CPU cell build: 5-7 ms (cells), ~10 ms (sampled split) in Debug - measure in Release before judging; dirty cells
-  would remove most of it.
-Reading: the cells pay off on their own (exact, fewer lights per pixel). The sampled tail needs a better proposal
-(per-pixel BRDF / visibility, as ReGIR resamples at the shading point) or a denoiser before it can replace CELLS.
+  samples - and 16 samples already cost what CELLS costs. More samples is not the road.
+- Release, 1280x720 (`XLIONRENDER_LAB_BENCH=1`), GPU scene / CPU cell build / cell data:
+
+  | Lights | EXACT | CELLS | CELLS build | Cells |
+  |---|---|---|---|---|
+  | 256 | 0.231 ms | 0.023 ms | 0.16 ms | 214 KB |
+  | 1024 | 0.996 ms | 0.066 ms | 0.53 ms | 283 KB |
+  | 4096 | 5.653 ms | 0.248 ms | 1.97 ms | 562 KB |
+
+- The builder is light-centric (each light visits only its own cell range; count / prefix / fill; light order kept
+  without sorting). Boundary tests: points just inside every radius in 26 directions and just inside spot cones, a light
+  enclosing the camera, a very narrow cone, a camera far in negative space, all levels. Outside the cells or past the
+  cell buffer: an explicit EXACT fallback (`getLightModeUsed`), never a truncated list.
+
+**Decision: CELLS is the default** (`instance::m_LightMode`), EXACT the reference and fallback. Next for CELLS:
+separate membership (position, radius, cone, add/remove, window) from proposal data (intensity, color, visibility) so
+a color edit does not rebuild lists; reuse across views with compatible coverage; measure the complete frame (snapshot,
+build, upload, recording, GPU, CPU wait). **SAMPLED stays experimental.** Order: noise diagnostics per pixel (which
+light, its probability, f/p, diffuse vs specular, shadowed) -> shading-point resampling (a few cell candidates
+re-weighted with the exact falloff, cone, orientation and a BRDF estimate; visibility kept out or conservative) ->
+diffuse / specular split (exact specular + sampled diffuse is a candidate) -> demodulated diffuse -> a small spatial
+filter -> temporal reuse last, judged on moving sequences, not 64-frame stills. The 32 shadowed lights make this a
+many-light selection test, not yet a many-shadowed-light one: add shadowed lights in the tail, a moving blocker.
 
 Test matrix: few lights (the head alone), dense overlap, glossy receivers, a thin occluder (zero support), a moving
 blocker with fixed lights (visibility invalidation), cell and clipmap crossings, two distant views, a sustained shadow
