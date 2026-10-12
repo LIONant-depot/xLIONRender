@@ -62,7 +62,7 @@ struct LocalLightData                  // xLIONRender: a point or spot light (sh
 	vec4 PosRadius;                    // camera-centered position, radius
 	vec4 Color;                        // rgb: color * intensity, w: cos of the spot's inner angle
 	vec4 DirCosOuter;                  // spot: direction, w cos of the outer angle; point: w = -2
-	vec4 Shadow;                       // x: first atlas tile (-1 none), y: near, z: tan of the half field of view
+	vec4 Shadow;                       // xy: its shadow map's origin in the atlas, z: its size (0 none), w: spot tan of the half field of view
 };
 #endif
 

@@ -4,8 +4,6 @@
 
 const int   kClipmapLevels  = 4;
 const int   kClipmapTiles   = 4;        // tiles per level side
-const float kAtlasTiles     = 8.0;      // tiles per atlas side
-const float kTileTexels     = 512.0;    // texels per tile side
 
 // World position -> 1 lit, 0 in shadow (3x3 PCF inside the tile). The finest level that holds the point decides; outside them all: lit.
 float ShadowClipmap(in const vec3 World)
@@ -15,6 +13,7 @@ float ShadowClipmap(in const vec3 World)
     const vec3 L = (UBOLight.W2Light * vec4(World, 1.0)).xyz;
     for (int Level = 0; Level < kClipmapLevels; ++Level)
     {
+        const float kTileTexels = UBOLight.ShadowParams.z;    // texels per tile side (shadows::setup)
         const vec4  Lv   = UBOLight.ShadowLevels[Level];       // xy: first tile of the level's window, z: tile size, w: depth center
         const vec2  T    = L.xy / Lv.z;
         const vec2  Tile = floor(T);

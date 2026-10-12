@@ -443,6 +443,15 @@ warps (PSM / LiSPSM / TSM) are out: camera-dependent, so nothing caches, and the
   Tested (`xlionrender_test_local_shadows`): the light lights, its shadow is there, an unchanged frame renders 0 tiles,
   a moved caster re-renders only the near light's 6 faces and the cached image equals a full rebuild, a spot's 1 tile.
   Image-based PBR materials got the directional branch (they treated the sun as a zero-radius point: no light).
+- **Phase 3 (done):** one 16-bit atlas (`DEPTH_U16`): the clipmap's 8x8 tiles on the left, the local lights' square on the
+  right, both sized per platform (`shadows::setup` at `instance::Init`; PC default 4096 + 4096 -> 8192x4096, 64 MB). Local
+  maps hold linear distance / radius; a point light's map is octahedral (one tile, down at the center, seams up), a spot's
+  its frustum, both with a 2 texel border. Casters render into a D32F scratch (point: 6 cube faces at half the map size),
+  then a remap pass writes the map (`shaders/xlionrender_shadow_remap_frag.glsl`, shared mapping in
+  `xlionrender_octahedral.glsl`). Map sizes: powers of two from the light's size on screen with hysteresis, quadtree buddy
+  allocator. At most `m_ShadowUpdatesPerFrame` maps re-render per frame (never-rendered first, then by screen size). Normal
+  offset bias for the local lights (a constant bias left acne where the light grazes the ground). Tested: the allocator,
+  1 map per light, caching, cached == rebuilt, the budget (2, 1, 0 maps over three frames, then equal to a rebuild).
 - **Phase 2b:** per-object tiles for dynamic objects (characters) - their own tight, high-resolution tile each frame;
   tiles sized by importance; per-face invalidation; normal-offset bias (grazing-angle speckle at the terminator).
 - **Later:** static/dynamic tile separation (copy the static depth, draw only the movers); virtual shadow maps once xGPU
@@ -511,7 +520,12 @@ changes fit xLION better:
 - **One importance number.** The same per-light importance drives the cell sampling, the shadow tile's size and
   its place in the update queue (adopted item 2): the lights the cells pick most get shadow resolution first.
 
-No compute needed: the CPU fills the cells (HypeHype bins 32x32 tiles on one thread inside L1 - a cell clipmap is
+**A clustered builder for PC.** The cells are clusters: froxels moved into the little world (clipmap levels give the
+fine-near / coarse-far resolution froxel depth slices give, without depending on the view). One data layout and one
+shader lookup, two builders: the CPU on mobile (no compute, as HypeHype), a compute pass on PC once xGPU has compute
+(rebuilt each frame or only the dirty cells, more exact lights per cell, depth-bounds culling against the depth buffer).
+
+No compute needed on mobile: the CPU fills the cells (HypeHype bins 32x32 tiles on one thread inside L1 - a cell clipmap is
 the same order of data) and uploads them as a small buffer; the shader finds its cell from the world position like
 `ShadowClipmap` finds its tile. Fixed cost per pixel: K exact lights + 1 tail sample. Compute-side culling and
 temporal reservoir reuse come with xGPU compute. Open points: cell size per clipmap level, K per platform, the tail
@@ -524,6 +538,5 @@ half resolution + 30 fps on slow GPUs; GTAO at half resolution with a bilateral 
 fp16 in one 128-bit load; draw streams (only the changed fields per draw) and user-land bind groups (xGPU
 direction); generational handles (index + generation, weak references).
 
-**Next phase (shadows phase 3):** adopted items 1 and 2 with octahedral point shadows: the clipmap atlas and a 16-bit
-local atlas, each sized per platform; the scratch render + remap pass (point: cube -> octahedral, spot: linearize),
-borders, tiles sized by importance; the per-frame tile budget. Then item 4, the world-cell reservoirs, item 5.
+**Order:** items 1 and 2 with the octahedral point shadows are done (shadows phase 3; one 16-bit atlas instead of two:
+the clipmap's orthographic depth is linear, so 16 bits hold it too). Next: item 4, the world-cell reservoirs, item 5.

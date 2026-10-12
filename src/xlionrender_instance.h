@@ -35,7 +35,8 @@ namespace xlionrender
                                 instance        ( const instance& )                                             = delete;
         instance&               operator=       ( const instance& )                                             = delete;
 
-        [[nodiscard]] xgpu::device::error* Init         ( xgpu::device& Device )                                noexcept;
+        // Shadows: per platform sizes (features/shadows/xlionrender_shadow_local.h)
+        [[nodiscard]] xgpu::device::error* Init         ( xgpu::device& Device, const shadows::setup& ShadowSetup = {} ) noexcept;
 
         [[nodiscard]] xgpu::device::error* CreateMesh   ( mesh_id& Id, std::span<const vertex> Vertices, std::span<const std::uint32_t> Indices ) noexcept;
         // An xgeom_static/xgeom_skin mesh (MakeClusterGeom / MakeSkinGeom). References Geom's GPU buffers (not owned, not
@@ -71,7 +72,9 @@ namespace xlionrender
 
         // Shadows: false re-renders every shadow tile every frame (the reference the caching is tested against)
         bool                                       m_bShadowCache = true;
-        // How many shadow-atlas tiles the last Render drew (a static scene: 0 after its first frame)
+        // At most this many local light shadow maps re-render per frame (the others stay a frame stale)
+        int                                        m_ShadowUpdatesPerFrame = 16;
+        // How many clipmap tiles + local light maps the last Render drew (a static scene: 0 after its first frame)
                       int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
 
         // true when a newer frame's timings arrived since the last call
@@ -103,7 +106,7 @@ namespace xlionrender
 
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
         material_slot*              findMaterial    ( material_id Id )                                          noexcept;
-        void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
+        void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
 
         xgpu::device                m_Device;
@@ -121,9 +124,16 @@ namespace xlionrender
         xgpu::texture               m_WhiteTexture;
         xgpu::shader                m_DefaultMaterialFrag;
 
-        // Shadows (features/shadows): the atlas, its passes (a clear for its first use, then load), the tile clear and the casters' depth
-        // pipelines per vertex path (float mesh, rigid, skin)
+        // Shadows (features/shadows): the atlas (16 bits: the clipmap's 8x8 tiles on the left, the local maps' square on the right),
+        // its passes (a clear for its first use, then load), the tile clear, the casters' depth pipelines per vertex path (float
+        // mesh, rigid, skin), the scratch the local maps' casters render into and the remap from it into the atlas
+        shadows::setup                          m_ShadowSetup;
         xgpu::texture                           m_ShadowAtlas;
+        xgpu::texture                           m_ShadowScratch;
+        xgpu::renderpass                        m_ScratchPass;
+        xgpu::pipeline                          m_RemapPipeline;
+        xgpu::pipeline_instance                 m_RemapInstance;
+        shadows::buddy                          m_ScratchAlloc;
         xgpu::renderpass                        m_ShadowClearPass, m_ShadowPass;
         xgpu::pipeline                          m_ShadowClearPipeline;
         xgpu::pipeline_instance                 m_ShadowClearInstance;
@@ -133,8 +143,8 @@ namespace xlionrender
         shadows::clipmap                        m_Clipmap;
         std::vector<shadows::tile_to_render>    m_ShadowTiles;
         shadows::local_shadows                  m_LocalShadows;
-        std::vector<shadows::local_tile_to_render> m_LocalTiles;
-        std::vector<int>                        m_LocalFirstTile;   // per scene local light: its first atlas tile, -1 none
+        std::vector<shadows::local_map_to_render> m_LocalToRender;
+        std::vector<shadows::local_map>         m_LocalMaps;        // per scene local light: its map (m_Size 0: none)
         std::unordered_map<std::uint64_t, xmath::fbbox> m_PrevCasters;  // last frame's casters (key -> world bounds), to find what changed
         int                                     m_nShadowTilesRendered = 0;
         bool                                    m_bShadowAtlasReady    = false;         // stands in for the shadow map until shadows exist

@@ -63,7 +63,7 @@ struct LocalLightData                  // xLIONRender: a point or spot light (sh
 	vec4 PosRadius;                    // camera-centered position, radius
 	vec4 Color;                        // rgb: color * intensity, w: cos of the spot's inner angle
 	vec4 DirCosOuter;                  // spot: direction, w cos of the outer angle; point: w = -2
-	vec4 Shadow;                       // x: first atlas tile (-1 none), y: near, z: tan of the half field of view
+	vec4 Shadow;                       // xy: its shadow map's origin in the atlas, z: its size (0 none), w: spot tan of the half field of view
 };
 #endif
 
@@ -79,7 +79,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	mat4 W2Light;                      // world -> light space (rotation)
 	vec4 CameraPos;                    // world position of the camera (wSpacePosition is camera-centered)
 	vec4 ShadowLevels[4];              // per clipmap level: xy first tile of the window, z tile size, w depth center
-	vec4 ShadowParams;                 // x: 1 shadows on, y: level 0 depth half range
+	vec4 ShadowParams;                 // x: 1 shadows on, y: level 0 depth half range, z: clipmap tile texels
 	vec4 LocalCount;                     // x: lights in Local[]
 	LocalLightData Local[32];          // shadows::max_local_lights_v
 #endif

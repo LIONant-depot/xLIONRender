@@ -26,9 +26,7 @@
 
 namespace xlionrender::shadows
 {
-    constexpr int atlas_size_v          = 4096;
-    constexpr int tile_size_v           = 512;                          // texels per tile side
-    constexpr int atlas_tiles_v         = atlas_size_v / tile_size_v;   // tiles per atlas side (8)
+    constexpr int atlas_tiles_v         = 8;                            // the clipmap's part of the atlas: 8x8 tiles (setup::m_ClipmapTileSize texels each)
     constexpr int clipmap_levels_v      = 4;
     constexpr int clipmap_tiles_v       = 4;                            // tiles per level side; a level's block in the atlas is 4x4
     constexpr float depth_scale_v       = 2.0f;                         // a level's depth range: +-depth_scale_v x its extent, around the camera

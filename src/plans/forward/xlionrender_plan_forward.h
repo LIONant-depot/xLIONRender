@@ -72,6 +72,14 @@ namespace xlionrender::details
         xmath::fvec4    m_Emissive;
     };
 
+    // xlionrender_shadow_remap_frag.glsl
+    struct push_shadow_remap
+    {
+        std::array<std::int32_t, 4>     m_Tile;             // x, y in the atlas, size, face size in the scratch
+        std::array<float, 4>            m_Params;           // near, far, spot tan half fov, 1 point / 0 spot
+        std::array<std::int32_t, 12>    m_Faces;            // the faces' origins in the scratch (x, y) x 6
+    };
+
     // xlionrender_tonemap_frag.glsl
     struct push_tonemap
     {

@@ -17,47 +17,51 @@ vec3 PBRDirect(in const vec3 N, in const vec3 V, in const float NdotV, in const 
     return (Diff + Spec) * NdotL;
 }
 
-// 1 lit .. 0 shadowed. FromLight: the receiver minus the light's position.
-float LocalShadow(in const LocalLightData Ld, in const vec3 FromLight)
+#include "xlionrender_octahedral.glsl"
+
+// 1 lit .. 0 shadowed. Receiver: the surface minus the light's position, N its normal. The light's map (Shadow: xy origin in the
+// atlas, z size) holds the linear distance to the nearest caster / radius: octahedral for a point light, the frustum for a spot.
+// Against acne the receiver moves along its normal (normal offset: the error grows as the light grazes the
+// surface, a constant bias does not follow it) by two texels, plus a one texel bias.
+float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const vec3 N)
 {
-    if (Ld.Shadow.x < 0.0) return 1.0;
+    if (Ld.Shadow.z <= 0.0) return 1.0;
 
-    int  Tile = int(Ld.Shadow.x);
-    vec3 F;
-    if (Ld.DirCosOuter.w < -1.5)
+    const float kBorder = 2.0;                                                  // shadows::local_border_v
+    const float Size    = Ld.Shadow.z;
+    const float Inner   = Size - 2.0 * kBorder;
+    const bool  bPoint  = Ld.DirCosOuter.w < -1.5;
+    const float TexelWorld = length(Receiver) * (bPoint ? 4.0 : 2.0 * Ld.Shadow.w) / Inner;    // a texel's size at the receiver (the
+                                                                                               // octahedral square spans ~4 radians)
+    const vec3  FromLight = Receiver + N * (2.0 * TexelWorld);
+    const float Dist      = length(FromLight);
+    vec2  UV;
+    if (bPoint)
     {
-        // Point light: the cube face of the major axis (faces +X -X +Y -Y +Z -Z, consecutive tiles)
-        const vec3 A = abs(FromLight);
-        if      (A.x >= A.y && A.x >= A.z) { F = vec3(sign(FromLight.x), 0.0, 0.0); Tile += FromLight.x > 0.0 ? 0 : 1; }
-        else if (A.y >= A.z)               { F = vec3(0.0, sign(FromLight.y), 0.0); Tile += FromLight.y > 0.0 ? 2 : 3; }
-        else                               { F = vec3(0.0, 0.0, sign(FromLight.z)); Tile += FromLight.z > 0.0 ? 4 : 5; }
+        UV = OctEncode(FromLight / Dist);
     }
-    else F = Ld.DirCosOuter.xyz;
+    else
+    {
+        const vec3  F       = Ld.DirCosOuter.xyz;
+        const vec3  Up      = abs(F.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        const vec3  R       = normalize(cross(Up, F));
+        const vec3  U       = cross(F, R);
+        const float TanHalf = Ld.Shadow.w;
+        const float d       = dot(FromLight, F);
+        if (d <= 0.0) return 1.0;
+        UV = vec2(dot(FromLight, R), dot(FromLight, U)) / (d * TanHalf);
+        if (any(greaterThan(abs(UV), vec2(1.0)))) return 1.0;                  // outside the spot's frustum
+    }
 
-    const vec3  Up      = abs(F.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    const vec3  R       = normalize(cross(Up, F));
-    const vec3  U       = cross(F, R);
-    const float Near    = Ld.Shadow.y;
-    const float Far     = Ld.PosRadius.w;
-    const float TanHalf = Ld.Shadow.z;
-
-    const float d = dot(FromLight, F);
-    if (d <= Near) return 1.0;
-    const vec2 XY = vec2(dot(FromLight, R), dot(FromLight, U)) / (d * TanHalf);
-    if (any(greaterThan(abs(XY), vec2(1.0)))) return 1.0;                      // outside a spot light's frustum
-
-    const float Bias  = 1.5 * 2.0 * d * TanHalf / kTileTexels;                   // a texel and a half at that distance
-    const float dd    = max(d - Bias, Near * 1.0001);
-    const float Depth = Far / (Far - Near) - (Far * Near) / ((Far - Near) * dd);
-
-    const ivec2 Base  = ivec2((int(kAtlasTiles) + Tile % int(kAtlasTiles)) * int(kTileTexels), (Tile / int(kAtlasTiles)) * int(kTileTexels));
-    const ivec2 Texel = ivec2(floor((XY * 0.5 + 0.5) * kTileTexels));
+    const float Ref   = (Dist - TexelWorld) / Ld.PosRadius.w;
+    const ivec2 Base  = ivec2(Ld.Shadow.xy);
+    const ivec2 Texel = ivec2(kBorder + floor((UV * 0.5 + 0.5) * Inner));
     float Lit = 0.0;
     for (int y = -1; y <= 1; ++y)
     for (int x = -1; x <= 1; ++x)
     {
-        const ivec2 P = clamp(Texel + ivec2(x, y), ivec2(0), ivec2(int(kTileTexels) - 1));
-        Lit += (texelFetch(SamplerShadowMap, Base + P, 0).r < Depth) ? 0.0 : 1.0;
+        const ivec2 P = clamp(Texel + ivec2(x, y), ivec2(0), ivec2(int(Size) - 1));     // the border holds the folded neighbors
+        Lit += (texelFetch(SamplerShadowMap, Base + P, 0).r < Ref) ? 0.0 : 1.0;
     }
     return Lit / 9.0;
 }
@@ -77,7 +81,7 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         const vec3 L = ToLight / Dist;
         if (Ld.DirCosOuter.w > -1.5) Att *= smoothstep(Ld.DirCosOuter.w, Ld.Color.w, dot(-L, Ld.DirCosOuter.xyz));     // spot cone: outer -> inner
         if (Att < 1e-4) continue;
-        Sum += PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att * LocalShadow(Ld, -ToLight);
+        Sum += PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att * LocalShadow(Ld, -ToLight, N);
     }
     return Sum;
 }

@@ -1,10 +1,12 @@
 // Point and spot lights and their atlas shadows (features/shadows/xlionrender_shadow_local.h). A sphere over a ground slab, no sun:
 //  - a point light lights the scene (brighter than without it)
 //  - its shadow is there: with shadows on no texel gets brighter and a patch of the ground gets clearly darker
-//  - tiles: the first frame renders 6 per shadowed point light, an unchanged frame none (same image)
-//  - invalidation: the sphere moves -> only the light whose radius reaches it re-renders its 6 faces, and the cached image equals
-//    the image with every tile re-rendered (m_bShadowCache = false)
-//  - a spot light: 1 tile, and its shadow is there too
+//  - maps: the first frame renders one per shadowed light (octahedral for a point light), an unchanged frame none (same image)
+//  - invalidation: the sphere moves -> only the light whose radius reaches it re-renders its map, and the cached image equals
+//    the image with every map re-rendered (m_bShadowCache = false)
+//  - a spot light: its map, and its shadow is there too
+//  - the per-frame budget: 3 lights, 2 maps per frame -> 2, then 1, then 0, and then the same image as a full rebuild
+//  - the buddy allocator the atlas uses: fills up, frees back into one block
 #include "xlionrender_test_common.h"
 
 using namespace xlionrender::test;
@@ -42,6 +44,19 @@ namespace
 
 int main()
 {
+    // The atlas allocator (CPU only)
+    {
+        xlionrender::shadows::buddy B;
+        B.Reset(4096, 64);
+        std::vector<xlionrender::shadows::buddy::pos> P(16);
+        for (auto& Q : P) CHECK(B.Alloc(1024, Q), "16 maps of 1024 fit in 4096");
+        xlionrender::shadows::buddy::pos Q;
+        CHECK(!B.Alloc(64, Q), "A full atlas takes nothing more");
+        for (int i = 0; i < 16; ++i) for (int j = i + 1; j < 16; ++j) CHECK(P[i].m_X != P[j].m_X || P[i].m_Y != P[j].m_Y, "Two maps at the same place");
+        for (auto& R : P) B.Free(R, 1024);
+        CHECK(B.Alloc(4096, Q) && Q.m_X == 0 && Q.m_Y == 0, "Freed maps merge back into the whole atlas");
+    }
+
     app App;
     CHECK(App.Init(), "Init");
     auto& Renderer = App.m_Renderer;
@@ -85,7 +100,7 @@ int main()
     // Its shadow
     Scene.m_LocalLights[0].m_bCastShadows = Scene.m_LocalLights[1].m_bCastShadows = true;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, On), "Render with shadows");
-    CHECK(Renderer.getShadowTilesRendered() == 12, "The first frame renders 6 tiles per point light (%d)", Renderer.getShadowTilesRendered());
+    CHECK(Renderer.getShadowTilesRendered() == 2, "The first frame renders a map per point light (%d)", Renderer.getShadowTilesRendered());
     Dump("point_off", Off); Dump("point_on", On);
     const int nDarker = CountDarker(Off, On);
     std::printf("point shadowed texels: %d\n", nDarker);
@@ -101,10 +116,10 @@ int main()
     Scene.m_Draws[1].m_L2W = Lifted(0.4f);
     std::vector<float> Cached, Rebuilt;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Cached), "Render moved (cached)");
-    CHECK(Renderer.getShadowTilesRendered() == 6, "A moved caster re-rendered %d tiles (expected the near light's 6)", Renderer.getShadowTilesRendered());
+    CHECK(Renderer.getShadowTilesRendered() == 1, "A moved caster re-rendered %d maps (expected the near light's)", Renderer.getShadowTilesRendered());
     Renderer.m_bShadowCache = false;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Rebuilt), "Render moved (rebuilt)");
-    CHECK(Renderer.getShadowTilesRendered() == 12, "Without the cache every tile renders (%d)", Renderer.getShadowTilesRendered());
+    CHECK(Renderer.getShadowTilesRendered() == 2, "Without the cache every map renders (%d)", Renderer.getShadowTilesRendered());
     Renderer.m_bShadowCache = true;
     for (std::size_t i = 0; i < Cached.size(); ++i) CHECK(Cached[i] == Rebuilt[i], "Cached and rebuilt shadows differ at %d (%f vs %f)", int(i), Cached[i], Rebuilt[i]);
     int nChanged = 0;
@@ -124,6 +139,22 @@ int main()
     const int nSpot = CountDarker(SpotOff, SpotOn);
     std::printf("spot shadowed texels: %d\n", nSpot);
     CHECK(nSpot > 150, "Only %d texels in the spot light's shadow", nSpot);
+
+    // The budget: 3 new shadowed point lights, 2 maps per frame
+    Scene.m_LocalLights = { Point, Point, Point };
+    Scene.m_LocalLights[1].m_Position = { -0.6f, 1.4f, 0.2f };
+    Scene.m_LocalLights[2].m_Position = { 0.1f, 1.8f, -0.5f };
+    Renderer.m_ShadowUpdatesPerFrame = 2;
+    int nPerFrame[3];
+    for (int& n : nPerFrame) { CHECK(App.RenderFrame(Scene, View, Camera), "Render budgeted"); n = Renderer.getShadowTilesRendered(); }
+    CHECK(nPerFrame[0] == 2 && nPerFrame[1] == 1 && nPerFrame[2] == 0, "Budgeted maps per frame: %d %d %d (expected 2 1 0)", nPerFrame[0], nPerFrame[1], nPerFrame[2]);
+    std::vector<float> Budgeted, Full;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Budgeted), "Render budgeted (settled)");
+    Renderer.m_bShadowCache = false;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Full), "Render budgeted (rebuilt)");
+    Renderer.m_bShadowCache = true;
+    Renderer.m_ShadowUpdatesPerFrame = 16;
+    for (std::size_t i = 0; i < Full.size(); ++i) CHECK(Budgeted[i] == Full[i], "Budgeted and rebuilt differ at %d", int(i));
 
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);

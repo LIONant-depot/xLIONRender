@@ -14,9 +14,12 @@ namespace xlionrender
         }
     }
 
-    // Shadows: which casters changed (world bounds), which tiles must be rendered - the sun's clipmap and the local lights' tiles -,
-    // then those tiles (each cleared and drawn with the casters over it) into the atlas. Before the scene pass, which samples the atlas.
-    void instance::renderShadows( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept
+    // Shadows: which casters changed (world bounds), what must be rendered - the sun's clipmap tiles and the local lights' maps -, then:
+    //  - the local maps' casters into the scratch (in batches that fit it), each batch remapped into the atlas (linear distance,
+    //    octahedral for point lights)
+    //  - the clipmap tiles straight into the atlas (each cleared and drawn with the casters over it)
+    // Before the scene pass, which samples the atlas.
+    void instance::renderShadows( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
     {
         if( !m_bShadowAtlasReady )
         {
@@ -56,45 +59,19 @@ namespace xlionrender
         const auto& Sun = Scene.m_Sun;
         if( Sun.m_bCastShadows ) m_Clipmap.Update(Sun.m_Direction, Sun.m_ShadowTileSize, Eye, Changed, m_bShadowCache, m_ShadowTiles);
         else                     m_ShadowTiles.clear();
-        m_LocalShadows.Update(Scene.m_LocalLights, Changed, m_bShadowCache, m_LocalFirstTile, m_LocalTiles);
+        m_LocalShadows.Update(Scene.m_LocalLights, Changed, m_bShadowCache, Eye, ProjScale, m_ShadowUpdatesPerFrame, m_LocalMaps, m_LocalToRender);
 
-        m_nShadowTilesRendered = static_cast<int>(m_ShadowTiles.size() + m_LocalTiles.size());
+        m_nShadowTilesRendered = static_cast<int>(m_ShadowTiles.size() + m_LocalToRender.size());
         if( m_nShadowTilesRendered == 0 ) return;
 
         static const xmath::fmat4 NoShadow = []{ xmath::fmat4 M = xmath::fmat4::fromZero(); M(2, 3) = 2; M(3, 3) = 1; return M; }();
 
-        // The clipmap culls in light space
-        std::vector<shadows::lbox> LightBounds;
-        LightBounds.reserve(Draws.size());
-        for( const auto& C : Draws ) LightBounds.push_back(m_Clipmap.Bounds(C.m_World));
-
-        auto Cmd = Window.StartRenderPass(m_ShadowPass);
-        const std::size_t nTiles = m_ShadowTiles.size() + m_LocalTiles.size();
-        for( std::size_t t = 0; t < nTiles; ++t )
+        // Draws the casters that pass Keep with W2C into the current viewport
+        const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, const auto& Keep )
         {
-            const bool          bSun = t < m_ShadowTiles.size();
-            const auto*         pT   = bSun ? &m_ShadowTiles[t] : nullptr;
-            const auto*         pLT  = bSun ? nullptr : &m_LocalTiles[t - m_ShadowTiles.size()];
-            const xmath::fmat4& W2C  = bSun ? pT->m_W2C : pLT->m_W2C;
-            const float X = float(bSun ? pT->m_AtlasX * shadows::tile_size_v : shadows::LocalTileX(pLT->m_Tile));
-            const float Y = float(bSun ? pT->m_AtlasY * shadows::tile_size_v : shadows::LocalTileY(pLT->m_Tile));
-            const float S = float(shadows::tile_size_v);
-            Cmd.setViewport(X, Y, S, S);
-            Cmd.setScissor(int(X), int(Y), int(S), int(S));
-
-            Cmd.setPipelineInstance(m_ShadowClearInstance);
-            Cmd.setBuffer(m_FullscreenVB);
-            Cmd.setBuffer(m_FullscreenIB);
-            Cmd.Draw(3);
-
             for( std::size_t i = 0; i < Draws.size(); ++i )
             {
-                if( bSun ) { if( !shadows::clipmap::Overlaps(LightBounds[i], pT->m_MinX, pT->m_MinY, pT->m_Size) ) continue; }
-                else
-                {
-                    const auto& LL = Scene.m_LocalLights[pLT->m_Light];
-                    if( !shadows::Overlaps(Draws[i].m_World, LL.m_Position, LL.m_Radius) ) continue;     // ponytail: sphere, not the face's frustum
-                }
+                if( !Keep(i) ) continue;
                 const auto& D = *Draws[i].m_pDraw;
                 const auto& M = *Draws[i].m_pMesh;
 
@@ -129,7 +106,115 @@ namespace xlionrender
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                     }
             }
+        };
+
+        const auto Viewport = [&]( xgpu::cmd_buffer& Cmd, int X, int Y, int S )
+        {
+            Cmd.setViewport(float(X), float(Y), float(S), float(S));
+            Cmd.setScissor(X, Y, S, S);
+        };
+
+        // Local maps: batches whose faces fit in the scratch (a point light: 6 faces of half its map size in two blocks of its map
+        // size, a spot: one face of its map size)
+        struct face_batch { int m_iRender; std::array<shadows::buddy::pos, 2> m_Blocks; };
+        std::vector<face_batch> Batch;
+        const int LocalX = shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;     // the local part's origin in the atlas
+        bool      bClipmapDone = false;
+
+        const auto FacePos = [&]( const face_batch& B, int Face, int Size, bool bPoint ) -> shadows::buddy::pos
+        {
+            if( !bPoint ) return B.m_Blocks[0];
+            const auto& Block = B.m_Blocks[Face / 4];
+            const int   Half  = Size / 2, Sub = Face % 4;
+            return { Block.m_X + (Sub % 2) * Half, Block.m_Y + (Sub / 2) * Half };
+        };
+
+        const auto Flush = [&]()
+        {
+            if( !Batch.empty() )
+            {
+                auto Cmd = Window.StartRenderPass(m_ScratchPass);
+                for( const auto& B : Batch )
+                {
+                    const auto& R      = m_LocalToRender[B.m_iRender];
+                    const auto& L      = Scene.m_LocalLights[R.m_Light];
+                    const bool  bPoint = L.m_Type == local_light::type::POINT;
+                    const float Near   = shadows::LocalNear(L.m_Radius);
+                    const auto  Keep   = [&](std::size_t i) { return shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius); };   // ponytail: the sphere, not the face's frustum
+                    for( int f = 0, nFaces = bPoint ? 6 : 1; f < nFaces; ++f )
+                    {
+                        const auto P = FacePos(B, f, R.m_Map.m_Size, bPoint);
+                        Viewport(Cmd, P.m_X, P.m_Y, bPoint ? R.m_Map.m_Size / 2 : R.m_Map.m_Size);
+                        DrawCasters(Cmd, bPoint ? shadows::FaceW2C(L.m_Position, shadows::CubeFaceAxis(f), 1.0f, Near, L.m_Radius)
+                                                : shadows::FaceW2C(L.m_Position, L.m_Direction.NormalizeCopy(), shadows::SpotTanHalf(L), Near, L.m_Radius), Keep);
+                    }
+                }
+            }
+
+            auto Cmd = Window.StartRenderPass(m_ShadowPass);
+
+            if( !bClipmapDone )
+            {
+                bClipmapDone = true;
+                std::vector<shadows::lbox> LightBounds;         // the clipmap culls in light space
+                LightBounds.reserve(Draws.size());
+                for( const auto& C : Draws ) LightBounds.push_back(m_Clipmap.Bounds(C.m_World));
+                const int S = m_ShadowSetup.m_ClipmapTileSize;
+                for( const auto& T : m_ShadowTiles )
+                {
+                    Viewport(Cmd, T.m_AtlasX * S, T.m_AtlasY * S, S);
+                    Cmd.setPipelineInstance(m_ShadowClearInstance);
+                    Cmd.setBuffer(m_FullscreenVB);
+                    Cmd.setBuffer(m_FullscreenIB);
+                    Cmd.Draw(3);
+                    DrawCasters(Cmd, T.m_W2C, [&](std::size_t i) { return shadows::clipmap::Overlaps(LightBounds[i], T.m_MinX, T.m_MinY, T.m_Size); });
+                }
+            }
+
+            for( const auto& B : Batch )
+            {
+                const auto& R      = m_LocalToRender[B.m_iRender];
+                const auto& L      = Scene.m_LocalLights[R.m_Light];
+                const bool  bPoint = L.m_Type == local_light::type::POINT;
+                details::push_shadow_remap Push{};
+                Push.m_Tile   = { LocalX + R.m_Map.m_X, R.m_Map.m_Y, R.m_Map.m_Size, bPoint ? R.m_Map.m_Size / 2 : R.m_Map.m_Size };
+                Push.m_Params = { shadows::LocalNear(L.m_Radius), L.m_Radius, bPoint ? 1.0f : shadows::SpotTanHalf(L), bPoint ? 1.0f : 0.0f };
+                for( int f = 0; f < (bPoint ? 6 : 1); ++f )
+                {
+                    const auto P = FacePos(B, f, R.m_Map.m_Size, bPoint);
+                    Push.m_Faces[f * 2] = P.m_X;
+                    Push.m_Faces[f * 2 + 1] = P.m_Y;
+                }
+                Viewport(Cmd, Push.m_Tile[0], Push.m_Tile[1], R.m_Map.m_Size);
+                Cmd.setPipelineInstance(m_RemapInstance);
+                Cmd.setPushConstants(Push);
+                Cmd.setBuffer(m_FullscreenVB);
+                Cmd.setBuffer(m_FullscreenIB);
+                Cmd.Draw(3);
+            }
+            Batch.clear();
+            m_ScratchAlloc.Reset(m_ShadowSetup.m_ScratchSize, m_ShadowSetup.m_MinLocalSize);
+        };
+
+        m_ScratchAlloc.Reset(m_ShadowSetup.m_ScratchSize, m_ShadowSetup.m_MinLocalSize);
+        for( int r = 0; r < int(m_LocalToRender.size()); ++r )
+        {
+            const auto& R      = m_LocalToRender[r];
+            const bool  bPoint = Scene.m_LocalLights[R.m_Light].m_Type == local_light::type::POINT;
+            const auto  TryAlloc = [&](face_batch& B)
+            {
+                if( !m_ScratchAlloc.Alloc(R.m_Map.m_Size, B.m_Blocks[0]) ) return false;
+                return !bPoint || m_ScratchAlloc.Alloc(R.m_Map.m_Size, B.m_Blocks[1]);
+            };
+            face_batch B{ r, {} };
+            if( !TryAlloc(B) )
+            {
+                Flush();
+                if( !TryAlloc(B) ) continue;        // larger than the scratch: setup error (m_ScratchSize >= 2 x m_MaxLocalSize)
+            }
+            Batch.push_back(B);
         }
+        if( !Batch.empty() || !bClipmapDone ) Flush();
     }
 
     //------------------------------------------------------------------------------------------------
@@ -148,7 +233,8 @@ namespace xlionrender
         // The vertex shaders' single-shadow-map output is unused (the clipmap is looked up from the world position): z = 2, outside (-1,1)
         static const xmath::fmat4 NoShadow = []{ xmath::fmat4 M = xmath::fmat4::fromZero(); M(2, 3) = 2; M(3, 3) = 1; return M; }();
 
-        renderShadows(Window, Scene, Eye);
+        const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
+        renderShadows(Window, Scene, Eye, ProjScale);
 
         // Scene -> HDR
         {
@@ -176,7 +262,7 @@ namespace xlionrender
                     const auto& Lv = m_Clipmap.m_Levels[i];
                     Light.m_ShadowLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_TileSize, Lv.m_DepthCenter };
                 }
-                Light.m_ShadowParams = { L.m_bCastShadows ? 1.0f : 0.0f, m_Clipmap.DepthHalfRange(0), 0, 0 };
+                Light.m_ShadowParams = { L.m_bCastShadows ? 1.0f : 0.0f, m_Clipmap.DepthHalfRange(0), float(m_ShadowSetup.m_ClipmapTileSize), 0 };
 
                 const int nLocal = std::min(int(Scene.m_LocalLights.size()), max_local_lights_v);
                 Light.m_LocalCount = { float(nLocal), 0, 0, 0 };
@@ -184,12 +270,12 @@ namespace xlionrender
                 {
                     const auto& LL     = Scene.m_LocalLights[i];
                     const bool  bSpot  = LL.m_Type == local_light::type::SPOT;
-                    const int   First  = i < int(m_LocalFirstTile.size()) ? m_LocalFirstTile[i] : -1;
+                    const auto  Map    = i < int(m_LocalMaps.size()) ? m_LocalMaps[i] : shadows::local_map{};
                     auto&       Out    = Light.m_Local[i];
                     Out.m_PosRadius    = xmath::fvec4(LL.m_Position - Eye, LL.m_Radius);
                     Out.m_Color        = xmath::fvec4(LL.m_Color * LL.m_Intensity, std::cos(LL.m_InnerAngle));
                     Out.m_DirCosOuter  = bSpot ? xmath::fvec4(LL.m_Direction.NormalizeCopy(), std::cos(LL.m_OuterAngle)) : xmath::fvec4(0, 0, 0, -2);
-                    Out.m_Shadow       = { float(First), shadows::LocalNear(LL.m_Radius), bSpot ? std::tan(std::min(LL.m_OuterAngle, 1.0f)) : 1.0f, 0 };
+                    Out.m_Shadow       = { float(shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize + Map.m_X), float(Map.m_Y), float(Map.m_Size), bSpot ? shadows::SpotTanHalf(LL) : 1.0f };
                 }
             }
 
