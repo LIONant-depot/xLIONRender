@@ -235,9 +235,13 @@ namespace xlionrender
         static constexpr int        lit_samplers_v          = 10;
         static constexpr int        env_source_size_v       = 256;
         static constexpr int        env_dfg_size_v          = 64;
-        xgpu::texture               m_EnvSource, m_EnvAtlas, m_EnvDFG;
-        xgpu::renderpass            m_EnvSourcePass, m_EnvAtlasPass, m_EnvDFGPass;
-        xgpu::pipeline              m_EnvSkyPipeline, m_EnvPrefilterPipeline, m_EnvDFGPipeline;
+        static constexpr int        env_source_levels_v     = 6;            // the source pyramid: 256 .. 8 (filtered importance sampling)
+        std::array<xgpu::texture, env_source_levels_v>    m_EnvSource;
+        std::array<xgpu::renderpass, env_source_levels_v> m_EnvSourcePass;
+        std::array<xgpu::pipeline_instance, env_source_levels_v> m_EnvDownsampleInstance;      // [k]: level k from level k-1 (0 unused)
+        xgpu::texture               m_EnvAtlas, m_EnvDFG;
+        xgpu::renderpass            m_EnvAtlasPass, m_EnvDFGPass;
+        xgpu::pipeline              m_EnvSkyPipeline, m_EnvPrefilterPipeline, m_EnvDFGPipeline, m_EnvDownsamplePipeline;
         xgpu::pipeline_instance     m_EnvSkyInstance, m_EnvPrefilterInstance, m_EnvDFGInstance;
         std::uint64_t               m_EnvKey                = 0;            // the sky the atlas holds (0: none yet)
         bool                        m_bEnvDFGReady          = false;

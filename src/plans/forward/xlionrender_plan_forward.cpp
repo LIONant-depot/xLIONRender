@@ -168,10 +168,19 @@ namespace xlionrender
         ++m_nEnvBuilds;
 
         {
-            auto Cmd = Window.StartRenderPass(m_EnvSourcePass);
+            auto Cmd = Window.StartRenderPass(m_EnvSourcePass[0]);
             Cmd.setPipelineInstance(m_EnvSkyInstance);
             Cmd.setPushConstants(details::push_env_sky{ { 0, 1, 0, 2 }, { 0, 0, 0, 0 }                     // no sun disc: the sun is the direct light
                                                       , xmath::fvec4(Sky.m_Zenith, 0), xmath::fvec4(Sky.m_Horizon, 0), xmath::fvec4(Sky.m_Ground, float(env_source_size_v)) });
+            Cmd.setBuffer(m_FullscreenVB);
+            Cmd.setBuffer(m_FullscreenIB);
+            Cmd.Draw(3);
+        }
+        for( int k = 1; k < env_source_levels_v; ++k )         // the source pyramid, for filtered importance sampling
+        {
+            auto Cmd = Window.StartRenderPass(m_EnvSourcePass[k]);
+            Cmd.setPipelineInstance(m_EnvDownsampleInstance[k]);
+            Cmd.setPushConstants(details::push_env_downsample{ { float(env_source_size_v >> k), float(env_source_size_v >> (k - 1)), 0, 0 } });
             Cmd.setBuffer(m_FullscreenVB);
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
@@ -185,7 +194,7 @@ namespace xlionrender
                 Cmd.setViewport(R[0], R[1], R[2], R[2]);
                 Cmd.setScissor(int(R[0]), int(R[1]), int(R[2]), int(R[2]));
                 Cmd.setPipelineInstance(m_EnvPrefilterInstance);
-                Cmd.setPushConstants(details::push_env_prefilter{ { R[0], R[1], R[2], 0 }, { L / 5.0f, float(env_source_size_v), L == 0 ? 1.0f : 256.0f, 0 } });
+                Cmd.setPushConstants(details::push_env_prefilter{ { R[0], R[1], R[2], 0 }, { L / 5.0f, float(env_source_size_v), L == 0 ? 1.0f : 64.0f, 0 } });
                 Cmd.setBuffer(m_FullscreenVB);
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);

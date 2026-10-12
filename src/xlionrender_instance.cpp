@@ -30,6 +30,9 @@ namespace xlionrender
         constexpr std::uint32_t s_EnvPrefilterFrag[] = {
             #include "xlionrender_env_prefilter_frag.h"
         };
+        constexpr std::uint32_t s_EnvDownsampleFrag[] = {
+            #include "xlionrender_env_downsample_frag.h"
+        };
         constexpr std::uint32_t s_EnvDFGFrag[] = {
             #include "xlionrender_env_dfg_frag.h"
         };
@@ -131,9 +134,12 @@ namespace xlionrender
         ReleaseBuffer(m_LightUBO);
         ReleaseBuffer(m_LightRing);
         for( auto* p : { &m_EnvSkyInstance, &m_EnvPrefilterInstance, &m_EnvDFGInstance } ) m_Device.Destroy(std::move(*p));
-        for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline } ) m_Device.Destroy(std::move(*p));
-        for( auto* p : { &m_EnvSourcePass, &m_EnvAtlasPass, &m_EnvDFGPass } )             m_Device.Destroy(std::move(*p));
-        for( auto* p : { &m_EnvSource, &m_EnvAtlas, &m_EnvDFG } )                          m_Device.Destroy(std::move(*p));
+        for( auto& I : m_EnvDownsampleInstance ) m_Device.Destroy(std::move(I));
+        for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline, &m_EnvDownsamplePipeline } ) m_Device.Destroy(std::move(*p));
+        for( auto* p : { &m_EnvAtlasPass, &m_EnvDFGPass } )                                 m_Device.Destroy(std::move(*p));
+        for( auto& P : m_EnvSourcePass ) m_Device.Destroy(std::move(P));
+        for( auto* p : { &m_EnvAtlas, &m_EnvDFG } )                                         m_Device.Destroy(std::move(*p));
+        for( auto& T : m_EnvSource ) m_Device.Destroy(std::move(T));
         ReleaseBuffer(m_CellRing);
         ReleaseBuffer(m_MaterialUBO);
         ReleaseBuffer(m_FullscreenVB);
@@ -211,7 +217,8 @@ namespace xlionrender
         }
 
         // The environment probe's textures (filled by updateEnvironment)
-        if( auto Err = Device.Create(m_EnvSource, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = env_source_size_v, .m_Height = env_source_size_v, .m_isGamma = false }); Err ) return Err;
+        for( int k = 0; k < env_source_levels_v; ++k )
+            if( auto Err = Device.Create(m_EnvSource[k], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = env_source_size_v >> k, .m_Height = env_source_size_v >> k, .m_isGamma = false }); Err ) return Err;
         if( auto Err = Device.Create(m_EnvAtlas,  { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 384, .m_Height = 256, .m_isGamma = false }); Err ) return Err;
         if( auto Err = Device.Create(m_EnvDFG,    { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = env_dfg_size_v, .m_Height = env_dfg_size_v, .m_isGamma = false }); Err ) return Err;
 
@@ -388,35 +395,49 @@ namespace xlionrender
 
         // The environment probe's passes and pipelines (fullscreen triangles; the sky and the prefilter rebuild only on a sky change)
         {
-            xgpu::shader ClearVert2, Sky, Prefilter, DFG;
+            xgpu::shader ClearVert2, Sky, Prefilter, DFG, Downsample;
             if( auto Err = Device.Create(ClearVert2, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_ClearDepthVert) }); Err ) return Err;
             if( auto Err = Device.Create(Sky,        { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvSkyFrag) }); Err ) return Err;
             if( auto Err = Device.Create(Prefilter,  { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvPrefilterFrag) }); Err ) return Err;
             if( auto Err = Device.Create(DFG,        { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvDFGFrag) }); Err ) return Err;
+            if( auto Err = Device.Create(Downsample, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvDownsampleFrag) }); Err ) return Err;
 
-            auto A0 = std::array{ xgpu::renderpass::attachment{ m_EnvSource } };
+            for( int k = 0; k < env_source_levels_v; ++k )
+            {
+                auto A = std::array{ xgpu::renderpass::attachment{ m_EnvSource[k] } };
+                if( auto Err = Device.Create(m_EnvSourcePass[k], { .m_Attachments = A }); Err ) return Err;
+            }
             auto A1 = std::array{ xgpu::renderpass::attachment{ m_EnvAtlas } };
             auto A2 = std::array{ xgpu::renderpass::attachment{ m_EnvDFG } };
-            if( auto Err = Device.Create(m_EnvSourcePass, { .m_Attachments = A0 }); Err ) return Err;
             if( auto Err = Device.Create(m_EnvAtlasPass,  { .m_Attachments = A1 }); Err ) return Err;
             if( auto Err = Device.Create(m_EnvDFGPass,    { .m_Attachments = A2 }); Err ) return Err;
 
-            const auto Make = [&](xgpu::pipeline& Pipe, xgpu::pipeline_instance& Inst, const xgpu::shader& Frag, std::size_t PushSize, xgpu::texture* pSource) -> xgpu::device::error*
+            const auto Clamp = xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true, .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } };
+            const auto MakePipe = [&](xgpu::pipeline& Pipe, const xgpu::shader& Frag, std::size_t PushSize, int nSamplers) -> xgpu::device::error*
             {
                 auto Shaders  = std::array<const xgpu::shader*, 2>{ &Frag, &ClearVert2 };
-                auto Samplers = std::array{ xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true, .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } } };
-                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = PushSize };
-                if( pSource ) Setup.m_Samplers = Samplers;
+                std::vector<xgpu::pipeline::sampler> Samplers(nSamplers, Clamp);
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = PushSize, .m_Samplers = Samplers };
                 Setup.m_Primitive.m_Cull            = xgpu::pipeline::primitive::cull::NONE;
                 Setup.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
-                if( auto Err = Device.Create(Pipe, Setup); Err ) return Err;
-                if( pSource == nullptr ) return Device.Create(Inst, { .m_PipeLine = Pipe });
-                auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ *pSource } };
-                return Device.Create(Inst, { .m_PipeLine = Pipe, .m_SamplersBindings = Bindings });
+                return Device.Create(Pipe, Setup);
             };
-            if( auto Err = Make(m_EnvSkyPipeline,       m_EnvSkyInstance,       Sky,       sizeof(details::push_env_sky),       nullptr);      Err ) return Err;
-            if( auto Err = Make(m_EnvPrefilterPipeline, m_EnvPrefilterInstance, Prefilter, sizeof(details::push_env_prefilter), &m_EnvSource); Err ) return Err;
-            if( auto Err = Make(m_EnvDFGPipeline,       m_EnvDFGInstance,       DFG,       sizeof(details::push_env_dfg),       nullptr);      Err ) return Err;
+            if( auto Err = MakePipe(m_EnvSkyPipeline,        Sky,        sizeof(details::push_env_sky),        0); Err ) return Err;
+            if( auto Err = MakePipe(m_EnvPrefilterPipeline,  Prefilter,  sizeof(details::push_env_prefilter),  env_source_levels_v); Err ) return Err;
+            if( auto Err = MakePipe(m_EnvDFGPipeline,        DFG,        sizeof(details::push_env_dfg),        0); Err ) return Err;
+            if( auto Err = MakePipe(m_EnvDownsamplePipeline, Downsample, sizeof(details::push_env_downsample), 1); Err ) return Err;
+            if( auto Err = Device.Create(m_EnvSkyInstance, { .m_PipeLine = m_EnvSkyPipeline }); Err ) return Err;
+            if( auto Err = Device.Create(m_EnvDFGInstance, { .m_PipeLine = m_EnvDFGPipeline }); Err ) return Err;
+            {
+                std::vector<xgpu::pipeline_instance::sampler_binding> Levels;
+                for( auto& T : m_EnvSource ) Levels.emplace_back(T);
+                if( auto Err = Device.Create(m_EnvPrefilterInstance, { .m_PipeLine = m_EnvPrefilterPipeline, .m_SamplersBindings = Levels }); Err ) return Err;
+            }
+            for( int k = 1; k < env_source_levels_v; ++k )
+            {
+                auto Parent = std::array{ xgpu::pipeline_instance::sampler_binding{ m_EnvSource[k - 1] } };
+                if( auto Err = Device.Create(m_EnvDownsampleInstance[k], { .m_PipeLine = m_EnvDownsamplePipeline, .m_SamplersBindings = Parent }); Err ) return Err;
+            }
         }
 
         // GPU timings: 0 = scene start, 1 = scene end, 2 = tone map end

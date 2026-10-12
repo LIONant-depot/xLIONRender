@@ -714,3 +714,17 @@ Left: occlusion culling for the street (~4.4k of 8k draws drawn); flyover is GPU
 frame that overflowed (the city binds ~100k sets) made every later frame create a larger pool - CPU time per frame
 exploded and the driver stalled the machine. Now: fixed-size pools all reset after the frame's fence, a hard cap, and a
 frame reuses a descriptor set already written with the same buffers (~100k allocations -> a few dozen).
+
+## Reflections (step 1 done: the sky probe)
+
+`scene::m_Sky` -> an octahedral source pyramid (256 .. 8, folded borders) -> a 6-level roughness atlas (GGX importance
+sampling, filtered: each sample reads the pyramid level matching its solid angle - 64 samples) + the split-sum DFG table;
+rebuilt only on a sky change. Lit pipelines bind it at samplers 8 and 9. Tests: a uniform sky gives every texel of every
+level the sky's value, levels keep the mean, a furnace sphere shades to ~1, a static sky builds once.
+
+Against the references: Godot 4 (octahedral radiance like ours, filtered importance sampling - adopted -, update modes
+quality / incremental / realtime); Flax (cube maps, probes rendered one face per frame - to adopt for local probes -, then
+filtered per mip). Roughness -> level mapping, measured (CPU, exact GGX prefilter of a high-contrast sky vs the blend of
+6 levels): linear 1.50% mean / 2.4% max error, square root (Godot) 1.53% / 3.0% - kept linear.
+Next (step 2): local probes captured by the renderer (6 faces -> one octahedral tile, a capture budget per frame), box
+parallax, listed by the world cells.

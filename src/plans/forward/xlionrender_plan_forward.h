@@ -112,6 +112,10 @@ namespace xlionrender::details
         xmath::fvec4    m_Rect;             // the level's origin and size in the atlas
         xmath::fvec4    m_Params;           // roughness, the source's size, samples
     };
+    struct push_env_downsample
+    {
+        xmath::fvec4    m_Params;           // this level's size, the parent's size
+    };
     struct push_env_dfg
     {
         xmath::fvec4    m_Params;           // the table's size, samples
