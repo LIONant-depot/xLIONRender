@@ -45,9 +45,9 @@ namespace xlionrender
         (void)m_InstanceRing.MemoryMap(Base, region_v, [&](void* pMemory)
         {
             auto* pRing = static_cast<details::instance_data*>(pMemory);
-            const auto Put = [&](std::uint32_t Slot, const xmath::fmat4& L2W)
+            const auto Put = [&](std::uint32_t Slot, const xmath::fmat4& L2W, const material& Mat)
             {
-                pRing[m_RingUsed].set(L2W, m_Origin);
+                pRing[m_RingUsed].set(L2W, m_Origin, Mat);
                 const int Src = Base + m_RingUsed++;
                 if( !Regions.empty() && Regions.back().m_SrcEntry + Regions.back().m_Count == Src && Regions.back().m_DstEntry + Regions.back().m_Count == int(Slot) ) ++Regions.back().m_Count;
                 else Regions.push_back({ Src, int(Slot), 1 });
@@ -58,12 +58,12 @@ namespace xlionrender
             {
                 const auto&         D  = Scene.m_Draws[i];
                 const std::uint32_t ID = static_cast<std::uint32_t>(D.m_Instance);
-                std::uint32_t Slot = ID ? m_InstanceSlots.Acquire(ID, D.m_L2W, Frame) : instance_slots::none_v;
+                std::uint32_t Slot = ID ? m_InstanceSlots.Acquire(ID, D.m_L2W, Frame, D.m_Material) : instance_slots::none_v;
                 if( Slot == instance_slots::none_v )
                 {
                     if( m_TransientCount >= max_transient_v || m_RingUsed >= region_v ) { m_DrawSlot[i] = instance_slots::none_v; continue; }     // ponytail: dropped
                     Slot = std::uint32_t(max_instances_v + m_TransientCount++);
-                    Put(Slot, D.m_L2W);
+                    Put(Slot, D.m_L2W, D.m_Material);
                 }
                 m_DrawSlot[i] = Slot;
             }
@@ -199,6 +199,7 @@ namespace xlionrender
             auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();     // absolute world: the instances' origin as is
             ViewBlock.m_w2C         = W2C;
             ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
+            const cluster_geom* pBoundGeom = nullptr;       // binds only when the mesh changes
 
             for( std::size_t i = 0; i < Draws.size(); ++i )
             {
@@ -208,6 +209,7 @@ namespace xlionrender
 
                 if( M.m_bCluster == false )
                 {
+                    pBoundGeom = nullptr;
                     Cmd.setPipelineInstance(m_ShadowInstance[0]);
                     Cmd.setPushConstants(details::push_forward{ D.m_L2W, W2C });
                     Cmd.setBuffer(const_cast<xgpu::buffer&>(M.m_VertexBuffer));
@@ -218,10 +220,14 @@ namespace xlionrender
 
                 const auto& G     = M.m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
-                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer };
-                Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} });
-                Cmd.setDynamicUBO(m_ShadowUBO, 0);
-                Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
+                if( &G != pBoundGeom )
+                {
+                    std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer };
+                    Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} });
+                    Cmd.setDynamicUBO(m_ShadowUBO, 0);
+                    Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
+                    pBoundGeom = &G;
+                }
 
                 for( const auto& Sub : G.m_Submeshes )
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
@@ -403,8 +409,9 @@ namespace xlionrender
 
             // Frustum culling in the camera-centered world (the bounds move by -Eye)
             const frustum Frustum = frustum::FromW2C(W2C);
-            m_nDrawsRendered = 0;
 
+            // The visible draws, sorted by mesh then first material: runs of the same state need no binding between draws
+                        m_Visible.clear();
             for( std::size_t iDraw = 0; iDraw < Scene.m_Draws.size(); ++iDraw )
             {
                 const auto& D     = Scene.m_Draws[iDraw];
@@ -417,7 +424,21 @@ namespace xlionrender
                     Box.m_Max = Box.m_Max - Eye;
                     if( !Frustum.Overlaps(Box) ) continue;
                 }
-                ++m_nDrawsRendered;
+                m_Visible.push_back({ pMesh, D.m_Materials.empty() ? ~0u : D.m_Materials[0].m_Index, std::uint32_t(iDraw) });
+            }
+            std::sort(m_Visible.begin(), m_Visible.end(), [](const visible_draw& a, const visible_draw& b)
+            {
+                return a.m_pMesh != b.m_pMesh ? a.m_pMesh < b.m_pMesh : a.m_Material != b.m_Material ? a.m_Material < b.m_Material : a.m_iDraw < b.m_iDraw;
+            });
+            m_nDrawsRendered = int(m_Visible.size());
+
+            const xgpu::pipeline_instance* pBound     = nullptr;      // the state the last cluster draw left bound
+            const cluster_geom*            pBoundGeom = nullptr;
+            for( const auto& Vis : m_Visible )
+            {
+                const std::size_t iDraw = Vis.m_iDraw;
+                const auto& D     = Scene.m_Draws[iDraw];
+                const auto* pMesh = Vis.m_pMesh;
 
                 const xmath::fmat4 L2w  = ToEye * D.m_L2W;
                 const std::uint32_t Slot = m_DrawSlot[iDraw];
@@ -436,6 +457,7 @@ namespace xlionrender
 
                 if( pMesh->m_bCluster == false )
                 {
+                    pBound = nullptr;
                     std::array<xgpu::buffer*, 2> LightBuffers{ &m_LightRing, &m_CellRing };
                     BindStandard(m_ForwardInstance, LightBuffers);
                     Cmd.setPushConstants(details::push_forward{ L2w, W2C });
@@ -456,21 +478,20 @@ namespace xlionrender
                 {
                     auto* pMat      = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                     auto* pInstance = pMat ? getMaterialInstance(*pMat, G.m_Kind) : nullptr;
-                    if( pInstance )
+                    if( pInstance == nullptr )
+                    {
+                        if( bSkin ) continue;       // ponytail: no constant-material fallback on the skin path; the editors give every slot a material
+                        pInstance = &m_StaticGeomInstance;      // the constant material, read from the instance record
+                    }
+                    if( pInstance != pBound || &G != pBoundGeom )
                     {
                         Cmd.setPipelineInstance(*pInstance, Static);
                         Cmd.setDynamicUBO(m_LightUBO, 1);
+                        Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                        Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
+                        pBound     = pInstance;
+                        pBoundGeom = &G;
                     }
-                    else if( bSkin )
-                    {
-                        continue;       // ponytail: no constant-material fallback on the skin path; the editors give every slot a material
-                    }
-                    else
-                    {
-                        BindStandard(m_StaticGeomInstance, Static);
-                    }
-                    Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
-                    Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
 
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {

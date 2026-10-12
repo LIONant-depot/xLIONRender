@@ -170,6 +170,8 @@ namespace xlionrender
         int                         m_RingUsed              = 0;        // entries of this frame's ring region already written
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
         std::vector<xmath::fbbox>   m_DrawWorld;            // per scene draw: its world bounds this frame (computed with the shadow casters)
+        struct visible_draw { const mesh_slot* m_pMesh; std::uint32_t m_Material; std::uint32_t m_iDraw; };
+        std::vector<visible_draw>   m_Visible;              // this view's visible draws, sorted by state
         int                         m_nDrawsRendered        = 0;
         xmath::fvec3                m_Origin                {};
         bool                        m_bOriginSet            = false;

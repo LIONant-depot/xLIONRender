@@ -604,6 +604,15 @@ cell only where it is exactly 0). Measured at 160x160, 256 lights of radius 3-7 
   enclosing the camera, a very narrow cone, a camera far in negative space, all levels. Outside the cells or past the
   cell buffer: an explicit EXACT fallback (`getLightModeUsed`), never a truncated list.
 
+**CELLS vs clustered shading (context).** For exact shading the two are near equivalent - both rebuild a 3D grid every
+frame (we track nothing yet either). Clustered (view froxels) is better at: a GPU build that scales to many lights, a
+resolution fitted to the screen, full-screen coverage (ours: a window around the camera, outside it every light is
+looped). World cells are kept for what froxels cannot do: lights at points outside the view frustum (reflection
+probes and their captures, GI injection, ray-traced secondary hits - ReGIR's reason -, off-screen particles), no
+compute (xGPU today, mobile), one build for several views (editor viewports, XR eyes, probe faces), and lists that do
+not change when the camera turns (what temporal reuse in SAMPLED needs). To close the gaps: a compute builder once
+xGPU has compute, a coarse far level instead of the all-lights fallback, optional per-view trimming of the lists.
+
 **Decision: CELLS is the default** (`instance::m_LightMode`), EXACT the reference and fallback. Next for CELLS:
 separate membership (position, radius, cone, add/remove, window) from proposal data (intensity, color, visibility) so
 a color edit does not rebuild lists; reuse across views with compatible coverage; measure the complete frame (snapshot,

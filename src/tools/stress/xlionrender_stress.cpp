@@ -5,7 +5,9 @@
 // GPU passes (shadows, scene, tone map), the draws and lights.
 //
 //   xlionrender_stress [--scenario flyover|street|moving_lights|all] [--frames N] [--grid N] [--lights N]
-//                      [--mode exact|cells|sampled] [--csv FILE] [--validate]
+//                      [--mode exact|cells|sampled] [--csv FILE] [--validate] [--loop]
+//
+// The window's title shows the frame rate and the main times, updated every half second.
 //
 // The research doc's performance baseline comes from here (documentation/xlion_renderer_research.md).
 #include "tests/xlionrender_test_common.h"         // the cluster geometry upload (MakeStaticBuffers) and the logs
@@ -28,6 +30,7 @@ namespace
         std::string     m_Mode      = "cells";
         std::string     m_Csv       = "xlionrender_stress.csv";
         bool            m_bValidate = false;
+        bool            m_bLoop     = false;        // repeat the scenarios until the window closes (to watch the title's readout)
     };
 
     options ParseOptions(int argc, char** argv)
@@ -44,6 +47,7 @@ namespace
             else if (A == "--mode")     O.m_Mode     = Next();
             else if (A == "--csv")      O.m_Csv      = Next();
             else if (A == "--validate") O.m_bValidate = true;
+            else if (A == "--loop")     O.m_bLoop     = true;
         }
         return O;
     }
@@ -215,7 +219,7 @@ int main(int argc, char** argv)
     const std::vector<std::string> Scenarios = O.m_Scenario == "all" ? std::vector<std::string>{ "flyover", "street", "moving_lights" } : std::vector<std::string>{ O.m_Scenario };
 
     xlionrender::instance::gpu_times Gpu;
-    for (const auto& Scenario : Scenarios)
+    do for (const auto& Scenario : Scenarios)
     {
         std::vector<frame_sample> Samples;
         auto Last = clock::now();
@@ -251,6 +255,23 @@ int main(int argc, char** argv)
             Last = Now;
             Samples.push_back(S);
             static const char* Modes[] = { "exact", "cells", "sampled" };
+
+            // The title: a live readout, the mean of the last half second
+            {
+                static double   TitleMs = 0, TitleCpu = 0, TitleGpu = 0;
+                static int      nTitle  = 0;
+                TitleMs += S.m_WallMs; TitleCpu += S.m_RenderMs; TitleGpu += S.m_GpuSceneMs + S.m_GpuShadowMs + S.m_GpuToneMapMs; ++nTitle;
+                if (TitleMs >= 500.0)
+                {
+                    char Title[256];
+                    std::snprintf(Title, sizeof(Title), "xLIONRender stress - %s - %.0f FPS (%.2f ms) - CPU Render %.2f ms - GPU %.2f ms - %d/%d draws - %d lights %s"
+                                 , Scenario.c_str(), 1000.0 * nTitle / TitleMs, TitleMs / nTitle, TitleCpu / nTitle, TitleGpu / nTitle
+                                 , S.m_DrawsRendered, int(C.m_Scene.m_Draws.size()), int(C.m_Scene.m_LocalLights.size()), Modes[int(Renderer.getLightModeUsed())]);
+                    Window.setTitle(Title);
+                    TitleMs = TitleCpu = TitleGpu = 0;
+                    nTitle  = 0;
+                }
+            }
             Csv << Scenario << ',' << f << ',' << S.m_WallMs << ',' << S.m_RenderMs << ',' << S.m_InstancesMs << ',' << S.m_ShadowsCpuMs << ',' << S.m_CellsMs << ','
                 << S.m_WaitMs << ',' << S.m_GpuShadowMs << ',' << S.m_GpuSceneMs << ',' << S.m_GpuToneMapMs << ',' << S.m_ShadowTiles << ','
                 << C.m_Scene.m_Draws.size() << ',' << S.m_DrawsRendered << ',' << C.m_Scene.m_LocalLights.size() << ',' << Modes[int(Renderer.getLightModeUsed())] << '\n';
@@ -258,6 +279,7 @@ int main(int argc, char** argv)
         Summary(Scenario, Samples);
         for (std::size_t i = 0; i < C.m_Scene.m_LocalLights.size(); ++i) C.m_Scene.m_LocalLights[i].m_Position = C.m_LightBase[i];
     }
+    while (O.m_bLoop);
 
     std::printf("per frame: %s\n", O.m_Csv.c_str());
     Renderer.DestroyView(View);

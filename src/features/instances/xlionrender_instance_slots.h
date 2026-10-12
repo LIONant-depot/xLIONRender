@@ -11,7 +11,7 @@
 //  - A slot is not freed when its id is missing from a frame (invisible is not dead): slots are evicted least recently
 //    seen first, only when the buffer is full.
 
-#include "dependencies/xmath/source/xmath.h"
+#include "scene/xlionrender_scene.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -33,21 +33,24 @@ namespace xlionrender
             m_Pending.clear();
         }
 
-        // The slot of ID this frame (none_v: no room - every slot was seen this frame). New or changed: pending.
-        std::uint32_t Acquire(std::uint32_t ID, const xmath::fmat4& L2W, std::uint64_t Frame) noexcept
+        // The slot of ID this frame (none_v: no room - every slot was seen this frame). New or changed (transform or constant
+        // material): pending.
+        std::uint32_t Acquire(std::uint32_t ID, const xmath::fmat4& L2W, std::uint64_t Frame, const material& Mat = {}) noexcept
         {
             if (auto It = m_ByID.find(ID); It != m_ByID.end())
             {
                 auto& S = m_Slots[It->second];
                 S.m_LastSeen = Frame;
-                if (std::memcmp(&S.m_L2W, &L2W, sizeof(L2W)) != 0) { S.m_L2W = L2W; MarkPending(It->second); }
+                const bool bMoved   = std::memcmp(&S.m_L2W, &L2W, sizeof(L2W)) != 0;
+                const bool bMatEdit = std::memcmp(&S.m_Material, &Mat, sizeof(Mat)) != 0;
+                if (bMoved || bMatEdit) { S.m_L2W = L2W; S.m_Material = Mat; MarkPending(It->second); }
                 return It->second;
             }
 
             if (m_Free.empty() && !Evict(Frame)) return none_v;
             const std::uint32_t Index = m_Free.back();
             m_Free.pop_back();
-            m_Slots[Index] = { L2W, Frame, ID, false, true };
+            m_Slots[Index] = { L2W, Mat, Frame, ID, false, true };
             m_ByID.emplace(ID, Index);
             MarkPending(Index);
             return Index;
@@ -56,7 +59,7 @@ namespace xlionrender
         // Every live slot pending (the world origin moved: the stored rows are relative to it)
         void MarkAllPending() noexcept { for (std::uint32_t i = 0; i < m_Slots.size(); ++i) if (m_Slots[i].m_bLive) MarkPending(i); }
 
-        // Writes up to Max pending slots: Write(slot index, const fmat4& L2W). The rest stay pending. Returns how many.
+        // Writes up to Max pending slots: Write(slot index, const fmat4& L2W, const material&). The rest stay pending. Returns how many.
         template<typename T_WRITE>
         int Flush(int Max, T_WRITE&& Write) noexcept
         {
@@ -66,7 +69,7 @@ namespace xlionrender
             {
                 auto& S = m_Slots[m_Pending[i]];
                 S.m_bPending = false;
-                if (S.m_bLive) { Write(m_Pending[i], S.m_L2W); ++n; }
+                if (S.m_bLive) { Write(m_Pending[i], S.m_L2W, S.m_Material); ++n; }
             }
             m_Pending.erase(m_Pending.begin(), m_Pending.begin() + i);
             return n;
@@ -79,6 +82,7 @@ namespace xlionrender
         struct slot
         {
             xmath::fmat4    m_L2W;
+            material        m_Material;
             std::uint64_t   m_LastSeen  = 0;
             std::uint32_t   m_ID        = 0;
             bool            m_bPending  = false;

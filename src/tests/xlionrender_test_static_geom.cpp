@@ -132,11 +132,13 @@ int main()
         const auto s1 = S.Acquire(1, M1, 1), s2 = S.Acquire(2, M2, 1);
         CHECK(s1 != s2 && s1 != S.none_v && s2 != S.none_v, "Two slots");
         int nWritten = 0;
-        const auto Count = [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; };
+        const auto Count = [&](std::uint32_t, const xmath::fmat4&, const xlionrender::material&) { ++nWritten; };
         CHECK(S.Flush(1, Count) == 1 && S.getPendingCount() == 1, "A budget of 1 writes 1, the other stays pending");
         CHECK(S.Flush(16, Count) == 1 && nWritten == 2, "Then the rest");
         CHECK(S.Acquire(2, M2, 2) == s2 && S.Flush(16, Count) == 0, "An unchanged id keeps its slot, nothing to write");
         CHECK(S.Acquire(2, M1, 2) == s2 && S.Flush(16, Count) == 1, "A moved id is written once");
+        CHECK(S.Acquire(2, M1, 2, { .m_BaseColor = { 1, 0, 0 } }) == s2 && S.Flush(16, Count) == 1, "A constant-material edit is written once");
+        CHECK(S.Acquire(2, M1, 2, { .m_BaseColor = { 1, 0, 0 } }) == s2 && S.Flush(16, Count) == 0, "The same material again: nothing to write");
         CHECK(S.Acquire(3, M1, 2) == s1, "Full: the least recently seen slot (id 1) is evicted");
         CHECK(S.Acquire(1, M1, 2) == S.none_v, "Full and every slot seen this frame: no slot");
     }

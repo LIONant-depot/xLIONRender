@@ -30,10 +30,17 @@ namespace xlionrender::details
     struct instance_data
     {
         std::array<xmath::fvec4, 3>     m_L2wRows;      // local -> the instance buffer's origin: the affine matrix's rows
+        std::array<xmath::fvec4, 3>     m_Material;     // the constant material: base rgb + metallic, emissive rgb + roughness, AO, F0
 
-        void set(const xmath::fmat4& M, const xmath::fvec3& Origin) noexcept { for (int r = 0; r < 3; ++r) m_L2wRows[r] = { M(r, 0), M(r, 1), M(r, 2), M(r, 3) - Origin[r] }; }
+        void set(const xmath::fmat4& M, const xmath::fvec3& Origin, const material& Mat) noexcept
+        {
+            for (int r = 0; r < 3; ++r) m_L2wRows[r] = { M(r, 0), M(r, 1), M(r, 2), M(r, 3) - Origin[r] };
+            m_Material[0] = xmath::fvec4(Mat.m_BaseColor, Mat.m_Metallic);
+            m_Material[1] = xmath::fvec4(Mat.m_Emissive,  Mat.m_Roughness);
+            m_Material[2] = { Mat.m_AO, Mat.m_F0, 0, 0 };
+        }
     };
-    static_assert(sizeof(instance_data) == 48);
+    static_assert(sizeof(instance_data) == 96);
 
     struct push_static_geom
     {

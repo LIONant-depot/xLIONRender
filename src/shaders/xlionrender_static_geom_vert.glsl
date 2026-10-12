@@ -16,6 +16,7 @@ layout(set=2, binding = 0) uniform MeshUniforms
 struct InstanceData
 {
     vec4   Rows[3];        // Local space -> the instance buffer's origin: the affine matrix's 3 rows
+    vec4   Material[3];    // the constant material (xlionrender_geom_standard_frag.glsl reads it)
 };
 layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 {
@@ -25,6 +26,7 @@ layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 
 // Fragment shader inputs
 layout(location = 0) out VaryingFull Out;
+layout(location = 8) flat out uint OutInstance;     // the slot, for fragment shaders that read the instance record (geom standard)
 
 
 void main()
@@ -34,6 +36,7 @@ void main()
     //
     // Transform to all needed spaces
     //
+    OutInstance             = push.instanceIndex;
     const InstanceData I    = instances.Instances[push.instanceIndex];
     const mat3x4 L2wRows    = mat3x4(I.Rows[0], I.Rows[1], I.Rows[2]);
     Out.wSpacePosition      = vec4(VertData.LocalPos * L2wRows + mesh.WorldOffset.xyz, 1.0);
