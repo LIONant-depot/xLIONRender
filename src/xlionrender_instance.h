@@ -8,7 +8,7 @@
 
 #include "scene/xlionrender_scene.h"
 #include "view/xlionrender_render_view.h"
-#include "meshes/xlionrender_static_geom.h"
+#include "meshes/xlionrender_cluster_geom.h"
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
 #include <vector>
@@ -35,14 +35,19 @@ namespace xlionrender
         [[nodiscard]] xgpu::device::error* Init         ( xgpu::device& Device )                                noexcept;
 
         [[nodiscard]] xgpu::device::error* CreateMesh   ( mesh_id& Id, std::span<const vertex> Vertices, std::span<const std::uint32_t> Indices ) noexcept;
-        // References Geom's GPU buffers (not owned, not copied): they must outlive the mesh id
-        [[nodiscard]] xgpu::device::error* CreateStaticGeom( mesh_id& Id, static_geom Geom )                    noexcept;
+        // An xgeom_static/xgeom_skin mesh (MakeClusterGeom / MakeSkinGeom). References Geom's GPU buffers (not owned, not
+        // copied): they must outlive the mesh id
+        [[nodiscard]] xgpu::device::error* CreateClusterGeom( mesh_id& Id, cluster_geom Geom )                  noexcept;
                       void                 DestroyMesh  ( mesh_id Id )                                          noexcept;
 
-        // A material drawn on static geometry: its HDR fragment shader (xmaterial::rt::getShaderHDR()) and its sampler
-        // bindings in shader order - slot 0 is the shadow map (nullptr: white, i.e. unshadowed), then the textures
-        // (the same list the static geom editor binds). Neither is copied or owned: they must outlive the id.
+        // A material: its HDR fragment shader (xmaterial::rt::getShaderHDR()) and its sampler bindings in shader order - slot 0
+        // is the shadow map (nullptr: white, i.e. unshadowed), then the textures (the list the geom editors bind). Neither is
+        // copied or owned: they must outlive the id. The same material draws rigid and skinned geometry: the pipeline of each
+        // vertex path is built the first time the material is drawn with it.
         [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures ) noexcept;
+        // The renderer's default material (shaders/xlionrender_default_material_frag.glsl: PBR with a diffuse texture), for a slot whose
+        // material does not resolve. Textures: slot 0 the shadow map (nullptr: white), slot 1 the diffuse texture.
+        [[nodiscard]] xgpu::device::error* CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept;
                       void                 DestroyMaterial( material_id Id )                                    noexcept;
 
         [[nodiscard]] xgpu::device::error* CreateView   ( render_view& View, const render_view::setup& Setup )  noexcept;
@@ -71,22 +76,25 @@ namespace xlionrender
             xgpu::buffer            m_VertexBuffer;
             xgpu::buffer            m_IndexBuffer;
             int                     m_nIndices      = 0;
-            static_geom             m_StaticGeom;                       // used when m_bStatic
+            cluster_geom            m_Geom;                             // used when m_bCluster
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
-            bool                    m_bStatic       = false;
+            bool                    m_bCluster      = false;
         };
 
         struct material_slot
         {
-            xgpu::pipeline          m_Pipeline;
-            xgpu::pipeline_instance m_Instance;
+            const xgpu::shader*                                     m_pFragment = nullptr;
+            std::vector<xgpu::texture*>                             m_Textures;     // slot 0 (shadow map) may be nullptr: white
+            std::array<xgpu::pipeline,          size_t(geom_kind::COUNT)> m_Pipeline;     // per vertex path, built on first use
+            std::array<xgpu::pipeline_instance, size_t(geom_kind::COUNT)> m_Instance;
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
         };
 
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
         material_slot*              findMaterial    ( material_id Id )                                          noexcept;
+        xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
 
         xgpu::device                m_Device;
         xgpu::vertex_descriptor     m_MeshVD;
@@ -96,10 +104,12 @@ namespace xlionrender
         xgpu::vertex_descriptor     m_StaticGeomVD;
         xgpu::pipeline              m_StaticGeomPipeline;
         xgpu::pipeline_instance     m_StaticGeomInstance;
-        xgpu::buffer                m_StaticGeomUBO;
+        xgpu::buffer                m_StaticGeomUBO;        // the mesh block of both cluster vertex paths
+        xgpu::vertex_descriptor     m_SkinGeomVD;
         xgpu::pipeline              m_ToneMapPipeline;
         xgpu::pipeline              m_BlitPipeline;
-        xgpu::texture               m_WhiteTexture;         // stands in for the shadow map until shadows exist
+        xgpu::texture               m_WhiteTexture;
+        xgpu::shader                m_DefaultMaterialFrag;         // stands in for the shadow map until shadows exist
         xgpu::buffer                m_LightUBO;
         xgpu::buffer                m_MaterialUBO;
         xgpu::buffer                m_FullscreenVB;

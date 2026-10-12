@@ -8,29 +8,6 @@
 
 using namespace xlionrender::test;
 
-namespace
-{
-    // xgeom_static::geom layouts (xgeom_static.plugin/source/xgeom_static.h)
-    struct gs_vertex        { std::int16_t m_X, m_Y, m_Z, m_Extra; };
-    struct gs_vertex_extras { std::uint16_t m_UV[2]; std::uint8_t m_OctNormal[2]; std::uint8_t m_OctTangent[2]; };
-    struct gs_cluster_data  { float m_PosScale[4]; float m_PosTranslation[4]; float m_UVScaleTranslation[4]; };
-
-    void OctEncode(float X, float Y, float Z, float& U, float& V) noexcept
-    {
-        const float L = std::abs(X) + std::abs(Y) + std::abs(Z);
-        X /= L; Y /= L;
-        if (Z < 0)
-        {
-            const float OX = X;
-            X = (1 - std::abs(Y))  * (OX >= 0 ? 1.f : -1.f);
-            Y = (1 - std::abs(OX)) * (Y  >= 0 ? 1.f : -1.f);
-        }
-        U = X * 0.5f + 0.5f;
-        V = Y * 0.5f + 0.5f;
-    }
-
-    std::uint32_t Quantize(float V01, std::uint32_t Max) noexcept { return static_cast<std::uint32_t>(std::lround(std::clamp(V01, 0.f, 1.f) * Max)); }
-}
 
 int main()
 {
@@ -55,44 +32,11 @@ int main()
         CHECK(!Renderer.CreateMesh(Reference, Verts, Prim.m_Indices), "CreateMesh");
     }
 
-    // (b) the same sphere as one xgeom_static cluster
-    const float Scale = 0.5f;                               // positions in [-0.5, 0.5]: cluster scale 0.5, translation 0
-    std::vector<gs_vertex>        Pos(Prim.m_Vertices.size());
-    std::vector<gs_vertex_extras> Extras(Prim.m_Vertices.size());
-    for (std::size_t i = 0; i < Pos.size(); ++i)
-    {
-        const auto& V = Prim.m_Vertices[i];
-        const auto  Q = [&](float P) { return static_cast<std::int16_t>(std::clamp(std::lround((P / Scale + 1.0f) * 32767.5f - 32768.0f), -32768l, 32767l)); };
-
-        float NU, NV, TU, TV;
-        OctEncode(V.m_Normal.m_X,  V.m_Normal.m_Y,  V.m_Normal.m_Z,  NU, NV);
-        OctEncode(V.m_Tangent.m_X, V.m_Tangent.m_Y, V.m_Tangent.m_Z, TU, TV);
-        const std::uint32_t Nx = Quantize(NU, 4095), Ny = Quantize(NV, 4095), Tx = Quantize(TU, 4095), Ty = Quantize(TV, 2047);
-        const std::uint32_t Extra = (Nx & 15) | ((Ny & 15) << 4) | ((Tx & 15) << 8) | ((Ty & 7) << 12) | ((V.m_Tangent.m_D < 0 ? 1u : 0u) << 15);
-
-        Pos[i]    = { Q(V.m_Position.m_X), Q(V.m_Position.m_Y), Q(V.m_Position.m_Z), static_cast<std::int16_t>(static_cast<std::uint16_t>(Extra)) };
-        Extras[i] = { { static_cast<std::uint16_t>(Quantize(V.m_Texcoord.m_X, 65535)), static_cast<std::uint16_t>(Quantize(V.m_Texcoord.m_Y, 65535)) }
-                    , { static_cast<std::uint8_t>(Nx >> 4), static_cast<std::uint8_t>(Ny >> 4) }
-                    , { static_cast<std::uint8_t>(Tx >> 4), static_cast<std::uint8_t>(Ty >> 3) } };
-    }
-    std::vector<std::uint16_t> Idx16(Prim.m_Indices.begin(), Prim.m_Indices.end());
-    const gs_cluster_data Cluster{ { Scale, Scale, Scale, 0 }, { 0, 0, 0, 0 }, { 1, 1, 0, 0 } };
-
-    // Same buffers the xgeom_static loader creates, in its order: index, vertex, extras (contiguous) + the cluster SSBO
-    std::array<xgpu::buffer, 3> Streams;
-    xgpu::buffer                ClusterData;
-    CHECK(!Device.Create(Streams[0],  { .m_Type = xgpu::buffer::type::INDEX,   .m_EntryByteSize = sizeof(std::uint16_t),    .m_EntryCount = int(Idx16.size()),  .m_pData = Idx16.data()  }), "index buffer");
-    CHECK(!Device.Create(Streams[1],  { .m_Type = xgpu::buffer::type::VERTEX,  .m_EntryByteSize = sizeof(gs_vertex),        .m_EntryCount = int(Pos.size()),    .m_pData = Pos.data()    }), "vertex buffer");
-    CHECK(!Device.Create(Streams[2],  { .m_Type = xgpu::buffer::type::VERTEX,  .m_EntryByteSize = sizeof(gs_vertex_extras), .m_EntryCount = int(Extras.size()), .m_pData = Extras.data() }), "extras buffer");
-    CHECK(!Device.Create(ClusterData, { .m_Type = xgpu::buffer::type::STORAGE, .m_EntryByteSize = sizeof(gs_cluster_data),  .m_EntryCount = 1, .m_pData = const_cast<gs_cluster_data*>(&Cluster) }), "cluster buffer");
-
+    // (b) the same sphere as one xgeom_static cluster (positions in [-0.5, 0.5]: cluster scale 0.5)
+    cluster_buffers Buffers;
+    CHECK(MakeStaticBuffers(Device, Prim, 0.5f, Buffers), "static geom buffers");
     xlionrender::mesh_id Static;
-    {
-        xlionrender::static_geom G{ .m_pStreams = Streams.data(), .m_pClusterData = &ClusterData };
-        G.m_Clusters  = { { 0, std::uint32_t(Idx16.size()), 0 } };
-        G.m_Submeshes = { { 0, 1, 0 } };
-        CHECK(!Renderer.CreateStaticGeom(Static, std::move(G)), "CreateStaticGeom");
-    }
+    CHECK(!Renderer.CreateClusterGeom(Static, Buffers.Geom()), "CreateClusterGeom");
 
     constexpr int size_v = 128;
     xlionrender::render_view View;

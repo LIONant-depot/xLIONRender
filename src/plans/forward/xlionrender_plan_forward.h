@@ -16,7 +16,7 @@ namespace xlionrender::details
         xmath::fmat4    m_W2C;
     };
 
-    // GeomStaticBasicShader_vert.glsl "MeshUniforms" (set 2, binding 0) and its push constant
+    // "MeshUniforms" (set 2, binding 0) of both cluster vertex paths, and the rigid path's push constant
     struct alignas(256) ubo_static_geom_mesh
     {
         xmath::fmat4    m_L2w;                  // local -> camera-centered world
@@ -27,6 +27,13 @@ namespace xlionrender::details
     struct push_static_geom
     {
         std::uint32_t   m_ClusterIndex;
+    };
+
+    // xlionrender_skin_geom_vert.glsl (xgeom_skin_mb_clusters.vert) push constant
+    struct push_skin_geom
+    {
+        std::uint32_t   m_ClusterIndex;
+        std::uint32_t   m_MaxInfluences;
     };
 
     // mb_standard_pbr.frag "lighting_uniforms" (set 2, binding 1)

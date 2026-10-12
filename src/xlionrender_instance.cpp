@@ -15,6 +15,12 @@ namespace xlionrender
         constexpr std::uint32_t s_StaticGeomVert[] = {
             #include "xlionrender_static_geom_vert.h"
         };
+        constexpr std::uint32_t s_SkinGeomVert[] = {
+            #include "xlionrender_skin_geom_vert.h"
+        };
+        constexpr std::uint32_t s_DefaultMaterialFrag[] = {
+            #include "xlionrender_default_material_frag.h"
+        };
         constexpr std::uint32_t s_FullscreenVert[] = {
             #include "xlionrender_fullscreen_vert.h"
         };
@@ -73,8 +79,12 @@ namespace xlionrender
     instance::~instance( void ) noexcept
     {
         if( m_bReady == false ) return;
-        for( auto& M : m_Meshes ) if( M.m_bAlive && !M.m_bStatic ) { ReleaseBuffer(M.m_VertexBuffer); ReleaseBuffer(M.m_IndexBuffer); }
-        for( auto& M : m_Materials ) if( M.m_bAlive ) { m_Device.Destroy(std::move(M.m_Instance)); m_Device.Destroy(std::move(M.m_Pipeline)); }
+        for( auto& M : m_Meshes ) if( M.m_bAlive && !M.m_bCluster ) { ReleaseBuffer(M.m_VertexBuffer); ReleaseBuffer(M.m_IndexBuffer); }
+        for( auto& M : m_Materials ) if( M.m_bAlive ) for( std::size_t k = 0; k < M.m_Pipeline.size(); ++k )
+        {
+            if( M.m_Instance[k].m_Private ) m_Device.Destroy(std::move(M.m_Instance[k]));
+            if( M.m_Pipeline[k].m_Private ) m_Device.Destroy(std::move(M.m_Pipeline[k]));
+        }
         m_Device.Destroy(std::move(m_ForwardInstance));
         m_Device.Destroy(std::move(m_StaticGeomInstance));
         m_Device.Destroy(std::move(m_StaticGeomPipeline));
@@ -150,6 +160,19 @@ namespace xlionrender
             , xgpu::vertex_descriptor::attribute{ .m_Offset = 4, .m_Format = xgpu::vertex_descriptor::format::UINT8_4D,  .m_iStream = 1 }   // vertex_extras::m_OctNormal + m_OctTangent
             };
             if( auto Err = Device.Create(m_StaticGeomVD, { .m_bUseStreaming = true, .m_Topology = xgpu::vertex_descriptor::topology::TRIANGLE_LIST, .m_VertexSize = 0, .m_Attributes = Attributes }); Err ) return Err;
+
+            // xgeom_skin::geom::vertex (int16 x3 + 6 packed bytes) and vertex_extras (UV, oct normal, oct tangent X, tangent Y + sign); the same
+            // formats the skin geom editor uses (R16G16B16A16_SINT / R16_UINT / R16G16_UINT: required vertex formats on every driver)
+            auto SkinAttributes = std::array
+            { xgpu::vertex_descriptor::attribute{ .m_Offset = 0,  .m_Format = xgpu::vertex_descriptor::format::SINT16_4D, .m_iStream = 0 }
+            , xgpu::vertex_descriptor::attribute{ .m_Offset = 6,  .m_Format = xgpu::vertex_descriptor::format::UINT16_1D, .m_iStream = 0 }
+            , xgpu::vertex_descriptor::attribute{ .m_Offset = 8,  .m_Format = xgpu::vertex_descriptor::format::UINT16_2D, .m_iStream = 0 }
+            , xgpu::vertex_descriptor::attribute{ .m_Offset = 0,  .m_Format = xgpu::vertex_descriptor::format::UINT16_2D, .m_iStream = 1 }
+            , xgpu::vertex_descriptor::attribute{ .m_Offset = 4,  .m_Format = xgpu::vertex_descriptor::format::UINT16_2D, .m_iStream = 1 }
+            , xgpu::vertex_descriptor::attribute{ .m_Offset = 8,  .m_Format = xgpu::vertex_descriptor::format::UINT16_1D, .m_iStream = 1 }
+            , xgpu::vertex_descriptor::attribute{ .m_Offset = 10, .m_Format = xgpu::vertex_descriptor::format::UINT16_1D, .m_iStream = 1 }
+            };
+            if( auto Err = Device.Create(m_SkinGeomVD, { .m_bUseStreaming = true, .m_Topology = xgpu::vertex_descriptor::topology::TRIANGLE_LIST, .m_VertexSize = 0, .m_Attributes = SkinAttributes }); Err ) return Err;
             if( auto Err = Device.Create(m_StaticGeomUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_static_geom_mesh), .m_EntryCount = max_draws_per_frame_v }); Err ) return Err;
 
             xgpu::shader Vert, Frag;
@@ -201,6 +224,8 @@ namespace xlionrender
             (void)m_FullscreenIB.MemoryMap(0, 3, [](void* p) { const std::uint32_t I[] = { 0, 1, 2 }; std::memcpy(p, I, sizeof(I)); });
         }
 
+        if( auto Err = Device.Create(m_DefaultMaterialFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DefaultMaterialFrag) }); Err ) return Err;
+
         // GPU timings: 0 = scene start, 1 = scene end, 2 = tone map end
         if( auto Err = Device.Create(m_Timestamps, { .m_Count = 3 }); Err ) return Err;
 
@@ -227,12 +252,12 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    xgpu::device::error* instance::CreateStaticGeom( mesh_id& Id, static_geom Geom ) noexcept
+    xgpu::device::error* instance::CreateClusterGeom( mesh_id& Id, cluster_geom Geom ) noexcept
     {
-        assert(m_bReady && Geom.m_pStreams && Geom.m_pClusterData);
+        assert(m_bReady && Geom.m_pStreams && Geom.m_pClusterData && (Geom.m_Kind != geom_kind::SKIN || Geom.m_pBones));
         mesh_slot M;
-        M.m_StaticGeom = std::move(Geom);
-        M.m_bStatic    = true;
+        M.m_Geom     = std::move(Geom);
+        M.m_bCluster = true;
         const auto [Index, Gen] = AddSlot(m_Meshes, std::move(M));
         Id = { Index, Gen };
         return nullptr;
@@ -246,12 +271,12 @@ namespace xlionrender
     {
         if( findMesh(Id) == nullptr ) return;
         auto& M = m_Meshes[Id.m_Index];
-        if( M.m_bStatic == false )
+        if( M.m_bCluster == false )
         {
             ReleaseBuffer(M.m_VertexBuffer);
             ReleaseBuffer(M.m_IndexBuffer);
         }
-        M.m_StaticGeom = {};
+        M.m_Geom = {};
         M.m_bAlive     = false;
     }
 
@@ -276,32 +301,11 @@ namespace xlionrender
         assert(m_bReady && !Textures.empty());
 
         material_slot M;
-        {
-            xgpu::shader Vert;
-            if( auto Err = m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_StaticGeomVert) }); Err ) return Err;
+        M.m_pFragment = &FragmentHDR;
+        M.m_Textures.assign(Textures.begin(), Textures.end());
 
-            // Slot 0 (shadow map) clamps, the material textures use the default sampler - as the static geom editor
-            std::vector<xgpu::pipeline::sampler> Samplers(Textures.size());
-            Samplers[0] = xgpu::pipeline::sampler{ .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } };
-
-            auto Shaders      = std::array<const xgpu::shader*, 2>{ &FragmentHDR, &Vert };
-            auto UniformBinds = std::array
-            { xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
-            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
-            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
-            };
-            if( auto Err = m_Device.Create(M.m_Pipeline, { .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
-                                                         , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
-        }
-
-        std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
-        Bindings.reserve(Textures.size());
-        for( auto* pTexture : Textures ) Bindings.emplace_back( pTexture ? *pTexture : m_WhiteTexture );
-        if( auto Err = m_Device.Create(M.m_Instance, { .m_PipeLine = M.m_Pipeline, .m_SamplersBindings = Bindings }); Err )
-        {
-            m_Device.Destroy(std::move(M.m_Pipeline));
-            return Err;
-        }
+        // The rigid pipeline now, so a material that cannot build reports it here (the skin one is built on its first skinned draw)
+        if( getMaterialInstance(M, geom_kind::RIGID) == nullptr ) return VGPU_ERROR(xgpu::device::error::FAILURE, "The material's pipeline could not be created");
 
         const auto [Index, Gen] = AddSlot(m_Materials, std::move(M));
         Id = { Index, Gen };
@@ -310,12 +314,61 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    xgpu::pipeline_instance* instance::getMaterialInstance( material_slot& M, geom_kind Kind ) noexcept
+    {
+        const auto k = static_cast<std::size_t>(Kind);
+        if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
+
+        const bool bSkin = Kind == geom_kind::SKIN;
+        xgpu::shader Vert;
+        if( m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = bSkin ? SPIRV(s_SkinGeomVert) : SPIRV(s_StaticGeomVert) }) ) return nullptr;
+
+        // Slot 0 (shadow map) clamps, the material textures use the default sampler - as the geom editors
+        std::vector<xgpu::pipeline::sampler> Samplers(M.m_Textures.size());
+        Samplers[0] = xgpu::pipeline::sampler{ .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } };
+
+        auto Shaders      = std::array<const xgpu::shader*, 2>{ M.m_pFragment, &Vert };
+        auto UniformBinds = std::array
+        { xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
+        , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
+        , xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+        , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // SKIN: bones
+        };
+        const auto Binds = std::span{ UniformBinds.data(), bSkin ? std::size_t{4} : std::size_t{3} };
+        if( m_Device.Create(M.m_Pipeline[k], { .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
+                                             , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
+                                             , .m_UniformBinds = Binds, .m_Samplers = Samplers }) ) return nullptr;
+
+        std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
+        Bindings.reserve(M.m_Textures.size());
+        for( auto* pTexture : M.m_Textures ) Bindings.emplace_back( pTexture ? *pTexture : m_WhiteTexture );
+        if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
+        {
+            m_Device.Destroy(std::move(M.m_Pipeline[k]));
+            return nullptr;
+        }
+        return &M.m_Instance[k];
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    xgpu::device::error* instance::CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept
+    {
+        return CreateMaterial(Id, m_DefaultMaterialFrag, Textures);
+    }
+
+    //------------------------------------------------------------------------------------------------
+
     void instance::DestroyMaterial( material_id Id ) noexcept
     {
         auto* pM = findMaterial(Id);
         if( pM == nullptr ) return;
-        m_Device.Destroy(std::move(pM->m_Instance));
-        m_Device.Destroy(std::move(pM->m_Pipeline));
+        for( std::size_t k = 0; k < pM->m_Pipeline.size(); ++k )
+        {
+            if( pM->m_Instance[k].m_Private ) m_Device.Destroy(std::move(pM->m_Instance[k]));
+            if( pM->m_Pipeline[k].m_Private ) m_Device.Destroy(std::move(pM->m_Pipeline[k]));
+        }
+        pM->m_Textures.clear();
         pM->m_bAlive = false;
     }
 

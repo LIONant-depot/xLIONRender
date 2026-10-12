@@ -53,7 +53,7 @@ namespace xlionrender
                     Cmd.setDynamicUBO(m_MaterialUBO, 2);
                 };
 
-                if( pMesh->m_bStatic == false )
+                if( pMesh->m_bCluster == false )
                 {
                     BindStandard(m_ForwardInstance, {});
                     Cmd.setPushConstants(details::push_forward{ L2w, W2C });
@@ -63,8 +63,10 @@ namespace xlionrender
                     continue;
                 }
 
-                const auto& G = pMesh->m_StaticGeom;
-                std::array<xgpu::buffer*, 1> StaticBuffers{ G.m_pClusterData };
+                const auto& G     = pMesh->m_Geom;
+                const bool  bSkin = G.m_Kind == geom_kind::SKIN;
+                std::array<xgpu::buffer*, 2> StaticBuffers{ G.m_pClusterData, G.m_pBones };
+                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{2} : std::size_t{1} };
 
                 auto& Mesh = m_StaticGeomUBO.allocEntry<details::ubo_static_geom_mesh>();
                 Mesh.m_L2w        = L2w;
@@ -73,15 +75,20 @@ namespace xlionrender
 
                 for( const auto& Sub : G.m_Submeshes )
                 {
-                    auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
-                    if( pMat )
+                    auto* pMat      = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                    auto* pInstance = pMat ? getMaterialInstance(*pMat, G.m_Kind) : nullptr;
+                    if( pInstance )
                     {
-                        Cmd.setPipelineInstance(pMat->m_Instance, StaticBuffers);
+                        Cmd.setPipelineInstance(*pInstance, Static);
                         Cmd.setDynamicUBO(m_LightUBO, 1);
+                    }
+                    else if( bSkin )
+                    {
+                        continue;       // ponytail: no constant-material fallback on the skin path; the editors give every slot a material
                     }
                     else
                     {
-                        BindStandard(m_StaticGeomInstance, StaticBuffers);
+                        BindStandard(m_StaticGeomInstance, Static);
                     }
                     Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                     Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
@@ -89,7 +96,8 @@ namespace xlionrender
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {
                         const auto& C = G.m_Clusters[c];
-                        Cmd.setPushConstants(details::push_static_geom{ c });
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences });
+                        else        Cmd.setPushConstants(details::push_static_geom{ c });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                     }
                 }
