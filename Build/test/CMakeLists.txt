@@ -66,3 +66,8 @@ foreach(TEST xlionrender_test_forward xlionrender_test_static_geom xlionrender_t
   target_link_libraries(${TEST} PRIVATE xlionrender_new)
   add_test(NAME ${TEST} COMMAND ${TEST})
 endforeach()
+
+# The stress scene (src/tools/stress): a windowed, scripted benchmark - not a test (ctest does not run it)
+#   Build/test/vs2022/Release/xlionrender_stress.exe [--scenario flyover|street|moving_lights|all] [--lights N] [--mode exact|cells|sampled]
+add_executable(xlionrender_stress "${XLIONRENDER_DIR}/src/tools/stress/xlionrender_stress.cpp")
+target_link_libraries(xlionrender_stress PRIVATE xlionrender_new)

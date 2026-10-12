@@ -649,3 +649,31 @@ direction); generational handles (index + generation, weak references).
 
 **Order:** items 1 and 2 with the octahedral point shadows are done (shadows phase 3; one 16-bit atlas instead of two:
 the clipmap's orthographic depth is linear, so 16 bits hold it too). Next: item 4, the world-cell reservoirs, item 5.
+
+## Performance baseline: the stress scene (2026-10-13)
+
+`src/tools/stress/xlionrender_stress.cpp` (target `xlionrender_stress` in Build/test; windowed, scripted, a CSV per frame):
+a procedural kitbashed city of xprim_geom primitives as static cluster geometry with persistent instance ids, street
+lights (the first 16 shadowed, a quarter spots), the sun with the clipmap. Release, RTX 4070 Ti SUPER, 1280x720, no
+vsync, 40x40 blocks = 8001 draws, 1024 lights, CELLS:
+
+| Scenario | Frame | CPU Render | CPU shadows | CPU cells | CPU wait | GPU scene | GPU shadows | Maps / tiles per frame |
+|---|---|---|---|---|---|---|---|---|
+| flyover | 11.5 ms | 4.5 ms | 1.1 ms | 0.08 ms | 7.0 ms | 6.7 ms | 0.01 ms | 1 (p95 8) |
+| street | 7.3 ms | 4.5 ms | 0.9 ms | 0.27 ms | 2.8 ms | 2.5 ms | 0.004 ms | 0.3 |
+| moving_lights | 9.4 ms | 6.3 ms | 2.7 ms | 0.29 ms | 3.1 ms | 2.7 ms | 0.04 ms | 16 |
+
+Reading (what to do next, by the size of the win):
+1. **No culling.** The street walk draws all 8001 draws, most behind the camera or the next building; flyover is
+   GPU-bound (7 ms waiting on a 6.7 ms scene pass). Frustum culling first, occlusion later.
+2. **Draw recording ~3 ms of CPU for 8001 draws** (Render minus its measured stages): one pipeline bind, material
+   entry and push per draw. Sort by mesh/material and instance the repeats (the instance buffer already holds the
+   per-draw data); move the constant material into the instance record (the material ring is a stopgap).
+3. **The caster diff hashes every draw every frame** (~1 ms): key it by instance id and the slot's change flag instead.
+4. Moving shadowed lights cost CPU (2.7 ms recording their maps), not GPU.
+The cell build is not the bottleneck at 1024 lights (0.1-0.3 ms).
+
+**xGPU fix found by this scene:** the descriptor pool ring reset one pool per frame and grew each new pool by 1.5x; a
+frame that overflowed (the city binds ~100k sets) made every later frame create a larger pool - CPU time per frame
+exploded and the driver stalled the machine. Now: fixed-size pools all reset after the frame's fence, a hard cap, and a
+frame reuses a descriptor set already written with the same buffers (~100k allocations -> a few dozen).

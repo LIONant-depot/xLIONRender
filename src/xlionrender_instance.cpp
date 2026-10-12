@@ -46,7 +46,7 @@ namespace xlionrender
             return { { reinterpret_cast<const std::int32_t*>(Words), N } };
         }
 
-        constexpr int max_draws_per_frame_v         = 1024;     // ponytail: one material UBO entry per draw, ring of this size; grow with the scene graph work
+        constexpr int max_draws_per_frame_v         = 16384;    // ponytail: one material UBO entry per draw, ring of this size (the stress city needs ~7k); the constant material belongs in the persistent instance record
         constexpr int max_shadow_draws_per_frame_v  = 8192;     // ponytail: one UBO entry per (tile, caster) the shadow pass draws, ring of this size
 
         struct fullscreen_vert { float m_X, m_Y; };
@@ -341,7 +341,7 @@ namespace xlionrender
         }
 
         // GPU timings: 0 = scene start, 1 = scene end, 2 = tone map end
-        if( auto Err = Device.Create(m_Timestamps, { .m_Count = 3 }); Err ) return Err;
+        if( auto Err = Device.Create(m_Timestamps, { .m_Count = 4 }); Err ) return Err;     // 0 shadows start, 1 scene start, 2 scene end, 3 tone map end
 
         m_bReady = true;
         return nullptr;
@@ -559,8 +559,9 @@ namespace xlionrender
     {
         if( m_Timestamps.getResults(m_TimestampNs) == false ) return false;
         const auto& T = m_TimestampNs;
-        Times.m_SceneMs   = (T[1] - T[0]) * 1e-6;
-        Times.m_ToneMapMs = (T[2] - T[1]) * 1e-6;
+        Times.m_ShadowMs  = (T[1] - T[0]) * 1e-6;
+        Times.m_SceneMs   = (T[2] - T[1]) * 1e-6;
+        Times.m_ToneMapMs = (T[3] - T[2]) * 1e-6;
         return true;
     }
 }

@@ -355,13 +355,19 @@ namespace xlionrender
         const xmath::fmat4 ToEye   = xmath::fmat4::fromTranslation(-Eye);
 
         const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
+        using clock = std::chrono::steady_clock;
+        const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
+        const auto T0 = clock::now();
         updateInstances(Window, Scene, Eye);
+        const auto T1 = clock::now();
+        Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
         renderShadows(Window, Scene, Eye, ProjScale);
+        const auto T2 = clock::now();
 
         // Scene -> HDR
         {
             auto Cmd = Window.StartRenderPass(View.m_ScenePass);
-            Cmd.WriteTimestamp(m_Timestamps, 0);
+            Cmd.WriteTimestamp(m_Timestamps, 1);
 
             {
                 const auto& L     = Scene.m_Sun;
@@ -462,7 +468,7 @@ namespace xlionrender
                 }
             }
 
-            Cmd.WriteTimestamp(m_Timestamps, 1);
+            Cmd.WriteTimestamp(m_Timestamps, 2);
         }
 
         // HDR -> exposure -> LionMapper -> sRGB output (alpha = coverage)
@@ -473,7 +479,7 @@ namespace xlionrender
             Cmd.setBuffer(m_FullscreenVB);
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
-            Cmd.WriteTimestamp(m_Timestamps, 2);
+            Cmd.WriteTimestamp(m_Timestamps, 3);
         }
 
         // Editor overlays over the tone-mapped image, depth-tested against the scene
@@ -482,5 +488,8 @@ namespace xlionrender
             auto Cmd = Window.StartRenderPass(View.m_OverlayPass);
             Overlay(Cmd);
         }
+
+        const auto T3 = clock::now();
+        m_CPUTimes = { Ms(T0, T1), Ms(T1, T2), m_LightBuildMs, Ms(T0, T3) };
     }
 }

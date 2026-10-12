@@ -30,8 +30,18 @@ namespace xlionrender
         // GPU time of the last finished frame, in milliseconds (measured with xgpu::timestamps, never stalls)
         struct gpu_times
         {
+            double  m_ShadowMs      = 0;        // the instance copy + every shadow pass
             double  m_SceneMs       = 0;
             double  m_ToneMapMs     = 0;
+        };
+
+        // The last Render's CPU time per stage (recording, not GPU execution)
+        struct cpu_times
+        {
+            double  m_InstancesMs   = 0;        // instance slots + the ring
+            double  m_ShadowsMs     = 0;        // caster diff, clipmap / local updates, recording the shadow passes
+            double  m_LightCellsMs  = 0;        // the world-cell build (CELLS / SAMPLED)
+            double  m_RenderMs      = 0;        // the whole Render call
         };
 
                                 instance        ( void )                                                        noexcept = default;
@@ -99,6 +109,7 @@ namespace xlionrender
 
         // true when a newer frame's timings arrived since the last call
                       bool                 getGPUTimes  ( gpu_times& Times )                                    noexcept;
+                      const cpu_times&     getCPUTimes  ( void ) const                                          noexcept { return m_CPUTimes; }
 
     private:
 
@@ -206,6 +217,7 @@ namespace xlionrender
         xgpu::buffer                m_FullscreenVB;
         xgpu::buffer                m_FullscreenIB;
         xgpu::timestamps            m_Timestamps;
+        cpu_times                   m_CPUTimes;
         std::vector<mesh_slot>      m_Meshes;
         std::vector<material_slot>  m_Materials;
         std::vector<std::uint64_t>  m_TimestampNs;
