@@ -22,5 +22,6 @@ layout(std430, set = 1, binding = 0) buffer ClusterBuffer
 layout(push_constant) uniform PushConstants
 {
     uint    clusterIndex;  // Index into cluster array
+    uint    instanceIndex; // xLIONRender: the draw's slot in the instance buffer
 } push;
 

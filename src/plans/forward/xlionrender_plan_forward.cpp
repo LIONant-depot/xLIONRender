@@ -14,6 +14,52 @@ namespace xlionrender
         }
     }
 
+    // Every draw's slot in the instance buffer this frame: a draw with an instance id keeps its persistent slot (written only
+    // when its transform changes or the origin moves), one without takes a transient slot written now. Then the copy of this
+    // frame gets the persistent slots still pending for it (features/instances/xlionrender_instance_slots.h).
+    void instance::updateInstances( const scene& Scene, const xmath::fvec3& Eye ) noexcept
+    {
+        const std::uint64_t Frame = m_Device.getFrameIndex();
+        if( Frame != m_InstanceFrame )
+        {
+            m_InstanceFrame  = Frame;
+            m_InstanceCopy   = int(Frame % instance_slots::copies_v);
+            m_TransientCount = 0;
+        }
+
+        // The origin (camera-relative "little world" for the stored rows): re-snapped when the eye moves a grid cell away
+        const auto Far = [&](int i) { return std::abs(Eye[i] - m_Origin[i]) > origin_grid_v; };
+        if( !m_bOriginSet || Far(0) || Far(1) || Far(2) )
+        {
+            for( int i = 0; i < 3; ++i ) m_Origin[i] = std::round(Eye[i] / origin_grid_v) * origin_grid_v;
+            m_bOriginSet = true;
+            m_InstanceSlots.MarkAllPending();
+        }
+
+        auto& Buffer = m_InstanceBuffers[m_InstanceCopy];
+        (void)Buffer.MemoryMap(0, Buffer.getEntryCount(), [&](void* pMemory)
+        {
+            auto* pData = static_cast<details::instance_data*>(pMemory);
+            m_DrawSlot.resize(Scene.m_Draws.size());
+            for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
+            {
+                const auto&         D  = Scene.m_Draws[i];
+                const std::uint32_t ID = static_cast<std::uint32_t>(D.m_Instance);
+                std::uint32_t Slot = ID ? m_InstanceSlots.Acquire(ID, D.m_L2W, Frame) : instance_slots::none_v;
+                if( Slot == instance_slots::none_v )
+                {
+                    if( m_TransientCount >= max_transient_v ) { m_DrawSlot[i] = instance_slots::none_v; continue; }     // ponytail: dropped
+                    Slot = std::uint32_t(max_instances_v + m_TransientCount++);
+                    pData[Slot].set(D.m_L2W, m_Origin);
+                }
+                m_DrawSlot[i] = Slot;
+            }
+            m_InstanceSlots.Flush(m_InstanceCopy, [&](std::uint32_t Slot, const xmath::fmat4& L2W) { pData[Slot].set(L2W, m_Origin); });
+        });
+    }
+
+    //------------------------------------------------------------------------------------------------
+
     // Shadows: which casters changed (world bounds), what must be rendered - the sun's clipmap tiles and the local lights' maps -, then:
     //  - the local maps' casters into the scratch (in batches that fit it), each batch remapped into the atlas (linear distance,
     //    octahedral for point lights)
@@ -30,16 +76,18 @@ namespace xlionrender
         m_nShadowTilesRendered = 0;
 
         // The casters and what changed since the last frame: new and gone casters, and skinned ones (old and new bounds)
-        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; };
+        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; };
         std::vector<draw_caster>                         Draws;
         std::vector<xmath::fbbox>                        Changed;
         std::unordered_map<std::uint64_t, xmath::fbbox>  Now;
         Draws.reserve(Scene.m_Draws.size());
         Now.reserve(Scene.m_Draws.size());
-        for( const auto& D : Scene.m_Draws )
+        for( std::size_t iDraw = 0; iDraw < Scene.m_Draws.size(); ++iDraw )
         {
+            const auto& D     = Scene.m_Draws[iDraw];
             const auto* pMesh = findMesh(D.m_Mesh);
             if( pMesh == nullptr ) continue;
+            if( pMesh->m_bCluster && m_DrawSlot[iDraw] == instance_slots::none_v ) continue;
 
             const bool bSkin = pMesh->m_bCluster && pMesh->m_Geom.m_Kind == geom_kind::SKIN;
             std::uint64_t Key = 1469598103934665603ull;
@@ -47,7 +95,7 @@ namespace xlionrender
             Key = Hash(Key, &D.m_L2W, sizeof(D.m_L2W));
             Key = Hash(Key, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id));     // alpha test, displacement
             const xmath::fbbox World = (pMesh->m_bCluster ? pMesh->m_Geom.m_BBox : pMesh->m_BBox).TransformCopy(D.m_L2W);
-            Draws.push_back({ &D, pMesh, World });
+            Draws.push_back({ &D, pMesh, World, m_DrawSlot[iDraw] });
             Now.emplace(Key, World);
 
             const auto It = m_PrevCasters.find(Key);
@@ -68,6 +116,10 @@ namespace xlionrender
         // Draws the casters that pass Keep with W2C into the current viewport
         const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, const auto& Keep )
         {
+            auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();     // absolute world: the instances' origin as is
+            ViewBlock.m_w2C         = W2C;
+            ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
+
             for( std::size_t i = 0; i < Draws.size(); ++i )
             {
                 if( !Keep(i) ) continue;
@@ -86,12 +138,8 @@ namespace xlionrender
 
                 const auto& G     = M.m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
-                std::array<xgpu::buffer*, 2> StaticBuffers{ G.m_pClusterData, G.m_pBones };
-                Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{2} : std::size_t{1} });
-
-                auto& Mesh = m_ShadowUBO.allocEntry<details::ubo_static_geom_mesh>();
-                Mesh.setL2w(D.m_L2W);
-                Mesh.m_w2C = W2C;
+                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffers[m_InstanceCopy], &m_InstanceBuffers[m_InstanceCopy] };
+                Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} });
                 Cmd.setDynamicUBO(m_ShadowUBO, 0);
                 Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
 
@@ -99,8 +147,8 @@ namespace xlionrender
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {
                         const auto& C = G.m_Clusters[c];
-                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences });
-                        else        Cmd.setPushConstants(details::push_static_geom{ c });
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot });
+                        else        Cmd.setPushConstants(details::push_static_geom{ c, Draws[i].m_Slot });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                     }
             }
@@ -229,6 +277,7 @@ namespace xlionrender
         const xmath::fmat4 ToEye   = xmath::fmat4::fromTranslation(-Eye);
 
         const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
+        updateInstances(Scene, Eye);
         renderShadows(Window, Scene, Eye, ProjScale);
 
         // Scene -> HDR
@@ -274,12 +323,18 @@ namespace xlionrender
                 }
             }
 
-            for( const auto& D : Scene.m_Draws )
+            auto& ViewBlock = m_StaticGeomUBO.allocEntry<details::ubo_geom_view>();      // camera-centered
+            ViewBlock.m_w2C         = W2C;
+            ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin - Eye, 0);
+
+            for( std::size_t iDraw = 0; iDraw < Scene.m_Draws.size(); ++iDraw )
             {
+                const auto& D     = Scene.m_Draws[iDraw];
                 const auto* pMesh = findMesh(D.m_Mesh);
                 if( pMesh == nullptr ) continue;
 
-                const xmath::fmat4 L2w = ToEye * D.m_L2W;
+                const xmath::fmat4 L2w  = ToEye * D.m_L2W;
+                const std::uint32_t Slot = m_DrawSlot[iDraw];
 
                 // The standard (constant) material: pipeline first, the dynamic UBOs bind to the active pipeline's layout
                 const auto BindStandard = [&](xgpu::pipeline_instance& Instance, std::span<xgpu::buffer*> StaticBuffers)
@@ -305,12 +360,9 @@ namespace xlionrender
 
                 const auto& G     = pMesh->m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
-                std::array<xgpu::buffer*, 2> StaticBuffers{ G.m_pClusterData, G.m_pBones };
-                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{2} : std::size_t{1} };
-
-                auto& Mesh = m_StaticGeomUBO.allocEntry<details::ubo_static_geom_mesh>();
-                Mesh.setL2w(L2w);
-                Mesh.m_w2C = W2C;
+                if( Slot == instance_slots::none_v ) continue;
+                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffers[m_InstanceCopy], &m_InstanceBuffers[m_InstanceCopy] };
+                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} };
 
                 for( const auto& Sub : G.m_Submeshes )
                 {
@@ -335,8 +387,8 @@ namespace xlionrender
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {
                         const auto& C = G.m_Clusters[c];
-                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences });
-                        else        Cmd.setPushConstants(details::push_static_geom{ c });
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot });
+                        else        Cmd.setPushConstants(details::push_static_geom{ c, Slot });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                     }
                 }

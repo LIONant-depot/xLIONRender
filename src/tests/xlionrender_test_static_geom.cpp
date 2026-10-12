@@ -123,6 +123,58 @@ int main()
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, C), "Render after destroy");
     for (float v : C) CHECK(v == 0, "A destroyed static geom drew something");
 
+    // Persistent instances (features/instances): the slot manager on the CPU, then images with instance ids equal to the
+    // same draws written every frame (id 0) - first frame, moved, hidden for a frame then back, far from the origin
+    {
+        xlionrender::instance_slots S;
+        S.Init(2);
+        const auto M1 = xmath::fmat4::fromTranslation({ 1, 0, 0 }), M2 = xmath::fmat4::fromTranslation({ 2, 0, 0 });
+        const auto s1 = S.Acquire(1, M1, 1), s2 = S.Acquire(2, M2, 1);
+        CHECK(s1 != s2 && s1 != S.none_v && s2 != S.none_v, "Two slots");
+        int nWritten = 0;
+        S.Flush(0, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
+        CHECK(nWritten == 2, "New slots are written into each copy (%d)", nWritten);
+        nWritten = 0; S.Flush(0, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
+        CHECK(nWritten == 0, "A copy is written once per change (%d)", nWritten);
+        nWritten = 0; S.Flush(1, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
+        CHECK(nWritten == 2, "The other copies still get the change (%d)", nWritten);
+        CHECK(S.Acquire(2, M2, 2) == s2, "An unchanged id keeps its slot");
+        nWritten = 0; S.Flush(2, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
+        CHECK(nWritten == 2, "Copy 2 had both pending from the start (%d)", nWritten);
+        nWritten = 0; S.Flush(2, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
+        CHECK(nWritten == 0, "Unchanged: nothing to write (%d)", nWritten);
+        CHECK(S.Acquire(3, M1, 2) == s1, "Full: the least recently seen slot (id 1) is evicted");
+        CHECK(S.Acquire(1, M1, 2) == S.none_v, "Full and every slot seen this frame: no slot");
+    }
+    {
+        std::vector<float> Transient, Persistent;
+        const auto Compare = [&](const char* pWhat) -> bool
+        {
+            for (std::size_t i = 0; i < Transient.size(); ++i)
+                if (Transient[i] != Persistent[i]) { std::printf("FAIL: %s: texel %d %f vs %f\n", pWhat, int(i), Transient[i], Persistent[i]); return false; }
+            return true;
+        };
+        const auto RenderBoth = [&](const xmath::fmat4& L2W, const char* pWhat) -> bool
+        {
+            Scene.m_Draws = { { .m_Mesh = Static, .m_L2W = L2W, .m_Material = Mat } };
+            if (!App.RenderFrame(Scene, View, Camera) || !ReadHDR(Device, View, Transient)) return false;
+            Scene.m_Draws[0].m_Instance = 5;
+            if (!App.RenderFrame(Scene, View, Camera) || !ReadHDR(Device, View, Persistent)) return false;
+            return Compare(pWhat);
+        };
+        CHECK(RenderBoth(xmath::fmat4::fromIdentity(), "first frame"), "Instance id: first frame");
+        CHECK(RenderBoth(xmath::fmat4::fromTranslation({ 0.1f, 0.05f, 0 }), "moved"), "Instance id: moved");
+        Scene.m_Draws.clear();
+        CHECK(App.RenderFrame(Scene, View, Camera), "Hidden for a frame");
+        CHECK(RenderBoth(xmath::fmat4::fromTranslation({ 0.1f, 0.05f, 0 }), "back"), "Instance id: back after a hidden frame");
+        for (int f = 0; f < 4; ++f) CHECK(RenderBoth(xmath::fmat4::fromTranslation({ 0.02f * f, 0, 0 }), "frames"), "Instance id: frame %d", f);
+
+        // Far away: the origin re-snaps (every slot rewritten relative to it)
+        const xmath::fvec3 Far{ 5000, 0, -3000 };
+        Camera.LookAt(xmath::fvec3{ 0.6f, 0.4f, -1.8f } + Far, Far);
+        CHECK(RenderBoth(xmath::fmat4::fromTranslation(Far), "far"), "Instance id: far from the origin");
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");

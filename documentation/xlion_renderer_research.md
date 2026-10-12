@@ -507,7 +507,14 @@ content is unpredictable, so the cost must not follow scene complexity. Bandwidt
    rows: 192 -> 112 bytes. xGPU pads each uniform entry to the GPU's `minUniformBufferOffsetAlignment` (was: the
    renderer padded every struct to 256), so the stride is per device: 128 bytes per draw and 64 per material on the
    RTX 4070 Ti SUPER here (alignment 64), still 256 where the alignment is 256. Report logical bytes, stride and
-   uploaded bytes per target device. Next on this road: a persistent instance buffer (below). Indexed loads are slow on mobile; uniform-address loads are the fast path.
+   uploaded bytes per target device.
+   **Persistent instance buffer (done):** `draw::m_Instance` (low 32 bits: the caller's id, high 32: flags) keeps a slot
+   whose 3x4 transform (relative to a snapped "little world" origin) is written only when it changes - visibility never
+   touches it; id 0 takes a transient slot written that frame. The per-draw data is now just the slot index in the
+   push constants; the view block (w2C + origin offset) is written once per view / shadow tile. Slots are evicted
+   least-recently-seen only when the buffer is full (invisible is not dead). `features/instances/xlionrender_instance_slots.h`.
+   Stopgap: one host-visible copy per frame in flight, each written with the deltas it has not seen. **Next:** a ring
+   of deltas copied by the GPU into one device-local buffer (Unreal GPUScene, Bevy) once xGPU records buffer copies. Indexed loads are slow on mobile; uniform-address loads are the fast path.
 5. **Pipelines built at material load,** not at first draw (first-sight stutter). HypeHype builds every PSO at load.
 
 **Octahedral maps (adopted for point-light shadows, planned for reflections):**

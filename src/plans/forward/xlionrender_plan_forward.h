@@ -19,19 +19,26 @@ namespace xlionrender::details
     };
 
     // "MeshUniforms" (set 2, binding 0) of both cluster vertex paths, and the rigid path's push constant
-    // (each UBO entry is padded to the GPU's offset alignment by xGPU, not here: 112 -> 128 bytes on most desktop GPUs)
-    struct ubo_static_geom_mesh
+    // Per view or shadow tile (the per-draw data is the instance buffer's; each UBO entry is padded by xGPU)
+    struct ubo_geom_view
     {
-        std::array<xmath::fvec4, 3>     m_L2wRows;      // local -> camera-centered world: the affine matrix's rows
-        xmath::fmat4                    m_w2C;          // camera-centered world -> clip
-
-        void setL2w(const xmath::fmat4& M) noexcept { for (int r = 0; r < 3; ++r) m_L2wRows[r] = { M(r, 0), M(r, 1), M(r, 2), M(r, 3) }; }
+        xmath::fmat4                    m_w2C;          // world (camera-centered for views, absolute for shadow tiles) -> clip
+        xmath::fvec4                    m_WorldOffset;  // xyz: the instance buffer's origin in that world
     };
-    static_assert(sizeof(ubo_static_geom_mesh) == 112);
+
+    // The instance buffer's entry (std430 InstanceData)
+    struct instance_data
+    {
+        std::array<xmath::fvec4, 3>     m_L2wRows;      // local -> the instance buffer's origin: the affine matrix's rows
+
+        void set(const xmath::fmat4& M, const xmath::fvec3& Origin) noexcept { for (int r = 0; r < 3; ++r) m_L2wRows[r] = { M(r, 0), M(r, 1), M(r, 2), M(r, 3) - Origin[r] }; }
+    };
+    static_assert(sizeof(instance_data) == 48);
 
     struct push_static_geom
     {
         std::uint32_t   m_ClusterIndex;
+        std::uint32_t   m_InstanceIndex;
     };
 
     // xlionrender_skin_geom_vert.glsl (xgeom_skin_mb_clusters.vert) push constant
@@ -39,6 +46,7 @@ namespace xlionrender::details
     {
         std::uint32_t   m_ClusterIndex;
         std::uint32_t   m_MaxInfluences;
+        std::uint32_t   m_InstanceIndex;
     };
 
     // mb_standard_pbr.frag "lighting_uniforms" (set 2, binding 1)

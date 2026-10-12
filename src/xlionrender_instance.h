@@ -11,6 +11,7 @@
 #include "meshes/xlionrender_cluster_geom.h"
 #include "features/shadows/xlionrender_shadow_clipmap.h"
 #include "features/shadows/xlionrender_shadow_local.h"
+#include "features/instances/xlionrender_instance_slots.h"
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
 #include <vector>
@@ -107,6 +108,7 @@ namespace xlionrender
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
         material_slot*              findMaterial    ( material_id Id )                                          noexcept;
         void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
+        void                        updateInstances ( const scene& Scene, const xmath::fvec3& Eye )             noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
 
         xgpu::device                m_Device;
@@ -117,7 +119,20 @@ namespace xlionrender
         xgpu::vertex_descriptor     m_StaticGeomVD;
         xgpu::pipeline              m_StaticGeomPipeline;
         xgpu::pipeline_instance     m_StaticGeomInstance;
-        xgpu::buffer                m_StaticGeomUBO;        // the mesh block of both cluster vertex paths
+        xgpu::buffer                m_StaticGeomUBO;        // the view block of both cluster vertex paths (details::ubo_geom_view)
+
+        // Instance data (features/instances): one buffer per frame in flight; persistent slots then this frame's transient ones
+        static constexpr int        max_instances_v         = 65536;
+        static constexpr int        max_transient_v         = 16384;
+        static constexpr float      origin_grid_v           = 1024.0f;  // the instance buffer's origin snaps to this grid near the eye
+        std::array<xgpu::buffer, instance_slots::copies_v> m_InstanceBuffers;
+        instance_slots              m_InstanceSlots;
+        std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
+        xmath::fvec3                m_Origin                {};
+        bool                        m_bOriginSet            = false;
+        std::uint64_t               m_InstanceFrame         = ~0ull;
+        int                         m_TransientCount        = 0;
+        int                         m_InstanceCopy          = 0;
         xgpu::vertex_descriptor     m_SkinGeomVD;
         xgpu::pipeline              m_ToneMapPipeline;
         xgpu::pipeline              m_BlitPipeline;

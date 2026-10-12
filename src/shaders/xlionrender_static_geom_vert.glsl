@@ -5,12 +5,22 @@
 #include "xgeom_static_mb_input_full.vert"
 #include "mb_varying_definition_full.glsl"
 
-// Per draw (plans/forward/xlionrender_plan_forward.h ubo_static_geom_mesh): 112 bytes
+// Per view or shadow tile (plans/forward/xlionrender_plan_forward.h ubo_geom_view)
 layout(set=2, binding = 0) uniform MeshUniforms
 {
-    mat3x4 L2wRows;    // Local space -> camera-centered small world: the affine matrix's 3 rows (each column here is one)
-    mat4   w2C;        // Small world -> clip space (projection * view)
+    mat4   w2C;            // Small world -> clip space (projection * view)
+    vec4   WorldOffset;    // xyz: the instance buffer's origin in that small world
 } mesh;
+
+// Per instance (features/instances/xlionrender_instance_slots.h): persistent, indexed by push.instanceIndex
+struct InstanceData
+{
+    vec4   Rows[3];        // Local space -> the instance buffer's origin: the affine matrix's 3 rows
+};
+layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
+{
+    InstanceData Instances[];
+} instances;
 
 
 // Fragment shader inputs
@@ -24,7 +34,9 @@ void main()
     //
     // Transform to all needed spaces
     //
-    Out.wSpacePosition      = vec4(VertData.LocalPos * mesh.L2wRows, 1.0);
+    const InstanceData I    = instances.Instances[push.instanceIndex];
+    const mat3x4 L2wRows    = mat3x4(I.Rows[0], I.Rows[1], I.Rows[2]);
+    Out.wSpacePosition      = vec4(VertData.LocalPos * L2wRows + mesh.WorldOffset.xyz, 1.0);
     Out.ShadowPosition      = vec4(0.5, 0.5, 2.0, 1.0);                 // the editors' single shadow map (LDR materials) only
     gl_Position             = mesh.w2C * Out.wSpacePosition;
 
@@ -39,7 +51,7 @@ void main()
     
     // Extract scales from L2w column lengths (handles non-uniform scales in the L2W) 
     // However does not handle skew matrices... not used offen
-    const mat3 RotMat           = transpose(mat3(mesh.L2wRows));
+    const mat3 RotMat           = transpose(mat3(L2wRows));
     vec3 scales = vec3( length(RotMat[0]),
                         length(RotMat[1]),
                         length(RotMat[2]));

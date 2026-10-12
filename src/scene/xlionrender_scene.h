@@ -57,6 +57,10 @@ namespace xlionrender
         material                    m_Material;         // used where m_Materials has no valid entry for a material slot
         std::vector<material_id>    m_Materials;        // per material slot of the mesh (xgeom_static submesh m_iMaterial)
         std::uint64_t               m_UserID        = 0;    // e.g. the entity; what editor pick/ID passes write
+        // Low 32 bits: the caller's instance id - its data stays in the renderer's instance buffer across frames and is
+        // written only when it changes (0: none, written every frame). The caller owns the ids (unique among its draws).
+        // High 32 bits: flags (none defined yet).
+        std::uint64_t               m_Instance      = 0;
     };
 
     // The directional light (the sun): shades everything, shadowed by the shadow clipmap
