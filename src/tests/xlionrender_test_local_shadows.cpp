@@ -162,6 +162,18 @@ int main()
         CHECK(App.RenderFrame(Scene, View, Camera), "Render back");
     }
 
+    // Per-face caster culling draws the same maps as drawing every caster in the light's sphere into every face
+    {
+        std::vector<float> Faces, Sphere;
+        Renderer.m_bShadowCache = false;
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Faces), "Render face-culled maps");
+        Renderer.m_bShadowFaceCull = false;
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Sphere), "Render sphere-culled maps");
+        Renderer.m_bShadowFaceCull = true;
+        Renderer.m_bShadowCache    = true;
+        for (std::size_t i = 0; i < Faces.size(); ++i) CHECK(Faces[i] == Sphere[i], "Face culling changed the shadows at %d (%f vs %f)", int(i), Faces[i], Sphere[i]);
+    }
+
     // A spot light pointing down at the sphere: 1 tile, a shadow
     xlionrender::local_light Spot{ .m_Type = xlionrender::local_light::type::SPOT, .m_Position = { 0.3f, 2.0f, 0.2f }, .m_Direction = { -0.1f, -1.0f, -0.1f }
                                  , .m_Radius = 6.0f, .m_InnerAngle = 0.6f, .m_OuterAngle = 0.8f, .m_Intensity = 8.0f, .m_bCastShadows = false };

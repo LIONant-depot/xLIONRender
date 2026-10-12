@@ -22,10 +22,13 @@ namespace xlionrender
             return { { R3 + R0, R3 - R0, R3 + R1, R3 - R1, R2, R3 - R2 } };   // left, right, bottom, top, near, far
         }
 
-        bool Overlaps(const xmath::fbbox& B) const noexcept
+        // bNear = false: no near plane - for shadow pancaking, where casters in front of the near plane still cast (depth clamp)
+        bool Overlaps(const xmath::fbbox& B, bool bNear = true) const noexcept
         {
-            for (const auto& P : m_Planes)
+            for (int i = 0; i < 6; ++i)
             {
+                if (i == 4 && !bNear) continue;
+                const auto& P = m_Planes[i];
                 // the box's corner furthest along the plane's normal
                 const float X = P.m_X >= 0 ? B.m_Max.m_X : B.m_Min.m_X;
                 const float Y = P.m_Y >= 0 ? B.m_Max.m_Y : B.m_Min.m_Y;

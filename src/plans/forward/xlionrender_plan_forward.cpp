@@ -229,14 +229,15 @@ namespace xlionrender
         if( m_nShadowTilesRendered == 0 ) return;
 
         // Draws the casters that pass Keep with W2C into the current viewport
-        const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, const auto& Keep )
+        // Draws the casters of Indices that pass Keep with W2C into the current viewport
+        const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, std::span<const std::uint32_t> Indices, const auto& Keep )
         {
             auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();     // absolute world: the instances' origin as is
             ViewBlock.m_w2C         = W2C;
             ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
             const cluster_geom* pBoundGeom = nullptr;       // binds only when the mesh changes
 
-            for( std::size_t i = 0; i < Draws.size(); ++i )
+            for( const std::uint32_t i : Indices )
             {
                 if( !Keep(i) ) continue;
                 const auto& D = *Draws[i].m_pDraw;
@@ -285,6 +286,7 @@ namespace xlionrender
         // size, a spot: one face of its map size)
         struct face_batch { int m_iRender; std::array<shadows::buddy::pos, 2> m_Blocks; };
         std::vector<face_batch> Batch;
+        std::vector<std::uint32_t> LightCasters;        // a local light's casters (reused per light)
         const int LocalX = shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;     // the local part's origin in the atlas
         bool      bClipmapDone = false;
 
@@ -307,13 +309,17 @@ namespace xlionrender
                     const auto& L      = Scene.m_LocalLights[R.m_Light];
                     const bool  bPoint = L.m_Type == local_light::type::POINT;
                     const float Near   = shadows::LocalNear(L.m_Radius);
-                    const auto  Keep   = [&](std::size_t i) { return shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius); };   // ponytail: the sphere, not the face's frustum
+                    // The light's casters once (its sphere), then per face the ones in that face's frustum
+                    LightCasters.clear();
+                    for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius) ) LightCasters.push_back(i);
                     for( int f = 0, nFaces = bPoint ? 6 : 1; f < nFaces; ++f )
                     {
                         const auto P = FacePos(B, f, R.m_Map.m_Size, bPoint);
                         Viewport(Cmd, P.m_X, P.m_Y, bPoint ? R.m_Map.m_Size / 2 : R.m_Map.m_Size);
-                        DrawCasters(Cmd, bPoint ? shadows::FaceW2C(L.m_Position, shadows::CubeFaceAxis(f), 1.0f, Near, L.m_Radius)
-                                                : shadows::FaceW2C(L.m_Position, L.m_Direction.NormalizeCopy(), shadows::SpotTanHalf(L), Near, L.m_Radius), Keep);
+                        const xmath::fmat4 FaceW2C = bPoint ? shadows::FaceW2C(L.m_Position, shadows::CubeFaceAxis(f), 1.0f, Near, L.m_Radius)
+                                                            : shadows::FaceW2C(L.m_Position, L.m_Direction.NormalizeCopy(), shadows::SpotTanHalf(L), Near, L.m_Radius);
+                        const frustum Face = frustum::FromW2C(FaceW2C);
+                        DrawCasters(Cmd, FaceW2C, LightCasters, [&](std::uint32_t i) { return !m_bShadowFaceCull || Face.Overlaps(Draws[i].m_World, false); });
                     }
                 }
             }
@@ -323,11 +329,13 @@ namespace xlionrender
             if( !bClipmapDone )
             {
                 bClipmapDone = true;
-                std::vector<shadows::lbox> LightBounds;         // the clipmap culls in light space (only when a tile renders)
+                std::vector<shadows::lbox>  LightBounds;        // the clipmap culls in light space (only when a tile renders)
+                std::vector<std::uint32_t>  AllCasters;
                 if( !m_ShadowTiles.empty() )
                 {
                     LightBounds.reserve(Draws.size());
-                    for( const auto& C : Draws ) LightBounds.push_back(m_Clipmap.Bounds(C.m_World));
+                    AllCasters.reserve(Draws.size());
+                    for( std::uint32_t i = 0; i < Draws.size(); ++i ) { LightBounds.push_back(m_Clipmap.Bounds(Draws[i].m_World)); AllCasters.push_back(i); }
                 }
                 const int S = m_ShadowSetup.m_ClipmapTileSize;
                 for( const auto& T : m_ShadowTiles )
@@ -337,7 +345,7 @@ namespace xlionrender
                     Cmd.setBuffer(m_FullscreenVB);
                     Cmd.setBuffer(m_FullscreenIB);
                     Cmd.Draw(3);
-                    DrawCasters(Cmd, T.m_W2C, [&](std::size_t i) { return shadows::clipmap::Overlaps(LightBounds[i], T.m_MinX, T.m_MinY, T.m_Size); });
+                    DrawCasters(Cmd, T.m_W2C, AllCasters, [&](std::uint32_t i) { return shadows::clipmap::Overlaps(LightBounds[i], T.m_MinX, T.m_MinY, T.m_Size); });
                 }
             }
 

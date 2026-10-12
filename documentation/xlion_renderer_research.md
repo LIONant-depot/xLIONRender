@@ -705,7 +705,10 @@ the city was outside the +-64 unit window and every pixel looped all 1024 lights
 | street | 2.3 ms (7.3) | 1.0 ms (4.5) | 1.0 ms (2.5) | ~440 |
 | moving_lights | 3.8 ms (9.4) | 2.5 ms (6.3) | 1.0 ms (2.7) | ~260 |
 
-Left on the CPU: shadow map recording for the 16 moving shadowed lights (~1.7 ms); occlusion culling for the street.
+Then: the cell headers packed into one uint (320 -> 80 KB per render; an overflowing list is shaded exactly), and local
+light maps gather their casters once per light (sphere) and draw per face only the ones in that face's frustum (near
+plane skipped: pancaking) - moving_lights CPU shadows 1.7 -> 0.47 ms, frame 3.8 -> 2.8 ms (~360 FPS).
+Left: occlusion culling for the street (~4.4k of 8k draws drawn); flyover is GPU-bound (2.8 ms scene).
 
 **xGPU fix found by this scene:** the descriptor pool ring reset one pool per frame and grew each new pool by 1.5x; a
 frame that overflowed (the city binds ~100k sets) made every later frame create a larger pool - CPU time per frame

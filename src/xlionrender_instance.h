@@ -89,6 +89,8 @@ namespace xlionrender
         bool                                       m_bShadowCache = true;
         // At most this many local light shadow maps re-render per frame (the others stay a frame stale)
         int                                        m_ShadowUpdatesPerFrame = 16;
+        // Local light maps draw, per face, only the casters in that face's frustum (false: every caster in the light's sphere)
+        bool                                       m_bShadowFaceCull = true;
 
         // The lighting lab (features/lights/xlionrender_light_cells.h): how local lights are found per pixel
         enum class light_mode : std::uint8_t
