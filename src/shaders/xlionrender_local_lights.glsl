@@ -67,7 +67,7 @@ float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const v
 }
 
 // The local lights (storage buffers, so a scene is not limited to a uniform block): the lights, and the world-cell lists
-// (features/lights/xlionrender_light_cells.h builds them; levels_v 5, cells_v 16, 4 uint headers, 2 uint entries)
+// (features/lights/xlionrender_light_cells.h builds them; levels_v 5, cells_v 16, a packed uint header per cell, 2 uint entries)
 layout(std430, set = 1, binding = 3) readonly buffer LocalLightBuffer { LocalLightData LocalLightList[]; };
 layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint LightCells[]; };
 
@@ -128,9 +128,15 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     }
 
     const uint Base      = uint(UBOLight.LocalBase.y);
-    const uint Header    = Base + uint(Cell) * 4u;
-    const uint EntryBase = Base + uint(kCellLevels * kLevelCells * 4);
-    const uint First     = LightCells[Header], Count = LightCells[Header + 1u], Head = LightCells[Header + 2u];
+    const uint Header    = LightCells[Base + uint(Cell)];               // bits 0-19 first entry, 20-27 count, 28-31 head count
+    const uint EntryBase = Base + uint(kCellLevels * kLevelCells);
+    const uint First     = Header & 0xFFFFFu, Count = (Header >> 20) & 0xFFu, Head = Header >> 28;
+    if (Count == 255u)                                                  // the cell's list did not fit: every light (exact)
+    {
+        const int nLights = int(UBOLight.LocalCount.x);
+        for (int i = 0; i < nLights; ++i) Sum += LocalLight(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
+        return Sum;
+    }
     const uint nExact    = Mode == 1 ? Count : Head;
     for (uint k = 0u; k < nExact; ++k) Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + k)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
 

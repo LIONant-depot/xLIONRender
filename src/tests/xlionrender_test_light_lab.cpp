@@ -69,7 +69,7 @@ int main()
         Cells.Build(CL, Eye, 2.0f, 0);
         std::mt19937 R(3);
         std::uniform_real_distribution<float> P(-14, 14);
-        constexpr std::uint32_t entries_v = xlionrender::light_cells::levels_v * xlionrender::light_cells::level_cells_v * xlionrender::light_cells::header_uints_v;
+        constexpr std::uint32_t entries_v = xlionrender::light_cells::entry_base_v;
         for (int t = 0; t < 2000; ++t)
         {
             const xmath::fvec3 Q{ P(R), P(R) * 0.3f + 1.0f, P(R) };
@@ -83,7 +83,7 @@ int main()
                 if (bIn) Cell = Lv * xlionrender::light_cells::level_cells_v + Cells.Slot(C[0], C[1], C[2]);
             }
             if (Cell < 0) continue;
-            const std::uint32_t First = Cells.m_Data[Cell * 4], Count = Cells.m_Data[Cell * 4 + 1];
+            const std::uint32_t First = Cells.First(Cell), Count = Cells.Count(Cell);
             for (std::uint32_t i = 0; i < L.size(); ++i)
             {
                 if ((L[i].m_Position - Q).Length() >= L[i].m_Radius) continue;
@@ -152,7 +152,7 @@ int main()
                         if (!Contributes(l, Q)) continue;
                         const int Cell = CellOf(Q);
                         if (Cell < 0) continue;                                         // outside the cells: the shader loops every light
-                        const std::uint32_t First = Cells.m_Data[Cell * 4], Count = Cells.m_Data[Cell * 4 + 1];
+                        const std::uint32_t First = Cells.First(Cell), Count = Cells.Count(Cell);
                         bool bListed = false;
                         for (std::uint32_t k = 0; k < Count && !bListed; ++k) bListed = Cells.m_Data[entries_v + 2 * (First + k)] == i;
                         CHECK(bListed, "Boundary: light %u reaches (%f %f %f) but is not in its cell's list", i, Q.m_X, Q.m_Y, Q.m_Z);
@@ -168,7 +168,7 @@ int main()
         int nSplit = 0;
         for (int c = 0; c < xlionrender::light_cells::levels_v * xlionrender::light_cells::level_cells_v; ++c)
         {
-            const std::uint32_t First = Cells.m_Data[c * 4], Count = Cells.m_Data[c * 4 + 1], Head = Cells.m_Data[c * 4 + 2];
+            const std::uint32_t First = Cells.First(c), Count = Cells.Count(c), Head = Cells.Head(c);
             CHECK(Head == std::min<std::uint32_t>(Count, 4), "Cell %d: head %u of %u", c, Head, Count);
             if (Count <= Head) continue;
             ++nSplit;
@@ -182,6 +182,12 @@ int main()
             CHECK(Prev == 1.0f, "Cell %d: the tail's probabilities end at %f", c, Prev);
         }
         CHECK(nSplit > 100, "Only %d cells have a tail", nSplit);
+        for (int c = 0; c < xlionrender::light_cells::levels_v * xlionrender::light_cells::level_cells_v; ++c)
+        {
+            const std::uint32_t H = Cells.m_Data[c];
+            if (Cells.Count(c) >= xlionrender::light_cells::overflow_v) { CHECK(((H >> 20) & 0xFF) == 255, "Cell %d: an overflowing list is not marked", c); continue; }
+            CHECK((H & 0xFFFFF) == Cells.First(c) && ((H >> 20) & 0xFF) == Cells.Count(c) && (H >> 28) == Cells.Head(c), "Cell %d: the packed header does not decode", c);
+        }
     }
 
     app App;
@@ -226,6 +232,20 @@ int main()
         std::printf("few lights: cells vs exact %.2e (max %.2e), sampled vs cells %.2e (max %.2e)\n", C.m_MeanRel, C.m_Max, S.m_MeanRel, S.m_Max);
         CHECK(C.m_Max < 1e-4, "CELLS differs from EXACT (max %e)", C.m_Max);
         CHECK(S.m_Max < 1e-4, "SAMPLED differs from CELLS with every light in the heads (max %e)", S.m_Max);
+    }
+
+    // Overflow: 300 lights piled on one spot - their cells hold more than a packed header can count, the shader shades those
+    // cells with every light: still the same image as EXACT
+    {
+        auto Pile = MakeLights(300, 3.0f, 4.0f, 17);
+        for (auto& l : Pile) { l.m_Position = { 0.5f, 1.0f, 1.0f }; l.m_Type = xlionrender::local_light::type::POINT; l.m_Intensity = 0.05f; }
+        Scene.m_LocalLights = Pile;
+        std::vector<float> Exact, Cells;
+        CHECK(RenderMode(mode::EXACT, Exact) && RenderMode(mode::CELLS, Cells), "Render the pile");
+        CHECK(Renderer.getLightModeUsed() == mode::CELLS, "The pile fell back to EXACT for the whole render");
+        const auto C = Compare(Cells, Exact);
+        std::printf("overflow: cells vs exact %.2e (max %.2e)\n", C.m_MeanRel, C.m_Max);
+        CHECK(C.m_Max < 1e-4, "Overflowing cells differ from EXACT (max %e)", C.m_Max);
     }
 
     // Dense overlap: 256 lights of radius 3-7

@@ -9,8 +9,10 @@
 // head_v most important lights, kept in light order) is shaded exactly, the tail by one light J drawn with its probability
 // p(J): L = sum(head) + f(J) / p(J). Every tail light keeps p > 0 (a floor), head and tail never share a light.
 //
-// Layout (uints, shaders/xlionrender_local_lights.glsl reads the same): per cell (level-major, then slot) a header
-// { first entry, count, head count, 0 }, then entries { light index, floatBitsToUint(tail cumulative probability) }.
+// Layout (uints, shaders/xlionrender_local_lights.glsl reads the same): per cell (level-major, then slot) one packed header
+// uint - bits 0-19 the first entry, 20-27 the count, 28-31 the head count; a count of overflow_v (255) means "more than fits":
+// the shader shades that cell with every light (exact, never a dropped light) - then the entries { light index,
+// floatBitsToUint(tail cumulative probability) }.
 // ponytail: rebuilt from scratch every render on the CPU (the lab measures that cost); dirty cells, the visibility term and
 // a compute builder come after the lab says the cells earn their place.
 
@@ -29,7 +31,11 @@ namespace xlionrender
         static constexpr int levels_v = 5;                                      // level 4: 32 unit cells, a 512 unit window (aerial views stay inside)
         static constexpr int cells_v  = 16;                                     // per level and axis
         static constexpr int level_cells_v = cells_v * cells_v * cells_v;
-        static constexpr int header_uints_v = 4;
+        static constexpr int header_uints_v = 1;
+        static constexpr std::uint32_t overflow_v  = 255;                       // a packed count: the cell's list does not fit
+        static constexpr std::uint32_t max_head_v  = 15;
+        static constexpr std::uint32_t max_entry_v = (1u << 20) - 1;
+        static constexpr std::uint32_t entry_base_v = levels_v * level_cells_v * header_uints_v;     // the entries' first uint
 
         struct light
         {
@@ -88,24 +94,40 @@ namespace xlionrender
             for (const auto& Lt : Lights) ForEachCell(Lt, [&](int Cell, float) { ++Count[Cell]; });
 
             std::uint32_t nEntries = 0;
+            m_First.resize(nCells);
+            m_Head.assign(nCells, 0);
+            m_Count = Count;
+            for (int c = 0; c < nCells; ++c) { m_First[c] = nEntries; nEntries += Count[c]; }
             m_Data.assign(nCells * header_uints_v, 0);
-            for (int c = 0; c < nCells; ++c) { m_Data[c * header_uints_v] = nEntries; m_Data[c * header_uints_v + 1] = Count[c]; nEntries += Count[c]; }
 
-            const std::uint32_t EntryBase = nCells * header_uints_v;
+            const std::uint32_t EntryBase = entry_base_v;
             m_Data.resize(EntryBase + 2 * nEntries, 0);
             std::vector<std::uint32_t> Fill(nCells, 0);
             std::vector<float>         Importance(nEntries, 0.0f);
             for (std::uint32_t i = 0; i < Lights.size(); ++i)
                 ForEachCell(Lights[i], [&](int Cell, float Dist)
                 {
-                    const std::uint32_t e = m_Data[Cell * header_uints_v] + Fill[Cell]++;
+                    const std::uint32_t e = m_First[Cell] + Fill[Cell]++;
                     m_Data[EntryBase + 2 * e] = i;
                     const float s = Dist / Lights[i].m_Radius;                                         // the shader's falloff at the
                     Importance[e] = Lights[i].m_Power * (1.0f - s * s * s * s) / (1.0f + 2.0f * s * s);   // cell's nearest point: an upper bound
                 });
 
-            if (HeadCount > 0) for (int c = 0; c < nCells; ++c) SplitCell(c, HeadCount, Importance);
+            if (HeadCount > 0) for (int c = 0; c < nCells; ++c) SplitCell(c, std::min<int>(HeadCount, max_head_v), Importance);
+
+            // The packed headers (a list too long for the count, or entries past 20 bits: the cell is shaded exactly)
+            for (int c = 0; c < nCells; ++c)
+            {
+                const bool          bOver = m_Count[c] >= overflow_v || m_First[c] + m_Count[c] > max_entry_v;
+                const std::uint32_t n     = bOver ? overflow_v : m_Count[c];
+                m_Data[c] = (bOver ? 0 : m_First[c]) | (n << 20) | (std::min(m_Head[c], max_head_v) << 28);
+            }
         }
+
+        // A cell's unpacked header (the CPU side: tests, diagnostics)
+        std::uint32_t First(int Cell) const noexcept { return m_First[Cell]; }
+        std::uint32_t Count(int Cell) const noexcept { return m_Count[Cell]; }
+        std::uint32_t Head (int Cell) const noexcept { return m_Head[Cell]; }
 
         // A spot light's cone misses the cell's bounding sphere: the light is exactly 0 there (the shader's smoothstep is 0 at
         // and beyond the outer angle), so leaving it out keeps the lists complete
@@ -125,7 +147,8 @@ namespace xlionrender
             return (M(z) * cells_v + M(y)) * cells_v + M(x);
         }
 
-        std::vector<std::uint32_t>              m_Data;
+        std::vector<std::uint32_t>              m_Data;             // what the shader reads: packed headers, then entries
+        std::vector<std::uint32_t>              m_First, m_Count, m_Head;   // the headers unpacked
         std::array<std::array<int, 3>, levels_v> m_Origin{};        // per level: the window's first cell index
         float                                   m_CellSize = 1;
 
@@ -133,10 +156,10 @@ namespace xlionrender
         // Head: the HeadCount most important, back in light order; tail: the rest, with cumulative probabilities (floored)
         void SplitCell(int Cell, int HeadCount, const std::vector<float>& Importance) noexcept
         {
-            const std::uint32_t First = m_Data[Cell * header_uints_v], n = m_Data[Cell * header_uints_v + 1];
-            const std::uint32_t EntryBase = levels_v * level_cells_v * header_uints_v;
+            const std::uint32_t First = m_First[Cell], n = m_Count[Cell];
+            const std::uint32_t EntryBase = entry_base_v;
             if (n == 0) return;
-            if (int(n) <= HeadCount) { m_Data[Cell * header_uints_v + 2] = n; return; }
+            if (int(n) <= HeadCount) { m_Head[Cell] = n; return; }
 
             struct item { std::uint32_t m_Light; float m_I; };
             std::vector<item> Items(n);
@@ -159,7 +182,7 @@ namespace xlionrender
                 Cumulative += std::max(Items[k].m_I, Floor) / Sum;
                 m_Data[EntryBase + 2 * (First + k) + 1] = std::bit_cast<std::uint32_t>(k + 1 == n ? 1.0f : Cumulative);
             }
-            m_Data[Cell * header_uints_v + 2] = std::uint32_t(HeadCount);
+            m_Head[Cell] = std::uint32_t(HeadCount);
         }
     };
 }
