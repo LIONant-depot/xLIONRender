@@ -18,6 +18,7 @@
 
 #include "dependencies/xmath/source/xmath.h"
 #include <algorithm>
+#include <cassert>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -122,6 +123,46 @@ namespace xlionrender
                 const std::uint32_t n     = bOver ? overflow_v : m_Count[c];
                 m_Data[c] = (bOver ? 0 : m_First[c]) | (n << 20) | (std::min(m_Head[c], max_head_v) << 28);
             }
+        }
+
+        // Boxes (the reflection probes' influence boxes, world) listed per cell of Build's window, appended to m_Data: per cell
+        // (level-major, then slot) a packed header uint - bits 0-23 the first entry (a uint index into m_Data), 24-31 the count -,
+        // then the entries (box indices, in the given order: the shader keeps it). Returns the headers' first uint in m_Data.
+        std::uint32_t AddBoxes(const std::vector<xmath::fbbox>& Boxes) noexcept
+        {
+            constexpr int nCells = levels_v * level_cells_v;
+            assert(Boxes.size() < 256);                                         // a cell's count is 8 bits
+            const auto Base = std::uint32_t(m_Data.size());
+            const auto ForEachCell = [&](const xmath::fbbox& B, auto&& Fn)
+            {
+                for (int L = 0; L < levels_v; ++L)
+                {
+                    const float S = m_CellSize * float(1 << L);
+                    int Lo[3], Hi[3];
+                    bool bEmpty = false;
+                    for (int a = 0; a < 3; ++a)
+                    {
+                        Lo[a] = std::max(int(std::floor(B.m_Min[a] / S)), m_Origin[L][a]);
+                        Hi[a] = std::min(int(std::floor(B.m_Max[a] / S)), m_Origin[L][a] + cells_v - 1);
+                        bEmpty |= Lo[a] > Hi[a];
+                    }
+                    if (bEmpty) continue;
+                    for (int z = Lo[2]; z <= Hi[2]; ++z)
+                    for (int y = Lo[1]; y <= Hi[1]; ++y)
+                    for (int x = Lo[0]; x <= Hi[0]; ++x) Fn(L * level_cells_v + Slot(x, y, z));
+                }
+            };
+            std::vector<std::uint32_t> Count(nCells, 0);
+            for (const auto& B : Boxes) ForEachCell(B, [&](int Cell) { ++Count[Cell]; });
+
+            m_Data.resize(Base + nCells);
+            std::uint32_t e = Base + nCells;
+            for (int c = 0; c < nCells; ++c) { m_Data[Base + c] = e | (Count[c] << 24); e += Count[c]; }
+            m_Data.resize(e);
+            std::fill(Count.begin(), Count.end(), 0u);
+            for (std::uint32_t i = 0; i < Boxes.size(); ++i)
+                ForEachCell(Boxes[i], [&](int Cell) { m_Data[(m_Data[Base + Cell] & 0xFFFFFFu) + Count[Cell]++] = i; });
+            return Base;
         }
 
         // A cell's unpacked header (the CPU side: tests, diagnostics)

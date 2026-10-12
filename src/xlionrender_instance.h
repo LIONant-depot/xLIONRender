@@ -250,13 +250,18 @@ namespace xlionrender
         bool                        m_bEnvDFGReady          = false;
         bool                        m_bEnvOn                = false;
         float                       m_EnvIntensity          = 0;
-        // Reflection probes: a 4x4 atlas of the sky layout's slots, 6 capture views (128^2) for the probe being captured, the cube ->
-        // octahedral pass into the environment source (then the sky's pyramid and prefilter, into the probe's slot)
+        // Reflection probes: an 8x4 atlas of the sky layout's slots (the nearest probe_slots_v probes are resident), 6 capture views
+        // (128^2) for the probe being captured, the cube -> octahedral pass into the environment source (then the sky's pyramid and
+        // prefilter, into the probe's slot)
         static constexpr int        probe_face_size_v       = 128;
+        static constexpr int        probe_slots_v           = 32;
+        static constexpr int        probe_slots_x_v         = 8;
         struct probe_state
         {
             std::uint64_t           m_Key       = 0;        // the probe it holds (position, box)
-            bool                    m_bValid    = false;    // captured at least once
+            std::uint64_t           m_LightKey  = 0;        // the lights it saw: the local lights reaching its box, sun, sky, ambient
+            int                     m_Slot      = -1;       // its slot in the atlas (-1: not resident)
+            bool                    m_bValid    = false;    // captured since it got its slot
             bool                    m_bDirty    = true;
         };
         xgpu::texture               m_ProbeAtlas;
@@ -265,7 +270,9 @@ namespace xlionrender
         std::array<render_view, 6>  m_CaptureViews;
         xgpu::pipeline              m_CubeToOctPipeline;
         xgpu::pipeline_instance     m_CubeToOctInstance;
-        std::array<probe_state, max_probes_v> m_ProbeStates;
+        std::vector<probe_state>    m_ProbeStates;                      // per scene probe
+        std::vector<int>            m_ProbeOrder;                       // this scene pass' captured probes, innermost first
+        std::vector<xmath::fbbox>   m_ProbeBoxes;
         int                         m_ProbeCapturing        = -1;       // the probe being captured
         int                         m_ProbeNextFace         = 0;
         int                         m_nProbeCaptures        = 0;

@@ -135,7 +135,7 @@ namespace
 
         // Probes down the street the "street" scenario walks, each box a block of the street
         const float StreetX = -C.m_HalfSize + std::round(C.m_HalfSize / pitch_v) * pitch_v;
-        for (int i = 0; i < std::min(O.m_Probes, xlionrender::max_probes_v); ++i)
+        for (int i = 0; i < O.m_Probes; ++i)
         {
             const float Z = -C.m_HalfSize * 0.9f + (i + 0.5f) * (C.m_HalfSize * 1.8f / std::max(O.m_Probes, 1));
             const float H = C.m_HalfSize * 0.9f / std::max(O.m_Probes, 1);

@@ -3,6 +3,9 @@
 //  - the budget: 1 face per frame -> a capture completes on the 6th frame, not before
 //  - invalidation: a static scene does not re-capture; a box moving inside the probe's box does; one far outside does not
 //  - shading: a mirror sphere under the probe reflects the red box (more red on that side than without the probe)
+//  - light changes: a local light reaching the probe's box re-captures it, one far away does not; a sun change does
+//  - the world cells: nested and overlapping probes shade the same image found through the cells (CELLS) as with the full list (EXACT)
+//  - residency: 40 probes, only the nearest 32 hold a slot (and are captured); the camera moving to the others swaps them in
 #include "xlionrender_test_common.h"
 
 using namespace xlionrender::test;
@@ -111,6 +114,57 @@ int main()
     while (Renderer.getProbeCaptures() == 1 && nFrames < 20) { CHECK(App.RenderFrame(Scene, View, Camera), "Render re-capture"); ++nFrames; }
     std::printf("re-capture at 1 face per frame took %d frames\n", nFrames);
     CHECK(nFrames == 6, "A capture at 1 face per frame took %d frames", nFrames);
+
+    // Light changes (all faces in one frame from here)
+    Renderer.m_ProbeFacesPerFrame = 6;
+    for (int f = 0; f < 2; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render settle");
+    int Before = Renderer.getProbeCaptures();
+    Scene.m_LocalLights = { { .m_Position = { 40, 1, 0 }, .m_Radius = 3, .m_Color = { 1, 1, 1 }, .m_Intensity = 4, .m_bCastShadows = false } };
+    for (int f = 0; f < 2; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render far light");
+    Scene.m_LocalLights[0].m_Intensity = 8;
+    for (int f = 0; f < 2; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render far light changed");
+    CHECK(Renderer.getProbeCaptures() == Before, "A light that does not reach the probe's box re-captured it (%d)", Renderer.getProbeCaptures() - Before);
+    Scene.m_LocalLights[0].m_Position = { 2, 1, 0 };            // moves into the box
+    CHECK(App.RenderFrame(Scene, View, Camera), "Render near light");
+    CHECK(Renderer.getProbeCaptures() == Before + 1, "A light reaching the probe's box did not re-capture it (%d)", Renderer.getProbeCaptures() - Before);
+    Scene.m_LocalLights[0].m_Color = { 1, 0.5f, 0.2f };
+    CHECK(App.RenderFrame(Scene, View, Camera), "Render near light color");
+    CHECK(Renderer.getProbeCaptures() == Before + 2, "A light color change did not re-capture (%d)", Renderer.getProbeCaptures() - Before);
+    Scene.m_Sun.m_Intensity = 3;
+    CHECK(App.RenderFrame(Scene, View, Camera), "Render sun change");
+    CHECK(Renderer.getProbeCaptures() == Before + 3, "A sun change did not re-capture (%d)", Renderer.getProbeCaptures() - Before);
+    Scene.m_LocalLights.clear();
+
+    // The world cells: nested and overlapping probes, CELLS against EXACT
+    Scene.m_Probes.push_back({ .m_Position = { -2, 1.5f, 0 }, .m_BoxMin = { -5, -1, -3 }, .m_BoxMax = { 0.5f, 4, 3 }, .m_Blend = 1.0f });
+    Scene.m_Probes.push_back({ .m_Position = {  2, 1.5f, 0 }, .m_BoxMin = { -0.5f, -1, -3 }, .m_BoxMax = { 5, 4, 3 }, .m_Blend = 1.0f });
+    for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render 3 probes");
+    std::vector<float> Cells, Exact;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Cells), "Render cells");
+    Renderer.m_LightMode = xlionrender::instance::light_mode::EXACT;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Exact), "Render exact");
+    Renderer.m_LightMode = xlionrender::instance::light_mode::CELLS;
+    double MaxDiff = 0;
+    for (std::size_t i = 0; i < Cells.size(); ++i) MaxDiff = std::max<double>(MaxDiff, std::abs(Cells[i] - Exact[i]));
+    std::printf("probes CELLS vs EXACT: max difference %g\n", MaxDiff);
+    CHECK(MaxDiff < 1e-3, "Probes through the cells differ from the full list (%g)", MaxDiff);
+
+    // Residency: 40 small probes in a row along +Z, the camera near the first ones
+    Scene.m_Probes.clear();
+    for (int i = 0; i < 40; ++i)
+    {
+        const float Z = float(i) * 4.0f;
+        Scene.m_Probes.push_back({ .m_Position = { 0, 1.5f, Z }, .m_BoxMin = { -2, -1, Z - 2 }, .m_BoxMax = { 2, 4, Z + 2 }, .m_Blend = 0.5f });
+    }
+    Before = Renderer.getProbeCaptures();
+    for (int f = 0; f < 50; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render 40 probes");
+    CHECK(Renderer.getProbeCaptures() - Before == 32, "40 probes: %d captures, the 32 resident expected", Renderer.getProbeCaptures() - Before);
+    xgpu::tools::view Far = Camera;
+    Far.LookAt(xmath::fvec3{ 0, 1.2f, 39 * 4.0f + 4 }, xmath::fvec3{ 0, 1, 39 * 4.0f });
+    Before = Renderer.getProbeCaptures();
+    for (int f = 0; f < 50; ++f) CHECK(App.RenderFrame(Scene, View, Far), "Render 40 probes far");
+    std::printf("residency: the camera at the far end captured %d probes\n", Renderer.getProbeCaptures() - Before);
+    CHECK(Renderer.getProbeCaptures() - Before == 8, "The far end swapped in %d probes, 8 expected", Renderer.getProbeCaptures() - Before);
 
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);

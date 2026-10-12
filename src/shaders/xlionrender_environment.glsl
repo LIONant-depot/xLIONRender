@@ -3,14 +3,15 @@
 // roughness along the reflection (box-projected for a probe: parallax), times the split-sum DFG (Karis); diffuse: the roughest
 // level along the normal (an approximation of the irradiance - ponytail: SH9 when it shows).
 // Samplers 8 (sky atlas), 9 (DFG), 10 (probe atlas) in every lit pipeline (slots 0-7: the shadow atlas and the material's textures).
-// ponytail: probes are a loop over the lighting block's list (up to 16, innermost first); the world cells list them when there are many.
+// The probes' records share the light buffer (64 bytes, as a LocalLightData: PosRadius = center + blend, Color = box min,
+// DirCosOuter = box max, Shadow = atlas slot); the world cell of a point lists the probes whose box reaches it (innermost first).
 #include "xlionrender_environment_atlas.glsl"
 
 layout(binding = 8)  uniform sampler2D SamplerEnvironment;
 layout(binding = 9)  uniform sampler2D SamplerEnvDFG;
 layout(binding = 10) uniform sampler2D SamplerProbes;
 
-const vec2 kProbeAtlas = vec2(1536.0, 1024.0);          // 4 x 4 slots of the sky atlas' layout (384 x 256)
+const vec2 kProbeAtlas = vec2(3072.0, 1024.0);          // 8 x 4 slots of the sky atlas' layout (384 x 256) - instance::probe_slots_v
 
 vec3 AtlasSample(in const sampler2D Atlas, in const vec2 Origin, in const vec2 AtlasSize, in const vec3 Dir, in const float PerceptualRoughness)
 {
@@ -28,23 +29,34 @@ vec3 EnvSample(in const vec3 Dir, in const float PerceptualRoughness)
     return AtlasSample(SamplerEnvironment, vec2(0.0), kEnvAtlas, Dir, PerceptualRoughness);
 }
 
-// How much probe i covers a camera-centered point: 1 inside its box, fading to 0 over the blend distance at its faces
-float ProbeWeight(in const int i, in const vec3 P)
+// How much a probe covers a camera-centered point: 1 inside its box, fading to 0 over the blend distance at its faces
+float ProbeWeight(in const LocalLightData Pr, in const vec3 P)
 {
-    const vec3 Lo = UBOLight.Probes[i].BoxMin.xyz, Hi = UBOLight.Probes[i].BoxMax.xyz;
+    const vec3 Lo = Pr.Color.xyz, Hi = Pr.DirCosOuter.xyz;
     if (any(lessThan(P, Lo)) || any(greaterThan(P, Hi))) return 0.0;
     const vec3 Inside = min(P - Lo, Hi - P);
-    return clamp(min(Inside.x, min(Inside.y, Inside.z)) / max(UBOLight.Probes[i].PosBlend.w, 1e-4), 0.0, 1.0);
+    return clamp(min(Inside.x, min(Inside.y, Inside.z)) / max(Pr.PosRadius.w, 1e-4), 0.0, 1.0);
 }
 
-// The reflection ray from P meets probe i's box: the direction from the probe's center to that point (parallax correction)
-vec3 ProbeBoxProject(in const int i, in const vec3 P, in const vec3 R)
+// The reflection ray from P meets the probe's box: the direction from the probe's center to that point (parallax correction)
+vec3 ProbeBoxProject(in const LocalLightData Pr, in const vec3 P, in const vec3 R)
 {
-    const vec3 Lo = UBOLight.Probes[i].BoxMin.xyz, Hi = UBOLight.Probes[i].BoxMax.xyz;
+    const vec3 Lo = Pr.Color.xyz, Hi = Pr.DirCosOuter.xyz;
     const vec3 Inv = 1.0 / max(abs(R), vec3(1e-6)) * sign(R + 1e-12);
     const vec3 T  = max((Lo - P) * Inv, (Hi - P) * Inv);
     const float t = min(T.x, min(T.y, T.z));
-    return normalize(P + R * t - UBOLight.Probes[i].PosBlend.xyz);
+    return normalize(P + R * t - Pr.PosRadius.xyz);
+}
+
+// One probe into the running sums (its weight times what the earlier, inner probes left)
+void ProbeAdd(in const int Record, in const vec3 P, in const vec3 N, in const vec3 R, in const float PerceptualRoughness, inout vec3 Spec, inout vec3 Diff, inout float Covered)
+{
+    const LocalLightData Pr = LocalLightList[Record];
+    const float w = ProbeWeight(Pr, P) * (1.0 - Covered);
+    if (w <= 0.0) return;
+    Spec    += w * AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, ProbeBoxProject(Pr, P, R), PerceptualRoughness);
+    Diff    += w * AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, N, 1.0);
+    Covered += w;
 }
 
 vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic, in const float AO)
@@ -54,15 +66,20 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
 
     vec3  Spec = vec3(0.0), Diff = vec3(0.0);
     float Covered = 0.0;
-    const int nProbes = int(UBOLight.ProbeCount.x);
-    for (int i = 0; i < nProbes && Covered < 0.999; ++i)
+    const int nProbes     = int(UBOLight.ProbeCount.x);
+    const int FirstRecord = int(UBOLight.ProbeCount.y);
+    const int Cell        = (nProbes > 0 && UBOLight.ProbeCount.z >= 0.0) ? LocalLightCell(P + UBOLight.CameraPos.xyz) : -1;
+    if (Cell >= 0)
     {
-        const float w = ProbeWeight(i, P) * (1.0 - Covered);
-        if (w <= 0.0) continue;
-        const vec2 Origin = UBOLight.Probes[i].Slot.xy;
-        Spec    += w * AtlasSample(SamplerProbes, Origin, kProbeAtlas, ProbeBoxProject(i, P, R), PerceptualRoughness);
-        Diff    += w * AtlasSample(SamplerProbes, Origin, kProbeAtlas, N, 1.0);
-        Covered += w;
+        const uint Base   = uint(UBOLight.LocalBase.y);
+        const uint Header = LightCells[Base + uint(UBOLight.ProbeCount.z) + uint(Cell)];     // bits 0-23 first entry, 24-31 count
+        const uint First  = Header & 0xFFFFFFu, Count = Header >> 24;
+        for (uint k = 0u; k < Count && Covered < 0.999; ++k)
+            ProbeAdd(FirstRecord + int(LightCells[Base + First + k]), P, N, R, PerceptualRoughness, Spec, Diff, Covered);
+    }
+    else
+    {
+        for (int i = 0; i < nProbes && Covered < 0.999; ++i) ProbeAdd(FirstRecord + i, P, N, R, PerceptualRoughness, Spec, Diff, Covered);
     }
 
     const float Rest = 1.0 - Covered;

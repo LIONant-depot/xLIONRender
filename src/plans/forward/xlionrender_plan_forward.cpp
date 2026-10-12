@@ -77,8 +77,9 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    // The local lights for this render: into this frame's region of the light buffer, and in modes CELLS / SAMPLED their world
-    // cells into the cell buffer (features/lights/xlionrender_light_cells.h). Fills the lighting block's local part.
+    // The local lights and the captured reflection probes for this render: into this frame's region of the light buffer, and in
+    // modes CELLS / SAMPLED their world cells into the cell buffer (features/lights/xlionrender_light_cells.h). Fills the lighting
+    // block's local and probe parts.
     void instance::writeLocalLights( const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept
     {
         const std::uint64_t Frame = m_Device.getFrameIndex();
@@ -104,13 +105,35 @@ namespace xlionrender
             });
         m_LightRingUsed += std::max(nLights, 0);
 
+        // The captured probes, innermost (smallest box) first: the shader lets the first ones that cover a point win
+        m_ProbeOrder.clear();
+        for( int i = 0; i < int(m_ProbeStates.size()) && i < int(Scene.m_Probes.size()); ++i ) if( m_ProbeStates[i].m_bValid ) m_ProbeOrder.push_back(i);
+        const auto Volume = [&](int i) { const auto D = Scene.m_Probes[i].m_BoxMax - Scene.m_Probes[i].m_BoxMin; return D.m_X * D.m_Y * D.m_Z; };
+        std::sort(m_ProbeOrder.begin(), m_ProbeOrder.end(), [&](int a, int b) { return Volume(a) < Volume(b); });
+        const int nProbes   = std::min(int(m_ProbeOrder.size()), light_region_v - m_LightRingUsed);
+        const int ProbeBase = int(Frame % ring_frames_v) * light_region_v + m_LightRingUsed;
+        if( nProbes > 0 )
+            (void)m_LightRing.MemoryMap(ProbeBase, nProbes, [&](void* pMemory)
+            {
+                auto* pOut = static_cast<details::probe_data*>(pMemory);
+                for( int k = 0; k < nProbes; ++k )
+                {
+                    const auto& Pr   = Scene.m_Probes[m_ProbeOrder[k]];
+                    const int   Slot = m_ProbeStates[m_ProbeOrder[k]].m_Slot;
+                    pOut[k] = { xmath::fvec4(Pr.m_Position - Eye, Pr.m_Blend), xmath::fvec4(Pr.m_BoxMin - Eye, 0), xmath::fvec4(Pr.m_BoxMax - Eye, 0)
+                              , { float(Slot % probe_slots_x_v * 384), float(Slot / probe_slots_x_v * 256), 0, 0 } };
+                }
+            });
+        m_LightRingUsed += std::max(nProbes, 0);
+
         auto Mode = m_LightMode;
         int  CellBase = 0;
         m_LightBuildMs = 0;
-        if( Mode != light_mode::EXACT && nLights > 0 )
+        int  ProbeCells = -1;
+        if( Mode != light_mode::EXACT && (nLights > 0 || nProbes > 0) )
         {
             const auto T0 = std::chrono::steady_clock::now();
-            m_CellLights.resize(nLights);
+            m_CellLights.resize(std::max(nLights, 0));
             for( int i = 0; i < nLights; ++i )
             {
                 const auto& LL = Scene.m_LocalLights[i];
@@ -119,10 +142,16 @@ namespace xlionrender
                 m_CellLights[i] = { LL.m_Position, LL.m_Radius, std::max(Lum * LL.m_Intensity, 1e-6f), LL.m_Direction.NormalizeCopy(), bSpot ? LL.m_OuterAngle : -1.0f };
             }
             m_LightCells.Build(m_CellLights, Eye, m_LightCellSize, Mode == light_mode::SAMPLED ? m_LightHead : 0);
+            if( nProbes > 0 )
+            {
+                m_ProbeBoxes.resize(nProbes);
+                for( int k = 0; k < nProbes; ++k ) m_ProbeBoxes[k] = { Scene.m_Probes[m_ProbeOrder[k]].m_BoxMin, Scene.m_Probes[m_ProbeOrder[k]].m_BoxMax };
+                ProbeCells = int(m_LightCells.AddBoxes(m_ProbeBoxes));
+            }
             m_LightBuildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
 
             const int nUints = int(m_LightCells.m_Data.size());
-            if( nUints > max_cell_uints_v - m_CellRingUsed ) Mode = light_mode::EXACT;      // ponytail: too many entries for the buffer
+            if( nUints > max_cell_uints_v - m_CellRingUsed ) { Mode = light_mode::EXACT; ProbeCells = -1; }    // ponytail: too many entries for the buffer
             else
             {
                 CellBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
@@ -135,6 +164,7 @@ namespace xlionrender
         m_LightCellUints = Mode == light_mode::EXACT ? 0 : int(m_LightCells.m_Data.size());
         Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_LightHead) };
         Light.m_LocalBase  = { float(LightBase), float(CellBase), m_LightCellSize, float(m_LightTailSamples) };
+        Light.m_ProbeCount = { float(std::max(nProbes, 0)), float(ProbeBase), float(ProbeCells), 0 };
         for( int L = 0; L < light_cells::levels_v; ++L )
             Light.m_CellOrigin[L] = { float(m_LightCells.m_Origin[L][0]), float(m_LightCells.m_Origin[L][1]), float(m_LightCells.m_Origin[L][2]), 0 };
     }
@@ -209,33 +239,89 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    // Reflection probes: a changed probe (new, moved, or a changed caster in its box) is re-captured, m_ProbeFacesPerFrame faces per
-    // frame (never captured first, then the nearest): each face a scene pass from the probe's center; with its 6 faces done, the
-    // faces -> the octahedral source -> the pyramid and the prefilter into its slot of the probe atlas.
+    // Reflection probes: the nearest probe_slots_v (eye to box) are resident, each in a slot of the atlas. A changed probe (new,
+    // moved, newly resident, a changed caster in its box, a changed light reaching its box, or a sun / sky / ambient change) is
+    // re-captured, m_ProbeFacesPerFrame faces per frame (never captured first, then the nearest): each face a scene pass from the
+    // probe's center; with its 6 faces done, the faces -> the octahedral source -> the pyramid and the prefilter into its slot.
+    // A change during a capture lets it finish and captures again (a continuous change never starves it), except a moved probe.
     void instance::updateProbes( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept
     {
         if( !m_bProbeAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ProbeAtlasClearPass); m_bProbeAtlasReady = true; }   // bound by every lit pipeline
-        const int nProbes = std::min(int(Scene.m_Probes.size()), max_probes_v);
+        const int nProbes = int(Scene.m_Probes.size());
+        m_ProbeStates.resize(nProbes);
+        if( m_ProbeCapturing >= nProbes ) m_ProbeCapturing = -1;
         if( nProbes == 0 ) return;
+
+        const auto Touches = [](const xmath::fbbox& A, const xmath::fbbox& B)
+        {
+            return A.m_Max.m_X >= B.m_Min.m_X && A.m_Min.m_X <= B.m_Max.m_X && A.m_Max.m_Y >= B.m_Min.m_Y && A.m_Min.m_Y <= B.m_Max.m_Y
+                && A.m_Max.m_Z >= B.m_Min.m_Z && A.m_Min.m_Z <= B.m_Max.m_Z;
+        };
+        const auto BoxDistance = [&](const reflection_probe& Pr)
+        {
+            float D2 = 0;
+            for( int a = 0; a < 3; ++a ) { const float d = std::max({ Pr.m_BoxMin[a] - Eye[a], 0.0f, Eye[a] - Pr.m_BoxMax[a] }); D2 += d * d; }
+            return D2;
+        };
+
+        // Residency: the nearest probe_slots_v keep or get a slot, the others lose theirs
+        // ponytail: no hysteresis - a probe at the boundary can swap in and out as the camera moves
+        std::vector<bool> Wanted(nProbes, true);
+        if( nProbes > probe_slots_v )
+        {
+            std::vector<std::pair<float, int>> Rank(nProbes);
+            for( int i = 0; i < nProbes; ++i ) Rank[i] = { BoxDistance(Scene.m_Probes[i]), i };
+            std::nth_element(Rank.begin(), Rank.begin() + probe_slots_v, Rank.end());
+            for( int k = probe_slots_v; k < nProbes; ++k )
+            {
+                const int i  = Rank[k].second;
+                auto&     St = m_ProbeStates[i];
+                Wanted[i] = false;
+                if( St.m_Slot >= 0 ) { St.m_Slot = -1; St.m_bValid = false; if( m_ProbeCapturing == i ) m_ProbeCapturing = -1; }
+            }
+        }
+        std::array<bool, probe_slots_v> Used{};
+        for( const auto& St : m_ProbeStates ) if( St.m_Slot >= 0 ) Used[St.m_Slot] = true;
+        for( int i = 0, Free = 0; i < nProbes; ++i )
+        {
+            auto& St = m_ProbeStates[i];
+            if( St.m_Slot >= 0 || !Wanted[i] ) continue;
+            while( Free < probe_slots_v && Used[Free] ) ++Free;
+            if( Free == probe_slots_v ) break;
+            St.m_Slot = Free; Used[Free] = true; St.m_bValid = false; St.m_bDirty = true;
+        }
+
+        // The lights every capture sees (sun, sky, ambient)
+        float G[] = { Scene.m_Sun.m_Direction.m_X, Scene.m_Sun.m_Direction.m_Y, Scene.m_Sun.m_Direction.m_Z, Scene.m_Sun.m_Color.m_X, Scene.m_Sun.m_Color.m_Y, Scene.m_Sun.m_Color.m_Z
+                    , Scene.m_Sun.m_Intensity, Scene.m_Sun.m_Temperature, Scene.m_Sun.m_bCastShadows ? 1.0f : 0.0f, Scene.m_Ambient.m_X, Scene.m_Ambient.m_Y, Scene.m_Ambient.m_Z
+                    , Scene.m_Sky.m_Zenith.m_X, Scene.m_Sky.m_Zenith.m_Y, Scene.m_Sky.m_Zenith.m_Z, Scene.m_Sky.m_Horizon.m_X, Scene.m_Sky.m_Horizon.m_Y, Scene.m_Sky.m_Horizon.m_Z
+                    , Scene.m_Sky.m_Ground.m_X, Scene.m_Sky.m_Ground.m_Y, Scene.m_Sky.m_Ground.m_Z, Scene.m_Sky.m_Intensity };
+        const std::uint64_t GlobalKey = Hash(1469598103934665603ull, G, sizeof(G));
 
         for( int i = 0; i < nProbes; ++i )
         {
             const auto& Pr = Scene.m_Probes[i];
             auto&       St = m_ProbeStates[i];
+            if( St.m_Slot < 0 ) continue;
             const float K[] = { Pr.m_Position.m_X, Pr.m_Position.m_Y, Pr.m_Position.m_Z, Pr.m_BoxMin.m_X, Pr.m_BoxMin.m_Y, Pr.m_BoxMin.m_Z, Pr.m_BoxMax.m_X, Pr.m_BoxMax.m_Y, Pr.m_BoxMax.m_Z };
             const std::uint64_t Key = Hash(1469598103934665603ull, K, sizeof(K)) | 1;
-            if( Key != St.m_Key ) { St = { Key, false, true }; if( m_ProbeCapturing == i ) m_ProbeNextFace = 0; }
+            if( Key != St.m_Key ) { St.m_Key = Key; St.m_bValid = false; St.m_bDirty = true; if( m_ProbeCapturing == i ) m_ProbeNextFace = 0; }
+
             const xmath::fbbox Box{ Pr.m_BoxMin, Pr.m_BoxMax };
-            for( const auto& C : m_FrameChanged )
-                if( C.m_Max.m_X >= Box.m_Min.m_X && C.m_Min.m_X <= Box.m_Max.m_X && C.m_Max.m_Y >= Box.m_Min.m_Y && C.m_Min.m_Y <= Box.m_Max.m_Y
-                 && C.m_Max.m_Z >= Box.m_Min.m_Z && C.m_Min.m_Z <= Box.m_Max.m_Z )
-                {
-                    St.m_bDirty = true;
-                    if( m_ProbeCapturing == i ) m_ProbeNextFace = 0;        // its faces so far saw the old scene
-                    break;
-                }
+            for( const auto& C : m_FrameChanged ) if( Touches(C, Box) ) { St.m_bDirty = true; break; }
+
+            // ponytail: every resident probe against every light (32 x lights sphere-box tests); the world cells' lists when it shows
+            std::uint64_t LightKey = GlobalKey;
+            for( const auto& LL : Scene.m_LocalLights )
+            {
+                const xmath::fbbox Sphere{ LL.m_Position - xmath::fvec3(LL.m_Radius), LL.m_Position + xmath::fvec3(LL.m_Radius) };
+                if( !Touches(Sphere, Box) ) continue;
+                const float L[] = { float(LL.m_Type), LL.m_Position.m_X, LL.m_Position.m_Y, LL.m_Position.m_Z, LL.m_Direction.m_X, LL.m_Direction.m_Y, LL.m_Direction.m_Z, LL.m_Radius
+                                  , LL.m_InnerAngle, LL.m_OuterAngle, LL.m_Color.m_X, LL.m_Color.m_Y, LL.m_Color.m_Z, LL.m_Intensity, LL.m_bCastShadows ? 1.0f : 0.0f };
+                LightKey = Hash(LightKey, L, sizeof(L));
+            }
+            if( LightKey != St.m_LightKey ) { if( St.m_LightKey != 0 ) St.m_bDirty = true; St.m_LightKey = LightKey; }
         }
-        if( m_ProbeCapturing >= nProbes ) m_ProbeCapturing = -1;
 
         for( int Budget = std::max(m_ProbeFacesPerFrame, 1); Budget > 0; )
         {
@@ -244,7 +330,7 @@ namespace xlionrender
                 float Best = 1e30f;
                 for( int i = 0; i < nProbes; ++i )
                 {
-                    if( !m_ProbeStates[i].m_bDirty ) continue;
+                    if( !m_ProbeStates[i].m_bDirty || m_ProbeStates[i].m_Slot < 0 ) continue;
                     const float d = (Scene.m_Probes[i].m_Position - Eye).Length() - (m_ProbeStates[i].m_bValid ? 0.0f : 1e20f);
                     if( d < Best ) { Best = d; m_ProbeCapturing = i; }
                 }
@@ -267,8 +353,9 @@ namespace xlionrender
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);
             }
-            prefilterInto(Window, m_ProbeAtlasPass, float(m_ProbeCapturing % 4 * 384), float(m_ProbeCapturing / 4 * 256));
-            m_ProbeStates[m_ProbeCapturing].m_bValid = true;
+            auto& St = m_ProbeStates[m_ProbeCapturing];
+            prefilterInto(Window, m_ProbeAtlasPass, float(St.m_Slot % probe_slots_x_v * 384), float(St.m_Slot / probe_slots_x_v * 256));
+            St.m_bValid = true;
             ++m_nProbeCaptures;
             m_ProbeCapturing = -1;
         }
@@ -569,19 +656,6 @@ namespace xlionrender
                 writeLocalLights(Scene, Eye, Light);
                 Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, 0, 0 };
 
-                // The captured probes, innermost (smallest box) first: the shader lets the first ones that cover a point win
-                std::array<int, max_probes_v> Order;
-                int nProbes = 0;
-                for( int i = 0; i < std::min(int(Scene.m_Probes.size()), max_probes_v); ++i ) if( m_ProbeStates[i].m_bValid ) Order[nProbes++] = i;
-                const auto Volume = [&](int i) { const auto D = Scene.m_Probes[i].m_BoxMax - Scene.m_Probes[i].m_BoxMin; return D.m_X * D.m_Y * D.m_Z; };
-                std::sort(Order.begin(), Order.begin() + nProbes, [&](int a, int b) { return Volume(a) < Volume(b); });
-                Light.m_ProbeCount = { float(nProbes), 0, 0, 0 };
-                for( int k = 0; k < nProbes; ++k )
-                {
-                    const auto& Pr = Scene.m_Probes[Order[k]];
-                    Light.m_Probes[k] = { xmath::fvec4(Pr.m_Position - Eye, Pr.m_Blend), xmath::fvec4(Pr.m_BoxMin - Eye, 0), xmath::fvec4(Pr.m_BoxMax - Eye, 0)
-                                        , { float(Order[k] % 4 * 384), float(Order[k] / 4 * 256), 0, 0 } };
-                }
             }
 
             auto& ViewBlock = m_StaticGeomUBO.allocEntry<details::ubo_geom_view>();      // camera-centered

@@ -75,12 +75,8 @@ namespace xlionrender::details
         xmath::fvec4                            m_LocalBase;        // x: first light in the light buffer, y: first uint in the cell buffer, z: level 0 cell size, w: tail samples
         std::array<xmath::fvec4, light_cells::levels_v> m_CellOrigin;       // per cell level: the window's first cell index
         xmath::fvec4                            m_EnvParams;        // x: 1 the environment probe lights (scene::m_Sky), y: its intensity
-        struct probe
-        {
-            xmath::fvec4                        m_PosBlend, m_BoxMin, m_BoxMax, m_Slot;
-        };
-        xmath::fvec4                            m_ProbeCount;       // x: probes in m_Probes, innermost first
-        std::array<probe, max_probes_v>         m_Probes;
+        xmath::fvec4                            m_ProbeCount;       // x: captured probes (innermost first), y: the first's record in the light buffer,
+                                                                    // z: their cell headers' first uint in the cell buffer (-1: no cells, every probe)
     };
 
     // A point or spot light in the light buffer (std430 LocalLightData)
@@ -91,6 +87,15 @@ namespace xlionrender::details
         xmath::fvec4                            m_DirCosOuter;      // spot: direction, w cos outer angle; point: w = -2
         xmath::fvec4                            m_Shadow;           // xy: its shadow map's origin in the atlas, z: its size (0 none), w: spot tan half fov
     };
+
+    // A reflection probe in the light buffer (shaders/xlionrender_environment.glsl ProbeRecord: the same 64 bytes as a light)
+    struct probe_data
+    {
+        xmath::fvec4                            m_PosBlend;         // camera-centered center, w: blend distance
+        xmath::fvec4                            m_BoxMin, m_BoxMax; // camera-centered
+        xmath::fvec4                            m_Slot;             // xy: its slot's origin in the probe atlas
+    };
+    static_assert(sizeof(probe_data) == sizeof(local_light_data));
 
     // xlionrender_forward_standard_frag.glsl "material_uniforms" (set 2, binding 2)
     struct ubo_material

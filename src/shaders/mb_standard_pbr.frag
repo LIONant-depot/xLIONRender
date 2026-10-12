@@ -58,13 +58,6 @@
 layout(location = 0) in VaryingFull In;
 
 #ifndef XLION_LDR_OUTPUT
-struct ProbeData                       // xLIONRender: a reflection probe (shaders/xlionrender_environment.glsl), camera-centered
-{
-	vec4 PosBlend;                     // xyz: its center, w: blend distance
-	vec4 BoxMin;
-	vec4 BoxMax;
-	vec4 Slot;                         // xy: its slot's origin in the probe atlas
-};
 struct LocalLightData                  // xLIONRender: a point or spot light (shaders/xlionrender_local_lights.glsl)
 {
 	vec4 PosRadius;                    // camera-centered position, radius
@@ -91,8 +84,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 LocalBase;                      // x: first light in LocalLightList, y: first uint in LightCells, z: level 0 cell size, w: tail samples
 	vec4 CellOrigin[5];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
 	vec4 EnvParams;                      // x: 1 the environment probe replaces the flat ambient, y: its intensity
-	vec4 ProbeCount;                     // x: reflection probes in Probes[] (innermost first)
-	ProbeData Probes[16];                // max_probes_v
+	vec4 ProbeCount;                     // x: reflection probes (innermost first), y: the first's record in LocalLightList, z: their cell headers in LightCells (-1: none)
 #endif
 } UBOLight;
 

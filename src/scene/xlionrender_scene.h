@@ -103,7 +103,8 @@ namespace xlionrender
     };
 
     // A reflection probe: the renderer captures the scene around m_Position (6 faces, prefiltered like the sky) and surfaces in its
-    // box reflect it, box-projected (parallax); the box's faces fade it over m_Blend. Re-captured when a caster in its box changes.
+    // box reflect it, box-projected (parallax); the box's faces fade it over m_Blend. Re-captured when a caster in its box changes,
+    // a local light reaching its box changes, or the sun / sky / ambient change.
     struct reflection_probe
     {
         xmath::fvec3    m_Position  { 0, 0, 0 };
@@ -111,7 +112,6 @@ namespace xlionrender
         xmath::fvec3    m_BoxMax    {  5,  5,  5 };
         float           m_Blend     = 1.0f;
     };
-    constexpr int max_probes_v = 16;
 
     struct scene
     {
@@ -120,7 +120,7 @@ namespace xlionrender
         std::vector<local_light>    m_LocalLights;
         xmath::fvec3                m_Ambient   { 0, 0, 0 };
         sky                         m_Sky;
-        std::vector<reflection_probe> m_Probes;           // up to max_probes_v
+        std::vector<reflection_probe> m_Probes;           // any number: the nearest 32 (instance::probe_slots_v) are resident
     };
 }
 
