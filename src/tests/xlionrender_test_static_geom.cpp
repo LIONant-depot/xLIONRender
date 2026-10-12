@@ -48,7 +48,7 @@ int main()
     Camera.LookAt(xmath::fvec3{ 0.6f, 0.4f, -1.8f }, xmath::fvec3{ 0, 0, 0 });
 
     xlionrender::scene Scene;
-    Scene.m_Light     = { .m_Direction = { -0.4f, -1.0f, 0.5f }, .m_Intensity = 3 };
+    Scene.m_Sun     = { .m_Direction = { -0.4f, -1.0f, 0.5f }, .m_Intensity = 3 };
     Scene.m_Ambient = { 0.05f, 0.05f, 0.05f };
     const xlionrender::material Mat{ .m_BaseColor = { 0.7f, 0.7f, 0.7f }, .m_Metallic = 0.2f, .m_Roughness = 0.35f };
 

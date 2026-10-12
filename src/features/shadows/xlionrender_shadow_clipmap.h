@@ -11,8 +11,9 @@
 //  - Depth: each level has a depth range around the camera with headroom, snapped to a coarse grid (it changes - and its tiles
 //    invalidate - only when the camera leaves the margin). Casters nearer to the light than the range still cast: the shadow
 //    pipelines clamp depth ("pancaking", as Unreal's virtual shadow maps).
-//  - Invalidation (conservative, research doc Track A): a caster that appears, disappears or changes invalidates every tile under
-//    its old and new light-space bounds; a skinned caster changes every frame; a new light direction invalidates everything.
+//  - Invalidation (conservative, research doc Track A): the renderer passes the world bounds of every caster that appeared,
+//    disappeared or changed (old and new; skinned casters every frame); every tile under them re-renders. A new light direction
+//    invalidates everything.
 //
 // ponytail: the tiles touched by a moving caster re-render whole (all casters); Unreal keeps static and dynamic depth apart
 // and re-draws only the movers over a copy of the static tile - add when moving characters make tiles re-render all the time.
@@ -21,7 +22,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <unordered_map>
 #include <vector>
 
 namespace xlionrender::shadows
@@ -46,14 +46,6 @@ namespace xlionrender::shadows
         float m_Min[3] = {  1e30f,  1e30f,  1e30f };
         float m_Max[3] = { -1e30f, -1e30f, -1e30f };
         void Add(const xmath::fvec3& P) noexcept { const float V[3] = { P.m_X, P.m_Y, P.m_Z }; for (int i = 0; i < 3; ++i) { m_Min[i] = std::min(m_Min[i], V[i]); m_Max[i] = std::max(m_Max[i], V[i]); } }
-    };
-
-    // What one shadow-casting draw looked like this frame
-    struct caster
-    {
-        std::uint64_t   m_Key;          // identity + state: a different key is a different (or changed) caster
-        lbox            m_Bounds;       // in light space
-        bool            m_bDynamic;     // changes every frame whatever the key says (skinned)
     };
 
     struct tile_to_render
@@ -81,8 +73,9 @@ namespace xlionrender::shadows
         };
 
         // Called once per frame. Returns (in Out) the tiles that must be rendered: the ones that came into the window, whose depth
-        // range moved, or that a changed caster touched. bCache = false re-renders every tile (the reference to compare against).
-        void Update(const xmath::fvec3& LightDir, float Level0TileSize, const xmath::fvec3& Camera, const std::vector<caster>& Casters, bool bCache, std::vector<tile_to_render>& Out) noexcept
+        // range moved, or that a changed caster (Changed: world bounds) touched. bCache = false re-renders every tile (the reference
+        // to compare against).
+        void Update(const xmath::fvec3& LightDir, float Level0TileSize, const xmath::fvec3& Camera, const std::vector<xmath::fbbox>& ChangedWorld, bool bCache, std::vector<tile_to_render>& Out) noexcept
         {
             Out.clear();
 
@@ -97,21 +90,11 @@ namespace xlionrender::shadows
                 m_Level0TileSize = Level0TileSize;
                 m_bHasBasis = true;
                 for (auto& S : m_Slots) S.m_bValid = false;
-                m_Previous.clear();
             }
 
-            // Casters that changed: new keys, keys that are gone, dynamic ones -> invalidate the tiles under their bounds
-            std::unordered_map<std::uint64_t, lbox> Now;
-            Now.reserve(Casters.size());
             std::vector<lbox> Changed;
-            for (auto& C : Casters)
-            {
-                Now.emplace(C.m_Key, C.m_Bounds);
-                if (C.m_bDynamic || !m_Previous.contains(C.m_Key)) Changed.push_back(C.m_Bounds);
-            }
-            for (auto& [Key, Bounds] : m_Previous) if (!Now.contains(Key)) Changed.push_back(Bounds);
-            for (auto& C : Casters) if (C.m_bDynamic) if (auto It = m_Previous.find(C.m_Key); It != m_Previous.end()) Changed.push_back(It->second);
-            m_Previous = std::move(Now);
+            Changed.reserve(ChangedWorld.size());
+            for (auto& B : ChangedWorld) Changed.push_back(Bounds(B));
 
             const xmath::fvec3 C = ToLight(Camera);
             for (int L = 0; L < clipmap_levels_v; ++L)
@@ -149,15 +132,12 @@ namespace xlionrender::shadows
 
         xmath::fvec3 ToLight(const xmath::fvec3& P) const noexcept { return { P.Dot(m_X), P.Dot(m_Y), P.Dot(m_Z) }; }
 
-        // Light-space bounds of a world box under L2W
-        lbox Bounds(const xmath::fbbox& Local, const xmath::fmat4& L2W) const noexcept
+        // Light-space bounds of a world box
+        lbox Bounds(const xmath::fbbox& World) const noexcept
         {
             lbox B;
             for (int i = 0; i < 8; ++i)
-            {
-                const xmath::fvec3 P{ (i & 1) ? Local.m_Max.m_X : Local.m_Min.m_X, (i & 2) ? Local.m_Max.m_Y : Local.m_Min.m_Y, (i & 4) ? Local.m_Max.m_Z : Local.m_Min.m_Z };
-                B.Add(ToLight(L2W * P));
-            }
+                B.Add(ToLight({ (i & 1) ? World.m_Max.m_X : World.m_Min.m_X, (i & 2) ? World.m_Max.m_Y : World.m_Min.m_Y, (i & 4) ? World.m_Max.m_Z : World.m_Min.m_Z }));
             return B;
         }
 
@@ -190,7 +170,6 @@ namespace xlionrender::shadows
     private:
         std::array<slot, atlas_tiles_v * atlas_tiles_v>  m_Slots{};
         std::array<bool, clipmap_levels_v>               m_bDepthSet{};
-        std::unordered_map<std::uint64_t, lbox>          m_Previous;
         float                                            m_Level0TileSize = 0;
         bool                                             m_bHasBasis = false;
     };

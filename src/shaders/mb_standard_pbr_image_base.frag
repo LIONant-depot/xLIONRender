@@ -56,6 +56,16 @@
 
 layout(location = 0) in VaryingFull In;
 
+#ifndef XLION_LDR_OUTPUT
+struct LocalLightData                  // xLIONRender: a point or spot light (shaders/xlionrender_local_lights.glsl)
+{
+	vec4 PosRadius;                    // camera-centered position, radius
+	vec4 Color;                        // rgb: color * intensity, w: cos of the spot's inner angle
+	vec4 DirCosOuter;                  // spot: direction, w cos of the outer angle; point: w = -2
+	vec4 Shadow;                       // x: first atlas tile (-1 none), y: near, z: tan of the half field of view
+};
+#endif
+
 layout(set = 2, binding = 1) uniform lighting_uniforms
 {
 	vec4 LightColor;                   // Light color (RGB) * intensity (assume premultiplied)
@@ -69,6 +79,8 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 CameraPos;
 	vec4 ShadowLevels[4];
 	vec4 ShadowParams;
+	vec4 LocalCount;                     // x: lights in Local[]
+	LocalLightData Local[32];          // shadows::max_local_lights_v
 #endif
 } UBOLight;
 
@@ -203,6 +215,10 @@ vec3 TransformNotmalToWorld(vec3 inNormal)
 	return normalize(inNormal.x * In.Tangent.xyz + inNormal.y * vB.xyz + inNormal.z * In.Normal.xyz);
 }
 
+#ifndef XLION_LDR_OUTPUT
+#include "xlionrender_local_lights.glsl"
+#endif
+
 //-------------------------------------------------------------------------------------------
 // PBRLightingImageBase: 2025-Inspired, Quality/Perf Optimized
 //-------------------------------------------------------------------------------------------
@@ -246,13 +262,28 @@ vec3 PBRLightingImageBase
 #else
 	float   Shadow              = UBOLight.wSpaceLightPos.w == 0.0 ? ShadowClipmap(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz) : 1.0;
 #endif
-	vec3    lightVec			= UBOLight.wSpaceLightPos.xyz - In.wSpacePosition.xyz;
-	float   distance			= length(lightVec);
-	float   radius				= UBOLight.wSpaceLightPos.w;
-	float   att					= Attenuate(distance, radius);
-	vec3	L					= lightVec / distance;
+	// W == 0 is a directional light (XYZ = direction towards the light), W > 0 a point light with that falloff radius
+	vec3	L;
+	float	att;
+	if (UBOLight.wSpaceLightPos.w == 0.0)
+	{
+		L	= normalize(UBOLight.wSpaceLightPos.xyz);
+		att	= 1.0;
+	}
+	else
+	{
+		vec3    lightVec		= UBOLight.wSpaceLightPos.xyz - In.wSpacePosition.xyz;
+		float   distance		= length(lightVec);
+		att						= Attenuate(distance, UBOLight.wSpaceLightPos.w);
+		L						= lightVec / distance;
+	}
 	float	NdotL				= saturate(dot(N, L));
-	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return ambient + emissive;
+#ifndef XLION_LDR_OUTPUT
+	const vec3 Local = LocalLights(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic);
+#else
+	const vec3 Local = vec3(0.0);
+#endif
+	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return ambient + Local + emissive;
 
 	// Commit to lit path: Rest here.
 	vec3	H					= normalize(V + L);
@@ -279,7 +310,7 @@ vec3 PBRLightingImageBase
 	vec3	radiance			= UBOLight.LightColor.rgb * lightTint * att * UBOLight.LightParams.z; // Apply intensity mult
 	vec3	directLighting		= (diffuse + specular) * radiance * NdotL * Shadow;
 
-	return ambient + directLighting + emissive;
+	return ambient + directLighting + Local + emissive;
 }
 
 

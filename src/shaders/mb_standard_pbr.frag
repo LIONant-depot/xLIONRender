@@ -57,6 +57,16 @@
 
 layout(location = 0) in VaryingFull In;
 
+#ifndef XLION_LDR_OUTPUT
+struct LocalLightData                  // xLIONRender: a point or spot light (shaders/xlionrender_local_lights.glsl)
+{
+	vec4 PosRadius;                    // camera-centered position, radius
+	vec4 Color;                        // rgb: color * intensity, w: cos of the spot's inner angle
+	vec4 DirCosOuter;                  // spot: direction, w cos of the outer angle; point: w = -2
+	vec4 Shadow;                       // x: first atlas tile (-1 none), y: near, z: tan of the half field of view
+};
+#endif
+
 layout(set = 2, binding = 1) uniform lighting_uniforms
 {
 	vec4 LightColor;                   // Light color (RGB) * intensity (assume premultiplied)
@@ -70,6 +80,8 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 CameraPos;                    // world position of the camera (wSpacePosition is camera-centered)
 	vec4 ShadowLevels[4];              // per clipmap level: xy first tile of the window, z tile size, w depth center
 	vec4 ShadowParams;                 // x: 1 shadows on, y: level 0 depth half range
+	vec4 LocalCount;                     // x: lights in Local[]
+	LocalLightData Local[32];          // shadows::max_local_lights_v
 #endif
 } UBOLight;
 
@@ -191,6 +203,10 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
     return normalize(inNormal.x * In.Tangent.xyz + inNormal.y * vB.xyz + inNormal.z * In.Normal.xyz);  
 }
 
+#ifndef XLION_LDR_OUTPUT
+#include "xlionrender_local_lights.glsl"
+#endif
+
 //-------------------------------------------------------------------------------------------
 // PBRLighting: 2025-Inspired, Quality/Perf Optimized
 //-------------------------------------------------------------------------------------------
@@ -243,7 +259,12 @@ vec3 PBRLighting
 		L						= lightVec / distance;
 	}
 	float	NdotL				= saturate(dot(N, L));
-	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return ambient + emissive;
+#ifndef XLION_LDR_OUTPUT
+	const vec3 Local = LocalLights(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic);
+#else
+	const vec3 Local = vec3(0.0);
+#endif
+	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return ambient + Local + emissive;
 
 	// Commit to lit path: Rest here.
 	vec3	H					= normalize(V + L);
@@ -274,5 +295,5 @@ vec3 PBRLighting
 	vec3	radiance			= UBOLight.LightColor.rgb * lightTint * att * UBOLight.LightParams.z; // Apply intensity mult
 	vec3	directLighting		= (diffuse + specular) * radiance * NdotL * Shadow;
 
-	return ambient + directLighting + emissive;
+	return ambient + directLighting + Local + emissive;
 }

@@ -435,8 +435,16 @@ warps (PSM / LiSPSM / TSM) are out: camera-dependent, so nothing caches, and the
   direction everything); exact texel fetches (a filtered fetch at a tile edge blended in the unrelated neighbor slot).
   Tested (`xlionrender_test_shadows`): shadows present, an unchanged frame renders 0 tiles, the cached image equals a
   full rebuild after a caster moves (10 of 64 tiles re-rendered), a camera move re-renders only the new tiles (7 of 64).
-- **Phase 2:** point lights (6 atlas tiles per cube, each cached on its own) and spot lights, tiles sized by importance;
-  per-object tiles for dynamic objects (characters) - their own tight, high-resolution tile each frame.
+- **Phase 2 (done):** local lights and their shadows. `scene` has `m_Sun` (directional) and `m_LocalLights` (point / spot,
+  up to 32, in the lighting UBO; the HDR PBR shaders loop over them: `shaders/xlionrender_local_lights.glsl`). The atlas
+  is 8192x4096: the clipmap in the left half, local tiles (512^2) in the right: 6 per point light (a cube), 1 per spot
+  (`features/shadows/xlionrender_shadow_local.h`). A light keeps its tiles while it does not move; they re-render when a
+  changed caster's bounds touch its sphere. The caster diff (new, gone, skinned) is done once per frame for both.
+  Tested (`xlionrender_test_local_shadows`): the light lights, its shadow is there, an unchanged frame renders 0 tiles,
+  a moved caster re-renders only the near light's 6 faces and the cached image equals a full rebuild, a spot's 1 tile.
+  Image-based PBR materials got the directional branch (they treated the sun as a zero-radius point: no light).
+- **Phase 2b:** per-object tiles for dynamic objects (characters) - their own tight, high-resolution tile each frame;
+  tiles sized by importance; per-face invalidation; normal-offset bias (grazing-angle speckle at the terminator).
 - **Later:** static/dynamic tile separation (copy the static depth, draw only the movers); virtual shadow maps once xGPU
   has compute + indirect (smaller tiles = pages, GPU page marking from the depth buffer - same pool, cache, sampling);
   contact shadows.

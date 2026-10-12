@@ -10,10 +10,12 @@
 #include "view/xlionrender_render_view.h"
 #include "meshes/xlionrender_cluster_geom.h"
 #include "features/shadows/xlionrender_shadow_clipmap.h"
+#include "features/shadows/xlionrender_shadow_local.h"
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
 #include <vector>
 #include <functional>
+#include <unordered_map>
 
 namespace xlionrender
 {
@@ -130,6 +132,10 @@ namespace xlionrender
         xgpu::buffer                            m_ShadowUBO;
         shadows::clipmap                        m_Clipmap;
         std::vector<shadows::tile_to_render>    m_ShadowTiles;
+        shadows::local_shadows                  m_LocalShadows;
+        std::vector<shadows::local_tile_to_render> m_LocalTiles;
+        std::vector<int>                        m_LocalFirstTile;   // per scene local light: its first atlas tile, -1 none
+        std::unordered_map<std::uint64_t, xmath::fbbox> m_PrevCasters;  // last frame's casters (key -> world bounds), to find what changed
         int                                     m_nShadowTilesRendered = 0;
         bool                                    m_bShadowAtlasReady    = false;         // stands in for the shadow map until shadows exist
         xgpu::buffer                m_LightUBO;

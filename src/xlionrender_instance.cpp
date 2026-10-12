@@ -148,7 +148,7 @@ namespace xlionrender
         }
 
         // The shadow atlas: every lit pipeline samples it in slot 0
-        if( auto Err = Device.Create(m_ShadowAtlas, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = shadows::atlas_size_v, .m_Height = shadows::atlas_size_v, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = Device.Create(m_ShadowAtlas, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = shadows::atlas_width_v, .m_Height = shadows::atlas_size_v, .m_isGamma = false }); Err ) return Err;
 
         // Forward standard-material pipeline
         {

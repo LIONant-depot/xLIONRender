@@ -46,16 +46,16 @@ int main()
     const auto Ground = xmath::fmat4::fromTranslation({ 0, -0.55f, 0 }) * xmath::fmat4::fromScale({ 10.0f, 0.1f, 10.0f });
     const auto Lifted = [](float X) { return xmath::fmat4::fromTranslation({ X, 0.3f, 0 }); };
     Scene.m_Draws = { { .m_Mesh = Box, .m_L2W = Ground }, { .m_Mesh = Sphere, .m_L2W = Lifted(0) } };
-    Scene.m_Light   = { .m_Direction = { 0.3f, -1.0f, 0.2f }, .m_Intensity = 3, .m_ShadowTileSize = 0.5f };
+    Scene.m_Sun   = { .m_Direction = { 0.3f, -1.0f, 0.2f }, .m_Intensity = 3, .m_ShadowTileSize = 0.5f };
     Scene.m_Ambient = { 0.1f, 0.1f, 0.1f };
 
     constexpr int total_tiles_v = xlionrender::shadows::clipmap_levels_v * xlionrender::shadows::clipmap_tiles_v * xlionrender::shadows::clipmap_tiles_v;
 
     // Shadows off vs on
     std::vector<float> Off, On;
-    Scene.m_Light.m_bCastShadows = false;
+    Scene.m_Sun.m_bCastShadows = false;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Off), "Render without shadows");
-    Scene.m_Light.m_bCastShadows = true;
+    Scene.m_Sun.m_bCastShadows = true;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, On), "Render with shadows");
     CHECK(Renderer.getShadowTilesRendered() == total_tiles_v, "The first shadowed frame renders every tile (%d of %d)", Renderer.getShadowTilesRendered(), total_tiles_v);
 

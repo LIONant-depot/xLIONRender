@@ -41,14 +41,14 @@ int main()
 
     xlionrender::scene Scene;
     Scene.m_Draws.push_back({ .m_Mesh = Sphere, .m_Material = { .m_BaseColor = { 0.8f, 0.8f, 0.8f }, .m_Roughness = 0.6f } });
-    Scene.m_Light.m_Direction = { 0, -1, 0.3f };          // travels downwards: lights the top
+    Scene.m_Sun.m_Direction = { 0, -1, 0.3f };          // travels downwards: lights the top
     Scene.m_Ambient         = { 0, 0, 0 };
 
     // A: intensity 2, B: intensity 4
     std::vector<float> A, B;
-    Scene.m_Light.m_Intensity = 2;
+    Scene.m_Sun.m_Intensity = 2;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, A), "Render A");
-    Scene.m_Light.m_Intensity = 4;
+    Scene.m_Sun.m_Intensity = 4;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, B), "Render B");
 
     int nLit = 0;

@@ -7,6 +7,8 @@
 #include "xlionrender.h"
 #include "dependencies/xprim_geom/source/xprim_geom.h"
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <cmath>
 #include <algorithm>
 #include <array>
@@ -38,6 +40,20 @@ namespace xlionrender::test
         Red.resize(std::size_t(W) * H);
         for (std::size_t i = 0; i < Red.size(); ++i) Red[i] = HalfToFloat(p[i * 4]);
         return true;
+    }
+
+    // To look at a ReadHDR image: with XLIONRENDER_TEST_DUMP=<folder>, writes <folder>/<Name>.pgm (red, x / (1 + x) to 8 bits)
+    inline void Dump(const char* pName, const std::vector<float>& Red) noexcept
+    {
+        const char* pDir = std::getenv("XLIONRENDER_TEST_DUMP");
+        if (pDir == nullptr) return;
+        const int Side = int(std::sqrt(double(Red.size())));
+        if (FILE* f = std::fopen((std::string(pDir) + "/" + pName + ".pgm").c_str(), "wb"))
+        {
+            std::fprintf(f, "P5 %d %d 255\n", Side, Side);
+            for (float V : Red) std::fputc(int(255.0f * std::max(V, 0.0f) / (1.0f + std::max(V, 0.0f))), f);
+            std::fclose(f);
+        }
     }
 
     inline xprim_geom::mesh MakeSphere() noexcept { return xprim_geom::uvsphere::Generate(32, 32, 1, 0.5f); }

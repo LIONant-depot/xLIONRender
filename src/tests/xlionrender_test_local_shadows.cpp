@@ -1,0 +1,132 @@
+// Point and spot lights and their atlas shadows (features/shadows/xlionrender_shadow_local.h). A sphere over a ground slab, no sun:
+//  - a point light lights the scene (brighter than without it)
+//  - its shadow is there: with shadows on no texel gets brighter and a patch of the ground gets clearly darker
+//  - tiles: the first frame renders 6 per shadowed point light, an unchanged frame none (same image)
+//  - invalidation: the sphere moves -> only the light whose radius reaches it re-renders its 6 faces, and the cached image equals
+//    the image with every tile re-rendered (m_bShadowCache = false)
+//  - a spot light: 1 tile, and its shadow is there too
+#include "xlionrender_test_common.h"
+
+using namespace xlionrender::test;
+
+namespace
+{
+    bool MakeMesh(xlionrender::instance& Renderer, const xprim_geom::mesh& Prim, xlionrender::mesh_id& Id) noexcept
+    {
+        std::vector<xlionrender::vertex> Verts(Prim.m_Vertices.size());
+        for (std::size_t i = 0; i < Verts.size(); ++i)
+        {
+            const auto& V = Prim.m_Vertices[i];
+            Verts[i] = { { V.m_Position.m_X, V.m_Position.m_Y, V.m_Position.m_Z }, { V.m_Texcoord.m_X, V.m_Texcoord.m_Y }, 0xffffffffu
+                       , { V.m_Normal.m_X, V.m_Normal.m_Y, V.m_Normal.m_Z }, { V.m_Tangent.m_X, V.m_Tangent.m_Y, V.m_Tangent.m_Z, V.m_Tangent.m_D } };
+        }
+        return Renderer.CreateMesh(Id, Verts, Prim.m_Indices) == nullptr;
+    }
+
+    // Texels clearly darker in On than in Off; -1 when one is not finite or got brighter
+    int CountDarker(const std::vector<float>& Off, const std::vector<float>& On) noexcept
+    {
+        int nDarker = 0;
+        for (std::size_t i = 0; i < On.size(); ++i)
+        {
+            if (!std::isfinite(On[i]) || On[i] > Off[i] * 1.001f + 1e-4f)
+            {
+                std::printf("texel %d: %f -> %f\n", int(i), Off[i], On[i]);
+                return -1;
+            }
+            if (On[i] < Off[i] * 0.6f) ++nDarker;
+        }
+        return nDarker;
+    }
+}
+
+int main()
+{
+    app App;
+    CHECK(App.Init(), "Init");
+    auto& Renderer = App.m_Renderer;
+    auto& Device   = App.m_Device;
+
+    xlionrender::mesh_id Sphere, Box;
+    CHECK(MakeMesh(Renderer, MakeSphere(), Sphere), "sphere");
+    CHECK(MakeMesh(Renderer, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), Box), "box");
+
+    constexpr int size_v = 128;
+    xlionrender::render_view View;
+    CHECK(!Renderer.CreateView(View, { .m_Width = size_v, .m_Height = size_v }), "CreateView");
+
+    xgpu::tools::view Camera;
+    Camera.setFov(xmath::radian{ 1.0f });
+    Camera.LookAt(xmath::fvec3{ 0, 2.5f, -3.0f }, xmath::fvec3{ 0, 0, 0 });
+
+    xlionrender::scene Scene;
+    const auto Ground = xmath::fmat4::fromTranslation({ 0, -0.55f, 0 }) * xmath::fmat4::fromScale({ 10.0f, 0.1f, 10.0f });
+    const auto Lifted = [](float X) { return xmath::fmat4::fromTranslation({ X, 0.3f, 0 }); };
+    Scene.m_Draws = { { .m_Mesh = Box, .m_L2W = Ground }, { .m_Mesh = Sphere, .m_L2W = Lifted(0) } };
+    Scene.m_Sun   = { .m_Intensity = 0, .m_bCastShadows = false };
+    Scene.m_Ambient = { 0.05f, 0.05f, 0.05f };
+
+    // The point light that matters, and one far away whose radius reaches nothing that moves
+    const xlionrender::local_light Point{ .m_Position = { 0.5f, 1.6f, 0.4f }, .m_Radius = 6.0f, .m_Intensity = 6.0f };
+    const xlionrender::local_light Far  { .m_Position = { 20.0f, 1.0f, 0.0f }, .m_Radius = 2.0f, .m_Intensity = 6.0f };
+
+    // The light lights
+    std::vector<float> Dark, Off, On;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Dark), "Render without lights");
+    Scene.m_LocalLights = { Point, Far };
+    Scene.m_LocalLights[0].m_bCastShadows = Scene.m_LocalLights[1].m_bCastShadows = false;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Off), "Render without shadows");
+    CHECK(Renderer.getShadowTilesRendered() == 0, "Lights without shadows rendered %d tiles", Renderer.getShadowTilesRendered());
+    int nLit = 0;
+    for (std::size_t i = 0; i < Off.size(); ++i) nLit += Off[i] > Dark[i] * 1.5f + 0.01f;
+    std::printf("texels lit by the point light: %d\n", nLit);
+    CHECK(nLit > size_v * size_v / 4, "The point light lit only %d texels", nLit);
+
+    // Its shadow
+    Scene.m_LocalLights[0].m_bCastShadows = Scene.m_LocalLights[1].m_bCastShadows = true;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, On), "Render with shadows");
+    CHECK(Renderer.getShadowTilesRendered() == 12, "The first frame renders 6 tiles per point light (%d)", Renderer.getShadowTilesRendered());
+    Dump("point_off", Off); Dump("point_on", On);
+    const int nDarker = CountDarker(Off, On);
+    std::printf("point shadowed texels: %d\n", nDarker);
+    CHECK(nDarker > 150, "Only %d texels in the point light's shadow", nDarker);
+
+    // Caching
+    std::vector<float> Again;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Again), "Render again");
+    CHECK(Renderer.getShadowTilesRendered() == 0, "An unchanged scene re-rendered %d tiles", Renderer.getShadowTilesRendered());
+    for (std::size_t i = 0; i < On.size(); ++i) CHECK(Again[i] == On[i], "The cached frame differs at %d", int(i));
+
+    // The sphere moves: the near light's 6 faces re-render, the far light's do not; cached equals rebuilt
+    Scene.m_Draws[1].m_L2W = Lifted(0.4f);
+    std::vector<float> Cached, Rebuilt;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Cached), "Render moved (cached)");
+    CHECK(Renderer.getShadowTilesRendered() == 6, "A moved caster re-rendered %d tiles (expected the near light's 6)", Renderer.getShadowTilesRendered());
+    Renderer.m_bShadowCache = false;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Rebuilt), "Render moved (rebuilt)");
+    CHECK(Renderer.getShadowTilesRendered() == 12, "Without the cache every tile renders (%d)", Renderer.getShadowTilesRendered());
+    Renderer.m_bShadowCache = true;
+    for (std::size_t i = 0; i < Cached.size(); ++i) CHECK(Cached[i] == Rebuilt[i], "Cached and rebuilt shadows differ at %d (%f vs %f)", int(i), Cached[i], Rebuilt[i]);
+    int nChanged = 0;
+    for (std::size_t i = 0; i < Cached.size(); ++i) nChanged += Cached[i] != On[i];
+    CHECK(nChanged > 0, "Moving the sphere changed nothing on screen");
+
+    // A spot light pointing down at the sphere: 1 tile, a shadow
+    xlionrender::local_light Spot{ .m_Type = xlionrender::local_light::type::SPOT, .m_Position = { 0.3f, 2.0f, 0.2f }, .m_Direction = { -0.1f, -1.0f, -0.1f }
+                                 , .m_Radius = 6.0f, .m_InnerAngle = 0.6f, .m_OuterAngle = 0.8f, .m_Intensity = 8.0f, .m_bCastShadows = false };
+    Scene.m_LocalLights = { Spot };
+    std::vector<float> SpotOff, SpotOn;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, SpotOff), "Render spot without shadows");
+    Scene.m_LocalLights[0].m_bCastShadows = true;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, SpotOn), "Render spot with shadows");
+    CHECK(Renderer.getShadowTilesRendered() == 1, "A spot light renders 1 tile (%d)", Renderer.getShadowTilesRendered());
+    Dump("spot_on", SpotOn);
+    const int nSpot = CountDarker(SpotOff, SpotOn);
+    std::printf("spot shadowed texels: %d\n", nSpot);
+    CHECK(nSpot > 150, "Only %d texels in the spot light's shadow", nSpot);
+
+    Renderer.DestroyView(View);
+    CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
+    std::printf("PASS\n");
+    return 0;
+}

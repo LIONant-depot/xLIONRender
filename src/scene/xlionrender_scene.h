@@ -59,24 +59,40 @@ namespace xlionrender
         std::uint64_t               m_UserID        = 0;    // e.g. the entity; what editor pick/ID passes write
     };
 
-    // The one light of the first slice (mb_standard_pbr.frag shades one): directional when m_Radius == 0, else a point light
-    struct light
+    // The directional light (the sun): shades everything, shadowed by the shadow clipmap
+    struct sun_light
     {
-        xmath::fvec3    m_Direction     { -0.5f, -1.0f, -0.3f };    // directional: the direction the light travels
-        xmath::fvec3    m_Position      { 0, 0, 0 };                // point: world position
-        float           m_Radius        = 0;                        // point: falloff radius (0 = directional)
-        float           m_AreaRadius    = 0;                        // point: softens the falloff and highlight
+        xmath::fvec3    m_Direction     { -0.5f, -1.0f, -0.3f };    // the direction the light travels
         float           m_Temperature   = 0;                        // Kelvin tint, 0 = none
         xmath::fvec3    m_Color         { 1, 1, 1 };
         float           m_Intensity     = 4.0f;                     // ponytail: unitless until the physical-unit contract (research doc §6) is approved
-        bool            m_bCastShadows  = true;                     // directional: the shadow clipmap (point lights: phase 2)
-        float           m_ShadowTileSize = 1.0f;                    // directional: world size of a clipmap level-0 tile (512 texels); the levels double it
+        bool            m_bCastShadows  = true;
+        float           m_ShadowTileSize = 1.0f;                    // world size of a clipmap level-0 tile (512 texels); the levels double it
     };
+
+    // A point or spot light (up to max_local_lights_v per scene, the nearest first is up to the caller); shadows from atlas tiles:
+    // 6 for a point light (a cube), 1 for a spot
+    struct local_light
+    {
+        enum class type : std::uint8_t { POINT, SPOT };
+
+        type            m_Type          = type::POINT;
+        xmath::fvec3    m_Position      { 0, 0, 0 };
+        xmath::fvec3    m_Direction     { 0, -1, 0 };               // SPOT: where it points
+        float           m_Radius        = 5.0f;                     // falloff radius (zero light at and beyond it)
+        float           m_InnerAngle    = 0.4f;                     // SPOT: radians from the axis: full light inside, fading to the outer
+        float           m_OuterAngle    = 0.6f;                     // SPOT: radians (at most ~1 rad: a 115 degree shadow frustum)
+        xmath::fvec3    m_Color         { 1, 1, 1 };
+        float           m_Intensity     = 4.0f;
+        bool            m_bCastShadows  = true;
+    };
+    constexpr int max_local_lights_v = 32;
 
     struct scene
     {
         std::vector<draw>           m_Draws;
-        light                       m_Light;
+        sun_light                   m_Sun;
+        std::vector<local_light>    m_LocalLights;
         xmath::fvec3                m_Ambient   { 0, 0, 0 };
     };
 }
