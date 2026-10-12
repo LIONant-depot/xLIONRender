@@ -69,3 +69,6 @@ ipch/
 
 # Fetched dependencies (populated at configure time, not checked in)
 dependencies
+
+# Test build tree (Build/test/CMakeLists.txt is tracked)
+Build/test/vs2022/

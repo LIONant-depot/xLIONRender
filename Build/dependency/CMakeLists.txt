@@ -34,6 +34,40 @@ foreach(STAGE_PAIR "frag:primitive_frag" "vert:primitive_vert" "frag:outline_fra
   list(APPEND XLIONRENDER_GENERATED_HEADERS ${SHADER_OUT})
 endforeach()
 
+# The new renderer (xlionrender::instance, see documentation/xlion_renderer_research.md): an INTERFACE library like
+# xGPU - every binary that links it compiles its own copy (instances are per binary, there are no globals). Its
+# shaders include the shared library in src/shaders, hence -I.
+set(XLIONRENDER_LIB_SHADERS)
+foreach(STAGE_PAIR "vert:xlionrender_forward_vert" "frag:xlionrender_forward_standard_frag" "vert:xlionrender_fullscreen_vert"
+                   "frag:xlionrender_tonemap_frag" "frag:xlionrender_blit_frag" "vert:xlionrender_static_geom_vert")
+  string(REPLACE ":" ";" STAGE_PAIR_LIST ${STAGE_PAIR})
+  list(GET STAGE_PAIR_LIST 0 STAGE)
+  list(GET STAGE_PAIR_LIST 1 NAME)
+  set(SHADER_OUT "${CMAKE_BINARY_DIR}/sprv_shaders_h/${NAME}.h")
+  file(GLOB XLIONRENDER_SHADER_LIBRARY CONFIGURE_DEPENDS "${XLIONRENDER_SHADER_DIR}/*")
+  add_custom_command(
+    OUTPUT ${SHADER_OUT}
+    COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=${STAGE} -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
+    DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
+    COMMENT "Compiling xLIONRender ${STAGE} shader ${NAME}"
+  )
+  list(APPEND XLIONRENDER_LIB_SHADERS ${SHADER_OUT})
+endforeach()
+
+# The compiled shaders are built by their own target: a custom command's output is not visible to the consumers'
+# directories, so it cannot be an INTERFACE source (CMake 3.19+ propagates the dependency to whoever links the library)
+add_custom_target(xLIONRender_lib_shaders DEPENDS ${XLIONRENDER_LIB_SHADERS})
+add_library(xLIONRender_lib INTERFACE)
+add_dependencies(xLIONRender_lib xLIONRender_lib_shaders)
+target_sources(xLIONRender_lib INTERFACE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_instance.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../src/plans/forward/xlionrender_plan_forward.cpp"
+)
+target_include_directories(xLIONRender_lib INTERFACE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../src"
+  "${CMAKE_BINARY_DIR}/sprv_shaders_h"
+)
+
 # xLIONRender's own shared library - proves this DLL is a real home for components + a system, same
 # shape as xLIONCore. Self-registers via XecsPlugin_RegisterComponents/RegisterSystems (see
 # xlionrender_plugin_entry.cpp's own comment) - xLION.exe never includes primitive/system directly.
