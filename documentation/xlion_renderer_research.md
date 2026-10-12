@@ -450,3 +450,80 @@ warps (PSM / LiSPSM / TSM) are out: camera-dependent, so nothing caches, and the
   contact shadows.
 - The editors' grid still receives the editor's own shadow map (xeditor_tools grid); it moves when the grid becomes a
   renderer shadow receiver.
+
+## HypeHype perspective (added 2026-10-12)
+
+Sources in `E:\source_code`: Aaltonen, *HypeHype Mobile Rendering Architecture* (SIGGRAPH 2023 Advances); Aaltonen,
+*Transitioning HypeHype to PBR* (SIGGRAPH 2024 MMG); Lempiäinen, *Stochastic Tile-Based Lighting in HypeHype*
+(SIGGRAPH 2025 Advances). A UGC platform on $99 phones up to PCs, with the editor running on the device: the
+closest reference to xLION's situation. Their governing rule: **prefer fixed-cost techniques**. Kitbashed user
+content is unpredictable, so the cost must not follow scene complexity. Bandwidth, not ALU, is the budget.
+
+**Confirms what we do:**
+- Persistent shadow atlas, static/dynamic maps, updates only when a light moves (our cached tiles; static/dynamic
+  separation is already under *Later*).
+- One shadow render pass with a viewport per tile.
+- A separate position stream (tiled GPUs bin with positions only; shadow passes). `xgeom_static` has one.
+- Bump-allocated per-draw data with dynamic offsets, global data separate (`allocEntry` + `setDynamicUBO`).
+- Mock user code first; validation-layer errors fail the tests (`g_nErrors`).
+- Compact deferred (Plan B) stays a gated experiment. HypeHype went deferred because dense kitbashed geometry gave
+  ~60% extra pixel waves in forward lighting, and SSAO wants the depth first. Our Level scenes will get there.
+
+**Adopted:**
+1. **Atlas memory per platform.** 8192x4096 D32F is ~134 MB: a PC number. The sun's clipmap (the camera's
+   "little world": world-anchored tiles around the camera) keeps D32F at a per-platform size. Local lights get a
+   separate 16-bit atlas (`DEPTH_U16`) holding *linear* distance (written by the remap pass below; hyperbolic depth
+   in 16 bits loses the far range), also sized per platform. STB uses 16 bits.
+2. **A per-frame tile budget.** Shadow tiles to re-render go through one priority queue (importance: screen size,
+   distance, how often the lighting picks the light); past the budget they stay a frame stale. Fifty lights moving
+   at once must not spike the frame (STB load-balances the same way).
+3. **Light selection that does not scale with light count:** the world-cell reservoirs below, superseding the
+   32-light loop and the CPU 32x32 screen-tile binning HypeHype 2024 ships (also no compute, but per view).
+4. **Slim per-draw data.** `ubo_static_geom_mesh` drops `m_L2CShadowT` (always `NoShadow` now) and `m_L2w` becomes
+   3x4: 192 -> 112 bytes per draw. Indexed loads are slow on mobile; uniform-address loads are the fast path.
+5. **Pipelines built at material load,** not at first draw (first-sight stutter). HypeHype builds every PSO at load.
+
+**Octahedral maps (adopted for point-light shadows, planned for reflections):**
+- **Point shadows:** render the 6 cube faces into a scratch D32F (3x2 tiles), then a remap pass writes **one**
+  square octahedral tile of linear radial distance into the local atlas, with a 2 px border for PCF (STB). One tile
+  instead of six, one lookup, no face selection in the shader, any power-of-two size (sized by importance). Spot
+  lights go through the same remap (linearize + border), so the atlas has one format and one sampling path.
+- **Reflections:** octahedral probe maps instead of cubemaps: filtered in one pass instead of six, packable in a 2D
+  atlas with the same tile manager, and WebGL2 has no cubemap arrays (the web target).
+
+**Taking STB further: world-cell light reservoirs.** STB picks, per *screen* tile, 1-4 lights out of all of them
+(two-stage stratified reservoir sampling) and leans on TAA to remove the noise, which they have not solved. Four
+changes fit xLION better:
+
+- **Cells in the little world, not on the screen.** Reservoirs live in a camera-centered clipmap of world cells
+  (the shadow clipmap's structure: world-anchored, slot = index mod window). A cell's light set does not depend on
+  the view, so it is **cached** (re-sampled only when a light that reaches it changes - the same conservative
+  invalidation as shadow tiles), **shared by every view** (editor viewports, thumbnails), and **identical for both
+  XR eyes** - screen-tile stochastic lighting gives each eye different noise, which is visible in stereo.
+- **Exact head, sampled tail.** Each cell keeps its top-K lights (K = 4..8, by the importance PDF) evaluated
+  **exactly**, and only the remainder - the tail of weak contributors - is stochastic (1 weighted sample) or merged
+  into one unshadowed aggregate light (lightcuts-style). With at most K lights reaching a cell the result equals
+  today's loop: noise-free, so still frames in the editors are clean and our image tests stay deterministic (cached
+  == rebuilt). Noise appears only where many weak lights overlap, where it matters least.
+- **Visibility from the cached shadow tiles.** The PDF uses a coarse occlusion term taken from the light's (cached)
+  atlas tile over the cell's bounds: a light fully hidden from a cell gets weight 0, without STB's 4 stochastic
+  shadow samples per tile (their source of bias at light boundaries).
+- **One importance number.** The same per-light importance drives the cell sampling, the shadow tile's size and
+  its place in the update queue (adopted item 2): the lights the cells pick most get shadow resolution first.
+
+No compute needed: the CPU fills the cells (HypeHype bins 32x32 tiles on one thread inside L1 - a cell clipmap is
+the same order of data) and uploads them as a small buffer; the shader finds its cell from the world position like
+`ShadowClipmap` finds its tile. Fixed cost per pixel: K exact lights + 1 tail sample. Compute-side culling and
+temporal reservoir reuse come with xGPU compute. Open points: cell size per clipmap level, K per platform, the tail
+(sample vs aggregate - measure both), translucent and volumetric lookups (cells are 3D, so they work there too,
+which screen tiles do not).
+
+**Worth knowing, later:** fp16 lighting math (Filament's Lagrange-identity GGX for half precision); barriers that
+let vertex work overlap the previous pass (~15% GPU when missing); post-processing folded into the tone-map pass;
+half resolution + 30 fps on slow GPUs; GTAO at half resolution with a bilateral upscale; material data packed as
+fp16 in one 128-bit load; draw streams (only the changed fields per draw) and user-land bind groups (xGPU
+direction); generational handles (index + generation, weak references).
+
+**Next phase (shadows phase 3):** adopted items 1 and 2 with octahedral point shadows: the clipmap atlas and a 16-bit
+local atlas, each sized per platform; the scratch render + remap pass (point: cube -> octahedral, spot: linearize),
+borders, tiles sized by importance; the per-frame tile budget. Then item 4, the world-cell reservoirs, item 5.
