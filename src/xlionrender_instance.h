@@ -149,6 +149,9 @@ namespace xlionrender
         void                        updateInstances ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        writeLocalLights( const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept;
         void                        updateEnvironment( xgpu::window& Window, const scene& Scene )               noexcept;
+        void                        renderScenePass ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept;
+        void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
+        void                        prefilterInto   ( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept;
         std::vector<xgpu::pipeline::sampler>                    LitSamplers ( void ) const                     noexcept;
         std::vector<xgpu::pipeline_instance::sampler_binding>   LitBindings ( std::span<xgpu::texture* const> Textures ) noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
@@ -232,7 +235,7 @@ namespace xlionrender
         // The environment probe (features/environment; shaders/xlionrender_environment*.glsl): the sky into an octahedral source, the
         // source prefiltered into a roughness atlas, the split-sum DFG table. Lit pipelines bind the atlas and the table at samplers
         // 8 and 9 (0-7: the shadow atlas and the material's textures, padded with white).
-        static constexpr int        lit_samplers_v          = 10;
+        static constexpr int        lit_samplers_v          = 11;           // + 10: the probe atlas
         static constexpr int        env_source_size_v       = 256;
         static constexpr int        env_dfg_size_v          = 64;
         static constexpr int        env_source_levels_v     = 6;            // the source pyramid: 256 .. 8 (filtered importance sampling)
@@ -247,7 +250,32 @@ namespace xlionrender
         bool                        m_bEnvDFGReady          = false;
         bool                        m_bEnvOn                = false;
         float                       m_EnvIntensity          = 0;
+        // Reflection probes: a 4x4 atlas of the sky layout's slots, 6 capture views (128^2) for the probe being captured, the cube ->
+        // octahedral pass into the environment source (then the sky's pyramid and prefilter, into the probe's slot)
+        static constexpr int        probe_face_size_v       = 128;
+        struct probe_state
+        {
+            std::uint64_t           m_Key       = 0;        // the probe it holds (position, box)
+            bool                    m_bValid    = false;    // captured at least once
+            bool                    m_bDirty    = true;
+        };
+        xgpu::texture               m_ProbeAtlas;
+        xgpu::renderpass            m_ProbeAtlasClearPass, m_ProbeAtlasPass;
+        bool                        m_bProbeAtlasReady      = false;
+        std::array<render_view, 6>  m_CaptureViews;
+        xgpu::pipeline              m_CubeToOctPipeline;
+        xgpu::pipeline_instance     m_CubeToOctInstance;
+        std::array<probe_state, max_probes_v> m_ProbeStates;
+        int                         m_ProbeCapturing        = -1;       // the probe being captured
+        int                         m_ProbeNextFace         = 0;
+        int                         m_nProbeCaptures        = 0;
+        std::vector<xmath::fbbox>   m_FrameChanged;                     // this frame's changed caster bounds (shadows), for the probes
     public:
+        // At most this many probe faces are captured per frame (a probe needs 6; Flax does 1)
+        int                         m_ProbeFacesPerFrame    = 1;
+        // Completed probe captures so far (tests)
+                      int                  getProbeCaptures( void ) const                                       noexcept { return m_nProbeCaptures; }
+                      const xgpu::texture& getProbeAtlas( void ) const                                          noexcept { return m_ProbeAtlas; }
         // How many times the environment's atlas was (re)built (tests: a static sky builds it once)
                       int                  getEnvironmentBuilds( void ) const                                   noexcept { return m_nEnvBuilds; }
         // The prefiltered environment atlas (tests read it back)
@@ -257,6 +285,7 @@ namespace xlionrender
 
         // The local lights and their cells: host-visible storage buffers, a region per frame in flight, written per render
         static constexpr int        max_lights_v            = 4096;
+        static constexpr int        light_region_v          = 4 * max_lights_v;    // a frame's lights: the main view + probe capture faces
         static constexpr int        max_cell_uints_v        = light_cells::levels_v * light_cells::level_cells_v * light_cells::header_uints_v + 2 * 262144;
         xgpu::buffer                m_LightRing;
         xgpu::buffer                m_CellRing;

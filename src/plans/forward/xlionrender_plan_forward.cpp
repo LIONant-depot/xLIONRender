@@ -84,8 +84,8 @@ namespace xlionrender
         const std::uint64_t Frame = m_Device.getFrameIndex();
         if( Frame != m_LightFrame ) { m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0; }
 
-        const int nLights = std::min({ int(Scene.m_LocalLights.size()), max_lights_v, max_lights_v - m_LightRingUsed });
-        const int LightBase = int(Frame % ring_frames_v) * max_lights_v + m_LightRingUsed;
+        const int nLights = std::min({ int(Scene.m_LocalLights.size()), max_lights_v, light_region_v - m_LightRingUsed });
+        const int LightBase = int(Frame % ring_frames_v) * light_region_v + m_LightRingUsed;
         if( nLights > 0 )
             (void)m_LightRing.MemoryMap(LightBase, nLights, [&](void* pMemory)
             {
@@ -176,7 +176,14 @@ namespace xlionrender
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
         }
-        for( int k = 1; k < env_source_levels_v; ++k )         // the source pyramid, for filtered importance sampling
+        prefilterInto(Window, m_EnvAtlasPass, 0, 0);
+    }
+
+    // The environment source's pyramid (level 0 written by the caller) and its prefilter into Pass' atlas at (OriginX, OriginY):
+    // the 6 roughness levels of the sky layout (xlionrender_environment_atlas.glsl)
+    void instance::prefilterInto( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept
+    {
+        for( int k = 1; k < env_source_levels_v; ++k )
         {
             auto Cmd = Window.StartRenderPass(m_EnvSourcePass[k]);
             Cmd.setPipelineInstance(m_EnvDownsampleInstance[k]);
@@ -185,20 +192,85 @@ namespace xlionrender
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
         }
+        auto Cmd = Window.StartRenderPass(Pass);
+        constexpr float Rects[6][3] = { { 0, 0, 256 }, { 256, 0, 128 }, { 256, 128, 64 }, { 320, 128, 32 }, { 352, 128, 16 }, { 368, 128, 8 } };     // xlionrender_environment_atlas.glsl
+        for( int L = 0; L < 6; ++L )
         {
-            auto Cmd = Window.StartRenderPass(m_EnvAtlasPass);
-            constexpr float Rects[6][3] = { { 0, 0, 256 }, { 256, 0, 128 }, { 256, 128, 64 }, { 320, 128, 32 }, { 352, 128, 16 }, { 368, 128, 8 } };     // xlionrender_environment_atlas.glsl
-            for( int L = 0; L < 6; ++L )
+            const float X = OriginX + Rects[L][0], Y = OriginY + Rects[L][1], S = Rects[L][2];
+            Cmd.setViewport(X, Y, S, S);
+            Cmd.setScissor(int(X), int(Y), int(S), int(S));
+            Cmd.setPipelineInstance(m_EnvPrefilterInstance);
+            Cmd.setPushConstants(details::push_env_prefilter{ { X, Y, S, 0 }, { L / 5.0f, float(env_source_size_v), L == 0 ? 1.0f : 64.0f, 0 } });
+            Cmd.setBuffer(m_FullscreenVB);
+            Cmd.setBuffer(m_FullscreenIB);
+            Cmd.Draw(3);
+        }
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    // Reflection probes: a changed probe (new, moved, or a changed caster in its box) is re-captured, m_ProbeFacesPerFrame faces per
+    // frame (never captured first, then the nearest): each face a scene pass from the probe's center; with its 6 faces done, the
+    // faces -> the octahedral source -> the pyramid and the prefilter into its slot of the probe atlas.
+    void instance::updateProbes( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept
+    {
+        if( !m_bProbeAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ProbeAtlasClearPass); m_bProbeAtlasReady = true; }   // bound by every lit pipeline
+        const int nProbes = std::min(int(Scene.m_Probes.size()), max_probes_v);
+        if( nProbes == 0 ) return;
+
+        for( int i = 0; i < nProbes; ++i )
+        {
+            const auto& Pr = Scene.m_Probes[i];
+            auto&       St = m_ProbeStates[i];
+            const float K[] = { Pr.m_Position.m_X, Pr.m_Position.m_Y, Pr.m_Position.m_Z, Pr.m_BoxMin.m_X, Pr.m_BoxMin.m_Y, Pr.m_BoxMin.m_Z, Pr.m_BoxMax.m_X, Pr.m_BoxMax.m_Y, Pr.m_BoxMax.m_Z };
+            const std::uint64_t Key = Hash(1469598103934665603ull, K, sizeof(K)) | 1;
+            if( Key != St.m_Key ) { St = { Key, false, true }; if( m_ProbeCapturing == i ) m_ProbeNextFace = 0; }
+            const xmath::fbbox Box{ Pr.m_BoxMin, Pr.m_BoxMax };
+            for( const auto& C : m_FrameChanged )
+                if( C.m_Max.m_X >= Box.m_Min.m_X && C.m_Min.m_X <= Box.m_Max.m_X && C.m_Max.m_Y >= Box.m_Min.m_Y && C.m_Min.m_Y <= Box.m_Max.m_Y
+                 && C.m_Max.m_Z >= Box.m_Min.m_Z && C.m_Min.m_Z <= Box.m_Max.m_Z )
+                {
+                    St.m_bDirty = true;
+                    if( m_ProbeCapturing == i ) m_ProbeNextFace = 0;        // its faces so far saw the old scene
+                    break;
+                }
+        }
+        if( m_ProbeCapturing >= nProbes ) m_ProbeCapturing = -1;
+
+        for( int Budget = std::max(m_ProbeFacesPerFrame, 1); Budget > 0; )
+        {
+            if( m_ProbeCapturing < 0 )
             {
-                const auto& R = Rects[L];
-                Cmd.setViewport(R[0], R[1], R[2], R[2]);
-                Cmd.setScissor(int(R[0]), int(R[1]), int(R[2]), int(R[2]));
-                Cmd.setPipelineInstance(m_EnvPrefilterInstance);
-                Cmd.setPushConstants(details::push_env_prefilter{ { R[0], R[1], R[2], 0 }, { L / 5.0f, float(env_source_size_v), L == 0 ? 1.0f : 64.0f, 0 } });
+                float Best = 1e30f;
+                for( int i = 0; i < nProbes; ++i )
+                {
+                    if( !m_ProbeStates[i].m_bDirty ) continue;
+                    const float d = (Scene.m_Probes[i].m_Position - Eye).Length() - (m_ProbeStates[i].m_bValid ? 0.0f : 1e20f);
+                    if( d < Best ) { Best = d; m_ProbeCapturing = i; }
+                }
+                if( m_ProbeCapturing < 0 ) return;
+                m_ProbeNextFace = 0;
+                m_ProbeStates[m_ProbeCapturing].m_bDirty = false;    // a change from now on marks it again
+            }
+
+            const auto& Pr = Scene.m_Probes[m_ProbeCapturing];
+            for( ; Budget > 0 && m_ProbeNextFace < 6; --Budget, ++m_ProbeNextFace )
+                renderScenePass(Window, Scene, m_CaptureViews[m_ProbeNextFace]
+                               , shadows::FaceW2C(xmath::fvec3{ 0, 0, 0 }, shadows::CubeFaceAxis(m_ProbeNextFace), 1.0f, 0.05f, 2000.0f), Pr.m_Position, false);
+            if( m_ProbeNextFace < 6 ) return;
+
+            {
+                auto Cmd = Window.StartRenderPass(m_EnvSourcePass[0]);
+                Cmd.setPipelineInstance(m_CubeToOctInstance);
+                Cmd.setPushConstants(details::push_env_cube_to_oct{ { float(env_source_size_v), 0, 0, 0 } });
                 Cmd.setBuffer(m_FullscreenVB);
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);
             }
+            prefilterInto(Window, m_ProbeAtlasPass, float(m_ProbeCapturing % 4 * 384), float(m_ProbeCapturing / 4 * 256));
+            m_ProbeStates[m_ProbeCapturing].m_bValid = true;
+            ++m_nProbeCaptures;
+            m_ProbeCapturing = -1;
         }
     }
 
@@ -276,6 +348,7 @@ namespace xlionrender
         }
         for( const auto& [Key, World] : m_PrevCasters ) if( !Now.contains(Key) ) Changed.push_back(World);
         m_PrevCasters = std::move(Now);
+        m_FrameChanged = Changed;                           // the probes re-capture where casters changed
         for( auto Slot : m_CasterSlotsPrev )                                // persistent casters no longer drawn
         {
             auto& C = m_SlotCasters[Slot];
@@ -460,32 +533,15 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& Camera, const overlay_fn& Overlay ) noexcept
+    // The scene into View's HDR target (and depth), lit, from a camera-centered W2C at Eye: the main view, and the reflection
+    // probes' capture faces (bMain false: no timestamps). Shadows, instances and cells of this frame are already up to date.
+    void instance::renderScenePass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept
     {
-        assert(m_bReady && View.m_Width > 0);
-
-        Camera.setViewport({ 0, 0, View.m_Width, View.m_Height });
-
-        // Camera-centered world (same as the editors): precision stays near the eye in large worlds
-        const xmath::fvec3 Eye     = Camera.getPosition();
-        const xmath::fmat4 W2C     = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
-        const xmath::fmat4 ToEye   = xmath::fmat4::fromTranslation(-Eye);
-
-        const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
-        using clock = std::chrono::steady_clock;
-        const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
-        const auto T0 = clock::now();
-        updateEnvironment(Window, Scene);
-        updateInstances(Window, Scene, Eye);
-        const auto T1 = clock::now();
-        Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
-        renderShadows(Window, Scene, Eye, ProjScale);
-        const auto T2 = clock::now();
-
+        const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
         // Scene -> HDR
         {
             auto Cmd = Window.StartRenderPass(View.m_ScenePass);
-            Cmd.WriteTimestamp(m_Timestamps, 1);
+            if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
 
             {
                 const auto& L     = Scene.m_Sun;
@@ -512,6 +568,20 @@ namespace xlionrender
 
                 writeLocalLights(Scene, Eye, Light);
                 Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, 0, 0 };
+
+                // The captured probes, innermost (smallest box) first: the shader lets the first ones that cover a point win
+                std::array<int, max_probes_v> Order;
+                int nProbes = 0;
+                for( int i = 0; i < std::min(int(Scene.m_Probes.size()), max_probes_v); ++i ) if( m_ProbeStates[i].m_bValid ) Order[nProbes++] = i;
+                const auto Volume = [&](int i) { const auto D = Scene.m_Probes[i].m_BoxMax - Scene.m_Probes[i].m_BoxMin; return D.m_X * D.m_Y * D.m_Z; };
+                std::sort(Order.begin(), Order.begin() + nProbes, [&](int a, int b) { return Volume(a) < Volume(b); });
+                Light.m_ProbeCount = { float(nProbes), 0, 0, 0 };
+                for( int k = 0; k < nProbes; ++k )
+                {
+                    const auto& Pr = Scene.m_Probes[Order[k]];
+                    Light.m_Probes[k] = { xmath::fvec4(Pr.m_Position - Eye, Pr.m_Blend), xmath::fvec4(Pr.m_BoxMin - Eye, 0), xmath::fvec4(Pr.m_BoxMax - Eye, 0)
+                                        , { float(Order[k] % 4 * 384), float(Order[k] / 4 * 256), 0, 0 } };
+                }
             }
 
             auto& ViewBlock = m_StaticGeomUBO.allocEntry<details::ubo_geom_view>();      // camera-centered
@@ -614,8 +684,35 @@ namespace xlionrender
                 }
             }
 
-            Cmd.WriteTimestamp(m_Timestamps, 2);
+            if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 2);
         }
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& Camera, const overlay_fn& Overlay ) noexcept
+    {
+        assert(m_bReady && View.m_Width > 0);
+
+        Camera.setViewport({ 0, 0, View.m_Width, View.m_Height });
+
+        // Camera-centered world (same as the editors): precision stays near the eye in large worlds
+        const xmath::fvec3 Eye     = Camera.getPosition();
+        const xmath::fmat4 W2C     = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
+
+        const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
+        using clock = std::chrono::steady_clock;
+        const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
+        const auto T0 = clock::now();
+        updateEnvironment(Window, Scene);
+        updateInstances(Window, Scene, Eye);
+        const auto T1 = clock::now();
+        Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
+        renderShadows(Window, Scene, Eye, ProjScale);
+        updateProbes(Window, Scene, Eye);
+        const auto T2 = clock::now();
+
+        renderScenePass(Window, Scene, View, W2C, Eye, true);
 
         // HDR -> exposure -> LionMapper -> sRGB output (alpha = coverage)
         {

@@ -30,7 +30,8 @@ namespace
         std::string     m_Mode      = "cells";
         std::string     m_Csv       = "xlionrender_stress.csv";
         bool            m_bValidate = false;
-        bool            m_bLoop     = false;        // repeat the scenarios until the window closes (to watch the title's readout)
+        bool            m_bLoop     = false;
+        int             m_Probes    = 0;            // reflection probes along the walked street (captured 1 face per frame)        // repeat the scenarios until the window closes (to watch the title's readout)
     };
 
     options ParseOptions(int argc, char** argv)
@@ -48,6 +49,7 @@ namespace
             else if (A == "--csv")      O.m_Csv      = Next();
             else if (A == "--validate") O.m_bValidate = true;
             else if (A == "--loop")     O.m_bLoop     = true;
+            else if (A == "--probes")   O.m_Probes    = std::max(0, std::atoi(Next().c_str()));
         }
         return O;
     }
@@ -129,6 +131,16 @@ namespace
         }
 
         C.m_Scene.m_Sun     = { .m_Direction = { 0.4f, -1.0f, 0.3f }, .m_Intensity = 1.5f, .m_ShadowTileSize = 4.0f };
+        C.m_Scene.m_Sky     = { .m_Intensity = 0.3f };
+
+        // Probes down the street the "street" scenario walks, each box a block of the street
+        const float StreetX = -C.m_HalfSize + std::round(C.m_HalfSize / pitch_v) * pitch_v;
+        for (int i = 0; i < std::min(O.m_Probes, xlionrender::max_probes_v); ++i)
+        {
+            const float Z = -C.m_HalfSize * 0.9f + (i + 0.5f) * (C.m_HalfSize * 1.8f / std::max(O.m_Probes, 1));
+            const float H = C.m_HalfSize * 0.9f / std::max(O.m_Probes, 1);
+            C.m_Scene.m_Probes.push_back({ .m_Position = { StreetX, 2.0f, Z }, .m_BoxMin = { StreetX - pitch_v * 0.5f, 0.0f, Z - H }, .m_BoxMax = { StreetX + pitch_v * 0.5f, 12.0f, Z + H }, .m_Blend = 1.0f });
+        }
         C.m_Scene.m_Ambient = { 0.03f, 0.03f, 0.04f };
         return true;
     }

@@ -33,6 +33,9 @@ namespace xlionrender
         constexpr std::uint32_t s_EnvDownsampleFrag[] = {
             #include "xlionrender_env_downsample_frag.h"
         };
+        constexpr std::uint32_t s_EnvCubeToOctFrag[] = {
+            #include "xlionrender_env_cube_to_oct_frag.h"
+        };
         constexpr std::uint32_t s_EnvDFGFrag[] = {
             #include "xlionrender_env_dfg_frag.h"
         };
@@ -104,6 +107,12 @@ namespace xlionrender
     instance::~instance( void ) noexcept
     {
         if( m_bReady == false ) return;
+        for( auto& V : m_CaptureViews ) DestroyView(V);
+        m_Device.Destroy(std::move(m_CubeToOctInstance));
+        m_Device.Destroy(std::move(m_CubeToOctPipeline));
+        m_Device.Destroy(std::move(m_ProbeAtlasClearPass));
+        m_Device.Destroy(std::move(m_ProbeAtlasPass));
+        m_Device.Destroy(std::move(m_ProbeAtlas));
         for( auto& M : m_Meshes ) if( M.m_bAlive && !M.m_bCluster ) { ReleaseBuffer(M.m_VertexBuffer); ReleaseBuffer(M.m_IndexBuffer); }
         for( auto& M : m_Materials ) if( M.m_bAlive ) for( std::size_t k = 0; k < M.m_Pipeline.size(); ++k )
         {
@@ -156,7 +165,8 @@ namespace xlionrender
         std::vector<xgpu::pipeline::sampler> Samplers(lit_samplers_v);
         Samplers[0] = { .m_AddressMode = Clamp };
         Samplers[8] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
-        Samplers[9] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
+        Samplers[9]  = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
+        Samplers[10] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
         return Samplers;
     }
 
@@ -168,6 +178,7 @@ namespace xlionrender
         for( std::size_t i = 1; i < 8; ++i ) Bindings.emplace_back( i < Textures.size() && Textures[i] ? *Textures[i] : m_WhiteTexture );
         Bindings.emplace_back(m_EnvAtlas);
         Bindings.emplace_back(m_EnvDFG);
+        Bindings.emplace_back(m_ProbeAtlas);
         return Bindings;
     }
 
@@ -196,7 +207,7 @@ namespace xlionrender
 
         // Uniforms (dynamic UBO rings) - layouts in shaders/xlionrender_forward_standard_frag.glsl
         if( auto Err = Device.Create(m_LightUBO,    { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_lighting), .m_EntryCount = 16 }); Err ) return Err;
-        if( auto Err = Device.Create(m_LightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_light_data), .m_EntryCount = ring_frames_v * max_lights_v }); Err ) return Err;
+        if( auto Err = Device.Create(m_LightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_light_data), .m_EntryCount = ring_frames_v * light_region_v }); Err ) return Err;
         if( auto Err = Device.Create(m_CellRing,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * max_cell_uints_v }); Err ) return Err;
         if( auto Err = Device.Create(m_MaterialUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_material), .m_EntryCount = max_draws_per_frame_v }); Err ) return Err;
 
@@ -221,6 +232,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_EnvSource[k], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = env_source_size_v >> k, .m_Height = env_source_size_v >> k, .m_isGamma = false }); Err ) return Err;
         if( auto Err = Device.Create(m_EnvAtlas,  { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 384, .m_Height = 256, .m_isGamma = false }); Err ) return Err;
         if( auto Err = Device.Create(m_EnvDFG,    { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = env_dfg_size_v, .m_Height = env_dfg_size_v, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = Device.Create(m_ProbeAtlas,{ .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 1536, .m_Height = 1024, .m_isGamma = false }); Err ) return Err;
 
         // Forward standard-material pipeline
         {
@@ -442,6 +454,28 @@ namespace xlionrender
 
         // GPU timings: 0 = scene start, 1 = scene end, 2 = tone map end
         if( auto Err = Device.Create(m_Timestamps, { .m_Count = 4 }); Err ) return Err;     // 0 shadows start, 1 scene start, 2 scene end, 3 tone map end
+
+        // Reflection probes: the atlas' passes (a clear for its first use, then load), the capture views, the cube -> octahedral pass
+        {
+            auto A = std::array{ xgpu::renderpass::attachment{ m_ProbeAtlas } };
+            if( auto Err = Device.Create(m_ProbeAtlasClearPass, { .m_Attachments = A }); Err ) return Err;
+            if( auto Err = Device.Create(m_ProbeAtlasPass,      { .m_Attachments = A, .m_bClearOnRender = false }); Err ) return Err;
+            m_bReady = true;                        // CreateView needs the tone map pipeline: everything it uses exists by now
+            for( auto& V : m_CaptureViews ) if( auto Err = CreateView(V, { .m_Width = probe_face_size_v, .m_Height = probe_face_size_v }); Err ) return Err;
+
+            xgpu::shader ClearVert3, CubeToOct;
+            if( auto Err = Device.Create(ClearVert3, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_ClearDepthVert) }); Err ) return Err;
+            if( auto Err = Device.Create(CubeToOct,  { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvCubeToOctFrag) }); Err ) return Err;
+            auto Shaders = std::array<const xgpu::shader*, 2>{ &CubeToOct, &ClearVert3 };
+            std::vector<xgpu::pipeline::sampler> Samplers(6, xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true, .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } });
+            xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_env_cube_to_oct), .m_Samplers = Samplers };
+            Setup.m_Primitive.m_Cull            = xgpu::pipeline::primitive::cull::NONE;
+            Setup.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
+            if( auto Err = Device.Create(m_CubeToOctPipeline, Setup); Err ) return Err;
+            std::vector<xgpu::pipeline_instance::sampler_binding> Faces;
+            for( auto& V : m_CaptureViews ) Faces.emplace_back(V.m_HDR);
+            if( auto Err = Device.Create(m_CubeToOctInstance, { .m_PipeLine = m_CubeToOctPipeline, .m_SamplersBindings = Faces }); Err ) return Err;
+        }
 
         m_bReady = true;
         return nullptr;

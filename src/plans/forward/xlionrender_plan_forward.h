@@ -75,6 +75,12 @@ namespace xlionrender::details
         xmath::fvec4                            m_LocalBase;        // x: first light in the light buffer, y: first uint in the cell buffer, z: level 0 cell size, w: tail samples
         std::array<xmath::fvec4, light_cells::levels_v> m_CellOrigin;       // per cell level: the window's first cell index
         xmath::fvec4                            m_EnvParams;        // x: 1 the environment probe lights (scene::m_Sky), y: its intensity
+        struct probe
+        {
+            xmath::fvec4                        m_PosBlend, m_BoxMin, m_BoxMax, m_Slot;
+        };
+        xmath::fvec4                            m_ProbeCount;       // x: probes in m_Probes, innermost first
+        std::array<probe, max_probes_v>         m_Probes;
     };
 
     // A point or spot light in the light buffer (std430 LocalLightData)
@@ -115,6 +121,10 @@ namespace xlionrender::details
     struct push_env_downsample
     {
         xmath::fvec4    m_Params;           // this level's size, the parent's size
+    };
+    struct push_env_cube_to_oct
+    {
+        xmath::fvec4    m_Params;           // the source's size
     };
     struct push_env_dfg
     {
