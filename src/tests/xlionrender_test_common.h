@@ -190,6 +190,9 @@ namespace xlionrender::test
             return m_Renderer.Init(m_Device) == nullptr;
         }
 
+        instance::gpu_times m_LastTimes;
+        bool                m_bQuietTimes = false;
+
         bool RenderFrame(const scene& Scene, render_view& View, xgpu::tools::view& Camera, const instance::overlay_fn& Overlay = {})
         {
             if (!m_Instance.ProcessInputEvents()) return false;
@@ -198,7 +201,7 @@ namespace xlionrender::test
             { auto Cmd = m_Window.getCmdBuffer(); }
             m_Window.PageFlip();
             instance::gpu_times T;
-            if (m_Renderer.getGPUTimes(T)) { m_bGotTimes = true; std::printf("GPU: scene %.3f ms, tone map %.3f ms\n", T.m_SceneMs, T.m_ToneMapMs); }
+            if (m_Renderer.getGPUTimes(T)) { m_bGotTimes = true; m_LastTimes = T; if (!m_bQuietTimes) std::printf("GPU: scene %.3f ms, tone map %.3f ms\n", T.m_SceneMs, T.m_ToneMapMs); }
             return true;
         }
     };

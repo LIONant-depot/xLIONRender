@@ -50,7 +50,7 @@ namespace xlionrender::details
     };
 
     // mb_standard_pbr.frag "lighting_uniforms" (set 2, binding 1)
-    struct alignas(256) ubo_lighting
+    struct ubo_lighting
     {
         xmath::fvec4    m_LightColor;           // rgb * intensity
         xmath::fvec4    m_AmbientLightColor;
@@ -62,18 +62,20 @@ namespace xlionrender::details
         xmath::fvec4                            m_CameraPos;        // the camera's world position (positions are camera-centered)
         std::array<xmath::fvec4, 4>             m_ShadowLevels;     // per level: xy first tile of the window, z tile size, w depth center
         xmath::fvec4                            m_ShadowParams;     // x: 1 shadows on, y: level 0 depth half range
-        // point and spot lights (shaders/xlionrender_local_lights.glsl LocalLightData)
-        struct local
-        {
-            xmath::fvec4                        m_PosRadius;        // camera-centered position, radius
-            xmath::fvec4                        m_Color;            // rgb * intensity, w: cos inner angle
-            xmath::fvec4                        m_DirCosOuter;      // spot: direction, w cos outer angle; point: w = -2
-            xmath::fvec4                        m_Shadow;           // x: first atlas tile (-1 none), y: near, z: tan of the half field of view
-        };
-        xmath::fvec4                            m_LocalCount;       // x: lights in m_Local
-        std::array<local, max_local_lights_v>   m_Local;
+        // point and spot lights: the lights and their world cells are in storage buffers (shaders/xlionrender_local_lights.glsl)
+        xmath::fvec4                            m_LocalCount;       // x: lights, y: mode (instance::light_mode), z: seed, w: head size
+        xmath::fvec4                            m_LocalBase;        // x: first light in the light buffer, y: first uint in the cell buffer, z: level 0 cell size, w: tail samples
+        std::array<xmath::fvec4, 3>             m_CellOrigin;       // per cell level: the window's first cell index
     };
-    static_assert(sizeof(ubo_lighting) % 256 == 0);
+
+    // A point or spot light in the light buffer (std430 LocalLightData)
+    struct local_light_data
+    {
+        xmath::fvec4                            m_PosRadius;        // camera-centered position, radius
+        xmath::fvec4                            m_Color;            // rgb * intensity, w: cos inner angle
+        xmath::fvec4                            m_DirCosOuter;      // spot: direction, w cos outer angle; point: w = -2
+        xmath::fvec4                            m_Shadow;           // xy: its shadow map's origin in the atlas, z: its size (0 none), w: spot tan half fov
+    };
 
     // xlionrender_forward_standard_frag.glsl "material_uniforms" (set 2, binding 2)
     struct ubo_material

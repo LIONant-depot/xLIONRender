@@ -581,6 +581,20 @@ measure them too.
 | Exact world-cell candidate lists | Whether the cells help - construction, sharing, lookup - with no stochastic error |
 | Exact head + sampled tail | The bounded-cost proposal |
 
+**Lab, first results (2026-10-13; `xlionrender_test_light_lab`, `instance::m_LightMode`).** Local lights moved to storage
+buffers (up to 4096; the first 32 keep shadow maps); cells: 3 levels x 16^3, level 0 cells 2 units, rebuilt on the CPU
+each render (`features/lights/xlionrender_light_cells.h`), spot cones culled conservatively (a light is left out of a
+cell only where it is exactly 0). Measured at 160x160, 256 lights of radius 3-7 (RTX 4070 Ti SUPER, Debug build):
+- CELLS == EXACT bit for bit (few and dense lights); SAMPLED == CELLS bit for bit when every light fits in the heads.
+- SAMPLED is unbiased: the mean error of N frames falls as 1/sqrt(N) (0.32 -> 0.12 from 8 to 64 frames).
+- But one frame is very noisy: 0.81 mean relative error with 1 tail sample, 0.44 with 4, 0.19 with 16 stratified
+  samples (one pass over the tail's cumulative probabilities). Not usable without a denoiser or many more samples.
+- GPU scene: exact 0.166 ms, cells 0.098, sampled 0.049 (1 sample) / 0.096 (16) - too small an image to rank them.
+- CPU cell build: 5-7 ms (cells), ~10 ms (sampled split) in Debug - measure in Release before judging; dirty cells
+  would remove most of it.
+Reading: the cells pay off on their own (exact, fewer lights per pixel). The sampled tail needs a better proposal
+(per-pixel BRDF / visibility, as ReGIR resamples at the shading point) or a denoiser before it can replace CELLS.
+
 Test matrix: few lights (the head alone), dense overlap, glossy receivers, a thin occluder (zero support), a moving
 blocker with fixed lights (visibility invalidation), cell and clipmap crossings, two distant views, a sustained shadow
 backlog. **Acceptance before it replaces the exact path:** correct estimator weights with nonzero support,

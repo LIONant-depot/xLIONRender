@@ -12,6 +12,7 @@
 #include "features/shadows/xlionrender_shadow_clipmap.h"
 #include "features/shadows/xlionrender_shadow_local.h"
 #include "features/instances/xlionrender_instance_slots.h"
+#include "features/lights/xlionrender_light_cells.h"
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
 #include <vector>
@@ -20,6 +21,8 @@
 
 namespace xlionrender
 {
+    namespace details { struct ubo_lighting; }     // plans/forward/xlionrender_plan_forward.h
+
     class instance
     {
     public:
@@ -75,6 +78,19 @@ namespace xlionrender
         bool                                       m_bShadowCache = true;
         // At most this many local light shadow maps re-render per frame (the others stay a frame stale)
         int                                        m_ShadowUpdatesPerFrame = 16;
+
+        // The lighting lab (features/lights/xlionrender_light_cells.h): how local lights are found per pixel
+        enum class light_mode : std::uint8_t
+        { EXACT                 // every light
+        , CELLS                 // the world cell's list of the lights that reach it (the same image as EXACT)
+        , SAMPLED               // the cell's head_v most important lights exactly + one tail light, sampled (unbiased, noisy)
+        };
+        light_mode                                 m_LightMode     = light_mode::EXACT;
+        int                                        m_LightHead     = 4;
+        int                                        m_LightTailSamples = 1;     // SAMPLED: stratified tail samples per pixel
+        float                                      m_LightCellSize = 2.0f;     // level 0 cells, world units
+        // CPU time of the last render's cell build (ms)
+                      double               getLightBuildMs( void ) const                                        noexcept { return m_LightBuildMs; }
         // How many clipmap tiles + local light maps the last Render drew (a static scene: 0 after its first frame)
                       int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
 
@@ -109,6 +125,7 @@ namespace xlionrender
         material_slot*              findMaterial    ( material_id Id )                                          noexcept;
         void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
         void                        updateInstances ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
+        void                        writeLocalLights( const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
 
         xgpu::device                m_Device;
@@ -167,6 +184,19 @@ namespace xlionrender
         int                                     m_nShadowTilesRendered = 0;
         bool                                    m_bShadowAtlasReady    = false;         // stands in for the shadow map until shadows exist
         xgpu::buffer                m_LightUBO;
+
+        // The local lights and their cells: host-visible storage buffers, a region per frame in flight, written per render
+        static constexpr int        max_lights_v            = 4096;
+        static constexpr int        max_cell_uints_v        = light_cells::levels_v * light_cells::level_cells_v * light_cells::header_uints_v + 2 * 262144;
+        xgpu::buffer                m_LightRing;
+        xgpu::buffer                m_CellRing;
+        light_cells                 m_LightCells;
+        std::vector<light_cells::light> m_CellLights;
+        int                         m_LightRingUsed         = 0;
+        int                         m_CellRingUsed          = 0;
+        std::uint64_t               m_LightFrame            = ~0ull;
+        std::uint32_t               m_LightSeed             = 0;
+        double                      m_LightBuildMs          = 0;
         xgpu::buffer                m_MaterialUBO;
         xgpu::buffer                m_FullscreenVB;
         xgpu::buffer                m_FullscreenIB;

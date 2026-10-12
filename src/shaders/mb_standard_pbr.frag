@@ -80,8 +80,9 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 CameraPos;                    // world position of the camera (wSpacePosition is camera-centered)
 	vec4 ShadowLevels[4];              // per clipmap level: xy first tile of the window, z tile size, w depth center
 	vec4 ShadowParams;                 // x: 1 shadows on, y: level 0 depth half range, z: clipmap tile texels
-	vec4 LocalCount;                     // x: lights in Local[]
-	LocalLightData Local[32];          // shadows::max_local_lights_v
+	vec4 LocalCount;                     // x: local lights, y: mode (0 exact, 1 cells, 2 cells + sampled tail), z: seed, w: head size
+	vec4 LocalBase;                      // x: first light in LocalLightList, y: first uint in LightCells, z: level 0 cell size, w: tail samples
+	vec4 CellOrigin[3];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
 #endif
 } UBOLight;
 

@@ -1,6 +1,7 @@
 // Plan A - forward. instance::Render lives here so each plan is one file to read.
 #include "xlionrender_instance.h"
 #include "plans/forward/xlionrender_plan_forward.h"
+#include <chrono>
 
 namespace xlionrender
 {
@@ -69,6 +70,68 @@ namespace xlionrender
             m_InstanceSlots.Flush(region_v - m_RingUsed, Put);     // what does not fit this frame stays pending (several renders per frame)
         });
         Window.CopyBuffer(m_InstanceRing, m_InstanceBuffer, Regions);
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    // The local lights for this render: into this frame's region of the light buffer, and in modes CELLS / SAMPLED their world
+    // cells into the cell buffer (features/lights/xlionrender_light_cells.h). Fills the lighting block's local part.
+    void instance::writeLocalLights( const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept
+    {
+        const std::uint64_t Frame = m_Device.getFrameIndex();
+        if( Frame != m_LightFrame ) { m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0; }
+
+        const int nLights = std::min({ int(Scene.m_LocalLights.size()), max_lights_v, max_lights_v - m_LightRingUsed });
+        const int LightBase = int(Frame % ring_frames_v) * max_lights_v + m_LightRingUsed;
+        if( nLights > 0 )
+            (void)m_LightRing.MemoryMap(LightBase, nLights, [&](void* pMemory)
+            {
+                auto* pOut = static_cast<details::local_light_data*>(pMemory);
+                for( int i = 0; i < nLights; ++i )
+                {
+                    const auto& LL    = Scene.m_LocalLights[i];
+                    const bool  bSpot = LL.m_Type == local_light::type::SPOT;
+                    const auto  Map   = i < int(m_LocalMaps.size()) ? m_LocalMaps[i] : shadows::local_map{};
+                    auto&       Out   = pOut[i];
+                    Out.m_PosRadius   = xmath::fvec4(LL.m_Position - Eye, LL.m_Radius);
+                    Out.m_Color       = xmath::fvec4(LL.m_Color * LL.m_Intensity, std::cos(LL.m_InnerAngle));
+                    Out.m_DirCosOuter = bSpot ? xmath::fvec4(LL.m_Direction.NormalizeCopy(), std::cos(LL.m_OuterAngle)) : xmath::fvec4(0, 0, 0, -2);
+                    Out.m_Shadow      = { float(shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize + Map.m_X), float(Map.m_Y), float(Map.m_Size), bSpot ? shadows::SpotTanHalf(LL) : 1.0f };
+                }
+            });
+        m_LightRingUsed += std::max(nLights, 0);
+
+        auto Mode = m_LightMode;
+        int  CellBase = 0;
+        m_LightBuildMs = 0;
+        if( Mode != light_mode::EXACT && nLights > 0 )
+        {
+            const auto T0 = std::chrono::steady_clock::now();
+            m_CellLights.resize(nLights);
+            for( int i = 0; i < nLights; ++i )
+            {
+                const auto& LL = Scene.m_LocalLights[i];
+                const float Lum = 0.2126f * LL.m_Color.m_X + 0.7152f * LL.m_Color.m_Y + 0.0722f * LL.m_Color.m_Z;
+                const bool  bSpot = LL.m_Type == local_light::type::SPOT;
+                m_CellLights[i] = { LL.m_Position, LL.m_Radius, std::max(Lum * LL.m_Intensity, 1e-6f), LL.m_Direction.NormalizeCopy(), bSpot ? LL.m_OuterAngle : -1.0f };
+            }
+            m_LightCells.Build(m_CellLights, Eye, m_LightCellSize, Mode == light_mode::SAMPLED ? m_LightHead : 0);
+            m_LightBuildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+
+            const int nUints = int(m_LightCells.m_Data.size());
+            if( nUints > max_cell_uints_v - m_CellRingUsed ) Mode = light_mode::EXACT;      // ponytail: too many entries for the buffer
+            else
+            {
+                CellBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
+                (void)m_CellRing.MemoryMap(CellBase, nUints, [&](void* pMemory) { std::memcpy(pMemory, m_LightCells.m_Data.data(), nUints * sizeof(std::uint32_t)); });
+                m_CellRingUsed += nUints;
+            }
+        }
+
+        Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_LightHead) };
+        Light.m_LocalBase  = { float(LightBase), float(CellBase), m_LightCellSize, float(m_LightTailSamples) };
+        for( int L = 0; L < light_cells::levels_v; ++L )
+            Light.m_CellOrigin[L] = { float(m_LightCells.m_Origin[L][0]), float(m_LightCells.m_Origin[L][1]), float(m_LightCells.m_Origin[L][2]), 0 };
     }
 
     //------------------------------------------------------------------------------------------------
@@ -321,19 +384,7 @@ namespace xlionrender
                 }
                 Light.m_ShadowParams = { L.m_bCastShadows ? 1.0f : 0.0f, m_Clipmap.DepthHalfRange(0), float(m_ShadowSetup.m_ClipmapTileSize), 0 };
 
-                const int nLocal = std::min(int(Scene.m_LocalLights.size()), max_local_lights_v);
-                Light.m_LocalCount = { float(nLocal), 0, 0, 0 };
-                for( int i = 0; i < nLocal; ++i )
-                {
-                    const auto& LL     = Scene.m_LocalLights[i];
-                    const bool  bSpot  = LL.m_Type == local_light::type::SPOT;
-                    const auto  Map    = i < int(m_LocalMaps.size()) ? m_LocalMaps[i] : shadows::local_map{};
-                    auto&       Out    = Light.m_Local[i];
-                    Out.m_PosRadius    = xmath::fvec4(LL.m_Position - Eye, LL.m_Radius);
-                    Out.m_Color        = xmath::fvec4(LL.m_Color * LL.m_Intensity, std::cos(LL.m_InnerAngle));
-                    Out.m_DirCosOuter  = bSpot ? xmath::fvec4(LL.m_Direction.NormalizeCopy(), std::cos(LL.m_OuterAngle)) : xmath::fvec4(0, 0, 0, -2);
-                    Out.m_Shadow       = { float(shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize + Map.m_X), float(Map.m_Y), float(Map.m_Size), bSpot ? shadows::SpotTanHalf(LL) : 1.0f };
-                }
+                writeLocalLights(Scene, Eye, Light);
             }
 
             auto& ViewBlock = m_StaticGeomUBO.allocEntry<details::ubo_geom_view>();      // camera-centered
@@ -363,7 +414,8 @@ namespace xlionrender
 
                 if( pMesh->m_bCluster == false )
                 {
-                    BindStandard(m_ForwardInstance, {});
+                    std::array<xgpu::buffer*, 2> LightBuffers{ &m_LightRing, &m_CellRing };
+                    BindStandard(m_ForwardInstance, LightBuffers);
                     Cmd.setPushConstants(details::push_forward{ L2w, W2C });
                     Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_VertexBuffer));
                     Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_IndexBuffer));
@@ -374,8 +426,9 @@ namespace xlionrender
                 const auto& G     = pMesh->m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
                 if( Slot == instance_slots::none_v ) continue;
-                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer };
-                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} };
+                std::array<xgpu::buffer*, 5> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 5>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing }
+                                                                   : std::array<xgpu::buffer*, 5>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr };
+                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{5} : std::size_t{4} };
 
                 for( const auto& Sub : G.m_Submeshes )
                 {
