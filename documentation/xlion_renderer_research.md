@@ -673,6 +673,19 @@ Reading (what to do next, by the size of the win):
 4. Moving shadowed lights cost CPU (2.7 ms recording their maps), not GPU.
 The cell build is not the bottleneck at 1024 lights (0.1-0.3 ms).
 
+**Frustum culling (done; `features/culling/xlionrender_frustum.h`, `instance::m_bFrustumCull`, tested: the culled image
+equals the unculled one).** Same scene:
+
+| Scenario | Frame | CPU Render | GPU scene | Draws drawn |
+|---|---|---|---|---|
+| flyover | 10.0 ms (11.5) | 3.4 ms (4.5) | 6.2 ms (6.7) | 5180 of 8001 |
+| street | 5.7 ms (7.3) | 3.1 ms (4.5) | 2.2 ms (2.5) | 4460 of 8001 |
+| moving_lights | 7.7 ms (9.4) | 5.0 ms (6.3) | 2.3 ms (2.7) | 4460 of 8001 |
+
+Less than the street walk promised: looking down a long street keeps half the city in the frustum - the buildings
+hide it, which is occlusion culling's job (a hierarchical depth test, or portals for interiors). Next by size: draw
+recording (~2 ms for ~5k draws), the caster diff (~1 ms), shadow map recording for moving lights (2.7 ms).
+
 **xGPU fix found by this scene:** the descriptor pool ring reset one pool per frame and grew each new pool by 1.5x; a
 frame that overflowed (the city binds ~100k sets) made every later frame create a larger pool - CPU time per frame
 exploded and the driver stalled the machine. Now: fixed-size pools all reset after the frame's fence, a hard cap, and a

@@ -61,7 +61,7 @@ target_compile_definitions(xlionrender_new PUBLIC UNICODE _UNICODE NOMINMAX)
 target_compile_options(xlionrender_new PUBLIC /MP)
 
 enable_testing()
-foreach(TEST xlionrender_test_forward xlionrender_test_static_geom xlionrender_test_skin_geom xlionrender_test_shadows xlionrender_test_local_shadows xlionrender_test_light_lab)
+foreach(TEST xlionrender_test_forward xlionrender_test_static_geom xlionrender_test_skin_geom xlionrender_test_shadows xlionrender_test_local_shadows xlionrender_test_light_lab xlionrender_test_culling)
   add_executable(${TEST} "${XLIONRENDER_DIR}/src/tests/${TEST}.cpp" ${TEST_SHADER_HEADERS})
   target_link_libraries(${TEST} PRIVATE xlionrender_new)
   add_test(NAME ${TEST} COMMAND ${TEST})

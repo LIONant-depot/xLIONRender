@@ -160,6 +160,7 @@ namespace xlionrender
         std::unordered_map<std::uint64_t, xmath::fbbox>  Now;
         Draws.reserve(Scene.m_Draws.size());
         Now.reserve(Scene.m_Draws.size());
+        m_DrawWorld.assign(Scene.m_Draws.size(), xmath::fbbox{});
         for( std::size_t iDraw = 0; iDraw < Scene.m_Draws.size(); ++iDraw )
         {
             const auto& D     = Scene.m_Draws[iDraw];
@@ -173,6 +174,7 @@ namespace xlionrender
             Key = Hash(Key, &D.m_L2W, sizeof(D.m_L2W));
             Key = Hash(Key, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id));     // alpha test, displacement
             const xmath::fbbox World = (pMesh->m_bCluster ? pMesh->m_Geom.m_BBox : pMesh->m_BBox).TransformCopy(D.m_L2W);
+            m_DrawWorld[iDraw] = World;
             Draws.push_back({ &D, pMesh, World, m_DrawSlot[iDraw] });
             Now.emplace(Key, World);
 
@@ -399,11 +401,23 @@ namespace xlionrender
             ViewBlock.m_w2C         = W2C;
             ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin - Eye, 0);
 
+            // Frustum culling in the camera-centered world (the bounds move by -Eye)
+            const frustum Frustum = frustum::FromW2C(W2C);
+            m_nDrawsRendered = 0;
+
             for( std::size_t iDraw = 0; iDraw < Scene.m_Draws.size(); ++iDraw )
             {
                 const auto& D     = Scene.m_Draws[iDraw];
                 const auto* pMesh = findMesh(D.m_Mesh);
                 if( pMesh == nullptr ) continue;
+                if( m_bFrustumCull )
+                {
+                    xmath::fbbox Box = m_DrawWorld[iDraw];
+                    Box.m_Min = Box.m_Min - Eye;
+                    Box.m_Max = Box.m_Max - Eye;
+                    if( !Frustum.Overlaps(Box) ) continue;
+                }
+                ++m_nDrawsRendered;
 
                 const xmath::fmat4 L2w  = ToEye * D.m_L2W;
                 const std::uint32_t Slot = m_DrawSlot[iDraw];

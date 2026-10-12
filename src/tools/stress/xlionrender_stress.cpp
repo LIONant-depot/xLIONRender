@@ -150,6 +150,7 @@ namespace
         double  m_WallMs, m_RenderMs, m_InstancesMs, m_ShadowsCpuMs, m_CellsMs, m_WaitMs;
         double  m_GpuShadowMs, m_GpuSceneMs, m_GpuToneMapMs;
         int     m_ShadowTiles;
+        int     m_DrawsRendered;
     };
 
     void Summary(const std::string& Name, const std::vector<frame_sample>& S)
@@ -175,6 +176,7 @@ namespace
         Report("GPU scene ms",          [](const frame_sample& s) { return s.m_GpuSceneMs; });
         Report("GPU tone map ms",       [](const frame_sample& s) { return s.m_GpuToneMapMs; });
         Report("shadow tiles / maps",   [](const frame_sample& s) { return double(s.m_ShadowTiles); });
+        Report("draws drawn",           [](const frame_sample& s) { return double(s.m_DrawsRendered); });
     }
 }
 
@@ -206,7 +208,7 @@ int main(int argc, char** argv)
     Camera.setFov(xmath::radian{ 1.0f });
 
     std::ofstream Csv(O.m_Csv);
-    Csv << "scenario,frame,wall_ms,cpu_render_ms,cpu_instances_ms,cpu_shadows_ms,cpu_cells_ms,cpu_wait_ms,gpu_shadow_ms,gpu_scene_ms,gpu_tonemap_ms,shadow_tiles,draws,lights,mode\n";
+    Csv << "scenario,frame,wall_ms,cpu_render_ms,cpu_instances_ms,cpu_shadows_ms,cpu_cells_ms,cpu_wait_ms,gpu_shadow_ms,gpu_scene_ms,gpu_tonemap_ms,shadow_tiles,draws,draws_drawn,lights,mode\n";
 
     using clock = std::chrono::steady_clock;
     const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
@@ -245,13 +247,13 @@ int main(int argc, char** argv)
             const auto  Now = clock::now();
             const auto& Cpu = Renderer.getCPUTimes();
             frame_sample S{ Ms(Last, Now), Cpu.m_RenderMs, Cpu.m_InstancesMs, Cpu.m_ShadowsMs, Cpu.m_LightCellsMs, Ms(W0, W1) + Ms(P0, P1)
-                          , Gpu.m_ShadowMs, Gpu.m_SceneMs, Gpu.m_ToneMapMs, Renderer.getShadowTilesRendered() };
+                          , Gpu.m_ShadowMs, Gpu.m_SceneMs, Gpu.m_ToneMapMs, Renderer.getShadowTilesRendered(), Renderer.getDrawsRendered() };
             Last = Now;
             Samples.push_back(S);
             static const char* Modes[] = { "exact", "cells", "sampled" };
             Csv << Scenario << ',' << f << ',' << S.m_WallMs << ',' << S.m_RenderMs << ',' << S.m_InstancesMs << ',' << S.m_ShadowsCpuMs << ',' << S.m_CellsMs << ','
                 << S.m_WaitMs << ',' << S.m_GpuShadowMs << ',' << S.m_GpuSceneMs << ',' << S.m_GpuToneMapMs << ',' << S.m_ShadowTiles << ','
-                << C.m_Scene.m_Draws.size() << ',' << C.m_Scene.m_LocalLights.size() << ',' << Modes[int(Renderer.getLightModeUsed())] << '\n';
+                << C.m_Scene.m_Draws.size() << ',' << S.m_DrawsRendered << ',' << C.m_Scene.m_LocalLights.size() << ',' << Modes[int(Renderer.getLightModeUsed())] << '\n';
         }
         Summary(Scenario, Samples);
         for (std::size_t i = 0; i < C.m_Scene.m_LocalLights.size(); ++i) C.m_Scene.m_LocalLights[i].m_Position = C.m_LightBase[i];

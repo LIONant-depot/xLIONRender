@@ -13,6 +13,7 @@
 #include "features/shadows/xlionrender_shadow_local.h"
 #include "features/instances/xlionrender_instance_slots.h"
 #include "features/lights/xlionrender_light_cells.h"
+#include "features/culling/xlionrender_frustum.h"
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
 #include <vector>
@@ -107,6 +108,11 @@ namespace xlionrender
         // How many clipmap tiles + local light maps the last Render drew (a static scene: 0 after its first frame)
                       int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
 
+        // The scene pass skips draws whose world bounds are outside the camera's frustum (false: draw everything - the reference)
+        bool                                       m_bFrustumCull = true;
+        // How many of the scene's draws the last Render drew in the scene pass
+                      int                  getDrawsRendered( void ) const                                       noexcept { return m_nDrawsRendered; }
+
         // true when a newer frame's timings arrived since the last call
                       bool                 getGPUTimes  ( gpu_times& Times )                                    noexcept;
                       const cpu_times&     getCPUTimes  ( void ) const                                          noexcept { return m_CPUTimes; }
@@ -163,6 +169,8 @@ namespace xlionrender
         instance_slots              m_InstanceSlots;
         int                         m_RingUsed              = 0;        // entries of this frame's ring region already written
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
+        std::vector<xmath::fbbox>   m_DrawWorld;            // per scene draw: its world bounds this frame (computed with the shadow casters)
+        int                         m_nDrawsRendered        = 0;
         xmath::fvec3                m_Origin                {};
         bool                        m_bOriginSet            = false;
         std::uint64_t               m_InstanceFrame         = ~0ull;
