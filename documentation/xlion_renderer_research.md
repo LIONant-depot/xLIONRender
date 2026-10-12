@@ -726,7 +726,7 @@ Against the references: Godot 4 (octahedral radiance like ours, filtered importa
 quality / incremental / realtime); Flax (cube maps, probes rendered one face per frame - to adopt for local probes -, then
 filtered per mip). Roughness -> level mapping, measured (CPU, exact GGX prefilter of a high-contrast sky vs the blend of
 6 levels): linear 1.50% mean / 2.4% max error, square root (Godot) 1.53% / 3.0% - kept linear.
-**Step 2 done: local reflection probes** (`scene::m_Probes`, up to 16). The renderer captures 6 faces (128^2, the same scene
+**Step 2 done: local reflection probes** (`scene::m_Probes`). The renderer captures 6 faces (128^2, the same scene
 pass as the main view), remaps them into the octahedral source, then the sky's pyramid + prefilter into the probe's slot of
 a 4x4 probe atlas. `m_ProbeFacesPerFrame` faces per frame (default 1, Flax's way; never-captured first, then the nearest);
 re-captured when a changed caster's bounds touch its box. Shading: box-projected (parallax) specular + diffuse, probes
@@ -734,5 +734,14 @@ blended innermost first by their boxes' fades, the sky (or the flat ambient) for
 toward the red box and green toward the green one (faces, orientation, remap), a capture at 1 face/frame completes on
 frame 6, a static scene / a change outside the box does not re-capture, a mirror sphere reflects the probe.
 Stress (street, 8 probes): +1.2 ms per frame while capturing (one face), nothing after.
-ponytail: probes are a loop over the lighting block (innermost first) - list them in the world cells when they are many;
-light changes do not re-capture (casters do).
+**Step 3 done: many probes, cells, light changes.** Any number of probes per scene: the nearest 32 (eye to box) hold a slot
+of an 8x4 atlas (3072x1024 RGBA16F, 24 MiB), the others wait (a probe swapped in is captured again). The probes' records
+share the light buffer (64 bytes, like a light; innermost first) and the world cells list them (a second packed header per
+cell, `light_cells::AddBoxes`), so a pixel walks only the probes whose box reaches its cell; EXACT mode walks them all.
+Re-capture also on a changed local light reaching the box (hash of the lights touching it), and on a sun / sky / ambient
+change; a change during a capture lets it finish then captures again (a continuous change never starves it), except a
+moved probe. Tests: CELLS == EXACT with nested + overlapping probes (max difference 0); 40 probes -> 32 captured, the camera
+at the far end swaps in 8; a far light does not re-capture, a light moving into the box / changing color does, so does the
+sun. Stress (street, 64 probes): GPU scene 1.09 ms (1.06 with 8).
+ponytail: residency has no hysteresis (a probe on the boundary can swap as the camera moves); the light key tests every
+resident probe against every light (the cells' lists when it shows).
