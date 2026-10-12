@@ -108,7 +108,7 @@ namespace xlionrender
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
         material_slot*              findMaterial    ( material_id Id )                                          noexcept;
         void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
-        void                        updateInstances ( const scene& Scene, const xmath::fvec3& Eye )             noexcept;
+        void                        updateInstances ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
 
         xgpu::device                m_Device;
@@ -121,18 +121,21 @@ namespace xlionrender
         xgpu::pipeline_instance     m_StaticGeomInstance;
         xgpu::buffer                m_StaticGeomUBO;        // the view block of both cluster vertex paths (details::ubo_geom_view)
 
-        // Instance data (features/instances): one buffer per frame in flight; persistent slots then this frame's transient ones
+        // Instance data (features/instances): a device-local buffer (persistent slots, then this frame's transient ones) kept up to
+        // date by GPU copies from a CPU ring, one region of the ring per frame in flight
         static constexpr int        max_instances_v         = 65536;
         static constexpr int        max_transient_v         = 16384;
+        static constexpr int        ring_frames_v           = 3;        // frames in flight (xGPU keeps resources 2 flips) + the one recorded
         static constexpr float      origin_grid_v           = 1024.0f;  // the instance buffer's origin snaps to this grid near the eye
-        std::array<xgpu::buffer, instance_slots::copies_v> m_InstanceBuffers;
+        xgpu::buffer                m_InstanceBuffer;
+        xgpu::buffer                m_InstanceRing;
         instance_slots              m_InstanceSlots;
+        int                         m_RingUsed              = 0;        // entries of this frame's ring region already written
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
         xmath::fvec3                m_Origin                {};
         bool                        m_bOriginSet            = false;
         std::uint64_t               m_InstanceFrame         = ~0ull;
         int                         m_TransientCount        = 0;
-        int                         m_InstanceCopy          = 0;
         xgpu::vertex_descriptor     m_SkinGeomVD;
         xgpu::pipeline              m_ToneMapPipeline;
         xgpu::pipeline              m_BlitPipeline;

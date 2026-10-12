@@ -132,17 +132,11 @@ int main()
         const auto s1 = S.Acquire(1, M1, 1), s2 = S.Acquire(2, M2, 1);
         CHECK(s1 != s2 && s1 != S.none_v && s2 != S.none_v, "Two slots");
         int nWritten = 0;
-        S.Flush(0, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
-        CHECK(nWritten == 2, "New slots are written into each copy (%d)", nWritten);
-        nWritten = 0; S.Flush(0, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
-        CHECK(nWritten == 0, "A copy is written once per change (%d)", nWritten);
-        nWritten = 0; S.Flush(1, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
-        CHECK(nWritten == 2, "The other copies still get the change (%d)", nWritten);
-        CHECK(S.Acquire(2, M2, 2) == s2, "An unchanged id keeps its slot");
-        nWritten = 0; S.Flush(2, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
-        CHECK(nWritten == 2, "Copy 2 had both pending from the start (%d)", nWritten);
-        nWritten = 0; S.Flush(2, [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; });
-        CHECK(nWritten == 0, "Unchanged: nothing to write (%d)", nWritten);
+        const auto Count = [&](std::uint32_t, const xmath::fmat4&) { ++nWritten; };
+        CHECK(S.Flush(1, Count) == 1 && S.getPendingCount() == 1, "A budget of 1 writes 1, the other stays pending");
+        CHECK(S.Flush(16, Count) == 1 && nWritten == 2, "Then the rest");
+        CHECK(S.Acquire(2, M2, 2) == s2 && S.Flush(16, Count) == 0, "An unchanged id keeps its slot, nothing to write");
+        CHECK(S.Acquire(2, M1, 2) == s2 && S.Flush(16, Count) == 1, "A moved id is written once");
         CHECK(S.Acquire(3, M1, 2) == s1, "Full: the least recently seen slot (id 1) is evicted");
         CHECK(S.Acquire(1, M1, 2) == S.none_v, "Full and every slot seen this frame: no slot");
     }

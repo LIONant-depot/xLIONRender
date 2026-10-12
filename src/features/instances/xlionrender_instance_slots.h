@@ -6,12 +6,10 @@
 // bits; the caller owns the ids - an ECS entity, an editor's preview, ...) keeps a slot in the instance buffer across frames:
 // its data is written when it changes, not when it becomes visible. In tight spaces visibility flips every few steps; the
 // slots do not care.
-//  - The GPU buffer has one copy per frame in flight (copies_v): a slot changed now is written into each copy when that
-//    copy's frame comes around (per slot pending bits), so a frame still on the GPU never sees a write.
+//  - The instance buffer is device-local; the renderer writes the pending slots (Flush) into a CPU ring and the GPU copies
+//    them over (xgpu::window::CopyBuffer), as Unreal's GPUScene and Bevy upload their deltas.
 //  - A slot is not freed when its id is missing from a frame (invisible is not dead): slots are evicted least recently
 //    seen first, only when the buffer is full.
-// ponytail: a slot changed between two renders of the same frame shows its new data in both (an editor drawing the same id
-// twice per frame with different transforms); per-render copies if that matters.
 
 #include "dependencies/xmath/source/xmath.h"
 #include <algorithm>
@@ -24,7 +22,6 @@ namespace xlionrender
 {
     struct instance_slots
     {
-        static constexpr int copies_v = 3;                  // frames in flight (xGPU keeps resources 2 flips) + the one being recorded
         static constexpr std::uint32_t none_v = ~0u;
 
         void Init(int Capacity) noexcept
@@ -36,7 +33,7 @@ namespace xlionrender
             m_Pending.clear();
         }
 
-        // The slot of ID this frame (none_v: no room - every slot was seen this frame). New or changed: pending in every copy.
+        // The slot of ID this frame (none_v: no room - every slot was seen this frame). New or changed: pending.
         std::uint32_t Acquire(std::uint32_t ID, const xmath::fmat4& L2W, std::uint64_t Frame) noexcept
         {
             if (auto It = m_ByID.find(ID); It != m_ByID.end())
@@ -50,7 +47,7 @@ namespace xlionrender
             if (m_Free.empty() && !Evict(Frame)) return none_v;
             const std::uint32_t Index = m_Free.back();
             m_Free.pop_back();
-            m_Slots[Index] = { L2W, Frame, ID, 0, true };
+            m_Slots[Index] = { L2W, Frame, ID, false, true };
             m_ByID.emplace(ID, Index);
             MarkPending(Index);
             return Index;
@@ -59,22 +56,24 @@ namespace xlionrender
         // Every live slot pending (the world origin moved: the stored rows are relative to it)
         void MarkAllPending() noexcept { for (std::uint32_t i = 0; i < m_Slots.size(); ++i) if (m_Slots[i].m_bLive) MarkPending(i); }
 
-        // Writes the slots pending for Copy: Write(slot index, const fmat4& L2W)
+        // Writes up to Max pending slots: Write(slot index, const fmat4& L2W). The rest stay pending. Returns how many.
         template<typename T_WRITE>
-        void Flush(int Copy, T_WRITE&& Write) noexcept
+        int Flush(int Max, T_WRITE&& Write) noexcept
         {
-            const std::uint8_t Bit = std::uint8_t(1u << Copy);
-            for (auto i : m_Pending)
+            int n = 0;
+            std::size_t i = 0;
+            for (; i < m_Pending.size() && n < Max; ++i)
             {
-                auto& S = m_Slots[i];
-                if ((S.m_Pending & Bit) == 0) continue;
-                S.m_Pending &= ~Bit;
-                if (S.m_bLive) Write(i, S.m_L2W);
+                auto& S = m_Slots[m_Pending[i]];
+                S.m_bPending = false;
+                if (S.m_bLive) { Write(m_Pending[i], S.m_L2W); ++n; }
             }
-            std::erase_if(m_Pending, [&](std::uint32_t i) { return m_Slots[i].m_Pending == 0; });
+            m_Pending.erase(m_Pending.begin(), m_Pending.begin() + i);
+            return n;
         }
 
-        int getLiveCount() const noexcept { return int(m_ByID.size()); }
+        int getLiveCount()    const noexcept { return int(m_ByID.size()); }
+        int getPendingCount() const noexcept { return int(m_Pending.size()); }
 
     private:
         struct slot
@@ -82,14 +81,15 @@ namespace xlionrender
             xmath::fmat4    m_L2W;
             std::uint64_t   m_LastSeen  = 0;
             std::uint32_t   m_ID        = 0;
-            std::uint8_t    m_Pending   = 0;        // a bit per copy still to write
+            bool            m_bPending  = false;
             bool            m_bLive     = false;
         };
 
         void MarkPending(std::uint32_t i) noexcept
         {
-            if (m_Slots[i].m_Pending == 0) m_Pending.push_back(i);
-            m_Slots[i].m_Pending = std::uint8_t((1u << copies_v) - 1);
+            if (m_Slots[i].m_bPending) return;
+            m_Slots[i].m_bPending = true;
+            m_Pending.push_back(i);
         }
 
         // Frees the least recently seen slot not seen this frame. O(slots), only when full.
@@ -105,9 +105,9 @@ namespace xlionrender
             return true;
         }
 
-        std::vector<slot>                               m_Slots;
-        std::vector<std::uint32_t>                      m_Free;
-        std::vector<std::uint32_t>                      m_Pending;
+        std::vector<slot>                                m_Slots;
+        std::vector<std::uint32_t>                       m_Free;
+        std::vector<std::uint32_t>                       m_Pending;
         std::unordered_map<std::uint32_t, std::uint32_t> m_ByID;
     };
 }

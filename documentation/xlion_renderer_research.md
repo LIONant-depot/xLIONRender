@@ -513,8 +513,10 @@ content is unpredictable, so the cost must not follow scene complexity. Bandwidt
    touches it; id 0 takes a transient slot written that frame. The per-draw data is now just the slot index in the
    push constants; the view block (w2C + origin offset) is written once per view / shadow tile. Slots are evicted
    least-recently-seen only when the buffer is full (invisible is not dead). `features/instances/xlionrender_instance_slots.h`.
-   Stopgap: one host-visible copy per frame in flight, each written with the deltas it has not seen. **Next:** a ring
-   of deltas copied by the GPU into one device-local buffer (Unreal GPUScene, Bevy) once xGPU records buffer copies. Indexed loads are slow on mobile; uniform-address loads are the fast path.
+   One device-local instance buffer, kept up to date like Unreal's GPUScene and Bevy: the changed slots (and the
+   transient ones) are written into this frame's region of a CPU ring (a region per frame in flight), and the GPU copies
+   them over (`xgpu::window::CopyBuffer`: recorded between render passes, barriers on both sides) before the passes
+   that read them. What does not fit a frame's region stays pending for the next render. Indexed loads are slow on mobile; uniform-address loads are the fast path.
 5. **Pipelines built at material load,** not at first draw (first-sight stutter). HypeHype builds every PSO at load.
 
 **Octahedral maps (adopted for point-light shadows, planned for reflections):**

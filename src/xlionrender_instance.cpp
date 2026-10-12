@@ -99,7 +99,8 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_StaticGeomInstance));
         m_Device.Destroy(std::move(m_StaticGeomPipeline));
         ReleaseBuffer(m_StaticGeomUBO);
-        for( auto& B : m_InstanceBuffers ) ReleaseBuffer(B);
+        ReleaseBuffer(m_InstanceBuffer);
+        ReleaseBuffer(m_InstanceRing);
         ReleaseBuffer(m_ShadowUBO);
         for( std::size_t k = 0; k < m_ShadowPipeline.size(); ++k ) { m_Device.Destroy(std::move(m_ShadowInstance[k])); m_Device.Destroy(std::move(m_ShadowPipeline[k])); }
         m_Device.Destroy(std::move(m_ShadowClearInstance));
@@ -205,8 +206,13 @@ namespace xlionrender
             };
             if( auto Err = Device.Create(m_SkinGeomVD, { .m_bUseStreaming = true, .m_Topology = xgpu::vertex_descriptor::topology::TRIANGLE_LIST, .m_VertexSize = 0, .m_Attributes = SkinAttributes }); Err ) return Err;
             if( auto Err = Device.Create(m_StaticGeomUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_geom_view), .m_EntryCount = 64 }); Err ) return Err;
-            for( auto& B : m_InstanceBuffers )
-                if( auto Err = Device.Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::instance_data), .m_EntryCount = max_instances_v + max_transient_v }); Err ) return Err;
+            {
+                // Device-local (GPU_READ: created from zeros, then only written by GPU copies); the ring: host-visible, a region per frame
+                std::vector<details::instance_data> Zeros(max_instances_v + max_transient_v, details::instance_data{});
+                void* pZeros = Zeros.data();
+                if( auto Err = Device.Create(m_InstanceBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(details::instance_data), .m_EntryCount = int(Zeros.size()), .m_pData = pZeros }); Err ) return Err;
+                if( auto Err = Device.Create(m_InstanceRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::instance_data), .m_EntryCount = ring_frames_v * (max_instances_v + max_transient_v) }); Err ) return Err;
+            }
             m_InstanceSlots.Init(max_instances_v);
 
             xgpu::shader Vert, Frag;

@@ -15,16 +15,17 @@ namespace xlionrender
     }
 
     // Every draw's slot in the instance buffer this frame: a draw with an instance id keeps its persistent slot (written only
-    // when its transform changes or the origin moves), one without takes a transient slot written now. Then the copy of this
-    // frame gets the persistent slots still pending for it (features/instances/xlionrender_instance_slots.h).
-    void instance::updateInstances( const scene& Scene, const xmath::fvec3& Eye ) noexcept
+    // when its transform changes or the origin moves), one without takes a transient slot written now. What is written goes
+    // into this frame's region of the CPU ring, and the GPU copies it into the device-local instance buffer before the passes
+    // that read it (features/instances/xlionrender_instance_slots.h).
+    void instance::updateInstances( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept
     {
         const std::uint64_t Frame = m_Device.getFrameIndex();
         if( Frame != m_InstanceFrame )
         {
             m_InstanceFrame  = Frame;
-            m_InstanceCopy   = int(Frame % instance_slots::copies_v);
             m_TransientCount = 0;
+            m_RingUsed       = 0;
         }
 
         // The origin (camera-relative "little world" for the stored rows): re-snapped when the eye moves a grid cell away
@@ -36,10 +37,21 @@ namespace xlionrender
             m_InstanceSlots.MarkAllPending();
         }
 
-        auto& Buffer = m_InstanceBuffers[m_InstanceCopy];
-        (void)Buffer.MemoryMap(0, Buffer.getEntryCount(), [&](void* pMemory)
+        // This frame's ring region: written in order, copied by contiguous runs
+        constexpr int    region_v = max_instances_v + max_transient_v;
+        const int        Base     = int(Frame % ring_frames_v) * region_v;
+        std::vector<xgpu::buffer::copy> Regions;
+        (void)m_InstanceRing.MemoryMap(Base, region_v, [&](void* pMemory)
         {
-            auto* pData = static_cast<details::instance_data*>(pMemory);
+            auto* pRing = static_cast<details::instance_data*>(pMemory);
+            const auto Put = [&](std::uint32_t Slot, const xmath::fmat4& L2W)
+            {
+                pRing[m_RingUsed].set(L2W, m_Origin);
+                const int Src = Base + m_RingUsed++;
+                if( !Regions.empty() && Regions.back().m_SrcEntry + Regions.back().m_Count == Src && Regions.back().m_DstEntry + Regions.back().m_Count == int(Slot) ) ++Regions.back().m_Count;
+                else Regions.push_back({ Src, int(Slot), 1 });
+            };
+
             m_DrawSlot.resize(Scene.m_Draws.size());
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
             {
@@ -48,14 +60,15 @@ namespace xlionrender
                 std::uint32_t Slot = ID ? m_InstanceSlots.Acquire(ID, D.m_L2W, Frame) : instance_slots::none_v;
                 if( Slot == instance_slots::none_v )
                 {
-                    if( m_TransientCount >= max_transient_v ) { m_DrawSlot[i] = instance_slots::none_v; continue; }     // ponytail: dropped
+                    if( m_TransientCount >= max_transient_v || m_RingUsed >= region_v ) { m_DrawSlot[i] = instance_slots::none_v; continue; }     // ponytail: dropped
                     Slot = std::uint32_t(max_instances_v + m_TransientCount++);
-                    pData[Slot].set(D.m_L2W, m_Origin);
+                    Put(Slot, D.m_L2W);
                 }
                 m_DrawSlot[i] = Slot;
             }
-            m_InstanceSlots.Flush(m_InstanceCopy, [&](std::uint32_t Slot, const xmath::fmat4& L2W) { pData[Slot].set(L2W, m_Origin); });
+            m_InstanceSlots.Flush(region_v - m_RingUsed, Put);     // what does not fit this frame stays pending (several renders per frame)
         });
+        Window.CopyBuffer(m_InstanceRing, m_InstanceBuffer, Regions);
     }
 
     //------------------------------------------------------------------------------------------------
@@ -138,7 +151,7 @@ namespace xlionrender
 
                 const auto& G     = M.m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
-                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffers[m_InstanceCopy], &m_InstanceBuffers[m_InstanceCopy] };
+                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer };
                 Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} });
                 Cmd.setDynamicUBO(m_ShadowUBO, 0);
                 Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
@@ -277,7 +290,7 @@ namespace xlionrender
         const xmath::fmat4 ToEye   = xmath::fmat4::fromTranslation(-Eye);
 
         const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
-        updateInstances(Scene, Eye);
+        updateInstances(Window, Scene, Eye);
         renderShadows(Window, Scene, Eye, ProjScale);
 
         // Scene -> HDR
@@ -361,7 +374,7 @@ namespace xlionrender
                 const auto& G     = pMesh->m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
                 if( Slot == instance_slots::none_v ) continue;
-                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffers[m_InstanceCopy], &m_InstanceBuffers[m_InstanceCopy] };
+                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer };
                 const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} };
 
                 for( const auto& Sub : G.m_Submeshes )
