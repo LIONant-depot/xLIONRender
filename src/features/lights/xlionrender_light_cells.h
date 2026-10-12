@@ -26,7 +26,7 @@ namespace xlionrender
 {
     struct light_cells
     {
-        static constexpr int levels_v = 3;
+        static constexpr int levels_v = 5;                                      // level 4: 32 unit cells, a 512 unit window (aerial views stay inside)
         static constexpr int cells_v  = 16;                                     // per level and axis
         static constexpr int level_cells_v = cells_v * cells_v * cells_v;
         static constexpr int header_uints_v = 4;

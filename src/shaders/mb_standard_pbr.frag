@@ -82,7 +82,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 ShadowParams;                 // x: 1 shadows on, y: level 0 depth half range, z: clipmap tile texels
 	vec4 LocalCount;                     // x: local lights, y: mode (0 exact, 1 cells, 2 cells + sampled tail), z: seed, w: head size
 	vec4 LocalBase;                      // x: first light in LocalLightList, y: first uint in LightCells, z: level 0 cell size, w: tail samples
-	vec4 CellOrigin[3];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
+	vec4 CellOrigin[5];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
 #endif
 } UBOLight;
 

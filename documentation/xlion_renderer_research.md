@@ -695,6 +695,18 @@ Less than the street walk promised: looking down a long street keeps half the ci
 hide it, which is occlusion culling's job (a hierarchical depth test, or portals for interiors). Next by size: draw
 recording (~2 ms for ~5k draws), the caster diff (~1 ms), shadow map recording for moving lights (2.7 ms).
 
+**Then (same scene, same machine):** the constant material in the instance record + draws sorted by state with binds
+only on change; shadow casters tracked by instance slot (a compare, not a hash); 5 cell levels instead of 3 (from above,
+the city was outside the +-64 unit window and every pixel looped all 1024 lights - CELLS cost what EXACT cost):
+
+| Scenario | Frame (first baseline) | CPU Render | GPU scene | FPS |
+|---|---|---|---|---|
+| flyover | 4.2 ms (11.5) | 1.1 ms (4.5) | 2.8 ms (6.7) | ~240 |
+| street | 2.3 ms (7.3) | 1.0 ms (4.5) | 1.0 ms (2.5) | ~440 |
+| moving_lights | 3.8 ms (9.4) | 2.5 ms (6.3) | 1.0 ms (2.7) | ~260 |
+
+Left on the CPU: shadow map recording for the 16 moving shadowed lights (~1.7 ms); occlusion culling for the street.
+
 **xGPU fix found by this scene:** the descriptor pool ring reset one pool per frame and grew each new pool by 1.5x; a
 frame that overflowed (the city binds ~100k sets) made every later frame create a larger pool - CPU time per frame
 exploded and the driver stalled the machine. Now: fixed-size pools all reset after the frame's fence, a hard cap, and a

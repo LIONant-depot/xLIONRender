@@ -67,11 +67,11 @@ float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const v
 }
 
 // The local lights (storage buffers, so a scene is not limited to a uniform block): the lights, and the world-cell lists
-// (features/lights/xlionrender_light_cells.h builds them; levels_v 3, cells_v 16, 4 uint headers, 2 uint entries)
+// (features/lights/xlionrender_light_cells.h builds them; levels_v 5, cells_v 16, 4 uint headers, 2 uint entries)
 layout(std430, set = 1, binding = 3) readonly buffer LocalLightBuffer { LocalLightData LocalLightList[]; };
 layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint LightCells[]; };
 
-const int kCellLevels = 3;
+const int kCellLevels = 5;
 const int kCells      = 16;
 const int kLevelCells = kCells * kCells * kCells;
 
