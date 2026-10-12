@@ -24,6 +24,15 @@ namespace xlionrender
         constexpr std::uint32_t s_DepthFrag[] = {
             #include "xlionrender_depth_frag.h"
         };
+        constexpr std::uint32_t s_EnvSkyFrag[] = {
+            #include "xlionrender_env_sky_frag.h"
+        };
+        constexpr std::uint32_t s_EnvPrefilterFrag[] = {
+            #include "xlionrender_env_prefilter_frag.h"
+        };
+        constexpr std::uint32_t s_EnvDFGFrag[] = {
+            #include "xlionrender_env_dfg_frag.h"
+        };
         constexpr std::uint32_t s_GeomStandardFrag[] = {
             #include "xlionrender_geom_standard_frag.h"
         };
@@ -121,10 +130,39 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_WhiteTexture));
         ReleaseBuffer(m_LightUBO);
         ReleaseBuffer(m_LightRing);
+        for( auto* p : { &m_EnvSkyInstance, &m_EnvPrefilterInstance, &m_EnvDFGInstance } ) m_Device.Destroy(std::move(*p));
+        for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline } ) m_Device.Destroy(std::move(*p));
+        for( auto* p : { &m_EnvSourcePass, &m_EnvAtlasPass, &m_EnvDFGPass } )             m_Device.Destroy(std::move(*p));
+        for( auto* p : { &m_EnvSource, &m_EnvAtlas, &m_EnvDFG } )                          m_Device.Destroy(std::move(*p));
         ReleaseBuffer(m_CellRing);
         ReleaseBuffer(m_MaterialUBO);
         ReleaseBuffer(m_FullscreenVB);
         ReleaseBuffer(m_FullscreenIB);
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    // Every lit pipeline's samplers: 0 the shadow atlas (clamp), 1-7 the material's textures (white where it has none), 8 the
+    // environment atlas, 9 the DFG table (both clamp, linear)
+    std::vector<xgpu::pipeline::sampler> instance::LitSamplers( void ) const noexcept
+    {
+        constexpr auto Clamp = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP };
+        std::vector<xgpu::pipeline::sampler> Samplers(lit_samplers_v);
+        Samplers[0] = { .m_AddressMode = Clamp };
+        Samplers[8] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
+        Samplers[9] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
+        return Samplers;
+    }
+
+    std::vector<xgpu::pipeline_instance::sampler_binding> instance::LitBindings( std::span<xgpu::texture* const> Textures ) noexcept
+    {
+        std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
+        Bindings.reserve(lit_samplers_v);
+        Bindings.emplace_back(m_ShadowAtlas);
+        for( std::size_t i = 1; i < 8; ++i ) Bindings.emplace_back( i < Textures.size() && Textures[i] ? *Textures[i] : m_WhiteTexture );
+        Bindings.emplace_back(m_EnvAtlas);
+        Bindings.emplace_back(m_EnvDFG);
+        return Bindings;
     }
 
     //------------------------------------------------------------------------------------------------
@@ -172,6 +210,11 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ShadowScratch, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = ShadowSetup.m_ScratchSize, .m_Height = ShadowSetup.m_ScratchSize, .m_isGamma = false }); Err ) return Err;
         }
 
+        // The environment probe's textures (filled by updateEnvironment)
+        if( auto Err = Device.Create(m_EnvSource, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = env_source_size_v, .m_Height = env_source_size_v, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = Device.Create(m_EnvAtlas,  { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 384, .m_Height = 256, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = Device.Create(m_EnvDFG,    { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = env_dfg_size_v, .m_Height = env_dfg_size_v, .m_isGamma = false }); Err ) return Err;
+
         // Forward standard-material pipeline
         {
             xgpu::shader Vert, Frag;
@@ -179,7 +222,7 @@ namespace xlionrender
             if( auto Err = Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_ForwardStandardFrag) }); Err ) return Err;
 
             auto Shaders      = std::array<const xgpu::shader*, 2>{ &Frag, &Vert };
-            auto Samplers     = std::array{ xgpu::pipeline::sampler{} };
+            const auto Samplers = LitSamplers();
             auto UniformBinds = std::array
             { xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 2, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
@@ -189,7 +232,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ForwardPipeline, { .m_VertexDescriptor = m_MeshVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_forward)
                                                             , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
 
-            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ m_ShadowAtlas } };
+            auto Bindings = LitBindings({});
             if( auto Err = Device.Create(m_ForwardInstance, { .m_PipeLine = m_ForwardPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
         }
 
@@ -230,7 +273,7 @@ namespace xlionrender
             if( auto Err = Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GeomStandardFrag) }); Err ) return Err;
 
             auto Shaders      = std::array<const xgpu::shader*, 2>{ &Frag, &Vert };
-            auto Samplers     = std::array{ xgpu::pipeline::sampler{} };
+            const auto Samplers = LitSamplers();
             auto UniformBinds = std::array
             { xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
@@ -242,7 +285,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_StaticGeomPipeline, { .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                                                , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
 
-            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ m_ShadowAtlas } };
+            auto Bindings = LitBindings({});
             if( auto Err = Device.Create(m_StaticGeomInstance, { .m_PipeLine = m_StaticGeomPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
         }
 
@@ -341,6 +384,39 @@ namespace xlionrender
             if( auto Err = MakeCaster(0, m_MeshVD,       ForwardVert, sizeof(details::push_forward),     0); Err ) return Err;     // CreateMesh meshes
             if( auto Err = MakeCaster(1, m_StaticGeomVD, RigidVert,   sizeof(details::push_static_geom), 3); Err ) return Err;     // RIGID
             if( auto Err = MakeCaster(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   4); Err ) return Err;     // SKIN
+        }
+
+        // The environment probe's passes and pipelines (fullscreen triangles; the sky and the prefilter rebuild only on a sky change)
+        {
+            xgpu::shader ClearVert2, Sky, Prefilter, DFG;
+            if( auto Err = Device.Create(ClearVert2, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_ClearDepthVert) }); Err ) return Err;
+            if( auto Err = Device.Create(Sky,        { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvSkyFrag) }); Err ) return Err;
+            if( auto Err = Device.Create(Prefilter,  { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvPrefilterFrag) }); Err ) return Err;
+            if( auto Err = Device.Create(DFG,        { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvDFGFrag) }); Err ) return Err;
+
+            auto A0 = std::array{ xgpu::renderpass::attachment{ m_EnvSource } };
+            auto A1 = std::array{ xgpu::renderpass::attachment{ m_EnvAtlas } };
+            auto A2 = std::array{ xgpu::renderpass::attachment{ m_EnvDFG } };
+            if( auto Err = Device.Create(m_EnvSourcePass, { .m_Attachments = A0 }); Err ) return Err;
+            if( auto Err = Device.Create(m_EnvAtlasPass,  { .m_Attachments = A1 }); Err ) return Err;
+            if( auto Err = Device.Create(m_EnvDFGPass,    { .m_Attachments = A2 }); Err ) return Err;
+
+            const auto Make = [&](xgpu::pipeline& Pipe, xgpu::pipeline_instance& Inst, const xgpu::shader& Frag, std::size_t PushSize, xgpu::texture* pSource) -> xgpu::device::error*
+            {
+                auto Shaders  = std::array<const xgpu::shader*, 2>{ &Frag, &ClearVert2 };
+                auto Samplers = std::array{ xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true, .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } } };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = PushSize };
+                if( pSource ) Setup.m_Samplers = Samplers;
+                Setup.m_Primitive.m_Cull            = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
+                if( auto Err = Device.Create(Pipe, Setup); Err ) return Err;
+                if( pSource == nullptr ) return Device.Create(Inst, { .m_PipeLine = Pipe });
+                auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ *pSource } };
+                return Device.Create(Inst, { .m_PipeLine = Pipe, .m_SamplersBindings = Bindings });
+            };
+            if( auto Err = Make(m_EnvSkyPipeline,       m_EnvSkyInstance,       Sky,       sizeof(details::push_env_sky),       nullptr);      Err ) return Err;
+            if( auto Err = Make(m_EnvPrefilterPipeline, m_EnvPrefilterInstance, Prefilter, sizeof(details::push_env_prefilter), &m_EnvSource); Err ) return Err;
+            if( auto Err = Make(m_EnvDFGPipeline,       m_EnvDFGInstance,       DFG,       sizeof(details::push_env_dfg),       nullptr);      Err ) return Err;
         }
 
         // GPU timings: 0 = scene start, 1 = scene end, 2 = tone map end
@@ -443,8 +519,8 @@ namespace xlionrender
         if( m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = bSkin ? SPIRV(s_SkinGeomVert) : SPIRV(s_StaticGeomVert) }) ) return nullptr;
 
         // Slot 0 (shadow map) clamps, the material textures use the default sampler - as the geom editors
-        std::vector<xgpu::pipeline::sampler> Samplers(M.m_Textures.size());
-        Samplers[0] = xgpu::pipeline::sampler{ .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } };
+        assert(M.m_Textures.size() <= 8);       // slots 8, 9: the environment
+        const auto Samplers = LitSamplers();
 
         auto Shaders      = std::array<const xgpu::shader*, 2>{ M.m_pFragment, &Vert };
         using ub = xgpu::pipeline::uniform_binds;
@@ -465,8 +541,7 @@ namespace xlionrender
                                              , .m_UniformBinds = Binds, .m_Samplers = Samplers }) ) return nullptr;
 
         std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
-        Bindings.reserve(M.m_Textures.size());
-        for( auto* pTexture : M.m_Textures ) Bindings.emplace_back( Bindings.empty() ? m_ShadowAtlas : (pTexture ? *pTexture : m_WhiteTexture) );     // slot 0: the shadow atlas
+        Bindings = LitBindings(M.m_Textures);
         if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
         {
             m_Device.Destroy(std::move(M.m_Pipeline[k]));

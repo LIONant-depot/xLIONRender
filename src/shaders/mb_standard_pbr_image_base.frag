@@ -82,6 +82,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 LocalCount;                     // x: local lights, y: mode (0 exact, 1 cells, 2 cells + sampled tail), z: seed, w: head size
 	vec4 LocalBase;                      // x: first light in LocalLightList, y: first uint in LightCells, z: level 0 cell size, w: tail samples
 	vec4 CellOrigin[5];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
+	vec4 EnvParams;                      // x: 1 the environment probe replaces the flat ambient, y: its intensity
 #endif
 } UBOLight;
 
@@ -89,8 +90,10 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 #include "xlionrender_shadow_clipmap.glsl"
 #endif
 
+#ifdef XLION_LDR_OUTPUT
 layout(set = 2, binding = 0) uniform sampler2D		brdfLUT;	// 2D LUT for specular BRDF integration (DFG terms)
 layout(set = 2, binding = 1) uniform samplerCube	envMap;		// Prefiltered environment cubemap for specular IBL
+#endif
 
 //-------------------------------------------------------------------------------------------
 // Constants
@@ -218,6 +221,7 @@ vec3 TransformNotmalToWorld(vec3 inNormal)
 
 #ifndef XLION_LDR_OUTPUT
 #include "xlionrender_local_lights.glsl"
+#include "xlionrender_environment.glsl"
 #endif
 
 //-------------------------------------------------------------------------------------------
@@ -250,12 +254,17 @@ vec3 PBRLightingImageBase
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 
 	// IBL specular: Split-sum approx (prefiltered env * DFG LUT).
-	vec3	R					= reflect(-V, N);
 	float	perceptualRoughness = max(inRoughness, MIN_ROUGHNESS);
+#ifdef XLION_LDR_OUTPUT
+	vec3	R					= reflect(-V, N);
 	vec3	prefilteredColor	= textureLod(envMap, R, perceptualRoughness * MAX_LOD).rgb;
 	vec2	lut					= texture(brdfLUT, vec2(NdotV, perceptualRoughness)).rg;
 	vec3	indirectSpec		= prefilteredColor * (F0 * lut.x + vec3(lut.y));
 	ambient += indirectSpec;
+#else
+	// xLIONRender: the renderer's environment probe (diffuse + specular) when the sky is on
+	if (UBOLight.EnvParams.x > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, perceptualRoughness, inMetalic, inAO);
+#endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).
 #ifdef XLION_LDR_OUTPUT

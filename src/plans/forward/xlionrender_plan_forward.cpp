@@ -141,6 +141,60 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    // The environment probe (scene::m_Sky): the DFG table once, then the sky into the octahedral source and its prefiltered atlas
+    // whenever the sky changes. Off (m_Intensity 0): the flat ambient lights.
+    void instance::updateEnvironment( xgpu::window& Window, const scene& Scene ) noexcept
+    {
+        const auto& Sky = Scene.m_Sky;
+        m_bEnvOn        = Sky.m_Intensity > 0;
+        m_EnvIntensity  = Sky.m_Intensity;
+        if( !m_bEnvOn && m_bEnvDFGReady ) return;        // (the first render builds everything once: bound textures must have been rendered)
+
+        if( !m_bEnvDFGReady )
+        {
+            auto Cmd = Window.StartRenderPass(m_EnvDFGPass);
+            Cmd.setPipelineInstance(m_EnvDFGInstance);
+            Cmd.setPushConstants(details::push_env_dfg{ { float(env_dfg_size_v), 512, 0, 0 } });
+            Cmd.setBuffer(m_FullscreenVB);
+            Cmd.setBuffer(m_FullscreenIB);
+            Cmd.Draw(3);
+            m_bEnvDFGReady = true;
+        }
+
+        const float Key[] = { Sky.m_Zenith.m_X, Sky.m_Zenith.m_Y, Sky.m_Zenith.m_Z, Sky.m_Horizon.m_X, Sky.m_Horizon.m_Y, Sky.m_Horizon.m_Z, Sky.m_Ground.m_X, Sky.m_Ground.m_Y, Sky.m_Ground.m_Z };
+        const std::uint64_t K = Hash(1469598103934665603ull, Key, sizeof(Key)) | 1;
+        if( K == m_EnvKey ) return;
+        m_EnvKey = K;
+        ++m_nEnvBuilds;
+
+        {
+            auto Cmd = Window.StartRenderPass(m_EnvSourcePass);
+            Cmd.setPipelineInstance(m_EnvSkyInstance);
+            Cmd.setPushConstants(details::push_env_sky{ { 0, 1, 0, 2 }, { 0, 0, 0, 0 }                     // no sun disc: the sun is the direct light
+                                                      , xmath::fvec4(Sky.m_Zenith, 0), xmath::fvec4(Sky.m_Horizon, 0), xmath::fvec4(Sky.m_Ground, float(env_source_size_v)) });
+            Cmd.setBuffer(m_FullscreenVB);
+            Cmd.setBuffer(m_FullscreenIB);
+            Cmd.Draw(3);
+        }
+        {
+            auto Cmd = Window.StartRenderPass(m_EnvAtlasPass);
+            constexpr float Rects[6][3] = { { 0, 0, 256 }, { 256, 0, 128 }, { 256, 128, 64 }, { 320, 128, 32 }, { 352, 128, 16 }, { 368, 128, 8 } };     // xlionrender_environment_atlas.glsl
+            for( int L = 0; L < 6; ++L )
+            {
+                const auto& R = Rects[L];
+                Cmd.setViewport(R[0], R[1], R[2], R[2]);
+                Cmd.setScissor(int(R[0]), int(R[1]), int(R[2]), int(R[2]));
+                Cmd.setPipelineInstance(m_EnvPrefilterInstance);
+                Cmd.setPushConstants(details::push_env_prefilter{ { R[0], R[1], R[2], 0 }, { L / 5.0f, float(env_source_size_v), L == 0 ? 1.0f : 256.0f, 0 } });
+                Cmd.setBuffer(m_FullscreenVB);
+                Cmd.setBuffer(m_FullscreenIB);
+                Cmd.Draw(3);
+            }
+        }
+    }
+
+    //------------------------------------------------------------------------------------------------
+
     // Shadows: which casters changed (world bounds), what must be rendered - the sun's clipmap tiles and the local lights' maps -, then:
     //  - the local maps' casters into the scratch (in batches that fit it), each batch remapped into the atlas (linear distance,
     //    octahedral for point lights)
@@ -412,6 +466,7 @@ namespace xlionrender
         using clock = std::chrono::steady_clock;
         const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
         const auto T0 = clock::now();
+        updateEnvironment(Window, Scene);
         updateInstances(Window, Scene, Eye);
         const auto T1 = clock::now();
         Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
@@ -447,6 +502,7 @@ namespace xlionrender
                 Light.m_ShadowParams = { L.m_bCastShadows ? 1.0f : 0.0f, m_Clipmap.DepthHalfRange(0), float(m_ShadowSetup.m_ClipmapTileSize), 0 };
 
                 writeLocalLights(Scene, Eye, Light);
+                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, 0, 0 };
             }
 
             auto& ViewBlock = m_StaticGeomUBO.allocEntry<details::ubo_geom_view>();      // camera-centered

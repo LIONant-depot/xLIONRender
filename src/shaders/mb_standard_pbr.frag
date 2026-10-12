@@ -83,6 +83,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 LocalCount;                     // x: local lights, y: mode (0 exact, 1 cells, 2 cells + sampled tail), z: seed, w: head size
 	vec4 LocalBase;                      // x: first light in LocalLightList, y: first uint in LightCells, z: level 0 cell size, w: tail samples
 	vec4 CellOrigin[5];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
+	vec4 EnvParams;                      // x: 1 the environment probe replaces the flat ambient, y: its intensity
 #endif
 } UBOLight;
 
@@ -206,6 +207,7 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 
 #ifndef XLION_LDR_OUTPUT
 #include "xlionrender_local_lights.glsl"
+#include "xlionrender_environment.glsl"
 #endif
 
 //-------------------------------------------------------------------------------------------
@@ -236,6 +238,9 @@ vec3 PBRLighting
 	vec3	F_grazing			= FresnelSchlick(0.0, F0);
 	vec3	ambientSpec			= F_grazing * UBOLight.AmbientLightColor.rgb * inAO * (1.0 - inRoughness) * 0.04;
 	vec3	ambient				= ambientDiffuse + ambientSpec;
+#ifndef XLION_LDR_OUTPUT
+	if (UBOLight.EnvParams.x > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
+#endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).
 #ifdef XLION_LDR_OUTPUT

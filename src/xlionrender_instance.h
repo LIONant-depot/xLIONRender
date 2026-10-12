@@ -148,6 +148,9 @@ namespace xlionrender
         void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
         void                        updateInstances ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        writeLocalLights( const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept;
+        void                        updateEnvironment( xgpu::window& Window, const scene& Scene )               noexcept;
+        std::vector<xgpu::pipeline::sampler>                    LitSamplers ( void ) const                     noexcept;
+        std::vector<xgpu::pipeline_instance::sampler_binding>   LitBindings ( std::span<xgpu::texture* const> Textures ) noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
 
         xgpu::device                m_Device;
@@ -225,6 +228,28 @@ namespace xlionrender
         int                                     m_nShadowTilesRendered = 0;
         bool                                    m_bShadowAtlasReady    = false;         // stands in for the shadow map until shadows exist
         xgpu::buffer                m_LightUBO;
+
+        // The environment probe (features/environment; shaders/xlionrender_environment*.glsl): the sky into an octahedral source, the
+        // source prefiltered into a roughness atlas, the split-sum DFG table. Lit pipelines bind the atlas and the table at samplers
+        // 8 and 9 (0-7: the shadow atlas and the material's textures, padded with white).
+        static constexpr int        lit_samplers_v          = 10;
+        static constexpr int        env_source_size_v       = 256;
+        static constexpr int        env_dfg_size_v          = 64;
+        xgpu::texture               m_EnvSource, m_EnvAtlas, m_EnvDFG;
+        xgpu::renderpass            m_EnvSourcePass, m_EnvAtlasPass, m_EnvDFGPass;
+        xgpu::pipeline              m_EnvSkyPipeline, m_EnvPrefilterPipeline, m_EnvDFGPipeline;
+        xgpu::pipeline_instance     m_EnvSkyInstance, m_EnvPrefilterInstance, m_EnvDFGInstance;
+        std::uint64_t               m_EnvKey                = 0;            // the sky the atlas holds (0: none yet)
+        bool                        m_bEnvDFGReady          = false;
+        bool                        m_bEnvOn                = false;
+        float                       m_EnvIntensity          = 0;
+    public:
+        // How many times the environment's atlas was (re)built (tests: a static sky builds it once)
+                      int                  getEnvironmentBuilds( void ) const                                   noexcept { return m_nEnvBuilds; }
+        // The prefiltered environment atlas (tests read it back)
+                      const xgpu::texture& getEnvironmentAtlas( void ) const                                    noexcept { return m_EnvAtlas; }
+    private:
+        int                         m_nEnvBuilds            = 0;
 
         // The local lights and their cells: host-visible storage buffers, a region per frame in flight, written per render
         static constexpr int        max_lights_v            = 4096;

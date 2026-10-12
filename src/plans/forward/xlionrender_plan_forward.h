@@ -74,6 +74,7 @@ namespace xlionrender::details
         xmath::fvec4                            m_LocalCount;       // x: lights, y: mode (instance::light_mode), z: seed, w: head size
         xmath::fvec4                            m_LocalBase;        // x: first light in the light buffer, y: first uint in the cell buffer, z: level 0 cell size, w: tail samples
         std::array<xmath::fvec4, light_cells::levels_v> m_CellOrigin;       // per cell level: the window's first cell index
+        xmath::fvec4                            m_EnvParams;        // x: 1 the environment probe lights (scene::m_Sky), y: its intensity
     };
 
     // A point or spot light in the light buffer (std430 LocalLightData)
@@ -99,6 +100,21 @@ namespace xlionrender::details
         std::array<std::int32_t, 4>     m_Tile;             // x, y in the atlas, size, face size in the scratch
         std::array<float, 4>            m_Params;           // near, far, spot tan half fov, 1 point / 0 spot
         std::array<std::int32_t, 12>    m_Faces;            // the faces' origins in the scratch (x, y) x 6
+    };
+
+    // xlionrender_env_sky_frag.glsl, xlionrender_env_prefilter_frag.glsl, xlionrender_env_dfg_frag.glsl
+    struct push_env_sky
+    {
+        xmath::fvec4    m_SunDir, m_SunColor, m_Zenith, m_Horizon, m_Ground;       // m_Ground.w: the source's size
+    };
+    struct push_env_prefilter
+    {
+        xmath::fvec4    m_Rect;             // the level's origin and size in the atlas
+        xmath::fvec4    m_Params;           // roughness, the source's size, samples
+    };
+    struct push_env_dfg
+    {
+        xmath::fvec4    m_Params;           // the table's size, samples
     };
 
     // xlionrender_tonemap_frag.glsl

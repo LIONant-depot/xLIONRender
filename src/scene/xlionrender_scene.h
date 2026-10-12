@@ -92,12 +92,23 @@ namespace xlionrender
     };
     constexpr int max_local_lights_v = 32;
 
+    // The sky: a procedural gradient that lights the scene through the environment probe (image-based: diffuse + specular).
+    // m_Intensity 0: off - the flat m_Ambient lights instead. The sun is the direct light (it is not in the probe: no double count).
+    struct sky
+    {
+        xmath::fvec3    m_Zenith        { 0.20f, 0.40f, 0.85f };
+        xmath::fvec3    m_Horizon       { 0.70f, 0.78f, 0.90f };
+        xmath::fvec3    m_Ground        { 0.22f, 0.20f, 0.18f };
+        float           m_Intensity     = 0.0f;
+    };
+
     struct scene
     {
         std::vector<draw>           m_Draws;
         sun_light                   m_Sun;
         std::vector<local_light>    m_LocalLights;
         xmath::fvec3                m_Ambient   { 0, 0, 0 };
+        sky                         m_Sky;
     };
 }
 

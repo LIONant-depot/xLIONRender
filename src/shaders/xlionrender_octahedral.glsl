@@ -1,3 +1,5 @@
+#ifndef XLIONRENDER_OCTAHEDRAL_GLSL
+#define XLIONRENDER_OCTAHEDRAL_GLSL
 // Octahedral mapping of directions to [-1,1]^2 (Cigolle et al. 2014), oriented with down (-Y) at the center and the seams up: a
 // light's shadow on the ground below it gets the best texels, the folds land on the ceiling. Shared by the point light shadow
 // maps (features/shadows/xlionrender_shadow_local.h) - and meant for the reflection probes.
@@ -26,3 +28,5 @@ vec2 OctFold(in vec2 P)
     if (abs(P.y) > 1.0) { P.y = (P.y > 0.0 ? 2.0 : -2.0) - P.y; P.x = -P.x; }
     return P;
 }
+
+#endif
