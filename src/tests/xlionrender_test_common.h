@@ -67,10 +67,13 @@ namespace xlionrender::test
         std::array<xgpu::buffer, 3>     m_Streams;
         xgpu::buffer                    m_ClusterData;
         std::uint32_t                   m_nIndices = 0;
+        float                           m_Scale    = 1;         // positions lie in [-m_Scale, m_Scale]
 
         cluster_geom Geom(geom_kind Kind = geom_kind::RIGID, xgpu::buffer* pBones = nullptr, std::uint32_t MaxInfluences = 1) noexcept
         {
             cluster_geom G{ .m_Kind = Kind, .m_pStreams = m_Streams.data(), .m_pClusterData = &m_ClusterData, .m_pBones = pBones, .m_MaxInfluences = MaxInfluences };
+            G.m_BBox.m_Min = xmath::fvec3(-m_Scale);
+            G.m_BBox.m_Max = xmath::fvec3( m_Scale);
             G.m_Clusters  = { { 0, m_nIndices, 0 } };
             G.m_Submeshes = { { 0, 1, 0 } };
             return G;
@@ -89,6 +92,7 @@ namespace xlionrender::test
             std::vector<std::uint16_t> Idx16(Prim.m_Indices.begin(), Prim.m_Indices.end());
             const cluster_data Cluster{ { Scale, Scale, Scale, 0 }, { 0, 0, 0, 0 }, { 1, 1, 0, 0 } };
             Out.m_nIndices = static_cast<std::uint32_t>(Idx16.size());
+            Out.m_Scale    = Scale;
             return !Device.Create(Out.m_Streams[0],  { .m_Type = xgpu::buffer::type::INDEX,   .m_EntryByteSize = sizeof(std::uint16_t), .m_EntryCount = int(Idx16.size()),  .m_pData = Idx16.data() })
                 && !Device.Create(Out.m_Streams[1],  { .m_Type = xgpu::buffer::type::VERTEX,  .m_EntryByteSize = sizeof(T_VERT),        .m_EntryCount = int(Pos.size()),    .m_pData = const_cast<T_VERT*>(Pos.data()) })
                 && !Device.Create(Out.m_Streams[2],  { .m_Type = xgpu::buffer::type::VERTEX,  .m_EntryByteSize = sizeof(T_EXTRA),       .m_EntryCount = int(Extras.size()), .m_pData = const_cast<T_EXTRA*>(Extras.data()) })

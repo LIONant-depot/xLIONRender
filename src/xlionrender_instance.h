@@ -9,6 +9,7 @@
 #include "scene/xlionrender_scene.h"
 #include "view/xlionrender_render_view.h"
 #include "meshes/xlionrender_cluster_geom.h"
+#include "features/shadows/xlionrender_shadow_clipmap.h"
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
 #include <vector>
@@ -41,12 +42,12 @@ namespace xlionrender
                       void                 DestroyMesh  ( mesh_id Id )                                          noexcept;
 
         // A material: its HDR fragment shader (xmaterial::rt::getShaderHDR()) and its sampler bindings in shader order - slot 0
-        // is the shadow map (nullptr: white, i.e. unshadowed), then the textures (the list the geom editors bind). Neither is
+        // is the shadow map: the renderer binds its shadow atlas there whatever is given; then the textures. Neither is
         // copied or owned: they must outlive the id. The same material draws rigid and skinned geometry: the pipeline of each
         // vertex path is built the first time the material is drawn with it.
         [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures ) noexcept;
         // The renderer's default material (shaders/xlionrender_default_material_frag.glsl: PBR with a diffuse texture), for a slot whose
-        // material does not resolve. Textures: slot 0 the shadow map (nullptr: white), slot 1 the diffuse texture.
+        // material does not resolve. Textures: slot 0 the shadow map (the renderer's atlas), slot 1 the diffuse texture.
         [[nodiscard]] xgpu::device::error* CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept;
                       void                 DestroyMaterial( material_id Id )                                    noexcept;
 
@@ -66,6 +67,11 @@ namespace xlionrender
         // ImGui render callback. Not ImGui::Image: the xGPU ImGui shader gamma encodes textures again.
                       void                 Blit         ( xgpu::cmd_buffer& CmdBuffer, render_view& View )      noexcept;
 
+        // Shadows: false re-renders every shadow tile every frame (the reference the caching is tested against)
+        bool                                       m_bShadowCache = true;
+        // How many shadow-atlas tiles the last Render drew (a static scene: 0 after its first frame)
+                      int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
+
         // true when a newer frame's timings arrived since the last call
                       bool                 getGPUTimes  ( gpu_times& Times )                                    noexcept;
 
@@ -76,6 +82,7 @@ namespace xlionrender
             xgpu::buffer            m_VertexBuffer;
             xgpu::buffer            m_IndexBuffer;
             int                     m_nIndices      = 0;
+            xmath::fbbox            m_BBox;                             // local bounds of a CreateMesh mesh
             cluster_geom            m_Geom;                             // used when m_bCluster
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
@@ -94,6 +101,7 @@ namespace xlionrender
 
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
         material_slot*              findMaterial    ( material_id Id )                                          noexcept;
+        void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
 
         xgpu::device                m_Device;
@@ -109,7 +117,21 @@ namespace xlionrender
         xgpu::pipeline              m_ToneMapPipeline;
         xgpu::pipeline              m_BlitPipeline;
         xgpu::texture               m_WhiteTexture;
-        xgpu::shader                m_DefaultMaterialFrag;         // stands in for the shadow map until shadows exist
+        xgpu::shader                m_DefaultMaterialFrag;
+
+        // Shadows (features/shadows): the atlas, its passes (a clear for its first use, then load), the tile clear and the casters' depth
+        // pipelines per vertex path (float mesh, rigid, skin)
+        xgpu::texture                           m_ShadowAtlas;
+        xgpu::renderpass                        m_ShadowClearPass, m_ShadowPass;
+        xgpu::pipeline                          m_ShadowClearPipeline;
+        xgpu::pipeline_instance                 m_ShadowClearInstance;
+        std::array<xgpu::pipeline, 3>           m_ShadowPipeline;
+        std::array<xgpu::pipeline_instance, 3>  m_ShadowInstance;
+        xgpu::buffer                            m_ShadowUBO;
+        shadows::clipmap                        m_Clipmap;
+        std::vector<shadows::tile_to_render>    m_ShadowTiles;
+        int                                     m_nShadowTilesRendered = 0;
+        bool                                    m_bShadowAtlasReady    = false;         // stands in for the shadow map until shadows exist
         xgpu::buffer                m_LightUBO;
         xgpu::buffer                m_MaterialUBO;
         xgpu::buffer                m_FullscreenVB;

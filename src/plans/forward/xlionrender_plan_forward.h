@@ -6,6 +6,7 @@
 // in step with shaders/xlionrender_forward_*.glsl and shaders/mb_standard_pbr.frag.
 
 #include "dependencies/xmath/source/xmath.h"
+#include <array>
 
 namespace xlionrender::details
 {
@@ -44,7 +45,13 @@ namespace xlionrender::details
         xmath::fvec4    m_wSpaceLightPos;       // w == 0: xyz = direction towards the light; w > 0: position + radius
         xmath::fvec4    m_wSpaceEyePos;
         xmath::fvec4    m_LightParams;          // x = area radius, y = temperature K (0 = none), z = intensity mult
+        // the directional light's shadow clipmap (shaders/xlionrender_shadow_clipmap.glsl)
+        xmath::fmat4                            m_W2Light;          // world -> light space (rotation)
+        xmath::fvec4                            m_CameraPos;        // the camera's world position (positions are camera-centered)
+        std::array<xmath::fvec4, 4>             m_ShadowLevels;     // per level: xy first tile of the window, z tile size, w depth center
+        xmath::fvec4                            m_ShadowParams;     // x: 1 shadows on, y: level 0 depth half range
     };
+    static_assert(sizeof(ubo_lighting) == 256);
 
     // xlionrender_forward_standard_frag.glsl "material_uniforms" (set 2, binding 2)
     struct alignas(256) ubo_material

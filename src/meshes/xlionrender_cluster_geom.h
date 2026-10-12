@@ -10,6 +10,7 @@
 // motion vectors, RT refits) once xGPU has compute - see documentation/xlion_renderer_research.md.
 
 #include "dependencies/xGPU/source/xGPU.h"
+#include "dependencies/xmath/source/xmath.h"
 #include <algorithm>
 #include <vector>
 
@@ -38,6 +39,7 @@ namespace xlionrender
         xgpu::buffer*               m_pClusterData  = nullptr;  // SSBO of the per-cluster dequantization data
         xgpu::buffer*               m_pBones        = nullptr;  // SKIN: SSBO of the bone matrices (the caller fills it each frame)
         std::uint32_t               m_MaxInfluences = 4;        // SKIN: 1..4 bone weights used
+        xmath::fbbox                m_BBox;                     // local bounds (shadow culling and invalidation); SKIN: covering every pose
         std::vector<cluster>        m_Clusters;
         std::vector<submesh>        m_Submeshes;
     };
@@ -47,7 +49,7 @@ namespace xlionrender
     template<typename T_GEOM>
     cluster_geom MakeClusterGeom( T_GEOM& Geom, int iLOD = 0 ) noexcept
     {
-        cluster_geom G{ .m_pStreams = &Geom.IndexBuffer(), .m_pClusterData = &Geom.ClusterBuffer() };
+        cluster_geom G{ .m_pStreams = &Geom.IndexBuffer(), .m_pClusterData = &Geom.ClusterBuffer(), .m_BBox = Geom.m_BBox };
 
         for( auto& C : Geom.getClusters() ) G.m_Clusters.push_back({ C.m_iIndex, C.m_nIndices, C.m_iVertex });
         for( auto& M : Geom.getMeshes() )
@@ -67,6 +69,10 @@ namespace xlionrender
         G.m_Kind          = geom_kind::SKIN;
         G.m_pBones        = &Bones;
         G.m_MaxInfluences = static_cast<std::uint32_t>(std::clamp(MaxInfluences, 1, 4));
+        // ponytail: the bind-pose bounds grown 2x around their center to cover the poses; exact bounds want the skinned positions (compute skinning)
+        const auto C = G.m_BBox.getCenter(), E = (G.m_BBox.m_Max - G.m_BBox.m_Min);
+        G.m_BBox.m_Min = C - E;
+        G.m_BBox.m_Max = C + E;
         return G;
     }
 }

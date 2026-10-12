@@ -69,6 +69,8 @@ namespace xlionrender
         float           m_Temperature   = 0;                        // Kelvin tint, 0 = none
         xmath::fvec3    m_Color         { 1, 1, 1 };
         float           m_Intensity     = 4.0f;                     // ponytail: unitless until the physical-unit contract (research doc §6) is approved
+        bool            m_bCastShadows  = true;                     // directional: the shadow clipmap (point lights: phase 2)
+        float           m_ShadowTileSize = 1.0f;                    // directional: world size of a clipmap level-0 tile (512 texels); the levels double it
     };
 
     struct scene
@@ -76,7 +78,6 @@ namespace xlionrender
         std::vector<draw>           m_Draws;
         light                       m_Light;
         xmath::fvec3                m_Ambient   { 0, 0, 0 };
-        std::optional<xmath::fmat4> m_W2ShadowT;                    // world -> shadow-map texture space, when the materials' slot 0 holds a shadow map
     };
 }
 

@@ -21,6 +21,12 @@ namespace xlionrender
         constexpr std::uint32_t s_DefaultMaterialFrag[] = {
             #include "xlionrender_default_material_frag.h"
         };
+        constexpr std::uint32_t s_DepthFrag[] = {
+            #include "xlionrender_depth_frag.h"
+        };
+        constexpr std::uint32_t s_ClearDepthVert[] = {
+            #include "xlionrender_clear_depth_vert.h"
+        };
         constexpr std::uint32_t s_FullscreenVert[] = {
             #include "xlionrender_fullscreen_vert.h"
         };
@@ -37,7 +43,8 @@ namespace xlionrender
             return { { reinterpret_cast<const std::int32_t*>(Words), N } };
         }
 
-        constexpr int max_draws_per_frame_v = 1024;     // ponytail: one material UBO entry per draw, ring of this size; grow with the scene graph work
+        constexpr int max_draws_per_frame_v         = 1024;     // ponytail: one material UBO entry per draw, ring of this size; grow with the scene graph work
+        constexpr int max_shadow_draws_per_frame_v  = 8192;     // ponytail: one UBO entry per (tile, caster) the shadow pass draws, ring of this size
 
         struct fullscreen_vert { float m_X, m_Y; };
 
@@ -89,6 +96,13 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_StaticGeomInstance));
         m_Device.Destroy(std::move(m_StaticGeomPipeline));
         ReleaseBuffer(m_StaticGeomUBO);
+        ReleaseBuffer(m_ShadowUBO);
+        for( std::size_t k = 0; k < m_ShadowPipeline.size(); ++k ) { m_Device.Destroy(std::move(m_ShadowInstance[k])); m_Device.Destroy(std::move(m_ShadowPipeline[k])); }
+        m_Device.Destroy(std::move(m_ShadowClearInstance));
+        m_Device.Destroy(std::move(m_ShadowClearPipeline));
+        m_Device.Destroy(std::move(m_ShadowClearPass));
+        m_Device.Destroy(std::move(m_ShadowPass));
+        m_Device.Destroy(std::move(m_ShadowAtlas));
         m_Device.Destroy(std::move(m_ForwardPipeline));
         m_Device.Destroy(std::move(m_ToneMapPipeline));
         m_Device.Destroy(std::move(m_BlitPipeline));
@@ -133,6 +147,9 @@ namespace xlionrender
             if( auto Err = Device.Create(m_WhiteTexture, Setup); Err ) return Err;
         }
 
+        // The shadow atlas: every lit pipeline samples it in slot 0
+        if( auto Err = Device.Create(m_ShadowAtlas, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = shadows::atlas_size_v, .m_Height = shadows::atlas_size_v, .m_isGamma = false }); Err ) return Err;
+
         // Forward standard-material pipeline
         {
             xgpu::shader Vert, Frag;
@@ -148,7 +165,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ForwardPipeline, { .m_VertexDescriptor = m_MeshVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_forward)
                                                             , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
 
-            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ m_WhiteTexture } };
+            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ m_ShadowAtlas } };
             if( auto Err = Device.Create(m_ForwardInstance, { .m_PipeLine = m_ForwardPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
         }
 
@@ -190,7 +207,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_StaticGeomPipeline, { .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                                                , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
 
-            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ m_WhiteTexture } };
+            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ m_ShadowAtlas } };
             if( auto Err = Device.Create(m_StaticGeomInstance, { .m_PipeLine = m_StaticGeomPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
         }
 
@@ -226,6 +243,54 @@ namespace xlionrender
 
         if( auto Err = Device.Create(m_DefaultMaterialFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DefaultMaterialFrag) }); Err ) return Err;
 
+        // Shadows: the atlas's passes (a clear for its first use - a never rendered attachment cannot be loaded -, then load), the
+        // tile clear (depth 1, ALWAYS) and the casters' depth pipelines: depth bias against acne, depth clamp so casters nearer to the
+        // light than a level's range still cast ("pancaking")
+        {
+            auto Attachments = std::array{ xgpu::renderpass::attachment{ m_ShadowAtlas } };
+            if( auto Err = Device.Create(m_ShadowClearPass, { .m_Attachments = Attachments }); Err ) return Err;
+            if( auto Err = Device.Create(m_ShadowPass,      { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
+
+            xgpu::shader Depth, ClearVert, ForwardVert, RigidVert, SkinVert;
+            if( auto Err = Device.Create(Depth,       { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DepthFrag) }); Err ) return Err;
+            if( auto Err = Device.Create(ClearVert,   { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_ClearDepthVert) }); Err ) return Err;
+            if( auto Err = Device.Create(ForwardVert, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_ForwardVert) }); Err ) return Err;
+            if( auto Err = Device.Create(RigidVert,   { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_StaticGeomVert) }); Err ) return Err;
+            if( auto Err = Device.Create(SkinVert,    { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_SkinGeomVert) }); Err ) return Err;
+
+            {
+                auto Shaders = std::array<const xgpu::shader*, 2>{ &Depth, &ClearVert };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders };
+                Setup.m_Primitive.m_Cull                = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_DepthCompare     = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
+                if( auto Err = Device.Create(m_ShadowClearPipeline, Setup); Err ) return Err;
+                if( auto Err = Device.Create(m_ShadowClearInstance, { .m_PipeLine = m_ShadowClearPipeline }); Err ) return Err;
+            }
+
+            if( auto Err = Device.Create(m_ShadowUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_static_geom_mesh), .m_EntryCount = max_shadow_draws_per_frame_v }); Err ) return Err;
+
+            auto Binds = std::array
+            { xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+            };
+            const auto MakeCaster = [&](int k, xgpu::vertex_descriptor& VD, const xgpu::shader& Vert, std::size_t PushSize, std::size_t nBinds) -> xgpu::device::error*
+            {
+                auto Shaders = std::array<const xgpu::shader*, 2>{ &Depth, &Vert };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = VD, .m_Shaders = Shaders, .m_PushConstantsSize = PushSize, .m_UniformBinds = std::span{ Binds.data(), nBinds } };
+                Setup.m_Primitive.m_Cull                        = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_DepthBiasConstantFactor  = 2.0f;
+                Setup.m_DepthStencil.m_DepthBiasSlopeFactor     = 4.0f;
+                Setup.m_DepthStencil.m_bDepthBiasEnable         = true;
+                Setup.m_DepthStencil.m_bDepthClampEnable        = true;
+                if( auto Err = Device.Create(m_ShadowPipeline[k], Setup); Err ) return Err;
+                return Device.Create(m_ShadowInstance[k], { .m_PipeLine = m_ShadowPipeline[k] });
+            };
+            if( auto Err = MakeCaster(0, m_MeshVD,       ForwardVert, sizeof(details::push_forward),     0); Err ) return Err;     // CreateMesh meshes
+            if( auto Err = MakeCaster(1, m_StaticGeomVD, RigidVert,   sizeof(details::push_static_geom), 2); Err ) return Err;     // RIGID
+            if( auto Err = MakeCaster(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   3); Err ) return Err;     // SKIN
+        }
+
         // GPU timings: 0 = scene start, 1 = scene end, 2 = tone map end
         if( auto Err = Device.Create(m_Timestamps, { .m_Count = 3 }); Err ) return Err;
 
@@ -245,6 +310,8 @@ namespace xlionrender
         (void)M.m_VertexBuffer.MemoryMap(0, static_cast<int>(Vertices.size()), [&](void* p) { std::memcpy(p, Vertices.data(), Vertices.size_bytes()); });
         (void)M.m_IndexBuffer .MemoryMap(0, static_cast<int>(Indices.size()),  [&](void* p) { std::memcpy(p, Indices.data(),  Indices.size_bytes());  });
         M.m_nIndices = static_cast<int>(Indices.size());
+        M.m_BBox.m_Min = M.m_BBox.m_Max = xmath::fvec3(Vertices[0].m_Pos[0], Vertices[0].m_Pos[1], Vertices[0].m_Pos[2]);
+        for( auto& V : Vertices ) { const xmath::fvec3 P(V.m_Pos[0], V.m_Pos[1], V.m_Pos[2]); M.m_BBox.m_Min = xmath::fvec3::Min(M.m_BBox.m_Min, P); M.m_BBox.m_Max = xmath::fvec3::Max(M.m_BBox.m_Max, P); }
         const auto [Index, Gen] = AddSlot(m_Meshes, std::move(M));
         Id = { Index, Gen };
         return nullptr;
@@ -341,7 +408,7 @@ namespace xlionrender
 
         std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
         Bindings.reserve(M.m_Textures.size());
-        for( auto* pTexture : M.m_Textures ) Bindings.emplace_back( pTexture ? *pTexture : m_WhiteTexture );
+        for( auto* pTexture : M.m_Textures ) Bindings.emplace_back( Bindings.empty() ? m_ShadowAtlas : (pTexture ? *pTexture : m_WhiteTexture) );     // slot 0: the shadow atlas
         if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
         {
             m_Device.Destroy(std::move(M.m_Pipeline[k]));

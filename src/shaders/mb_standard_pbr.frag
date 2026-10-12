@@ -64,7 +64,18 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 wSpaceLightPos;               // Light position in world space (XYZ) and radius (W > 0 for finite falloff)
 	vec4 wSpaceEyePos;                 // Camera position in world space (XYZ)
 	vec4 LightParams;                  // .x=area radius (spec/soft shadow approx), .y=temperature (Kelvin), .z=intensity mult, .w=spare
+#ifndef XLION_LDR_OUTPUT
+	// xLIONRender (plans/forward/xlionrender_plan_forward.h ubo_lighting): the directional light's shadow clipmap
+	mat4 W2Light;                      // world -> light space (rotation)
+	vec4 CameraPos;                    // world position of the camera (wSpacePosition is camera-centered)
+	vec4 ShadowLevels[4];              // per clipmap level: xy first tile of the window, z tile size, w depth center
+	vec4 ShadowParams;                 // x: 1 shadows on, y: level 0 depth half range
+#endif
 } UBOLight;
+
+#ifndef XLION_LDR_OUTPUT
+#include "xlionrender_shadow_clipmap.glsl"
+#endif
 
 //-------------------------------------------------------------------------------------------
 // Constants
@@ -210,7 +221,11 @@ vec3 PBRLighting
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).
-	float Shadow = ShadowPCF(In.ShadowPosition / In.ShadowPosition.w);
+#ifdef XLION_LDR_OUTPUT
+	float Shadow = ShadowPCF(In.ShadowPosition / In.ShadowPosition.w);       // editors that draw materials themselves: their own shadow map
+#else
+	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? ShadowClipmap(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
+#endif
 	// xLIONRender: W == 0 is a directional light (XYZ = direction towards the light, no falloff); W > 0 a point
 	// light with that falloff radius. (The original treated W == 0 as a zero-radius point light: always black.)
 	vec3	L;

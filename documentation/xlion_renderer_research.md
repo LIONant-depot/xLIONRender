@@ -417,3 +417,28 @@ concurrent GI systems; runtime path tracer; per-platform renderers.
 - **Signature analysis is wrong** -> missed invalidation. `unknown` defaults conservative; differential
   tests against always-rebuild.
 - **Scope creep from references.** §3's deferred list and handoff §14.
+
+---
+
+## Shadows (decided 2026-10-12)
+
+One system that starts as a **cached shadow atlas** and grows into **virtual shadow maps**, not three separate systems.
+Reference survey: Unreal's VSM clipmap (per-level depth range with headroom, depth clamp "pancaking", static/dynamic
+pages kept apart), Filament (cascades + LiSPSM, no caching), Godot / Wicked (atlas, packed per frame). Perspective
+warps (PSM / LiSPSM / TSM) are out: camera-dependent, so nothing caches, and they shimmer; the clipmap gives the same
+"more texels near the camera" with stable, cached tiles.
+
+- **Phase 1 (done):** `features/shadows/xlionrender_shadow_clipmap.h`, `shaders/xlionrender_shadow_clipmap.glsl`.
+  D32F atlas 4096^2 of 512^2 tiles; the directional light's clipmap: 4 levels x 4x4 world-anchored tiles in light
+  space (slot = tile index mod 4, no allocator, no page table); conservative invalidation (a caster that appears,
+  disappears or moves marks the tiles under its old and new bounds; skinned casters every frame; a new light
+  direction everything); exact texel fetches (a filtered fetch at a tile edge blended in the unrelated neighbor slot).
+  Tested (`xlionrender_test_shadows`): shadows present, an unchanged frame renders 0 tiles, the cached image equals a
+  full rebuild after a caster moves (10 of 64 tiles re-rendered), a camera move re-renders only the new tiles (7 of 64).
+- **Phase 2:** point lights (6 atlas tiles per cube, each cached on its own) and spot lights, tiles sized by importance;
+  per-object tiles for dynamic objects (characters) - their own tight, high-resolution tile each frame.
+- **Later:** static/dynamic tile separation (copy the static depth, draw only the movers); virtual shadow maps once xGPU
+  has compute + indirect (smaller tiles = pages, GPU page marking from the depth buffer - same pool, cache, sampling);
+  contact shadows.
+- The editors' grid still receives the editor's own shadow map (xeditor_tools grid); it moves when the grid becomes a
+  renderer shadow receiver.
