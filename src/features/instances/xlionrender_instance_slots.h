@@ -35,8 +35,10 @@ namespace xlionrender
 
         // The slot of ID this frame (none_v: no room - every slot was seen this frame). New or changed (transform or constant
         // material): pending.
-        std::uint32_t Acquire(std::uint32_t ID, const xmath::fmat4& L2W, std::uint64_t Frame, const material& Mat = {}) noexcept
+        // bChanged: the slot is new, or its transform or constant material changed (what the shadow casters key on).
+        std::uint32_t Acquire(std::uint32_t ID, const xmath::fmat4& L2W, std::uint64_t Frame, const material& Mat = {}, bool* pChanged = nullptr) noexcept
         {
+            if (pChanged) *pChanged = true;
             if (auto It = m_ByID.find(ID); It != m_ByID.end())
             {
                 auto& S = m_Slots[It->second];
@@ -44,6 +46,7 @@ namespace xlionrender
                 const bool bMoved   = std::memcmp(&S.m_L2W, &L2W, sizeof(L2W)) != 0;
                 const bool bMatEdit = std::memcmp(&S.m_Material, &Mat, sizeof(Mat)) != 0;
                 if (bMoved || bMatEdit) { S.m_L2W = L2W; S.m_Material = Mat; MarkPending(It->second); }
+                if (pChanged) *pChanged = bMoved || bMatEdit;
                 return It->second;
             }
 

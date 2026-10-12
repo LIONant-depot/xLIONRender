@@ -169,6 +169,21 @@ namespace xlionrender
         instance_slots              m_InstanceSlots;
         int                         m_RingUsed              = 0;        // entries of this frame's ring region already written
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
+        std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
+
+        // Shadow casters by persistent slot: what they were the last time they were seen, so an unchanged caster costs a compare,
+        // not a hash, and a caster that stops being drawn is found from the list of the last render's slots
+        struct slot_caster
+        {
+            xmath::fbbox            m_World;
+            mesh_id                 m_Mesh;
+            std::uint64_t           m_MaterialsHash = 0;
+            std::uint64_t           m_Seen          = 0;
+            bool                    m_bValid        = false;
+        };
+        std::vector<slot_caster>    m_SlotCasters;
+        std::vector<std::uint32_t>  m_CasterSlots, m_CasterSlotsPrev;
+        std::uint64_t               m_ShadowPassCount       = 0;
         std::vector<xmath::fbbox>   m_DrawWorld;            // per scene draw: its world bounds this frame (computed with the shadow casters)
         struct visible_draw { const mesh_slot* m_pMesh; std::uint32_t m_Material; std::uint32_t m_iDraw; };
         std::vector<visible_draw>   m_Visible;              // this view's visible draws, sorted by state

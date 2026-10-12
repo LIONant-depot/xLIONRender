@@ -100,6 +100,38 @@ int main()
     std::printf("tiles re-rendered for the moved camera: %d of %d\n", nCamera, total_tiles_v);
     CHECK(nCamera > 0 && nCamera < total_tiles_v, "A camera move re-rendered %d of %d tiles", nCamera, total_tiles_v);
 
+    // The same with instance ids (casters tracked by their persistent slot, not hashed): unchanged -> nothing; moved, gone,
+    // re-materialed -> tiles, and the cached image equals a rebuild each time
+    {
+        const auto CachedEqualsRebuilt = [&](const char* pWhat) -> bool
+        {
+            std::vector<float> A, B;
+            if (!App.RenderFrame(Scene, View, Camera) || !ReadHDR(Device, View, A)) return false;
+            const int nTiles = Renderer.getShadowTilesRendered();
+            Renderer.m_bShadowCache = false;
+            const bool bOk = App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, B);
+            Renderer.m_bShadowCache = true;
+            if (!bOk || !App.RenderFrame(Scene, View, Camera)) return false;          // settle (the rebuild made every tile valid)
+            std::printf("ids: %s re-rendered %d tiles\n", pWhat, nTiles);
+            if (nTiles == 0) { std::printf("FAIL: %s rendered no tile\n", pWhat); return false; }
+            for (std::size_t i = 0; i < A.size(); ++i) if (A[i] != B[i]) { std::printf("FAIL: %s: cached and rebuilt differ at %d\n", pWhat, int(i)); return false; }
+            return true;
+        };
+        Scene.m_Draws[0].m_Instance = 1;
+        Scene.m_Draws[1].m_Instance = 2;
+        CHECK(CachedEqualsRebuilt("new ids"), "Ids: first frame");
+        CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.getShadowTilesRendered() == 0, "Ids: an unchanged scene re-rendered %d tiles", Renderer.getShadowTilesRendered());
+        Scene.m_Draws[1].m_L2W = Lifted(-0.3f);
+        CHECK(CachedEqualsRebuilt("moved"), "Ids: moved");
+        const auto Sphere1 = Scene.m_Draws[1];
+        Scene.m_Draws.pop_back();
+        CHECK(CachedEqualsRebuilt("gone"), "Ids: gone");
+        Scene.m_Draws.push_back(Sphere1);
+        CHECK(CachedEqualsRebuilt("back"), "Ids: back");
+        Scene.m_Draws[1].m_Material.m_BaseColor = { 0.2f, 0.9f, 0.2f };
+        CHECK(CachedEqualsRebuilt("material"), "Ids: material change");
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");

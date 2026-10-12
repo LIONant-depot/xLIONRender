@@ -54,11 +54,14 @@ namespace xlionrender
             };
 
             m_DrawSlot.resize(Scene.m_Draws.size());
+            m_DrawChanged.assign(Scene.m_Draws.size(), 0);
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
             {
                 const auto&         D  = Scene.m_Draws[i];
                 const std::uint32_t ID = static_cast<std::uint32_t>(D.m_Instance);
-                std::uint32_t Slot = ID ? m_InstanceSlots.Acquire(ID, D.m_L2W, Frame, D.m_Material) : instance_slots::none_v;
+                bool bChanged = true;
+                std::uint32_t Slot = ID ? m_InstanceSlots.Acquire(ID, D.m_L2W, Frame, D.m_Material, &bChanged) : instance_slots::none_v;
+                m_DrawChanged[i] = bChanged;
                 if( Slot == instance_slots::none_v )
                 {
                     if( m_TransientCount >= max_transient_v || m_RingUsed >= region_v ) { m_DrawSlot[i] = instance_slots::none_v; continue; }     // ponytail: dropped
@@ -153,37 +156,69 @@ namespace xlionrender
 
         m_nShadowTilesRendered = 0;
 
-        // The casters and what changed since the last frame: new and gone casters, and skinned ones (old and new bounds)
+        // The casters and what changed since the last render: new and gone casters, moved or re-materialed ones, and skinned
+        // ones (old and new bounds). Draws with an instance id compare against their slot's last state (no hashing, bounds kept
+        // while unchanged); draws without one go through a hash of their state.
         struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; };
         std::vector<draw_caster>                         Draws;
         std::vector<xmath::fbbox>                        Changed;
         std::unordered_map<std::uint64_t, xmath::fbbox>  Now;
         Draws.reserve(Scene.m_Draws.size());
-        Now.reserve(Scene.m_Draws.size());
         m_DrawWorld.assign(Scene.m_Draws.size(), xmath::fbbox{});
+        if( m_SlotCasters.empty() ) m_SlotCasters.resize(max_instances_v);
+        const std::uint64_t Pass = ++m_ShadowPassCount;
+        m_CasterSlots.clear();
+        const auto MaterialsHash = [](const draw& D) { return Hash(1469598103934665603ull, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id)); };     // alpha test, displacement
+        const auto WorldOf       = [](const mesh_slot& M, const draw& D) { return (M.m_bCluster ? M.m_Geom.m_BBox : M.m_BBox).TransformCopy(D.m_L2W); };
         for( std::size_t iDraw = 0; iDraw < Scene.m_Draws.size(); ++iDraw )
         {
             const auto& D     = Scene.m_Draws[iDraw];
             const auto* pMesh = findMesh(D.m_Mesh);
             if( pMesh == nullptr ) continue;
-            if( pMesh->m_bCluster && m_DrawSlot[iDraw] == instance_slots::none_v ) continue;
+            const std::uint32_t Slot = m_DrawSlot[iDraw];
+            if( pMesh->m_bCluster && Slot == instance_slots::none_v ) continue;
 
-            const bool bSkin = pMesh->m_bCluster && pMesh->m_Geom.m_Kind == geom_kind::SKIN;
-            std::uint64_t Key = 1469598103934665603ull;
-            Key = Hash(Key, &D.m_Mesh, sizeof(D.m_Mesh));
-            Key = Hash(Key, &D.m_L2W, sizeof(D.m_L2W));
-            Key = Hash(Key, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id));     // alpha test, displacement
-            const xmath::fbbox World = (pMesh->m_bCluster ? pMesh->m_Geom.m_BBox : pMesh->m_BBox).TransformCopy(D.m_L2W);
+            const bool   bSkin = pMesh->m_bCluster && pMesh->m_Geom.m_Kind == geom_kind::SKIN;
+            xmath::fbbox World;
+            if( Slot < std::uint32_t(max_instances_v) )
+            {
+                auto&               C     = m_SlotCasters[Slot];
+                const std::uint64_t MHash = MaterialsHash(D);
+                const bool bChanged = m_DrawChanged[iDraw] || !C.m_bValid || bSkin || C.m_Mesh.m_Index != D.m_Mesh.m_Index
+                                   || C.m_Mesh.m_Generation != D.m_Mesh.m_Generation || C.m_MaterialsHash != MHash;
+                if( bChanged )
+                {
+                    if( C.m_bValid ) Changed.push_back(C.m_World);
+                    C = { WorldOf(*pMesh, D), D.m_Mesh, MHash, Pass, true };
+                    Changed.push_back(C.m_World);
+                }
+                C.m_Seen = Pass;
+                World    = C.m_World;
+                m_CasterSlots.push_back(Slot);
+            }
+            else
+            {
+                std::uint64_t Key = 1469598103934665603ull;
+                Key = Hash(Key, &D.m_Mesh, sizeof(D.m_Mesh));
+                Key = Hash(Key, &D.m_L2W, sizeof(D.m_L2W));
+                Key = Hash(Key, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id));
+                World = WorldOf(*pMesh, D);
+                Now.emplace(Key, World);
+                const auto It = m_PrevCasters.find(Key);
+                if( It == m_PrevCasters.end() || bSkin ) Changed.push_back(World);
+                if( It != m_PrevCasters.end() && bSkin ) Changed.push_back(It->second);
+            }
             m_DrawWorld[iDraw] = World;
-            Draws.push_back({ &D, pMesh, World, m_DrawSlot[iDraw] });
-            Now.emplace(Key, World);
-
-            const auto It = m_PrevCasters.find(Key);
-            if( It == m_PrevCasters.end() || bSkin ) Changed.push_back(World);
-            if( It != m_PrevCasters.end() && bSkin ) Changed.push_back(It->second);
+            Draws.push_back({ &D, pMesh, World, Slot });
         }
         for( const auto& [Key, World] : m_PrevCasters ) if( !Now.contains(Key) ) Changed.push_back(World);
         m_PrevCasters = std::move(Now);
+        for( auto Slot : m_CasterSlotsPrev )                                // persistent casters no longer drawn
+        {
+            auto& C = m_SlotCasters[Slot];
+            if( C.m_bValid && C.m_Seen != Pass ) { Changed.push_back(C.m_World); C.m_bValid = false; }
+        }
+        std::swap(m_CasterSlots, m_CasterSlotsPrev);
 
         const auto& Sun = Scene.m_Sun;
         if( Sun.m_bCastShadows ) m_Clipmap.Update(Sun.m_Direction, Sun.m_ShadowTileSize, Eye, Changed, m_bShadowCache, m_ShadowTiles);
@@ -288,9 +323,12 @@ namespace xlionrender
             if( !bClipmapDone )
             {
                 bClipmapDone = true;
-                std::vector<shadows::lbox> LightBounds;         // the clipmap culls in light space
-                LightBounds.reserve(Draws.size());
-                for( const auto& C : Draws ) LightBounds.push_back(m_Clipmap.Bounds(C.m_World));
+                std::vector<shadows::lbox> LightBounds;         // the clipmap culls in light space (only when a tile renders)
+                if( !m_ShadowTiles.empty() )
+                {
+                    LightBounds.reserve(Draws.size());
+                    for( const auto& C : Draws ) LightBounds.push_back(m_Clipmap.Bounds(C.m_World));
+                }
                 const int S = m_ShadowSetup.m_ClipmapTileSize;
                 for( const auto& T : m_ShadowTiles )
                 {
