@@ -45,6 +45,7 @@ namespace xlionrender
             std::uint64_t Key = 1469598103934665603ull;
             Key = Hash(Key, &D.m_Mesh, sizeof(D.m_Mesh));
             Key = Hash(Key, &D.m_L2W, sizeof(D.m_L2W));
+            Key = Hash(Key, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id));     // alpha test, displacement
             const xmath::fbbox World = (pMesh->m_bCluster ? pMesh->m_Geom.m_BBox : pMesh->m_BBox).TransformCopy(D.m_L2W);
             Draws.push_back({ &D, pMesh, World });
             Now.emplace(Key, World);
@@ -63,8 +64,6 @@ namespace xlionrender
 
         m_nShadowTilesRendered = static_cast<int>(m_ShadowTiles.size() + m_LocalToRender.size());
         if( m_nShadowTilesRendered == 0 ) return;
-
-        static const xmath::fmat4 NoShadow = []{ xmath::fmat4 M = xmath::fmat4::fromZero(); M(2, 3) = 2; M(3, 3) = 1; return M; }();
 
         // Draws the casters that pass Keep with W2C into the current viewport
         const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, const auto& Keep )
@@ -91,9 +90,8 @@ namespace xlionrender
                 Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{2} : std::size_t{1} });
 
                 auto& Mesh = m_ShadowUBO.allocEntry<details::ubo_static_geom_mesh>();
-                Mesh.m_L2w        = D.m_L2W;
-                Mesh.m_w2C        = W2C;
-                Mesh.m_L2CShadowT = NoShadow;
+                Mesh.setL2w(D.m_L2W);
+                Mesh.m_w2C = W2C;
                 Cmd.setDynamicUBO(m_ShadowUBO, 0);
                 Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
 
@@ -230,9 +228,6 @@ namespace xlionrender
         const xmath::fmat4 W2C     = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
         const xmath::fmat4 ToEye   = xmath::fmat4::fromTranslation(-Eye);
 
-        // The vertex shaders' single-shadow-map output is unused (the clipmap is looked up from the world position): z = 2, outside (-1,1)
-        static const xmath::fmat4 NoShadow = []{ xmath::fmat4 M = xmath::fmat4::fromZero(); M(2, 3) = 2; M(3, 3) = 1; return M; }();
-
         const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
         renderShadows(Window, Scene, Eye, ProjScale);
 
@@ -314,9 +309,8 @@ namespace xlionrender
                 const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{2} : std::size_t{1} };
 
                 auto& Mesh = m_StaticGeomUBO.allocEntry<details::ubo_static_geom_mesh>();
-                Mesh.m_L2w        = L2w;
-                Mesh.m_w2C        = W2C;
-                Mesh.m_L2CShadowT = NoShadow;
+                Mesh.setL2w(L2w);
+                Mesh.m_w2C = W2C;
 
                 for( const auto& Sub : G.m_Submeshes )
                 {

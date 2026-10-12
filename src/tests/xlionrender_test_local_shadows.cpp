@@ -7,6 +7,9 @@
 //  - a spot light: its map, and its shadow is there too
 //  - the per-frame budget: 3 lights, 2 maps per frame -> 2, then 1, then 0, and then the same image as a full rebuild
 //  - the buddy allocator the atlas uses: fills up, frees back into one block
+//  - no starvation: a small light whose map stays dirty while a big one is dirty every frame gets its update within
+//    urgent_age_v frames under a budget of 1
+//  - a caster changing material (same mesh, same place) re-renders the maps it reaches
 #include "xlionrender_test_common.h"
 
 using namespace xlionrender::test;
@@ -55,6 +58,28 @@ int main()
         for (int i = 0; i < 16; ++i) for (int j = i + 1; j < 16; ++j) CHECK(P[i].m_X != P[j].m_X || P[i].m_Y != P[j].m_Y, "Two maps at the same place");
         for (auto& R : P) B.Free(R, 1024);
         CHECK(B.Alloc(4096, Q) && Q.m_X == 0 && Q.m_Y == 0, "Freed maps merge back into the whole atlas");
+    }
+
+    // No starvation (CPU only)
+    {
+        xlionrender::shadows::local_shadows S;
+        S.Init({});
+        const std::vector<xlionrender::local_light> L
+        { { .m_Position = { 0, 0, 2 },   .m_Radius = 5 }        // big on screen
+        , { .m_Position = { 0, 0, 40 },  .m_Radius = 5 } };     // small, far away
+        const std::vector<xmath::fbbox> Both{ xmath::fbbox{ xmath::fvec3{ -1, -1, -1 }, xmath::fvec3{ 1, 1, 50 } } };
+        std::vector<xlionrender::shadows::local_map>           Maps;
+        std::vector<xlionrender::shadows::local_map_to_render> Out;
+        S.Update(L, {}, true, { 0, 0, 0 }, 100.0f, 16, Maps, Out);
+        CHECK(Out.size() == 2, "Both maps render first (%d)", int(Out.size()));
+        int SmallAt = -1;
+        for (int f = 1; f <= 2 * xlionrender::shadows::urgent_age_v && SmallAt < 0; ++f)
+        {
+            S.Update(L, Both, true, { 0, 0, 0 }, 100.0f, 1, Maps, Out);
+            CHECK(Out.size() == 1, "A budget of 1 renders 1 map (%d)", int(Out.size()));
+            if (Out[0].m_Light == 1) SmallAt = f;
+        }
+        CHECK(SmallAt > 0 && SmallAt <= xlionrender::shadows::urgent_age_v + 1, "The small light waited %d frames", SmallAt);
     }
 
     app App;
@@ -125,6 +150,17 @@ int main()
     int nChanged = 0;
     for (std::size_t i = 0; i < Cached.size(); ++i) nChanged += Cached[i] != On[i];
     CHECK(nChanged > 0, "Moving the sphere changed nothing on screen");
+
+    // A caster changing material re-renders the maps it reaches (an alpha-tested material casts another shadow)
+    {
+        const xlionrender::material_id Mat{ .m_Index = 7, .m_Generation = 1 };     // the key only (the float mesh ignores slots)
+        CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.getShadowTilesRendered() == 0, "Settled before the material change");
+        Scene.m_Draws[1].m_Materials = { Mat };
+        CHECK(App.RenderFrame(Scene, View, Camera), "Render with the new material");
+        CHECK(Renderer.getShadowTilesRendered() == 1, "A material change re-rendered %d maps (expected the near light's)", Renderer.getShadowTilesRendered());
+        Scene.m_Draws[1].m_Materials.clear();
+        CHECK(App.RenderFrame(Scene, View, Camera), "Render back");
+    }
 
     // A spot light pointing down at the sphere: 1 tile, a shadow
     xlionrender::local_light Spot{ .m_Type = xlionrender::local_light::type::SPOT, .m_Position = { 0.3f, 2.0f, 0.2f }, .m_Direction = { -0.1f, -1.0f, -0.1f }

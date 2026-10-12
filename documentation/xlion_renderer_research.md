@@ -452,6 +452,22 @@ warps (PSM / LiSPSM / TSM) are out: camera-dependent, so nothing caches, and the
   allocator. At most `m_ShadowUpdatesPerFrame` maps re-render per frame (never-rendered first, then by screen size). Normal
   offset bias for the local lights (a constant bias left acne where the light grazes the ground). Tested: the allocator,
   1 map per light, caching, cached == rebuilt, the budget (2, 1, 0 maps over three frames, then equal to a rebuild).
+- **Stale results (the contract; current behavior / gap):**
+
+  | Case | Behavior |
+  |---|---|
+  | Map never rendered | Not sampled: the light is unshadowed until its first render (done) |
+  | Light moves / resizes before its refresh | Gets a new map; the old one is freed, never sampled with the new mapping; unshadowed until rendered (done; gap: a moved light under backlog pops) |
+  | Over budget | A dirty map keeps its last render - an allowed approximation, not a cache hit (done) |
+  | Continuous overload | Never-rendered first, then maps waiting `urgent_age_v` (4) frames or more, the longest first, then screen size: none starves (done, tested) |
+  | Caster appears, disappears, moves, skinned | Its old and new bounds invalidate (done) |
+  | Caster material changes (alpha test, displacement) | The caster key is mesh + transform + materials (done, tested) |
+
+  The budget is a map count, not time: record scratch raster time, remap time, texels updated, caster draws, waiting
+  age and frame spikes before it grows into a cost-based queue.
+- **Precision and mapping tests still owed** (cached == rebuilt passes when both share a defect): large clipmap depth
+  ranges (16 bits over 2 x the level's half range), thin casters, grazing receivers, clipmap level boundaries,
+  octahedral folds and corners, PCF at tile borders, the cube -> octahedral remap against a cube-map reference.
 - **Phase 2b:** per-object tiles for dynamic objects (characters) - their own tight, high-resolution tile each frame;
   tiles sized by importance; per-face invalidation; normal-offset bias (grazing-angle speckle at the terminator).
 - **Later:** static/dynamic tile separation (copy the static depth, draw only the movers); virtual shadow maps once xGPU
@@ -479,17 +495,19 @@ content is unpredictable, so the cost must not follow scene complexity. Bandwidt
   ~60% extra pixel waves in forward lighting, and SSAO wants the depth first. Our Level scenes will get there.
 
 **Adopted:**
-1. **Atlas memory per platform.** 8192x4096 D32F is ~134 MB: a PC number. The sun's clipmap (the camera's
-   "little world": world-anchored tiles around the camera) keeps D32F at a per-platform size. Local lights get a
-   separate 16-bit atlas (`DEPTH_U16`) holding *linear* distance (written by the remap pass below; hyperbolic depth
-   in 16 bits loses the far range), also sized per platform. STB uses 16 bits.
-2. **A per-frame tile budget.** Shadow tiles to re-render go through one priority queue (importance: screen size,
-   distance, how often the lighting picks the light); past the budget they stay a frame stale. Fifty lights moving
-   at once must not spike the frame (STB load-balances the same way).
+1. **Atlas memory per platform (done, shadows phase 3 is the specification).** One `DEPTH_U16` atlas: the clipmap's
+   linear orthographic depth, the local maps' linear distance (hyperbolic depth in 16 bits loses the far range), a
+   D32F scratch for the local maps' casters. 8192x4096 = 64 MiB on PC, scratch excluded. STB uses 16 bits.
+2. **A per-frame update budget (done for the local maps; see the stale-result contract).** Fifty lights moving at
+   once must not spike the frame (STB load-balances the same way). How often the lighting picks a light may become one
+   input of the priority, never the only one (a rarely picked light would get poor shadows and be picked even less).
 3. **Light selection that does not scale with light count:** the world-cell reservoirs below, superseding the
    32-light loop and the CPU 32x32 screen-tile binning HypeHype 2024 ships (also no compute, but per view).
-4. **Slim per-draw data.** `ubo_static_geom_mesh` drops `m_L2CShadowT` (always `NoShadow` now) and `m_L2w` becomes
-   3x4: 192 -> 112 bytes per draw. Indexed loads are slow on mobile; uniform-address loads are the fast path.
+4. **Slim per-draw data (done).** `ubo_static_geom_mesh` dropped `m_L2CShadowT` and `m_L2w` became the affine matrix's 3
+   rows: 192 -> 112 bytes. xGPU pads each uniform entry to the GPU's `minUniformBufferOffsetAlignment` (was: the
+   renderer padded every struct to 256), so the stride is per device: 128 bytes per draw and 64 per material on the
+   RTX 4070 Ti SUPER here (alignment 64), still 256 where the alignment is 256. Report logical bytes, stride and
+   uploaded bytes per target device. Next on this road: a persistent instance buffer (below). Indexed loads are slow on mobile; uniform-address loads are the fast path.
 5. **Pipelines built at material load,** not at first draw (first-sight stutter). HypeHype builds every PSO at load.
 
 **Octahedral maps (adopted for point-light shadows, planned for reflections):**
@@ -501,24 +519,37 @@ content is unpredictable, so the cost must not follow scene complexity. Bandwidt
   atlas with the same tile manager, and WebGL2 has no cubemap arrays (the web target).
 
 **Taking STB further: world-cell light reservoirs.** STB picks, per *screen* tile, 1-4 lights out of all of them
-(two-stage stratified reservoir sampling) and leans on TAA to remove the noise, which they have not solved. Four
-changes fit xLION better:
+(two-stage stratified reservoir sampling) and leans on TAA to remove the noise, which they have not solved. The
+world-space version exists: **ReGIR** (Boksansky et al., *Rendering Many Lights with Grid-Based Reservoirs*, Ray
+Tracing Gems II): reservoirs in world cells (scrolling clipmap or hashed), proposals from approximate importance,
+resampled at the shading point with its BRDF. Its known limits are our test cases: cell granularity and temporal reuse
+bias, and it suits secondary hits better than primary shading in complex scenes. What xLION adds:
 
 - **Cells in the little world, not on the screen.** Reservoirs live in a camera-centered clipmap of world cells
   (the shadow clipmap's structure: world-anchored, slot = index mod window). A cell's light set does not depend on
   the view, so it is **cached** (re-sampled only when a light that reaches it changes - the same conservative
-  invalidation as shadow tiles), **shared by every view** (editor viewports, thumbnails), and **identical for both
-  XR eyes** - screen-tile stochastic lighting gives each eye different noise, which is visible in stereo.
+  invalidation as shadow tiles), **shared by every view** whose window covers it (distant views need their own
+  windows over the same world cells), and **the same candidates for both XR eyes** - not the same samples: the eyes can
+  fall in different cells and see different surfaces (stereo cell-boundary tests when XR starts). View-specific
+  refinement (depth bounds) never removes candidates from the shared cells (other views, translucents, volumes).
 - **Exact head, sampled tail.** Each cell keeps its top-K lights (K = 4..8, by the importance PDF) evaluated
   **exactly**, and only the remainder - the tail of weak contributors - is stochastic (1 weighted sample) or merged
   into one unshadowed aggregate light (lightcuts-style). With at most K lights reaching a cell the result equals
   today's loop: noise-free, so still frames in the editors are clean and our image tests stay deterministic (cached
-  == rebuilt). Noise appears only where many weak lights overlap, where it matters least.
-- **Visibility from the cached shadow tiles.** The PDF uses a coarse occlusion term taken from the light's (cached)
-  atlas tile over the cell's bounds: a light fully hidden from a cell gets weight 0, without STB's 4 stochastic
-  shadow samples per tile (their source of bias at light boundaries).
-- **One importance number.** The same per-light importance drives the cell sampling, the shadow tile's size and
-  its place in the update queue (adopted item 2): the lights the cells pick most get shadow resolution first.
+  == rebuilt). "Weak" is the cell's scalar estimate: a tail light can still dominate a sharp highlight on one surface
+  (test rough metals, grazing angles, colored materials, spots, receivers near a light). The estimator is
+  L = sum over the head of f_i(x) + f_J(x) / p_c(J), J drawn from the tail with its real probability p_c: head and
+  tail never share a light, and every tail light that can contribute keeps p_c > 0.
+- **Visibility from the cached shadow tiles.** The PDF uses a coarse occlusion term from the light's (cached) atlas
+  tile over the cell's bounds. It **lowers** a light's importance, with a positive floor: a few coarse samples do not
+  prove a whole cell is occluded (STB documents that darkening bias). Weight 0 only where occlusion is established
+  conservatively. These proposals are dirty when casters change, the light's map is refreshed or resized, or the
+  light changes - not only when the light changes.
+- **One importance estimate, several inputs.** Screen size, distance and how often the cells pick a light drive the
+  shadow map's size and its update priority, with a minimum service so no light starves.
+- **Tail refresh policy (to measure).** Re-showing the same tail sample every frame adds no evidence. Options: a
+  fresh sample each frame (temporal refinement), a fixed approximation, a settled/capture mode of higher quality, or a
+  small cached pool with a changing pick. A fixed seed makes a test reproducible, not exact.
 
 **A clustered builder for PC.** The cells are clusters: froxels moved into the little world (clipmap levels give the
 fine-near / coarse-far resolution froxel depth slices give, without depending on the view). One data layout and one
@@ -530,7 +561,43 @@ the same order of data) and uploads them as a small buffer; the shader finds its
 `ShadowClipmap` finds its tile. Fixed cost per pixel: K exact lights + 1 tail sample. Compute-side culling and
 temporal reservoir reuse come with xGPU compute. Open points: cell size per clipmap level, K per platform, the tail
 (sample vs aggregate - measure both), translucent and volumetric lookups (cells are 3D, so they work there too,
-which screen tiles do not).
+which screen tiles do not). Bounded is the shading stage only: the cell build and upload follow the light count -
+measure them too.
+
+**Next lighting deliverable: a three-mode lab** on the current shadow atlas and the same PBR shading:
+
+| Mode | What it tells |
+|---|---|
+| Exact reference | Every light, exactly (the fastest exact baseline, not only today's 32-light loop) |
+| Exact world-cell candidate lists | Whether the cells help - construction, sharing, lookup - with no stochastic error |
+| Exact head + sampled tail | The bounded-cost proposal |
+
+Test matrix: few lights (the head alone), dense overlap, glossy receivers, a thin occluder (zero support), a moving
+blocker with fixed lights (visibility invalidation), cell and clipmap crossings, two distant views, a sustained shadow
+backlog. **Acceptance before it replaces the exact path:** correct estimator weights with nonzero support,
+visibility-dependent invalidation, multi-view coverage without shared depth-based exclusions, and a measured tail
+refresh / settled-view policy.
+
+**Replacement passes (picking, wireframe, debug) - the contract:** a replacement shader declares the vertex / geometry
+kinds it supports, whether it keeps deformation (skinning) and coverage (alpha test), the resources and outputs it
+needs, its depth and blend state, and whether it takes part in material dependency tracking. "Same draw path" means
+the same instance traversal and geometry submission, not a way around the resource validation.
+
+**Timings:** the timestamp ring collects GPU times without stalling, but `EndFrame` still waits for the GPU. Measure the
+CPU wait separately from the GPU time before reading throughput or latency from them.
+
+**Later (obvious, related):** atlas pages (an array of local atlases, a buddy allocator each) with an LRU that evicts the
+maps of lights not seen for a while, and far lights shrinking before anything is evicted.
+
+**Research needed - from inferred lighting** (Kircher & Lawrance, *Inferred Lighting*, Sandbox 2009). The full pipeline
+(G-buffer, light buffer, material pass) is not adopted: GGX specular does not factor out of the material, and the geometry
+is drawn twice (HypeHype rejected that for dense kitbashed scenes, and tiled GPUs bin twice). Two ideas to study:
+- **Discontinuity-sensitive upsampling** of any term computed at a lower resolution (AO, the reservoirs' stochastic tail,
+  per-quad shadows - STB's silhouette artifacts): a low-resolution sample counts only if its object ID and normal-group ID
+  match the pixel's. Open: normal-group IDs are per-face data the pipeline must produce and keep (cluster splits, LODs,
+  skinning, procedural meshes); depth + normal comparisons may be the practical substitute.
+- **Irradiance demodulation:** the stochastic diffuse part is written as irradiance, denoised / accumulated, then multiplied
+  by albedo in the material shader, so the denoiser never blurs texture detail. Diffuse only (specular does not factor).
 
 **Worth knowing, later:** fp16 lighting math (Filament's Lagrange-identity GGX for half precision); barriers that
 let vertex work overlap the previous pass (~15% GPU when missing); post-processing folded into the tone-map pass;

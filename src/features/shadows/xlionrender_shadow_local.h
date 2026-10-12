@@ -10,8 +10,9 @@
 //    a spot's frustum at the map size), then a remap pass writes the map: cube -> octahedral, hyperbolic depth -> linear distance.
 //  - Map sizes are powers of two following the light's size on screen (with hysteresis), allocated by a quadtree buddy allocator.
 //  - Caching as the clipmap: a map re-renders when a changed caster's bounds touch the light's sphere. A light that moves or
-//    changes size gets a new map. Re-renders go through a per-frame budget (lights without a map first, then by screen size);
-//    past it a map stays a frame stale. A light whose map was never rendered is unshadowed.
+//    changes size gets a new map. Re-renders go through a per-frame budget (lights without a map first, then maps waiting
+//    for urgent_age_v frames or more - the longest first -, then by screen size); past it a map keeps its last render (an
+//    allowed approximation, not a cache hit). A light whose map was never rendered is unshadowed.
 //
 // The shaders (shaders/xlionrender_local_lights.glsl, xlionrender_shadow_remap_frag.glsl) share the face basis, the octahedral
 // mapping (xlionrender_octahedral.glsl) and the border with this file.
@@ -39,6 +40,7 @@ namespace xlionrender::shadows
     };
 
     constexpr int local_border_v = 2;
+    constexpr int urgent_age_v   = 4;           // frames a dirty map waits before it goes ahead of bigger ones
 
     // A quadtree buddy allocator of power-of-two squares in a square
     struct buddy
@@ -168,6 +170,7 @@ namespace xlionrender::shadows
                    , int Budget, std::vector<local_map>& Maps, std::vector<local_map_to_render>& Out) noexcept
         {
             Out.clear();
+            ++m_Frame;
             const int nLights = std::min(int(Lights.size()), max_local_lights_v);
             Maps.assign(Lights.size(), {});
             for (auto& A : m_Allocs) { A.m_bUsed = false; A.m_iLight = -1; }
@@ -190,8 +193,9 @@ namespace xlionrender::shadows
 
                 pA->m_bUsed  = true;
                 pA->m_iLight = i;
-                if (!bCache) pA->m_bDirty = true;
-                for (std::size_t c = 0; !pA->m_bDirty && c < Changed.size(); ++c) pA->m_bDirty = Overlaps(Changed[c], L.m_Position, L.m_Radius);
+                bool bDirty = !bCache;
+                for (std::size_t c = 0; !bDirty && c < Changed.size(); ++c) bDirty = Overlaps(Changed[c], L.m_Position, L.m_Radius);
+                if (bDirty && !pA->m_bDirty) { pA->m_bDirty = true; pA->m_DirtyFrame = m_Frame; }
             }
 
             // Maps of lights that are gone, moved or resized go back; new maps for the others, the biggest on screen first
@@ -203,13 +207,22 @@ namespace xlionrender::shadows
             {
                 buddy::pos P;
                 if (!m_Atlas.Alloc(Wanted[i], P)) continue;
-                m_Allocs.push_back({ LightKey(Lights[i]), P.m_X, P.m_Y, Wanted[i], i, true, false, true });
+                m_Allocs.push_back({ LightKey(Lights[i]), P.m_X, P.m_Y, Wanted[i], i, true, false, true, m_Frame });
             }
 
-            // Within the budget: maps never rendered first, then by size on screen
+            // Within the budget: maps never rendered first, then the ones waiting urgent_age_v frames or more (the longest
+            // first), then by size on screen
             std::vector<alloc*> Dirty;
             for (auto& A : m_Allocs) if (A.m_bDirty) Dirty.push_back(&A);
-            std::sort(Dirty.begin(), Dirty.end(), [&](const alloc* a, const alloc* b) { return a->m_bValid != b->m_bValid ? !a->m_bValid : Pixels[a->m_iLight] > Pixels[b->m_iLight]; });
+            const auto Age = [&](const alloc* a) { return m_Frame - a->m_DirtyFrame; };
+            std::sort(Dirty.begin(), Dirty.end(), [&](const alloc* a, const alloc* b)
+            {
+                if (a->m_bValid != b->m_bValid) return !a->m_bValid;
+                const bool aUrgent = Age(a) >= urgent_age_v, bUrgent = Age(b) >= urgent_age_v;
+                if (aUrgent != bUrgent) return aUrgent;
+                if (aUrgent && Age(a) != Age(b)) return Age(a) > Age(b);
+                return Pixels[a->m_iLight] > Pixels[b->m_iLight];
+            });
             if (bCache && int(Dirty.size()) > Budget) Dirty.resize(std::max(Budget, 0));
             for (auto* pA : Dirty)
             {
@@ -228,6 +241,7 @@ namespace xlionrender::shadows
             int             m_X, m_Y, m_Size;
             int             m_iLight;
             bool            m_bUsed, m_bValid, m_bDirty;
+            std::uint64_t   m_DirtyFrame;       // when it became dirty (waiting age)
         };
 
         int SizeFor(float Pixels) const noexcept
@@ -247,6 +261,7 @@ namespace xlionrender::shadows
         }
 
         setup               m_Setup;
+        std::uint64_t       m_Frame = 0;
         buddy               m_Atlas;
         std::vector<alloc>  m_Allocs;
     };

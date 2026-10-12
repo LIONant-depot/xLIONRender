@@ -19,12 +19,15 @@ namespace xlionrender::details
     };
 
     // "MeshUniforms" (set 2, binding 0) of both cluster vertex paths, and the rigid path's push constant
-    struct alignas(256) ubo_static_geom_mesh
+    // (each UBO entry is padded to the GPU's offset alignment by xGPU, not here: 112 -> 128 bytes on most desktop GPUs)
+    struct ubo_static_geom_mesh
     {
-        xmath::fmat4    m_L2w;                  // local -> camera-centered world
-        xmath::fmat4    m_w2C;                  // camera-centered world -> clip
-        xmath::fmat4    m_L2CShadowT;           // local -> shadow texture space
+        std::array<xmath::fvec4, 3>     m_L2wRows;      // local -> camera-centered world: the affine matrix's rows
+        xmath::fmat4                    m_w2C;          // camera-centered world -> clip
+
+        void setL2w(const xmath::fmat4& M) noexcept { for (int r = 0; r < 3; ++r) m_L2wRows[r] = { M(r, 0), M(r, 1), M(r, 2), M(r, 3) }; }
     };
+    static_assert(sizeof(ubo_static_geom_mesh) == 112);
 
     struct push_static_geom
     {
@@ -65,7 +68,7 @@ namespace xlionrender::details
     static_assert(sizeof(ubo_lighting) % 256 == 0);
 
     // xlionrender_forward_standard_frag.glsl "material_uniforms" (set 2, binding 2)
-    struct alignas(256) ubo_material
+    struct ubo_material
     {
         xmath::fvec4    m_BaseColor;
         xmath::fvec4    m_Params;               // x = metallic, y = roughness, z = AO, w = F0
