@@ -77,6 +77,24 @@ namespace xlionrender
                 pOut[Length] = 0;
                 return Length;
             }
+            void          RenderScene(const void* pWorld, xgpu::window& Window, xgpu::tools::view& Camera, int W, int H, view View, overlay_fn pOverlay, void* pUser, const roles* pRoles) noexcept override
+            {
+                if (auto* pSystem = FindSystem(pWorld)) pSystem->RenderScene(Window, Camera, W, H, View, pOverlay, pUser, pRoles);
+            }
+            void          BlitScene(const void* pWorld, xgpu::cmd_buffer& CmdBuffer) noexcept override
+            {
+                if (auto* pSystem = FindSystem(pWorld)) pSystem->BlitScene(CmdBuffer);
+            }
+            int           DescribeScene(const void* pWorld, char* pOut, int Capacity) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                if (!pSystem || !pOut || Capacity <= 0) return -1;
+                const std::string Text = pSystem->DescribeScene();
+                const int Length = static_cast<int>(std::min<std::size_t>(Text.size(), static_cast<std::size_t>(Capacity - 1)));
+                std::memcpy(pOut, Text.data(), static_cast<std::size_t>(Length));
+                pOut[Length] = 0;
+                return Length;
+            }
             int           DescribeText(const void* pWorld, std::uint64_t EntityValue, char* pOut, int Capacity) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);

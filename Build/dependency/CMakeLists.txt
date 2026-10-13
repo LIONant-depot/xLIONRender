@@ -39,7 +39,7 @@ endforeach()
 # shaders include the shared library in src/shaders, hence -I.
 set(XLIONRENDER_LIB_SHADERS)
 foreach(STAGE_PAIR "vert:xlionrender_forward_vert" "frag:xlionrender_forward_standard_frag" "vert:xlionrender_fullscreen_vert"
-                   "frag:xlionrender_tonemap_frag" "frag:xlionrender_blit_frag" "frag:xlionrender_default_material_frag" "frag:xlionrender_depth_frag" "vert:xlionrender_clear_depth_vert" "frag:xlionrender_shadow_remap_frag" "frag:xlionrender_geom_standard_frag" "frag:xlionrender_env_sky_frag" "frag:xlionrender_env_prefilter_frag" "frag:xlionrender_env_dfg_frag" "frag:xlionrender_env_downsample_frag" "frag:xlionrender_env_cube_to_oct_frag" "vert:xlionrender_static_geom_vert" "vert:xlionrender_skin_geom_vert")
+                   "frag:xlionrender_tonemap_frag" "frag:xlionrender_blit_frag" "frag:xlionrender_default_material_frag" "frag:xlionrender_depth_frag" "vert:xlionrender_clear_depth_vert" "frag:xlionrender_shadow_remap_frag" "frag:xlionrender_geom_standard_frag" "frag:xlionrender_env_sky_frag" "frag:xlionrender_env_prefilter_frag" "frag:xlionrender_env_dfg_frag" "frag:xlionrender_env_downsample_frag" "frag:xlionrender_env_cube_to_oct_frag" "vert:xlionrender_static_geom_vert" "vert:xlionrender_static_geom_gi_vert" "vert:xlionrender_skin_geom_vert")
   string(REPLACE ":" ";" STAGE_PAIR_LIST ${STAGE_PAIR})
   list(GET STAGE_PAIR_LIST 0 STAGE)
   list(GET STAGE_PAIR_LIST 1 NAME)
@@ -99,13 +99,15 @@ target_include_directories(xLIONRender PRIVATE
   "${CMAKE_SOURCE_DIR}/dependencies/xmath"
   "${CMAKE_SOURCE_DIR}/dependencies/xbits"
   "${CMAKE_SOURCE_DIR}/dependencies/box3d/include"
+  "${CMAKE_SOURCE_DIR}/dependencies/xGPU"                # the resource plugins' runtime headers include "source/xGPU.h"
   "${CMAKE_BINARY_DIR}/sprv_shaders_h"
 )
 target_compile_definitions(xLIONRender PRIVATE XECS_BUILD_SHARED XLIONRENDER_BUILD_SHARED XLIONRENDER_EXPORTS XLIONCORE_BUILD_SHARED)
 # xecs.h (pulled in transitively via xlioncore's physics_body_properties component) is built with XECS_BUILD_SHARED
 # here, so xtextfile/xproperty symbols it declares dllimport need xLIONCore's own import lib to
 # resolve at link time - xLIONCore.dll is the one binary that actually exports them.
-target_link_libraries(xLIONRender PRIVATE xGPU xprim_geom xLIONCore)
+# xLIONRender_lib: the forward renderer (xlionrender::instance), compiled into this DLL for the Levels' Meshes and lights (xlionrender_scene_renderer.h)
+target_link_libraries(xLIONRender PRIVATE xGPU xprim_geom xLIONCore xLIONRender_lib)
 if(WIN32)
   target_link_libraries(xLIONRender PRIVATE Advapi32.lib)
 endif()

@@ -13,6 +13,7 @@
 #include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xmath/source/xmath.h"
 #include "xlionrender_view.h"
+#include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <cstdint>
 #include <limits>
 
@@ -52,7 +53,7 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 4;                // 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
+        static constexpr std::uint32_t kVersion = 5;                // 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
@@ -70,6 +71,14 @@ namespace xlionrender
         virtual std::uint64_t PickRoles(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View, const roles& Roles) noexcept = 0;
         // What the last draw did with the roles (items of the context, items of the document, whether the fade was drawn), written like DescribeTextDraw. Returns the length written. Version 4.
         virtual int           DescribeRoleDraw(char* pOut, int Capacity) noexcept = 0;
+        // The world's Meshes, lights and Environment through the forward renderer (xlionrender::instance: shadows, probes, GI) into the world's own
+        // W x H view, with pOverlay drawn over the tone-mapped image with the scene's depth (the host's grid). Records render passes: call while the
+        // frame is built, before the UI is rendered; then BlitScene from a render callback of the viewport. Version 5.
+        using overlay_fn = void (*)(xgpu::cmd_buffer& CmdBuffer, void* pUser) noexcept;
+        virtual void          RenderScene(const void* pWorld, xgpu::window& Window, xgpu::tools::view& Camera, int W, int H, view View, overlay_fn pOverlay, void* pUser, const roles* pRoles) noexcept = 0;
+        virtual void          BlitScene(const void* pWorld, xgpu::cmd_buffer& CmdBuffer) noexcept = 0;
+        // What the last RenderScene of the world had (Meshes, drawn, waiting for their resources, material slots on the constant material, lights), written like DescribeTextDraw. Version 5.
+        virtual int           DescribeScene(const void* pWorld, char* pOut, int Capacity) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";

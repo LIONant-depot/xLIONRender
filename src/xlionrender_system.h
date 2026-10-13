@@ -22,6 +22,7 @@
 #include "xlionrender_text_layout.h"
 #include "xlionrender_text_renderer.h"
 #include "xlionrender_internal.h"
+#include "xlionrender_scene_renderer.h"
 #include "dependencies/xLIONCore/src/resources/xlioncore_resources_api.h"
 #include "dependencies/xGPU/source/xGPU.h"
 // LIONCore.dll owns (registers) these components; this DLL only needs their types/reflection, so
@@ -44,6 +45,7 @@
 #include <cstring>
 #include <format>
 #include <functional>
+#include <memory>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -70,6 +72,7 @@ namespace xlionrender
         };
         std::unordered_map<std::uint64_t, cached_text>  m_Texts;
         int                                             m_Frame = 0;
+        std::unique_ptr<scene_renderer>                 m_pScene;       // the forward renderer of this world (Meshes, lights, Environment), made the first time it is asked to render
 
         static void Mix(std::size_t& Hash, std::size_t Value) noexcept { Hash ^= Value + 0x9E3779B97F4A7C15ull + (Hash << 6) + (Hash >> 2); }
         static std::size_t Bits(float V) noexcept { std::uint32_t B; std::memcpy(&B, &V, sizeof(B)); return B; }
@@ -215,6 +218,66 @@ namespace xlionrender
                 L2W.setupSRT(T.m_Scale, T.m_Rotation, T.m_Position);
                 SubmitInternal(Prim.m_Shape, L2W, T.m_Scale, Prim.m_Color, Ent.m_Value);
             });
+        }
+
+        // The world's Meshes, lights and Environment as this frame's scene, rendered into the world's view (xlionrender_scene_renderer.h); the host
+        // blits it (BlitScene). Called while the frame is built, before the UI is rendered: it records render passes.
+        void RenderScene(xgpu::window& Window, xgpu::tools::view& Camera, int W, int H, view View, scene_renderer::overlay_fn pOverlay, void* pUser, const roles* pRoles) noexcept
+        {
+            auto* pDevice = GetDeviceInternal();
+            if (!pDevice) return;
+            xlioncore::resources::Initialize(*pDevice, getGameMgr().m_SceneMgr.m_ProjectPath.c_str());
+            if (!m_pScene) m_pScene = std::make_unique<scene_renderer>();
+            auto& R = *m_pScene;
+            if (!R.Init(*pDevice)) return;
+
+            xlioncore::PropagateHierarchy(*this);
+            R.Begin();
+            const auto Interpolate = xlioncore::FixedInterpolateOf(getGameMgr());
+            const auto L2WOf = [&](const xlioncore::transform& Local, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender, xmath::fmat4& L2W) noexcept
+            {
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender, Interpolate);
+                if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return false;    // a degenerate scale: not drawn (as the Primitive)
+                L2W.setupSRT(T.m_Scale, T.m_Rotation, T.m_Position);
+                return true;
+            };
+            const auto Hidden = [&](std::uint64_t Entity) noexcept { return pRoles && pRoles->IsHidden(Entity); };
+            const auto Each = [&]<typename T_COMPONENT>(auto&& Fn)
+            {
+                xecs::query::instance Query;
+                Query.m_Must.AddFromComponents<xlioncore::transform, T_COMPONENT>();
+                LeaveOut(Query, View);
+                auto S = Search(Query);
+                Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const T_COMPONENT& C, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+                {
+                    xmath::fmat4 L2W;
+                    if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
+                    Fn(Ent.m_Value, C, L2W);
+                });
+            };
+            Each.template operator()<mesh>       ([&](std::uint64_t E, const mesh& C,        const xmath::fmat4& L2W) { R.AddMesh(C, L2W, E); });
+            Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });
+            Each.template operator()<light_point>([&](std::uint64_t,   const light_point& C, const xmath::fmat4& L2W) { R.AddPoint(C, L2W * xmath::fvec3(0, 0, 0)); });
+            Each.template operator()<light_spot> ([&](std::uint64_t,   const light_spot& C,  const xmath::fmat4& L2W) { R.AddSpot(C, L2W); });
+            {
+                xecs::query::instance Query;
+                Query.m_Must.AddFromComponents<environment>();
+                auto S = Search(Query);
+                bool bFirst = true;
+                Foreach(S, [&](const environment& E) noexcept { if (bFirst) R.SetEnvironment(E); bFirst = false; });
+            }
+            R.Render(Window, Camera, W, H, pOverlay, pUser);
+        }
+
+        void BlitScene(xgpu::cmd_buffer& CmdBuffer) noexcept { if (m_pScene) m_pScene->Blit(CmdBuffer); }
+
+        // What the last RenderScene had (the editor's DescribeScene, tests)
+        std::string DescribeScene() const noexcept
+        {
+            if (!m_pScene) return "DescribeScene: not rendered yet";
+            const auto& S = m_pScene->m_Stats;
+            return std::format("DescribeScene: ok\nMeshes={}\nDrawn={}\nWaiting={}\nConstantSlots={}\nMaterials={}\nSun={}\nLights={}\nDrawsRendered={}"
+                              , S.m_Meshes, S.m_Drawn, S.m_Waiting, S.m_ConstantSlots, S.m_Materials, S.m_bSun, S.m_Lights, m_pScene->m_Renderer.getDrawsRendered());
         }
 
         // Ray-vs-OBB: Transform Position/Rotation + half-extents 0.5*Scale (matches Collect L2W).
