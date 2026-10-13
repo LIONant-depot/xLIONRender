@@ -974,7 +974,7 @@ namespace xlionrender
                 const int x0 = 2 * (i % (W / 2)), y0 = 2 * (i / (W / 2));
                 const auto Block = [&](int y) { return (Texel(x0, y) + Texel(x0 + 1, y) + Texel(x0, y + 1) + Texel(x0 + 1, y + 1)) * 0.25f; };
                 Albedo[J.m_Order[i]]   = Block(y0);
-                Emission[J.m_Order[i]] = Block(y0 + H / 2);
+                Emission[J.m_Order[i]] = Block(y0 + H / 2) * gi_emissive_scale_v;      // as the lights they are (gi_emissive_scale_v)
             }
             m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission));
         }

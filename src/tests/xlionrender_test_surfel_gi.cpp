@@ -610,6 +610,41 @@ int main()
         CHECK(Under > 0.5, "the emissive panel lights nothing (%.3f)", Under);
     }
 
+    // 6j. The emitter lists: a small emissive tile (20 x 20 cm, an exit sign) 1 m above a floor in the dark, few rays: the floor under it
+    //     gets the same light as the rays' hits find with many rays (the reference), and with 8 rays its noise across the floor is far
+    //     lower than the hits' (which rarely find a small tile)
+    {
+        surfel_mesh Ground, Sign;
+        AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
+        AddQuad(Sign,   { -0.1f, 1, -0.1f }, { 0.2f, 0, 0 }, { 0, 0, 0.2f }, 0.1f);   // facing down
+        Ground.Bake(0.3f, 0.9f); Sign.Bake(0.05f, 0.15f);
+        const auto Run = [&](bool bLinks, int Rays, int Updates, double& Spread)
+        {
+            world D;
+            D.m_bEmitterLinks = bLinks;
+            D.m_Setup.m_RaysPerSurfel = Rays;
+            const int iG = D.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            const int iS = D.Add(Sign, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            D.SetSurfelMaterial(iS, {}, std::vector<v3>(Sign.m_Levels[0].size(), v3{ 20, 20, 20 }));
+            lights Dark;
+            for (int f = 0; f < Updates; ++f) D.Update(Dark, { 0, 1, 0 }, 1 << 30, 16000 + f);
+            double m = 0, m2 = 0; int n = 0;
+            for (std::size_t s = 0; s < Ground.m_Levels[0].size(); ++s)
+                if (Ground.m_Levels[0][s].m_Center.Length() < 0.5f) { const double e = D.InstanceLight(iG)[s].m_X; m += e; m2 += e * e; ++n; }
+            m /= std::max(n, 1);
+            Spread = std::sqrt(std::max(0.0, m2 / std::max(n, 1) - m * m)) / std::max(m, 1e-9);
+            return m;
+        };
+        double SRef, SLinks, SHits;
+        const double Ref   = Run(false, 256, 40, SRef);           // the reference: many rays find the tile
+        const double Links = Run(true, 8, 20, SLinks);
+        const double Hits  = Run(false, 8, 20, SHits);
+        std::printf("emitter lists: under a 20 cm sign the reference %.3f (spread %.0f%%); links, 8 rays %.3f (spread %.0f%%); hits, 8 rays %.3f (spread %.0f%%)\n"
+                   , Ref, 100 * SRef, Links, 100 * SLinks, Hits, 100 * SHits);
+        CHECK(std::abs(Links - Ref) < 0.25 * Ref, "the emitter lists' light is off: %.3f vs the reference %.3f", Links, Ref);
+        CHECK(SLinks < 0.5 * SHits, "the emitter lists are no less noisy than the hits (%.0f%% vs %.0f%%)", 100 * SLinks, 100 * SHits);
+    }
+
     // 6. Buried surfels decay for long (the box's bottom on the floor: their validity heads to 0, then underflows), far and back:
     //    the reads at the ray hits divide by a total weight that is ~0, and nothing may come out as inf / NaN (it spreads to every surfel)
     {

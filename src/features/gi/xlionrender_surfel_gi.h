@@ -1039,6 +1039,9 @@ namespace xlionrender::gi
             int     m_nColored  = 0;            // instances with their surfels' material colors (the GPU capture)
             int     m_nEmissive = 0;            // surfels that emit
             v3      m_MeanAlbedo{ 0, 0, 0 };    // over the colored surfels
+            int     m_nLinks    = 0;            // emitter links (RebuildEmitterLinks)
+            float   m_MaxEmitted = 0;           // the most emitted light a surfel receives (its links' irradiance, luminance)
+            v3      m_MaxEmitter{ 0, 0, 0 };    // the brightest emitter's radiance
         };
 
         struct hit
@@ -1057,18 +1060,21 @@ namespace xlionrender::gi
             Place(I, L2W);
             Resize(I);
             m_bTlasDirty = true;
+            m_bLinksDirty = true;
             return int(m_Instances.size()) - 1;
         }
 
         // The colors of an instance's surface, per fine surfel (its material sampled where the surfel is: albedo and emitted radiance).
         // The light a ray brings back from the instance is its color there times what lights it, plus what it emits. Empty: the
         // instance's albedo, no emission. Its neighbors re-solve (what they see changed)
+        bool m_bEmitterLinks = true;            // false: emitters only through the rays' hits (tests compare the two)
         void SetSurfelMaterial(int Id, std::vector<v3> Albedo, std::vector<v3> Emission) noexcept
         {
             auto& I = m_Instances[Id];
             const std::size_t n = I.m_pMesh->m_Levels[0].size();
             I.m_SurfAlbedo   = Albedo.size() == n ? std::move(Albedo) : std::vector<v3>{};
             I.m_SurfEmission = Emission.size() == n ? std::move(Emission) : std::vector<v3>{};
+            m_bLinksDirty = true;
             DirtyNear(I.m_Lo, I.m_Hi);
         }
 
@@ -1095,6 +1101,7 @@ namespace xlionrender::gi
             Place(I, L2W);
             DirtyNear(I.m_Lo, I.m_Hi);
             m_bTlasDirty = true;
+            m_bLinksDirty = true;           // ponytail: every link is rebuilt when anything moves (scenes with emitters and moving meshes: per instance)
         }
 
         int             InstanceCount  ( void ) const noexcept { return int(m_Instances.size()); }
@@ -1325,6 +1332,9 @@ namespace xlionrender::gi
             St.m_Surfels = int(m_Work.size());
             St.m_Rays    = St.m_Surfels * m_Setup.m_RaysPerSurfel;
 
+            if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; }
+            UpdateEmittedLight();
+
             const auto T1 = std::chrono::steady_clock::now();
             m_Pool.Run(int(m_Work.size()), [&](int w)
             {
@@ -1362,10 +1372,12 @@ namespace xlionrender::gi
                     v3 Albedo, Emission;
                     SurfaceAt(H, Albedo, Emission);
                     const v3 In = Direct(HitPosition(H), Nh, L) + Indirect(H);
-                    const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + Emission;
+                    const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (m_Emitters.empty() ? Emission : v3{ 0, 0, 0 });     // with emitters the links bring their light
                     Sum = Sum + Lr;
                     for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Lr * Bw[i];
                 }
+                if (s < I.m_EmitB.size())                                   // the emitters it sees (the links): deterministic, no rays
+                    for (int i = 0; i < 3; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance
                 I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
                 I.m_AccValid[s] = std::clamp(1.0f - (float(nBack) / float(R) - 0.1f) / 0.15f, 0.0f, 1.0f);
             });
@@ -1432,6 +1444,16 @@ namespace xlionrender::gi
                 for (const auto& e : I.m_SurfEmission) St.m_nEmissive += (e.m_X + e.m_Y + e.m_Z) > 0.01f;
             }
             if (nAlbedo) St.m_MeanAlbedo = St.m_MeanAlbedo * (1.0f / float(nAlbedo));
+            for (const auto& I : m_Instances)
+            {
+                St.m_nLinks += int(I.m_Links.size());
+                for (const auto& B : I.m_EmitB) St.m_MaxEmitted = std::max(St.m_MaxEmitted, (B[0].m_X + B[1].m_X + B[2].m_X + B[0].m_Y + B[1].m_Y + B[2].m_Y) / 6.0f);
+            }
+            for (const auto& [i, e] : m_Emitters)
+            {
+                const v3 Le = m_Instances[i].m_SurfEmission[e];
+                if (Le.m_X + Le.m_Y + Le.m_Z > St.m_MaxEmitter.m_X + St.m_MaxEmitter.m_Y + St.m_MaxEmitter.m_Z) St.m_MaxEmitter = Le;
+            }
             return St;
         }
 
@@ -1445,6 +1467,10 @@ namespace xlionrender::gi
 
     private:
 
+        // A surfel's view of an emitter (RebuildEmitterLinks): the emitter (m_Emitters), its weight (area x both cosines / distance^2:
+        // the irradiance per unit of its radiance) and the shares of the surfel's 3 basis directions
+        struct emit_link { std::uint32_t m_Emitter; float m_W; std::array<float, 3> m_Bw; };
+
         struct instance
         {
             const surfel_mesh*      m_pMesh = nullptr;
@@ -1454,6 +1480,9 @@ namespace xlionrender::gi
             std::vector<float>      m_Valid, m_AccValid;
             std::vector<moments>    m_Moments;                  // per surfel of the active level (MomentTexel)
             std::vector<v3>         m_SurfAlbedo, m_SurfEmission;     // per fine surfel (SetSurfelMaterial; empty: m_Albedo, none)
+            std::vector<std::uint32_t> m_LinkFirst;              // per fine surfel + 1: its emitter links (RebuildEmitterLinks)
+            std::vector<emit_link>  m_Links;
+            std::vector<basis>      m_EmitB;                    // per surfel of the active level: the emitters' irradiance this update, per basis direction
             std::vector<basis>      m_Frac;                     // per surfel: the fraction of its light from around each basis direction (per channel)
             std::vector<basis>      m_BasisAcc;                 // this pass: the light per basis direction
             mutable std::vector<basis> m_Filtered;              // BasisLight's
@@ -1582,6 +1611,105 @@ namespace xlionrender::gi
         }
 
         // A vertex's weighted sum over its surfels at the instance's level (W: the total weight)
+        // The emitter lists (next-event estimation, precomputed): every fine surfel of every instance finds the emissive surfels it sees
+        // (an emitter's light reaches it as its radiance x its area x both cosines / distance^2) and keeps the strongest that nothing
+        // hides (a shadow ray each), once - not by waiting for 8 random rays to find a small sign. Rebuilt when emitters or placements
+        // change
+        static constexpr int max_links_v = 16;
+        void RebuildEmitterLinks() noexcept
+        {
+            m_Emitters.clear();
+            for (int i = 0; i < int(m_Instances.size()); ++i)
+            {
+                const auto& I = m_Instances[i];
+                if (!I.m_bAlive) continue;
+                for (std::size_t e = 0; e < I.m_SurfEmission.size(); ++e)
+                    if (I.m_SurfEmission[e].m_X + I.m_SurfEmission[e].m_Y + I.m_SurfEmission[e].m_Z > 1e-3f) m_Emitters.push_back({ i, int(e) });
+            }
+            struct emitter { v3 m_C, m_N; float m_A; };
+            std::vector<emitter> Em(m_Emitters.size());
+            for (std::size_t k = 0; k < Em.size(); ++k)
+            {
+                const auto& I = m_Instances[m_Emitters[k].first];
+                const auto& S = I.m_pMesh->m_Levels[0][m_Emitters[k].second];
+                const float r = S.m_Radius * I.m_MeanScale;
+                Em[k] = { I.m_L2W * S.m_Center, NormalToWorld(I, S.m_Normal), 1.47f * r * r };     // its share of the surface: surfels baked r apart cover ~1.47 r^2 each
+            }
+            for (int i = 0; i < int(m_Instances.size()); ++i)
+            {
+                auto& I = m_Instances[i];
+                I.m_LinkFirst.clear(); I.m_Links.clear();
+                if (!I.m_bAlive || Em.empty()) continue;
+                const auto& L = I.m_pMesh->m_Levels[0];
+                std::vector<std::vector<emit_link>> Per(L.size());
+                ParallelFor(int(L.size()), [&](int s)
+                {
+                    const v3 C = I.m_L2W * L[s].m_Center, N = NormalToWorld(I, L[s].m_Normal);
+                    std::vector<std::pair<float, std::uint32_t>> Cand;
+                    for (std::uint32_t k = 0; k < Em.size(); ++k)
+                    {
+                        if (m_Emitters[k].first == i && m_Emitters[k].second == s) continue;
+                        const v3 D = Em[k].m_C - C;
+                        const float d2 = D.Dot(D);
+                        if (d2 < 1e-10f) continue;
+                        const v3 Dn = D * (1.0f / std::sqrt(d2));
+                        const float cr = N.Dot(Dn), ce = -Em[k].m_N.Dot(Dn);
+                        if (cr <= 0 || ce <= 0) continue;
+                        Cand.push_back({ Em[k].m_A * cr * ce / std::max(d2, Em[k].m_A), k });
+                    }
+                    std::sort(Cand.begin(), Cand.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                    const basis Dirs = BasisDirs(L[s].m_Normal);
+                    for (const auto& [w, k] : Cand)
+                    {
+                        if (int(Per[s].size()) >= max_links_v || w < 1e-5f) break;
+                        const v3 D = Em[k].m_C - C;
+                        const float d = D.Length();
+                        if (Occluded(C + N * 1e-3f, D * (1.0f / d), d * 0.98f)) continue;      // stops short of the emitter's own surface
+                        v3 Dm = I.m_W2L.TransformDirection(D * (1.0f / d));
+                        Dm = Dm * (1.0f / std::max(Dm.Length(), 1e-12f));
+                        Per[s].push_back({ k, w, BasisWeights(Dirs, Dm) });
+                    }
+                });
+                I.m_LinkFirst.assign(L.size() + 1, 0);
+                for (std::size_t s = 0; s < L.size(); ++s)
+                {
+                    I.m_LinkFirst[s + 1] = I.m_LinkFirst[s] + std::uint32_t(Per[s].size());
+                    I.m_Links.insert(I.m_Links.end(), Per[s].begin(), Per[s].end());
+                }
+            }
+        }
+
+        // This update's emitted light reaching each surfel (its links x the emitters' current radiance), per basis direction, at the
+        // instance's active level (a parent: the mean of its children)
+        void UpdateEmittedLight() noexcept
+        {
+            for (auto& I : m_Instances)
+            {
+                I.m_EmitB.clear();
+                if (!I.m_bAlive || I.m_Links.empty()) continue;
+                const auto& M = *I.m_pMesh;
+                std::vector<basis> Fine(M.m_Levels[0].size(), basis{});
+                for (std::size_t s = 0; s + 1 < I.m_LinkFirst.size(); ++s)
+                    for (std::uint32_t k = I.m_LinkFirst[s]; k < I.m_LinkFirst[s + 1]; ++k)
+                    {
+                        const auto& Lk = I.m_Links[k];
+                        const auto& Em = m_Emitters[Lk.m_Emitter];
+                        const v3    Le = m_Instances[Em.first].m_SurfEmission[Em.second] * Lk.m_W;
+                        for (int i = 0; i < 3; ++i) Fine[s][i] = Fine[s][i] + Le * (3.0f * Lk.m_Bw[i]);     // the basis' mean is the irradiance
+                    }
+                if (I.m_Level == 0) { I.m_EmitB = std::move(Fine); continue; }
+                I.m_EmitB.assign(M.m_Levels[1].size(), basis{});
+                std::vector<int> Cnt(I.m_EmitB.size(), 0);
+                for (std::size_t s = 0; s < Fine.size(); ++s)
+                {
+                    const int p = M.m_ParentOf[s];
+                    for (int i = 0; i < 3; ++i) I.m_EmitB[p][i] = I.m_EmitB[p][i] + Fine[s][i];
+                    ++Cnt[p];
+                }
+                for (std::size_t p = 0; p < Cnt.size(); ++p) if (Cnt[p]) for (int i = 0; i < 3; ++i) I.m_EmitB[p][i] = I.m_EmitB[p][i] * (1.0f / float(Cnt[p]));
+            }
+        }
+
         // The surface's colors at a ray hit: its fine surfels' (the hit triangle's vertices' surfels, the reads' weights), or the
         // instance's albedo and no emission when it has none
         void SurfaceAt(const hit& H, v3& Albedo, v3& Emission) const noexcept
@@ -1639,6 +1767,8 @@ namespace xlionrender::gi
             return Sum;
         }
 
+        bool                                    m_bLinksDirty = false;
+        std::vector<std::pair<int, int>>        m_Emitters;         // (instance, fine surfel) of every surfel that emits
         worker_pool                             m_Pool;
         std::vector<instance>                   m_Instances;
         mutable bvh                             m_Tlas;

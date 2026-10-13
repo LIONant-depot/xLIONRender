@@ -956,3 +956,24 @@ children); point lights with the renderer's falloff; any-hit shadow rays; PCG ra
   GI: the vertex read is free); CPU GI update 1.26 ms mean on the render thread.
   ponytail: the update blocks Render (asynchronous next), the whole ring region is rewritten per render (changed instances
   only, into a device-local buffer, next), albedo is the constant material's base color.
+
+## GI planned: precomputed transfer within a mesh (recorded 2026-10-14)
+
+Our surfels are fixed on their mesh (baked, never recycled), unlike Wicked's (spawned from the screen) or Lumen's caches (rebuilt as the
+camera moves). What a surfel sees of its own mesh therefore never changes, and can be computed once with many rays instead of
+re-discovered every update with 8:
+
+- Per fine surfel, the top N (about 32) surfels of the same mesh it sees, with their form factors (the share of its view each covers),
+  traced once with hundreds of rays per surfel. About 1M links (8 MB) for the Police Station's 30k surfels.
+- The bounce within a mesh becomes a sparse matrix-vector product per update: no rays, no noise, converged and deterministic.
+  E_i = D_i + sum_j F_ij * albedo_j * E_j, where D_i (direct: sun, lights, emitters) stays live, so lights can move and change.
+- Bounce between separate meshes (instances, moving objects) keeps the current rays: a hybrid. In a merged building (the Police
+  Station) almost all of the bounce is within the mesh.
+- Form factors depend on the geometry only (not materials or lights): the links can move into the GeomStatic compiler and the
+  resource; the colors (the material capture) are applied at runtime.
+- The same idea as Enlighten (precomputed radiosity on static geometry, real-time light updates; Battlefield, Mirror's Edge), on
+  surfels that are already the static elements it needed. Lumen, Wicked and DDGI cannot do it: their samples are not fixed.
+- A converged first frame (a warm start) comes with it.
+
+Step one of it, done first: the emitter lists (each surfel's visible emissive surfels with their weights, computed at load), so
+small emitters (an exit sign) light their surroundings without noise.
