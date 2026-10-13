@@ -623,7 +623,7 @@ namespace xlionrender
 
         const bool bSkin = Kind == geom_kind::SKIN;
         xgpu::shader Vert;
-        if( m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = bSkin ? SPIRV(s_SkinGeomVert) : SPIRV(s_StaticGeomVert) }) ) return nullptr;
+        if( m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = bSkin ? SPIRV(s_SkinGeomVert) : SPIRV(s_StaticGeomGIVert) }) ) return nullptr;     // RIGID: reads the surfel GI
 
         // Slot 0 (shadow map) clamps, the material textures use the default sampler - as the geom editors
         assert(M.m_Textures.size() <= 8);       // slots 8, 9: the environment
@@ -642,6 +642,7 @@ namespace xlionrender
         if( bSkin ) UniformBinds.push_back(VertexSSBO(2));     // SKIN: instances
         UniformBinds.push_back(FragmentSSBO(3));                // lights
         UniformBinds.push_back(FragmentSSBO(4));                // light cells
+        if( !bSkin ) { UniformBinds.push_back(VertexSSBO(5)); UniformBinds.push_back(VertexSSBO(6)); }     // RIGID: the GI (the mesh's surfels, their light)
         const auto Binds = std::span{ UniformBinds };
         if( m_Device.Create(M.m_Pipeline[k], { .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                              , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)

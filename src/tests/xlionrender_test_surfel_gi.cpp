@@ -235,7 +235,9 @@ int main()
         for (int Budget : { 4096, 16384 })
         {
             double Ms = 0;
-            for (int f = 0; f < 10; ++f) Ms += W.Update(L, Eye, Budget, 2500 + f).m_Ms;
+            int MaxRays = 0;
+            for (int f = 0; f < 10; ++f) { const auto S = W.Update(L, Eye, Budget, 2500 + f); Ms += S.m_Ms; MaxRays = std::max(MaxRays, S.m_Rays); }
+            CHECK(MaxRays <= Budget, "the budget is not held: %d rays for a budget of %d (instances are updated in slices)", MaxRays, Budget);
             std::printf("city: %d rays per update: %.2f ms\n", Budget, Ms / 10);
         }
         W.SetTransform(Moved, xmath::fmat4::fromTranslation({ 2.0f, 0, 1.0f }) * xmath::fmat4::fromTranslation({ 5, 4, 5 }));

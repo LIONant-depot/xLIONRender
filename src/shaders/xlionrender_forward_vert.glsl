@@ -15,6 +15,7 @@ layout(push_constant) uniform Push
 } push;
 
 layout(location = 0) out VaryingFull Out;
+layout(location = 9) out vec4 OutGI;            // surfel GI (mb_standard_pbr.frag): none on this path
 
 void main()
 {
@@ -27,6 +28,7 @@ void main()
     Out.Tangent.xyz    = normalize(RotMat * in_Tangent.xyz);
     Out.Tangent.w      = in_Tangent.w;
     Out.VertColor      = in_Color;
+    OutGI              = vec4(0.0);
     Out.UV             = in_UV;
 
     // No shadows yet: z outside (-1,1) makes ShadowPCF return 1 without sampling

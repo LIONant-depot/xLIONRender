@@ -56,6 +56,9 @@
 #include "mb_varying_definition_full.glsl"
 
 layout(location = 0) in VaryingFull In;
+#ifndef XLION_LDR_OUTPUT
+layout(location = 9) in vec4 InGI;     // xLIONRender surfel GI: sum(w E), sum(w) from the vertex shader (0 without GI) - divided here, into g_GI
+#endif
 
 #ifndef XLION_LDR_OUTPUT
 struct LocalLightData                  // xLIONRender: a point or spot light (shaders/xlionrender_local_lights.glsl)
@@ -240,6 +243,7 @@ vec3 PBRLighting
 	vec3	ambientSpec			= F_grazing * UBOLight.AmbientLightColor.rgb * inAO * (1.0 - inRoughness) * 0.04;
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 #ifndef XLION_LDR_OUTPUT
+	if (InGI.w > 1e-6) g_GI = vec4(InGI.rgb / InGI.w, 1.0);
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
 #endif
 

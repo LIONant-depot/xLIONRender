@@ -255,17 +255,17 @@ namespace xlionrender
                     Fn(Ent.m_Value, C, L2W);
                 });
             };
-            Each.template operator()<mesh>       ([&](std::uint64_t E, const mesh& C,        const xmath::fmat4& L2W) { R.AddMesh(C, L2W, E); });
-            Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });
-            Each.template operator()<light_point>([&](std::uint64_t,   const light_point& C, const xmath::fmat4& L2W) { R.AddPoint(C, L2W * xmath::fvec3(0, 0, 0)); });
-            Each.template operator()<light_spot> ([&](std::uint64_t,   const light_spot& C,  const xmath::fmat4& L2W) { R.AddSpot(C, L2W); });
-            {
+            {   // first: the meshes need to know whether GI is on (their surfels are baked when it is)
                 xecs::query::instance Query;
                 Query.m_Must.AddFromComponents<environment>();
                 auto S = Search(Query);
                 bool bFirst = true;
                 Foreach(S, [&](const environment& E) noexcept { if (bFirst) R.SetEnvironment(E); bFirst = false; });
             }
+            Each.template operator()<mesh>       ([&](std::uint64_t E, const mesh& C,        const xmath::fmat4& L2W) { R.AddMesh(C, L2W, E); });
+            Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });
+            Each.template operator()<light_point>([&](std::uint64_t,   const light_point& C, const xmath::fmat4& L2W) { R.AddPoint(C, L2W * xmath::fvec3(0, 0, 0)); });
+            Each.template operator()<light_spot> ([&](std::uint64_t,   const light_spot& C,  const xmath::fmat4& L2W) { R.AddSpot(C, L2W); });
             R.Render(Window, Camera, W, H, pOverlay, pUser);
         }
 
@@ -275,9 +275,11 @@ namespace xlionrender
         std::string DescribeScene() const noexcept
         {
             if (!m_pScene) return "DescribeScene: not rendered yet";
-            const auto& S = m_pScene->m_Stats;
-            return std::format("DescribeScene: ok\nMeshes={}\nDrawn={}\nWaiting={}\nConstantSlots={}\nMaterials={}\nSun={}\nLights={}\nDrawsRendered={}"
-                              , S.m_Meshes, S.m_Drawn, S.m_Waiting, S.m_ConstantSlots, S.m_Materials, S.m_bSun, S.m_Lights, m_pScene->m_Renderer.getDrawsRendered());
+            const auto& S  = m_pScene->m_Stats;
+            const auto& GI = m_pScene->m_Renderer.getGIStats();
+            return std::format("DescribeScene: ok\nMeshes={}\nDrawn={}\nWaiting={}\nConstantSlots={}\nMaterials={}\nSun={}\nLights={}\nDrawsRendered={}\nGIMeshes={}\nGIUpdated={}\nGIRays={}\nGIMs={:.2f}\nBakeMs={:.0f}"
+                              , S.m_Meshes, S.m_Drawn, S.m_Waiting, S.m_ConstantSlots, S.m_Materials, S.m_bSun, S.m_Lights, m_pScene->m_Renderer.getDrawsRendered()
+                              , S.m_GIMeshes, GI.m_Updated, GI.m_Rays, GI.m_Ms, m_pScene->m_TotalBakeMs);
         }
 
         // Ray-vs-OBB: Transform Position/Rotation + half-extents 0.5*Scale (matches Collect L2W).
@@ -343,6 +345,27 @@ namespace xlionrender
                 if ((xeditor_tools::picking::RayTriangleIntersect(Origin, Dir, P0, P1, P2, THit) || xeditor_tools::picking::RayTriangleIntersect(Origin, Dir, P0, P2, P3, THit)) && THit < MaxT)
                     Hit.Consider(Ent.m_Value, THit);
             });
+            // The Meshes: the box of their geometry (its bounds, scaled, rotated and placed by the entity). A geometry not loaded yet is not picked.
+            // ponytail: the bounds, not the triangles - a click in the empty part of a big mesh's box picks it; ray vs the clusters when it shows
+            xecs::query::instance MeshQuery;
+            MeshQuery.m_Must.AddFromComponents<xlioncore::transform, mesh>();
+            LeaveOut(MeshQuery, View);
+            auto MS = Search(MeshQuery);
+            Foreach(MS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const mesh& M, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+            {
+                if (NotPickable(Ent.m_Value) || M.m_Geom.empty()) return;
+                auto* pGeom = static_cast<xgeom_static::xgpu::geom*>(xlioncore::resources::GetResource(geom_static_type_guid_v.m_Value, M.m_Geom.m_Instance.m_Value));
+                if (!pGeom) return;
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender, xlioncore::FixedInterpolateOf(getGameMgr()));
+                if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return;
+                const xmath::fvec3 LocalCenter = (pGeom->m_BBox.m_Min + pGeom->m_BBox.m_Max) * 0.5f;
+                const xmath::fvec3 Half        = (pGeom->m_BBox.m_Max - pGeom->m_BBox.m_Min) * 0.5f * T.m_Scale;
+                const xmath::fvec3 Center      = T.m_Position + T.m_Rotation.RotateVector(LocalCenter * T.m_Scale);
+                float THit;
+                if (xeditor_tools::picking::RayOBBIntersect(Origin, Dir, Center, T.m_Rotation, Half.AbsCopy(), THit) && THit < MaxT)
+                    Hit.Consider(Ent.m_Value, THit);
+            });
+
             return Hit.isValid() ? Hit.m_Id : xecs::component::entity::invalid_entity_v;
         }
     };

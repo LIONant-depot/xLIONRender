@@ -27,6 +27,7 @@ layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 // Fragment shader inputs
 layout(location = 0) out VaryingFull Out;
 layout(location = 8) flat out uint OutInstance;     // the slot, for fragment shaders that read the instance record (geom standard)
+layout(location = 9) out vec4 OutGI;                // surfel GI: sum(w E), sum(w), interpolated and divided per pixel (mb_standard_pbr.frag); 0 without GI
 
 #ifdef XLION_GI
 // Surfel GI (features/gi/xlionrender_surfel_gi.h): the mesh's surfel data and this frame's surfel irradiance
@@ -35,7 +36,6 @@ layout(location = 8) flat out uint OutInstance;     // the slot, for fragment sh
 //  GILight: per surfel of the instance's active level: rgb irradiance, a validity (0: buried)
 layout(std430, set = 1, binding = 5) readonly buffer GIMeshBuffer  { uint GIMesh[]; };
 layout(std430, set = 1, binding = 6) readonly buffer GILightBuffer { vec4 GILight[]; };
-layout(location = 9) out vec4 OutGI;                // sum(w E), sum(w): interpolated, divided per pixel (a buried vertex drops out)
 
 // The weighted sum over the vertex's surfels at the instance's level (world space distances: any scale)
 vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4 L2wRows, in const float MeanScale)
@@ -121,6 +121,8 @@ void main()
 
 #ifdef XLION_GI
     OutGI = SurfelGI(VertData.LocalPos.xyz, normalize(VertData.Normal.xyz), L2wRows, (scales.x + scales.y + scales.z) / 3.0);
+#else
+    OutGI = vec4(0.0);
 #endif
 }
 

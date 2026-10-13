@@ -818,8 +818,8 @@ namespace xlionrender
                     }
                     if( pInstance != pBound || &G != pBoundGeom )
                     {
-                        if( pInstance == &m_StaticGeomInstance ) Cmd.setPipelineInstance(*pInstance, std::span{ GIBuffers });   // + the GI buffers
-                        else                                     Cmd.setPipelineInstance(*pInstance, Static);
+                        if( !bSkin ) Cmd.setPipelineInstance(*pInstance, std::span{ GIBuffers });     // every rigid pipeline reads the GI
+                        else         Cmd.setPipelineInstance(*pInstance, Static);
                         Cmd.setDynamicUBO(m_LightUBO, 1);
                         Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                         Cmd.setStreamingBuffers({ G.m_pStreams, 3 });

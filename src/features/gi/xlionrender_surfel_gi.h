@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #if defined(_M_X64) || defined(_M_IX86) || defined(__SSE2__)
 #include <xmmintrin.h>
@@ -421,6 +422,22 @@ namespace xlionrender::gi
         return f * f * c + 1e-6f;
     }
 
+    // A hash grid of points (the bake's neighbor searches)
+    struct surfel_grid
+    {
+        float                                               m_Cell;
+        std::unordered_map<std::uint64_t, std::vector<int>> m_Cells;
+        static std::uint64_t Key(int x, int y, int z) noexcept { return (std::uint64_t(std::uint32_t(x) & 0x1FFFFF) << 42) | (std::uint64_t(std::uint32_t(y) & 0x1FFFFF) << 21) | (std::uint32_t(z) & 0x1FFFFF); }
+        std::array<int, 3> Cell(const v3& P) const noexcept { return { int(std::floor(P.m_X / m_Cell)), int(std::floor(P.m_Y / m_Cell)), int(std::floor(P.m_Z / m_Cell)) }; }
+        void Add(const v3& P, int i) { const auto C = Cell(P); m_Cells[Key(C[0], C[1], C[2])].push_back(i); }
+        template <class F> void Near(const v3& P, int Ring, F&& Fn) const
+        {
+            const auto C = Cell(P);
+            for (int z = -Ring; z <= Ring; ++z) for (int y = -Ring; y <= Ring; ++y) for (int x = -Ring; x <= Ring; ++x)
+                if (auto It = m_Cells.find(Key(C[0] + x, C[1] + y, C[2] + z)); It != m_Cells.end()) for (int i : It->second) Fn(i);
+        }
+    };
+
     struct surfel_mesh
     {
         std::vector<v3>                     m_Pos, m_Nrm;           // mesh space; triangles counter-clockwise or not (normals decide)
@@ -449,47 +466,96 @@ namespace xlionrender::gi
             return { Best[0].second, Best[1].second, Best[2].second, Best[3].second };
         }
 
-        // The bake (the resource pipeline's job; here at load): surfels of Radius (a greedy cover of the vertices, each
-        // centered on the mean of its vertices), parents of ParentRadius over the surfels, the vertex indices, the BVH.
-        // ponytail: O(vertices x surfels); a spatial hash when real assets make it slow
+        // The bake (the resource pipeline's job; today also run at load for meshes compiled without it):
+        //  - candidates sampled on the surface by area (about 4 per Radius^2 of each triangle, at least one per triangle), each with the
+        //    interpolated vertex normal: the surfels follow the surface, not the vertices (a big wall gets as many as its area asks for)
+        //  - Poisson-disk acceptance through a hash grid of cell Radius: a candidate is kept when no kept surfel with a similar normal
+        //    (cos > 0.8) is closer than Radius (dart throwing in a shuffled order: blue-noise spacing)
+        //  - per vertex its 4 nearest compatible surfels (cos >= 0.5) from the 3x3x3 cells around it (wider rings if none)
+        //  - the parents: the same over the surfels' centers with ParentRadius; each surfel's parent is its nearest compatible one
+        //  - the BVH and the 4-triangle rows for the rays
+        // Deterministic (fixed seeds): the same mesh bakes the same surfels.
         void Bake(float Radius, float ParentRadius) noexcept
         {
-            const auto Cover = [&](std::vector<surfel>& Out, const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<int>& Owner)
+
+            // Dart throwing over weighted candidates: the kept ones become surfels of radius R
+            const auto Poisson = [](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G)
             {
                 Out.clear();
-                for (std::size_t i = 0; i < P.size(); ++i)
+                G = { R, {} };
+                std::vector<int> Order(P.size());
+                for (std::size_t i = 0; i < Order.size(); ++i) Order[i] = int(i);
+                rng Shuffle(0x5EEDu);
+                for (std::size_t i = Order.size(); i > 1; --i) std::swap(Order[i - 1], Order[std::size_t(Shuffle.Next() * float(i)) % i]);
+                for (int i : Order)
                 {
-                    bool bCovered = false;
-                    for (const auto& S : Out) if ((P[i] - S.m_Center).Length() < R && S.m_Normal.Dot(N[i]) > 0.8f) { bCovered = true; break; }
-                    if (!bCovered) Out.push_back({ P[i], N[i], R });
+                    bool bTaken = false;
+                    G.Near(P[i], 1, [&](int s) { bTaken = bTaken || ((P[i] - Out[s].m_Center).Length() < R && Out[s].m_Normal.Dot(N[i]) > 0.8f); });
+                    if (bTaken) continue;
+                    G.Add(P[i], int(Out.size()));
+                    Out.push_back({ P[i], N[i], R });
                 }
-                // each point to its nearest compatible center, centers moved to the mean of their points
-                Owner.assign(P.size(), 0);
-                std::vector<v3> Sum(Out.size(), v3{ 0, 0, 0 });
-                std::vector<int> Cnt(Out.size(), 0);
-                for (std::size_t i = 0; i < P.size(); ++i)
-                {
-                    float Best = 1e30f;
-                    for (std::size_t s = 0; s < Out.size(); ++s)
-                    {
-                        const float d = (P[i] - Out[s].m_Center).Length();
-                        if (Out[s].m_Normal.Dot(N[i]) > 0.5f && d < Best) { Best = d; Owner[i] = int(s); }
-                    }
-                    Sum[Owner[i]] = Sum[Owner[i]] + P[i];
-                    ++Cnt[Owner[i]];
-                }
-                for (std::size_t s = 0; s < Out.size(); ++s) if (Cnt[s]) Out[s].m_Center = Sum[s] * (1.0f / float(Cnt[s]));
             };
 
-            std::vector<int> VertOwner;
-            Cover(m_Levels[0], m_Pos, m_Nrm, Radius, VertOwner);
+            // The nearest compatible surfels of a point (up to 4), widening the search until something is found
+            const auto Nearest = [](const std::vector<surfel>& L, const surfel_grid& G, const v3& P, const v3& N, int nMax)
+            {
+                std::array<std::pair<float, int>, 4> Best;
+                Best.fill({ 1e30f, -1 });
+                for (int Ring = 1; Ring <= 4 && Best[0].second < 0; ++Ring)
+                    G.Near(P, Ring, [&](int s)
+                    {
+                        if (L[s].m_Normal.Dot(N) < 0.5f) return;
+                        const float d = (P - L[s].m_Center).Length();
+                        if (d >= Best[nMax - 1].first || std::any_of(Best.begin(), Best.end(), [&](const auto& b) { return b.second == s; })) return;
+                        Best[nMax - 1] = { d, s };
+                        std::sort(Best.begin(), Best.begin() + nMax);
+                    });
+                return Best;
+            };
+
+            // 1. Candidates on the surface, by area
+            std::vector<v3> CP, CN;
+            rng Sample(0xBA4Eu);
+            const float PerArea = 4.0f / (Radius * Radius);
+            for (const auto& T : m_Tris)
+            {
+                const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], C = m_Pos[T[2]];
+                const float Area = 0.5f * (B - A).Cross(C - A).Length();
+                const int   n    = std::max(1, int(std::ceil(Area * PerArea)));
+                for (int k = 0; k < n; ++k)
+                {
+                    float u = Sample.Next(), v = Sample.Next();
+                    if (u + v > 1) { u = 1 - u; v = 1 - v; }
+                    CP.push_back(A + (B - A) * u + (C - A) * v);
+                    v3 Nn = m_Nrm[T[0]] * (1 - u - v) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * v;
+                    if (Nn.Length() < 1e-6f) Nn = (B - A).Cross(C - A);
+                    CN.push_back(Nn.NormalizeCopy());
+                }
+            }
+
+            // 2. Surfels, 3. vertex indices
+            surfel_grid G0, G1;
+            Poisson(CP, CN, Radius, m_Levels[0], G0);
             m_VertSurfels.resize(m_Pos.size());
-            for (std::size_t v = 0; v < m_Pos.size(); ++v) m_VertSurfels[v] = Nearest4(0, m_Pos[v], m_Nrm[v]);
+            for (std::size_t v = 0; v < m_Pos.size(); ++v)
+            {
+                const auto B = Nearest(m_Levels[0], G0, m_Pos[v], m_Nrm[v], 4);
+                m_VertSurfels[v] = { B[0].second, B[1].second, B[2].second, B[3].second };
+            }
 
-            std::vector<v3> C(m_Levels[0].size()), N(m_Levels[0].size());
-            for (std::size_t s = 0; s < C.size(); ++s) { C[s] = m_Levels[0][s].m_Center; N[s] = m_Levels[0][s].m_Normal; }
-            Cover(m_Levels[1], C, N, ParentRadius, m_ParentOf);
+            // 4. Parents
+            std::vector<v3> SP(m_Levels[0].size()), SN(m_Levels[0].size());
+            for (std::size_t s = 0; s < SP.size(); ++s) { SP[s] = m_Levels[0][s].m_Center; SN[s] = m_Levels[0][s].m_Normal; }
+            Poisson(SP, SN, ParentRadius, m_Levels[1], G1);
+            m_ParentOf.assign(SP.size(), 0);
+            for (std::size_t s = 0; s < SP.size(); ++s)
+            {
+                const auto B = Nearest(m_Levels[1], G1, SP[s], SN[s], 1);
+                m_ParentOf[s] = std::max(B[0].second, 0);
+            }
 
+            // 5. The rays' structures
             m_Lo = { 1e30f, 1e30f, 1e30f }; m_Hi = { -1e30f, -1e30f, -1e30f };
             for (const auto& P : m_Pos) { m_Lo = v3::Min(m_Lo, P); m_Hi = v3::Max(m_Hi, P); }
             m_Bvh.Build(int(m_Tris.size()), [&](int t, v3& Lo, v3& Hi)
@@ -539,6 +605,45 @@ namespace xlionrender::gi
             return bHit;
         }
     };
+
+    // A compiled xgeom_static's geometry (its CPU copy: positions quantized per cluster, 12-bit oct normals, 16-bit indices per cluster) into a
+    // surfel_mesh, in the GPU buffer's vertex order (the vertex shader reads the surfels by gl_VertexIndex). Mirrors getVertexData of
+    // shaders/xgeom_static_mb_input_full.vert. Bake next.
+    template <class T_GEOM> void FromXGeomStatic(surfel_mesh& M, const T_GEOM& Geom) noexcept
+    {
+        const auto Verts = Geom.getVertices();
+        const auto Extra = Geom.getVertexExtras();
+        const auto Index = Geom.getIndices();
+        const auto Data  = Geom.getClusterData();
+        M.m_Pos.assign(Verts.size(), v3{ 0, 0, 0 });
+        M.m_Nrm.assign(Verts.size(), v3{ 0, 1, 0 });
+        M.m_Tris.clear();
+        const auto OctDecode = [](float x, float y) noexcept
+        {
+            x = x * 2 - 1; y = y * 2 - 1;
+            v3 N{ x, y, 1 - std::abs(x) - std::abs(y) };
+            if (N.m_Z < 0) N = v3{ (1 - std::abs(y)) * (x >= 0 ? 1.0f : -1.0f), (1 - std::abs(x)) * (y >= 0 ? 1.0f : -1.0f), N.m_Z };
+            return N.NormalizeCopy();
+        };
+        for (std::size_t c = 0; c < Geom.getClusters().size(); ++c)
+        {
+            const auto& C = Geom.getClusters()[c];
+            const auto& D = Data[c];
+            for (std::uint32_t v = C.m_iVertex; v < C.m_iVertex + C.m_nVertices && v < Verts.size(); ++v)
+            {
+                const auto& V = Verts[v];
+                const auto Q = [](std::int16_t q) { return (float(q) + 32768.0f) / 32767.5f - 1.0f; };
+                M.m_Pos[v] = { Q(V.m_XPos) * D.m_PosScaleAndWPADDING.m_X + D.m_PosTrasnlationAndWPADDING.m_X
+                             , Q(V.m_YPos) * D.m_PosScaleAndWPADDING.m_Y + D.m_PosTrasnlationAndWPADDING.m_Y
+                             , Q(V.m_ZPos) * D.m_PosScaleAndWPADDING.m_Z + D.m_PosTrasnlationAndWPADDING.m_Z };
+                const std::uint32_t Bits = std::uint16_t(V.m_Extra);
+                const std::uint32_t Nx = (std::uint32_t(Extra[v].m_OctNormal[0]) << 4) | (Bits & 0xF), Ny = (std::uint32_t(Extra[v].m_OctNormal[1]) << 4) | ((Bits >> 4) & 0xF);
+                M.m_Nrm[v] = OctDecode(float(Nx) / 4095.0f, float(Ny) / 4095.0f);
+            }
+            for (std::uint32_t i = C.m_iIndex; i + 2 < C.m_iIndex + C.m_nIndices && i + 2 < Index.size(); i += 3)
+                M.m_Tris.push_back({ int(C.m_iVertex + Index[i]), int(C.m_iVertex + Index[i + 1]), int(C.m_iVertex + Index[i + 2]) });
+        }
+    }
 
     struct lights
     {
@@ -734,32 +839,46 @@ namespace xlionrender::gi
                     for (std::size_t s = 0; s < M.m_ParentOf.size(); ++s) { E[M.m_ParentOf[s]] = E[M.m_ParentOf[s]] + I.m_E[s]; Valid[M.m_ParentOf[s]] += I.m_Valid[s]; ++Cnt[M.m_ParentOf[s]]; }
                     for (std::size_t p = 0; p < E.size(); ++p) if (Cnt[p]) { E[p] = E[p] * (1.0f / float(Cnt[p])); Valid[p] /= float(Cnt[p]); }
                 }
-                I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want;
+                I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0;
                 I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
             }
 
-            // Pick: dirty first, then age over distance, until the budget is spent
+            // Pick: dirty first, then a pass in progress, then age over distance, until the budget is spent. An instance is updated in
+            // slices (a cursor over its surfels): a pass over a big mesh spans several updates and the budget holds whatever one mesh
+            // has. A pass starts with the blend of its own (1 / n after a change); a change in the middle of a pass starts it again.
             m_Order.clear();
             for (int i = 0; i < int(m_Instances.size()); ++i)
             {
                 auto& I = m_Instances[i];
-                if (!I.m_bAlive) continue;
+                if (!I.m_bAlive || I.m_E.empty()) continue;
                 St.m_Dirty += I.m_bDirty;
-                const float Score = (I.m_bDirty ? 1e6f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
+                if (I.m_bDirty && I.m_Cursor != 0) I.m_Cursor = 0;
+                const float Score = (I.m_bDirty ? 1e6f : 0.0f) + (I.m_Cursor ? 5e5f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
                 m_Order.push_back({ Score, i });
             }
             std::sort(m_Order.begin(), m_Order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
             m_Work.clear();
+            int SurfelsLeft = std::max(RayBudget / std::max(m_Setup.m_RaysPerSurfel, 1), 1);
             for (const auto& [Score, i] : m_Order)
             {
-                const int n = int(m_Instances[i].m_E.size());
-                if (St.m_Rays > 0 && St.m_Rays + n * m_Setup.m_RaysPerSurfel > RayBudget) continue;
-                for (int s = 0; s < n; ++s) m_Work.push_back({ i, s });
-                St.m_Rays += n * m_Setup.m_RaysPerSurfel;
+                if (SurfelsLeft <= 0) break;
+                auto& I = m_Instances[i];
+                const int n    = int(I.m_E.size());
+                const int Take = std::min(n - I.m_Cursor, SurfelsLeft);
+                if (I.m_Cursor == 0)
+                {
+                    if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; }
+                    I.m_PassAlpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
+                }
+                for (int k = 0; k < Take; ++k) m_Work.push_back({ i, I.m_Cursor + k });
+                I.m_Cursor += Take;
+                if (I.m_Cursor >= n) { I.m_Cursor = 0; I.m_Age = 0; }
+                SurfelsLeft -= Take;
                 ++St.m_Updated;
-                m_Instances[i].m_bPicked = true;
+                I.m_bPicked = true;
             }
             St.m_Surfels = int(m_Work.size());
+            St.m_Rays    = St.m_Surfels * m_Setup.m_RaysPerSurfel;
 
             const auto T1 = std::chrono::steady_clock::now();
             m_Pool.Run(int(m_Work.size()), [&](int w)
@@ -786,18 +905,16 @@ namespace xlionrender::gi
             });
 
             St.m_TraceMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
+            for (const auto& [i, s] : m_Work)
+            {
+                auto& I = m_Instances[i];
+                I.m_E[s]     = I.m_E[s] * (1 - I.m_PassAlpha) + I.m_Acc[s] * I.m_PassAlpha;
+                I.m_Valid[s] = I.m_Valid[s] * (1 - I.m_PassAlpha) + I.m_AccValid[s] * I.m_PassAlpha;
+            }
             for (auto& I : m_Instances)
             {
                 if (!I.m_bAlive) continue;
-                if (!I.m_bPicked) { ++I.m_Age; continue; }
-                if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; }
-                const float Alpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
-                for (std::size_t s = 0; s < I.m_E.size(); ++s)
-                {
-                    I.m_E[s]     = I.m_E[s] * (1 - Alpha) + I.m_Acc[s] * Alpha;
-                    I.m_Valid[s] = I.m_Valid[s] * (1 - Alpha) + I.m_AccValid[s] * Alpha;
-                }
-                I.m_Age = 0;
+                if (!I.m_bPicked) ++I.m_Age;
                 I.m_bPicked = false;
             }
             St.m_Ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
@@ -824,6 +941,8 @@ namespace xlionrender::gi
             int                     m_Level     = 0;
             int                     m_Age       = 0;
             int                     m_History   = 0;
+            int                     m_Cursor    = 0;            // the next surfel of the pass in progress (0: none)
+            float                   m_PassAlpha = 1;            // the blend of the pass in progress
             bool                    m_bDirty    = true;
             bool                    m_bPicked   = false;
             bool                    m_bAlive    = true;
