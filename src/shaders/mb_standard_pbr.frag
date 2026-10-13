@@ -255,15 +255,19 @@ vec3 PBRLighting
 #ifndef XLION_LDR_OUTPUT
 	if (InGI.w > 1e-6) g_GI = vec4(InGI.rgb / InGI.w, 1.0);
 #ifndef XLION_NO_GI_PIXEL
+	// The face's normal (mesh space, to the smoothed normal's side): the GI's geometry tests use the surface as it is - smoothed corner
+	// normals step along the triangles (a sawtooth); the normal map still reads the basis (GNmap)
+	const vec3 GFaceD = cross(dFdx(InGIPos), dFdy(InGIPos));
+	const vec3 GFace  = dot(GFaceD, GFaceD) > 1e-24 ? normalize(dot(GFaceD, InGINormal) < 0.0 ? -GFaceD : GFaceD) : normalize(InGINormal);
 	if (InGIRef.y != gi_none_v && (InGIRef.y & gi_per_pixel_v) != 0u)     // the pixel reads the surfels itself (far: through their parents)
 	{
 		const vec3 GN = normalize(InGINormal), GT = normalize(InGITangent.xyz);
 		const vec3 GNmap = normalize(inNormal.x * GT + inNormal.y * (InGITangent.w * cross(GN, GT)) + inNormal.z * GN);     // as TransformNotmalToWorld, in mesh space
-		const vec4 Px = SurfelGIPixel(InGIPos, GN, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
+		const vec4 Px = SurfelGIPixel(InGIPos, GFace, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
 		if (Px.w > 1e-6) g_GI = vec4(Px.rgb / Px.w, 1.0);
 	}
 	const uint GIDebug = InGIRef.y == gi_none_v ? 0u : (InGIRef.y >> gi_debug_shift_v) & 3u;
-	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, normalize(InGINormal)); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
+	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, GFace); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
 	if (GIDebug == 2u) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0);
 	if (GIDebug == 3u) g_GIDebug = vec4((InGIRef.y & 0x800u) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
 #endif

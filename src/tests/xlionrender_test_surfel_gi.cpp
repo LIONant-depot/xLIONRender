@@ -645,6 +645,36 @@ int main()
         CHECK(SLinks < 0.5 * SHits, "the emitter lists are no less noisy than the hits (%.0f%% vs %.0f%%)", 100 * SLinks, 100 * SHits);
     }
 
+    // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
+    //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
+    {
+        surfel_mesh M;
+        AddQuad(M, { -2, 0, -1 }, { 0, 0, 2 }, { 2, 0, 0 }, 0.25f);                       // the wall: x in [-2, 0], y = 0
+        AddQuad(M, { 0.05f, -0.03f, -1 }, { 0, 0, 2 }, { 1, 0, 0 }, 0.25f);              // the door: x in [0.05, 1.05], 3 cm lower
+        AddQuad(M, { 0, 0.05f, -1 }, { 0, 0, 2 }, { 0.05f, 0, 0 }, 0.25f);               // the lip's top (5 cm above the wall)
+        AddQuad(M, { 0, -0.03f, -1 }, { 0, 0.08f, 0 }, { 0, 0, 2 }, 0.25f);              // its faces
+        AddQuad(M, { 0.05f, -0.03f, -1 }, { 0, 0, 2 }, { 0, 0.08f, 0 }, 0.25f);
+        M.Bake(0.3f, 0.9f);
+        int nNear = 0;
+        for (const auto& S : M.m_Levels[0]) nNear += S.m_Center.m_Y < -0.02f && S.m_Center.m_X < 0.35f && S.m_Normal.m_Y > 0.9f;
+        std::printf("a door behind its frame's lip: %d surfels of its own within 0.3 m of the lip\n", nNear);
+        CHECK(nNear >= 5, "the door next to its frame has few surfels of its own (%d; 3 when the surfels past the lip cover it)", nNear);
+    }
+
+    // 6l. Smoothed normals on a flat box (a pillar whose corner normals are averaged): the surfels still face their face's way (the GI's
+    //     geometry uses the faces: tilted surfels near the corners made the reads step along the triangles - a sawtooth)
+    {
+        surfel_mesh Pillar = Box({ 1, 3, 1 }, 0.25f);
+        for (std::size_t v = 0; v < Pillar.m_Pos.size(); ++v)                    // averaged at the corners: the direction of the vertex
+            Pillar.m_Nrm[v] = (Pillar.m_Nrm[v] * 0.5f + Pillar.m_Pos[v].NormalizeCopy() * 0.5f).NormalizeCopy();
+        Pillar.Bake(0.3f, 0.9f);
+        int nTilted = 0;
+        for (const auto& S : Pillar.m_Levels[0])
+            nTilted += std::max({ std::abs(S.m_Normal.m_X), std::abs(S.m_Normal.m_Y), std::abs(S.m_Normal.m_Z) }) < 0.999f;
+        std::printf("smoothed normals on a box: %d of %zu surfels tilted off their face\n", nTilted, Pillar.m_Levels[0].size());
+        CHECK(nTilted == 0, "%d surfels follow the smoothed normals instead of their faces", nTilted);
+    }
+
     // 6. Buried surfels decay for long (the box's bottom on the floor: their validity heads to 0, then underflows), far and back:
     //    the reads at the ray hits divide by a total weight that is ~0, and nothing may come out as inf / NaN (it spreads to every surfel)
     {

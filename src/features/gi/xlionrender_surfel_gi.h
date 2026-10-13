@@ -591,7 +591,7 @@ namespace xlionrender::gi
                     float u = R.Next(), v = R.Next();
                     if (u + v > 1) { u = 1 - u; v = 1 - v; }
                     v3 N = m_Nrm[T[0]] * (1 - u - v) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * v;
-                    N = N.Length() > 1e-6f ? N.NormalizeCopy() : (B - A).Cross(C - A).NormalizeCopy();
+                    { const v3 F = (B - A).Cross(C - A); if (F.Length() > 1e-12f) N = (F.Dot(N) < 0 ? F * -1.0f : F).NormalizeCopy(); else N = N.NormalizeCopy(); }     // the face's (as the pixels')
                     const v3 P = A + (B - A) * u + (C - A) * v + v3{ 1e-6f, -1e-6f, 1e-6f } * float((k % 3) - 1);
                     const auto List = ReadCellList(P, N);
                     bool bCovered = false;
@@ -640,7 +640,7 @@ namespace xlionrender::gi
                 {
                     const float u = float(i) / k, w = float(j) / k;
                     v3 N = m_Nrm[T[0]] * (1 - u - w) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * w;
-                    N = N.Length() > 1e-6f ? N.NormalizeCopy() : (B - A).Cross(Cc - A).NormalizeCopy();
+                    { const v3 F = (B - A).Cross(Cc - A); if (F.Length() > 1e-12f) N = (F.Dot(N) < 0 ? F * -1.0f : F).NormalizeCopy(); else N = N.NormalizeCopy(); }     // the face's (as the pixels')
                     Touch(A + (B - A) * u + (Cc - A) * w, N);
                 }
             }
@@ -716,7 +716,9 @@ namespace xlionrender::gi
             BuildRays();                                            // the vertices' visibility tests cast against the mesh
 
             // Dart throwing over weighted candidates: the kept ones become surfels of radius R
-            const auto Poisson = [](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G, std::vector<int>* pFrom = nullptr)
+            // A candidate is taken by a kept surfel only if that one sees it: a door a few cm behind its frame gets surfels of its own
+            // (the wall's past the frame's lip do not cover it - read through the lip, they faded in wedges)
+            const auto Poisson = [this](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G, std::vector<int>* pFrom = nullptr)
             {
                 Out.clear();
                 if (pFrom) pFrom->clear();
@@ -728,7 +730,7 @@ namespace xlionrender::gi
                 for (int i : Order)
                 {
                     bool bTaken = false;
-                    G.Near(P[i], 1, [&](int s) { bTaken = bTaken || ((P[i] - Out[s].m_Center).Length() < R && Out[s].m_Normal.Dot(N[i]) > 0.8f); });
+                    G.Near(P[i], 1, [&](int s) { bTaken = bTaken || ((P[i] - Out[s].m_Center).Length() < R && Out[s].m_Normal.Dot(N[i]) > 0.8f && Sees(P[i], N[i], Out[s])); });
                     if (bTaken) continue;
                     G.Add(P[i], int(Out.size()));
                     Out.push_back({ P[i], N[i], R });
@@ -771,8 +773,12 @@ namespace xlionrender::gi
                     float u = Sample.Next(), v = Sample.Next();
                     if (u + v > 1) { u = 1 - u; v = 1 - v; }
                     CP.push_back(A + (B - A) * u + (C - A) * v);
-                    v3 Nn = m_Nrm[T[0]] * (1 - u - v) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * v;
-                    if (Nn.Length() < 1e-6f) Nn = (B - A).Cross(C - A);
+                    // The triangle's own normal (to the smoothed normal's side): the GI's geometry tests use the surface as it is. A box
+                    // with averaged corner normals would tilt its surfels near the corners, and the reads step along its triangles
+                    const v3 Ns = m_Nrm[T[0]] * (1 - u - v) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * v;
+                    v3 Nn = (B - A).Cross(C - A);
+                    if (Nn.Length() < 1e-12f) Nn = Ns;
+                    else if (Nn.Dot(Ns) < 0) Nn = Nn * -1.0f;
                     CN.push_back(Nn.NormalizeCopy());
                     CT.push_back({ float(&T - m_Tris.data()), u, v });
                 }
@@ -1173,9 +1179,17 @@ namespace xlionrender::gi
             const float Reach = 2 * S.m_Radius, d = D.Length();
             float w = std::clamp(1.0f - std::abs(D.Dot(S.m_Normal)) / (0.7f * Reach), 0.0f, 1.0f);
             if (d < 1e-5f * Reach || w <= 0) return w;
-            const auto& M = I.m_Moments[s];
-            const int   t = MomentTexel(S.m_Normal, D * (1.0f / d));
-            const float Mean = M[2 * t], Var = std::abs(Mean * Mean - M[2 * t + 1]);
+            const auto& M  = I.m_Moments[s];
+            const v3    Dd = D * (1.0f / d);
+            const v3    T  = (std::abs(S.m_Normal.m_X) < 0.9f ? v3{ 1, 0, 0 } : v3{ 0, 1, 0 }).Cross(S.m_Normal).NormalizeCopy(), B = S.m_Normal.Cross(T);
+            const float x  = Dd.Dot(T), y = Dd.Dot(B), z = std::max(Dd.Dot(S.m_Normal), 0.0f), k = 1.0f / std::max(std::abs(x) + std::abs(y) + z, 1e-6f);
+            const float u  = std::clamp(((x + y) * k * 0.5f + 0.5f) * moment_res_v - 0.5f, 0.0f, float(moment_res_v - 1));
+            const float vv = std::clamp(((x - y) * k * 0.5f + 0.5f) * moment_res_v - 0.5f, 0.0f, float(moment_res_v - 1));
+            const int   u0 = int(u), v0 = int(vv), u1 = std::min(u0 + 1, moment_res_v - 1), v1 = std::min(v0 + 1, moment_res_v - 1);
+            const float fu = u - float(u0), fv = vv - float(v0);
+            const auto  At = [&](int tu, int tv, int c) { return M[2 * (tv * moment_res_v + tu) + c]; };
+            const auto  Bil = [&](int c) { return (At(u0, v0, c) * (1 - fu) + At(u1, v0, c) * fu) * (1 - fv) + (At(u0, v1, c) * (1 - fu) + At(u1, v1, c) * fu) * fv; };
+            const float Mean = Bil(0), Var = std::max(std::abs(Mean * Mean - Bil(1)), 0.0025f * Reach * Reach);     // bilinear, a variance floor: as the shaders
             if (d > Mean) w *= std::pow(Var / (Var + (d - Mean) * (d - Mean) + 1e-12f), 3.0f);
             return w;
         }

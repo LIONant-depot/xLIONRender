@@ -54,11 +54,16 @@ float GIVisibility(in const vec3 P, in const vec3 Center, in const vec3 Normal, 
     const vec3  Dd = D / d;
     const float x  = dot(Dd, T), y = dot(Dd, B), z = max(dot(Dd, Normal), 0.0);
     const float k  = 1.0 / max(abs(x) + abs(y) + z, 1e-6);
-    const ivec2 t  = clamp(ivec2((vec2((x + y) * k, (x - y) * k) * 0.5 + 0.5) * 4.0), ivec2(0), ivec2(3));
-    const vec2  M  = unpackHalf2x16(GIMoment[LightIndex * 16u + uint(t.y * 4 + t.x)]);
+    // bilinear over the 4 nearest texels (texel centers at 0.5..3.5): the nearest one alone jumps at each texel's edge (wedges)
+    const vec2  uv = clamp((vec2((x + y) * k, (x - y) * k) * 0.5 + 0.5) * 4.0 - 0.5, vec2(0.0), vec2(3.0));
+    const ivec2 t0 = ivec2(floor(uv)), t1 = min(t0 + 1, ivec2(3));
+    const vec2  fr = uv - vec2(t0);
+    const uint  m0 = LightIndex * 16u;
+    const vec2  M  = mix(mix(unpackHalf2x16(GIMoment[m0 + uint(t0.y * 4 + t0.x)]), unpackHalf2x16(GIMoment[m0 + uint(t0.y * 4 + t1.x)]), fr.x)
+                       , mix(unpackHalf2x16(GIMoment[m0 + uint(t1.y * 4 + t0.x)]), unpackHalf2x16(GIMoment[m0 + uint(t1.y * 4 + t1.x)]), fr.x), fr.y);
     if (d > M.x)
     {
-        const float Var = abs(M.x * M.x - M.y);
+        const float Var = max(abs(M.x * M.x - M.y), 0.0025 * Reach * Reach);       // a floor (DDGI's): a small change of distance cannot flip the weight
         w *= pow(Var / (Var + (d - M.x) * (d - M.x) + 1e-12), 3.0);
     }
     return w;
@@ -126,11 +131,12 @@ vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const vec3 Nmap, in cons
         if (c < 0.5) continue;
         const float f = max(0.0, 1.0 - length(P - GISurfelCenter(b)) / (2.0 * uintBitsToFloat(GIMesh[b + 3u])));
         if (f <= 0.0) continue;
+        const float cn = smoothstep(0.5, 0.75, c);                  // fades in: a cut at 0.5 draws a line where smoothed normals sweep through it
         // Level 1 (far): the fine surfels still find what reaches the pixel, their parents give the light (the same coverage at both
         // levels: no pop at the switch)
         const uint  sl = Level == 1u ? GIMesh[b + 7u] : s;
         const uint  bl = Level == 1u ? GIMesh[1] + 8u * sl : b;
-        const float w = f * f * c * GIValidity(LightOffset + sl) * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
+        const float w = f * f * c * cn * GIValidity(LightOffset + sl) * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
         if (w <= 0.0) continue;
         Sum += vec4(GIBasisRead(LightOffset + sl, GISurfelNormal(bl), Nmap) * w, w);       // the normal-mapped normal reads the basis
     }
