@@ -558,7 +558,8 @@ namespace xlionrender
         auto& M = m_Meshes[Id.m_Index];
         assert(M.m_bCluster && M.m_Geom.m_Kind == geom_kind::RIGID && Surfels.m_Levels[0].size() < 0xFFFF);
         // The layout of shaders/xlionrender_surfel_gi.glsl: a header of 8 uints ([0] level 0 surfels, [1] level 1 surfels, [2] the read
-        // grid's table, [3] its mask (0: none), [4] its cell (float bits), [5] its lists), per vertex 2 uints, the surfels, the grid
+        // grid's table, [3] its mask (0: none), [4] its cell (float bits), [5] its lists, [6] its longest probe), per vertex 2 uints, the
+        // surfels, the grid
         if( Surfels.m_ReadTable.empty() ) Surfels.BuildReadGrid();
         const std::uint32_t nVerts = std::uint32_t(Surfels.m_Pos.size());
         std::vector<std::uint32_t> Data(8 + 2 * nVerts);
@@ -587,6 +588,7 @@ namespace xlionrender
             Data[2] = std::uint32_t(Data.size());
             Data[3] = std::uint32_t(Surfels.m_ReadTable.size() - 1);
             Data[4] = std::bit_cast<std::uint32_t>(Surfels.m_ReadCell);
+            Data[6] = Surfels.m_ReadMaxProbe;
             for( const auto& E : Surfels.m_ReadTable ) Data.insert(Data.end(), E.begin(), E.end());
             Data[5] = std::uint32_t(Data.size());
             Data.insert(Data.end(), Surfels.m_ReadList.begin(), Surfels.m_ReadList.end());

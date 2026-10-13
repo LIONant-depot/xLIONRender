@@ -509,6 +509,7 @@ namespace xlionrender::gi
         float                                       m_ReadCell = 0;
         std::vector<std::array<std::uint32_t, 4>>   m_ReadTable;    // a power of 2 entries; key high 0xFFFFFFFF: empty
         std::vector<std::uint32_t>                  m_ReadList;
+        std::uint32_t                               m_ReadMaxProbe = 0;     // the longest probe of the table (the GPU's lookups go that far, no further)
 
         static std::array<int, 3> ReadCellOf(const v3& P, float Cell) noexcept { return { int(std::floor(P.m_X / Cell)), int(std::floor(P.m_Y / Cell)), int(std::floor(P.m_Z / Cell)) }; }
         static std::array<std::uint32_t, 2> ReadKey(const std::array<int, 3>& C) noexcept
@@ -518,11 +519,16 @@ namespace xlionrender::gi
         }
         static std::uint32_t ReadHash(const std::array<int, 3>& C) noexcept { return (std::uint32_t(C[0]) * 73856093u) ^ (std::uint32_t(C[1]) * 19349663u) ^ (std::uint32_t(C[2]) * 83492791u); }
 
-        // The fine surfels listed for the cell of P (empty: P is off the surface's cells)
-        std::span<const std::uint32_t> ReadCellList(const v3& P) const noexcept
+        // The cell of a surface point: lifted a little off its surface first (read_lift_v of a cell along N). A floor at a multiple of the
+        // cell size lies on a boundary, and the GPU's interpolated position falls a hair to either side of it: lifted, it does not
+        static constexpr float read_lift_v = 0.05f;
+        static std::array<int, 3> ReadCellAt(const v3& P, const v3& N, float Cell) noexcept { return ReadCellOf(P + N * (read_lift_v * Cell), Cell); }
+
+        // The fine surfels listed for the cell of the surface point P (normal N; empty: P is off the surface's cells)
+        std::span<const std::uint32_t> ReadCellList(const v3& P, const v3& N) const noexcept
         {
             if (m_ReadTable.empty()) return {};
-            const auto C = ReadCellOf(P, m_ReadCell);
+            const auto C = ReadCellAt(P, N, m_ReadCell);
             const auto K = ReadKey(C);
             const std::uint32_t Mask = std::uint32_t(m_ReadTable.size() - 1);
             for (std::uint32_t h = ReadHash(C) & Mask, n = 0; n <= Mask; h = (h + 1) & Mask, ++n)
@@ -534,23 +540,68 @@ namespace xlionrender::gi
             return {};
         }
 
+        // How much of the surface the per-pixel read covers: random points of every triangle, by its area (the interpolated vertex normal, a hair off
+        // the surface as the GPU's interpolation is), each read through its cell: uncovered when no listed surfel reaches it with a
+        // compatible normal (black in the SURFELS debug view). The first uncovered points are kept, with what is near them
+        struct coverage
+        {
+            struct example { v3 m_P, m_N; int m_nList; float m_NearestCompatible, m_NearestAny; };
+            int                     m_nPoints = 0, m_nUncovered = 0;
+            std::vector<example>    m_Examples;
+        };
+        coverage Coverage(int PerTriangle, int nExamples = 8) const noexcept
+        {
+            coverage Out;
+            rng R(0xC0FEu);
+            const float PerArea = m_ReadCell > 0 ? 16.0f / (m_ReadCell * m_ReadCell) : 0;     // and 16 per cell of area: long thin strips get theirs
+            for (const auto& T : m_Tris)
+            {
+                const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], C = m_Pos[T[2]];
+                const int n = std::min(4096, std::max(PerTriangle, int(0.5f * (B - A).Cross(C - A).Length() * PerArea)));
+                for (int k = 0; k < n; ++k, ++Out.m_nPoints)
+                {
+                    float u = R.Next(), v = R.Next();
+                    if (u + v > 1) { u = 1 - u; v = 1 - v; }
+                    v3 N = m_Nrm[T[0]] * (1 - u - v) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * v;
+                    N = N.Length() > 1e-6f ? N.NormalizeCopy() : (B - A).Cross(C - A).NormalizeCopy();
+                    const v3 P = A + (B - A) * u + (C - A) * v + v3{ 1e-6f, -1e-6f, 1e-6f } * float((k % 3) - 1);
+                    const auto List = ReadCellList(P, N);
+                    bool bCovered = false;
+                    for (auto s : List)
+                    {
+                        const auto& S = m_Levels[0][s];
+                        bCovered = bCovered || (S.m_Normal.Dot(N) >= 0.5f && (P - S.m_Center).Length() < 2 * S.m_Radius);
+                    }
+                    if (bCovered) continue;
+                    ++Out.m_nUncovered;
+                    if (int(Out.m_Examples.size()) >= nExamples) continue;
+                    float Nc = 1e30f, Na = 1e30f;
+                    for (const auto& S : m_Levels[0]) { const float d = (P - S.m_Center).Length(); Na = std::min(Na, d); if (S.m_Normal.Dot(N) >= 0.5f) Nc = std::min(Nc, d); }
+                    Out.m_Examples.push_back({ P, N, int(List.size()), Nc, Na });
+                }
+            }
+            return Out;
+        }
+
         void BuildReadGrid() noexcept
         {
-            m_ReadTable.clear(); m_ReadList.clear();
+            m_ReadTable.clear(); m_ReadList.clear(); m_ReadMaxProbe = 0;
             const auto& L = m_Levels[0];
             if (L.empty()) return;
             m_ReadCell = L[0].m_Radius;
             const float Cell = m_ReadCell, Reach = 2 * L[0].m_Radius;
 
             // The cells the surface crosses: points on every triangle no further apart than half a cell
-            struct cell { std::array<int, 3> m_C; int n = 0; std::array<v3, 16> m_P, m_N; };    // up to 16 surface points (and normals) in it: every face of a thin piece gets some
+            // Every direction the surface faces in the cell (near duplicates merged, no cap: a busy cell - frames, sills, a wall and the
+            // floor - has many, and a direction left out leaves its pixels without their surfels)
+            struct cell { std::array<int, 3> m_C; std::vector<v3> m_N; };
             std::unordered_map<std::uint64_t, cell> Cells;
             const auto Touch = [&](const v3& P, const v3& N)
             {
-                const auto C  = ReadCellOf(P, Cell);
-                auto&      Ce = Cells.try_emplace(surfel_grid::Key(C[0], C[1], C[2]), cell{ C }).first->second;
-                for (int p = 0; p < Ce.n; ++p) if (Ce.m_N[p].Dot(N) > 0.9f && (Ce.m_P[p] - P).Length() < 0.5f * Cell) return;     // spread: faces, corners
-                if (Ce.n < 16) { Ce.m_P[Ce.n] = P; Ce.m_N[Ce.n] = N; ++Ce.n; }
+                const auto C  = ReadCellAt(P, N, Cell);
+                auto&      Ce = Cells.try_emplace(surfel_grid::Key(C[0], C[1], C[2]), cell{ C, {} }).first->second;
+                for (const auto& M : Ce.m_N) if (M.Dot(N) > 0.97f) return;
+                Ce.m_N.push_back(N);
             };
             for (const auto& T : m_Tris)
             {
@@ -566,7 +617,7 @@ namespace xlionrender::gi
                 }
             }
 
-            // Per cell the surfels whose reach touches its box, with a normal compatible with one of its surface points
+            // Per cell the surfels whose reach touches its box, with a normal compatible with one of the directions its surface faces
             surfel_grid G{ Cell, {} };
             for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
             const int Ring = int(std::ceil(Reach / Cell));
@@ -587,8 +638,8 @@ namespace xlionrender::gi
                     // No visibility here: a cell's list is all a pixel of it may read, and a surfel culled from one cell but not its neighbor
                     // switches off along their edge (squares). What hides behind something fades per pixel instead (GIVisibility: the plane
                     // distance and the depth moments), continuously
-                    for (int p = 0; p < Ce.n; ++p)
-                        if ((Ce.m_P[p] - L[s].m_Center).Length() < Reach + 1.75f * Cell && L[s].m_Normal.Dot(Ce.m_N[p]) >= 0.5f) { Lists[c].push_back(std::uint32_t(s)); return; }
+                    for (const auto& N : Ce.m_N)
+                        if (L[s].m_Normal.Dot(N) >= 0.5f) { Lists[c].push_back(std::uint32_t(s)); return; }
                 });
             });
             for (std::size_t c = 0; c < Order.size(); ++c)
@@ -598,8 +649,9 @@ namespace xlionrender::gi
                 m_ReadList.insert(m_ReadList.end(), Lists[c].begin(), Lists[c].end());
                 if (m_ReadList.size() == First) continue;
                 const auto K = ReadKey(C);
-                std::uint32_t h = ReadHash(C) & (Size - 1);
-                while (m_ReadTable[h][1] != 0xFFFFFFFFu) h = (h + 1) & (Size - 1);
+                std::uint32_t h = ReadHash(C) & (Size - 1), nProbe = 0;
+                while (m_ReadTable[h][1] != 0xFFFFFFFFu) { h = (h + 1) & (Size - 1); ++nProbe; }
+                m_ReadMaxProbe = std::max(m_ReadMaxProbe, nProbe + 1);
                 m_ReadTable[h] = { K[0], K[1], First, std::uint32_t(m_ReadList.size()) - First };
             }
         }
@@ -622,7 +674,8 @@ namespace xlionrender::gi
         }
 
         // The bake (the GeomStatic compiler's job: its surfels are saved in the geometry, see SurfelsFromXGeomStatic):
-        //  - candidates sampled on the surface by area (about 4 per Radius^2 of each triangle, at least one per triangle), each with the
+        //  - candidates sampled on the surface by area (about 4 per Radius^2 of each triangle, and at least one per half Radius of its longest
+        //    edge: a thin strip - a frame, a sill - has little area but its whole length needs surfels), each with the
         //    interpolated vertex normal: the surfels follow the surface, not the vertices (a big wall gets as many as its area asks for)
         //  - Poisson-disk acceptance through a hash grid of cell Radius: a candidate is kept when no kept surfel with a similar normal
         //    (cos > 0.8) is closer than Radius (dart throwing in a shuffled order: blue-noise spacing)
@@ -680,7 +733,8 @@ namespace xlionrender::gi
             {
                 const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], C = m_Pos[T[2]];
                 const float Area = 0.5f * (B - A).Cross(C - A).Length();
-                const int   n    = std::max(1, int(std::ceil(Area * PerArea)));
+                const float Long = std::max({ (B - A).Length(), (C - B).Length(), (A - C).Length() });
+                const int   n    = std::min(1 << 16, std::max({ 1, int(std::ceil(Area * PerArea)), int(std::ceil(Long / (0.5f * Radius))) }));     // by area, and along a thin strip by length
                 for (int k = 0; k < n; ++k)
                 {
                     float u = Sample.Next(), v = Sample.Next();

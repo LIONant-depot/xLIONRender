@@ -1,7 +1,7 @@
 // Surfel GI (features/gi/xlionrender_surfel_gi.h): the mesh's surfel data and this frame's surfel irradiance, read per vertex
 // (xlionrender_static_geom_body.glsl) and per pixel (mb_standard_pbr.frag).
 //  GIMesh: a header of 8 uints: [0] level 0 surfels' first uint, [1] level 1's, [2] the read grid's table, [3] its mask (0: no grid),
-//          [4] its cell size (float bits), [5] its lists; from 8: per vertex 2 uints (4 x 16-bit level 0 surfel indices, 0xFFFF none);
+//          [4] its cell size (float bits), [5] its lists, [6] the table's longest probe; from 8: per vertex 2 uints (4 x 16-bit level 0 surfel indices, 0xFFFF none);
 //          per surfel 8 floats: center xyz, radius, normal xyz, parent index (uint bits; level 0); the grid (surfel_mesh::BuildReadGrid):
 //          per table entry 4 uints { key low, key high (0xFFFFFFFF: empty), first, count }, the lists of level 0 surfel indices
 //  GILight: per surfel of the instance's active level: rgb irradiance, a validity (0: buried)
@@ -50,18 +50,21 @@ float GIVisibility(in const vec3 P, in const vec3 Center, in const vec3 Normal, 
     return w;
 }
 
-// The read grid's list for the cell of P (mesh space): false when P is off the surface's cells, or there is no grid
-bool GIReadCell(in const vec3 P, out uint First, out uint Count)
+// The read grid's list for the cell of the surface point P (mesh space, its normal N): false when P is off the surface's cells, or there
+// is no grid. The cell is the one of P lifted 5% of a cell along N (surfel_mesh::ReadCellAt): a floor at a multiple of the cell size lies
+// on a boundary, and the interpolated position falls a hair to either side of it
+bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count)
 {
     First = 0u; Count = 0u;
     const uint Mask = GIMesh[3];
     if (Mask == 0u) return false;
-    const ivec3 C     = ivec3(floor(P / uintBitsToFloat(GIMesh[4])));
+    const float Cell  = uintBitsToFloat(GIMesh[4]);
+    const ivec3 C     = ivec3(floor((P + N * (0.05 * Cell)) / Cell));
     const uvec3 U     = uvec3(C) & 0x1FFFFFu;                       // surfel_grid::Key: 21 bits per axis
     const uint  KeyLo = U.z | (U.y << 21);
     const uint  KeyHi = (U.y >> 11) | (U.x << 10);
     uint h = ((uint(C.x) * 73856093u) ^ (uint(C.y) * 19349663u) ^ (uint(C.z) * 83492791u)) & Mask;
-    for (uint n = 0u; n <= Mask && n < 64u; ++n, h = (h + 1u) & Mask)
+    for (uint n = 0u; n < GIMesh[6]; ++n, h = (h + 1u) & Mask)        // [6]: the table's longest probe
     {
         const uint e = GIMesh[2] + 4u * h;
         if (GIMesh[e + 1u] == 0xFFFFFFFFu) return false;
@@ -75,7 +78,7 @@ uint SurfelGIDominant(in const vec3 P, in const vec3 N)
 {
     uint First, Count, Best = 0xFFFFFFFFu;
     float BestW = 0.0;
-    GIReadCell(P, First, Count);
+    GIReadCell(P, N, First, Count);
     for (uint i = 0u; i < Count; ++i)
     {
         const uint  s = GIMesh[GIMesh[5] + First + i];
@@ -99,7 +102,7 @@ vec3 SurfelDebugColor(in const uint s)
 vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const uint LightOffset)
 {
     uint First, Count;
-    if (!GIReadCell(P, First, Count)) return vec4(0.0);
+    if (!GIReadCell(P, N, First, Count)) return vec4(0.0);
     vec4 Sum = vec4(0.0);
     for (uint i = 0u; i < Count; ++i)
     {

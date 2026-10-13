@@ -158,6 +158,20 @@ int main()
         for (auto& M : SparseMeshes) Renderer.DestroyMesh(M);
     }
 
+    // The GPU's per-pixel lookup agrees with the CPU's read grid: in the SURFELS debug view every pixel of the room (the camera is inside
+    // it: every pixel is geometry) has a surfel's color, none is black (a cell the GPU does not find)
+    {
+        Scene.m_GI.m_Debug = xlionrender::gi_debug::SURFELS;
+        for (int f = 0; f < 2; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the surfels view");
+        const auto Ids = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_Debug = xlionrender::gi_debug::NONE;
+        DumpRGB("gi_surfels", Ids, W, H);
+        int nBlack = 0;
+        for (const auto& c : Ids) nBlack += std::max({ c[0], c[1], c[2] }) < 1e-3f;
+        std::printf("surfels view: %d of %d pixels black (no surfel found)\n", nBlack, W * H);
+        CHECK(nBlack <= W * H / 1000, "the GPU's lookup misses: %d of %d pixels black in the surfels view", nBlack, W * H);
+    }
+
     // The box moves: its instance moves in the world (no new instance); removed: the world drops it
     Scene.m_Draws[5].m_L2W = xmath::fmat4::fromTranslation({ 0.8f, 0.8f, 0.4f });
     for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render moved box");

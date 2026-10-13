@@ -294,7 +294,7 @@ int main()
                 float u = R.Next(), v = R.Next();
                 if (u + v > 1) { u = 1 - u; v = 1 - v; }
                 const v3 P = Loaded.m_Pos[T[0]] + (Loaded.m_Pos[T[1]] - Loaded.m_Pos[T[0]]) * u + (Loaded.m_Pos[T[2]] - Loaded.m_Pos[T[0]]) * v;
-                const auto List = Loaded.ReadCellList(P);
+                const auto List = Loaded.ReadCellList(P, (Loaded.m_Pos[T[1]] - Loaded.m_Pos[T[0]]).Cross(Loaded.m_Pos[T[2]] - Loaded.m_Pos[T[0]]).NormalizeCopy());
                 MaxList = std::max(MaxList, int(List.size()));
                 for (int s = 0; s < int(Loaded.m_Levels[0].size()); ++s)
                     if ((P - Loaded.m_Levels[0][s].m_Center).Length() < 2 * Loaded.m_Levels[0][s].m_Radius && Loaded.m_Levels[0][s].m_Normal.Dot((Loaded.m_Pos[T[1]] - Loaded.m_Pos[T[0]]).Cross(Loaded.m_Pos[T[2]] - Loaded.m_Pos[T[0]]).NormalizeCopy()) >= 0.5f && std::find(List.begin(), List.end(), std::uint32_t(s)) == List.end()) ++nMissing;
@@ -392,7 +392,9 @@ int main()
     }
 
     // 6c. Coverage: every point of the surface finds a surfel to read in its cell (the debug view's black: none), at a wall's foot and on a
-    //     thin plank too (both used to lose their surfels to a gap filter), on big triangles as authored (2 per face)
+    //     thin plank too (both used to lose their surfels to a gap filter), on big triangles as authored (2 per face), and a hair off the
+    //     surface (a floor at y = 0 lies on a cell boundary: the GPU's interpolated position falls on either side), and in a busy cell (24
+    //     small faces in as many directions: each finds its surfels, not only the first few directions the cell saw)
     {
         surfel_mesh Room;
         AddQuad(Room, { -3, 0, -3 }, { 0, 0, 6 }, { 6, 0, 0 }, 6.0f);                 // the floor: 2 triangles
@@ -403,6 +405,13 @@ int main()
             AddQuad(Room, Lo, X, Z, 6); AddQuad(Room, Lo + Y, Z, X, 6); AddQuad(Room, Lo, Z, Y, 6); AddQuad(Room, Lo + X, Y, Z, 6); AddQuad(Room, Lo, Y, X, 6); AddQuad(Room, Lo + Z, X, Y, 6);
         };
         Plank({ -2.0f, 1.5f, -0.6f }, { 1.2f, 0.02f, 0.3f });
+        Plank({ -0.25f, 0.12f, -2.0f }, { 0.25f, 0.02f, 4.0f });                 // a ledge on the wall, low over the floor: floor, wall, its top, front and underside share cells
+        for (int k = 0; k < 24; ++k)                                                 // a busy spot (a window's frames and sills: many small faces, as many directions, in one cell)
+        {
+            const float a = 0.2618f * k, e = 0.3f + 0.05f * float(k % 7);
+            const v3 U{ std::cos(a) * 0.08f, 0, std::sin(a) * 0.08f }, V{ -std::sin(a) * std::cos(e) * 0.08f, std::sin(e) * 0.08f, std::cos(a) * std::cos(e) * 0.08f };
+            AddQuad(Room, v3{ -1.0f, 0.6f, 1.0f } + U * 0.5f, U, V, 6);
+        }
         Room.Bake(0.3f, 0.9f);
         Room.BuildReadGrid();
         rng R(7);
@@ -414,9 +423,9 @@ int main()
             {
                 float u = R.Next(), v = R.Next();
                 if (u + v > 1) { u = 1 - u; v = 1 - v; }
-                const v3 P = A + (B - A) * u + (C - A) * v;
+                const v3 P = A + (B - A) * u + (C - A) * v + v3{ 1e-6f, -1e-6f, 1e-6f } * float((k % 3) - 1);     // the GPU's interpolation is a hair off: a floor at y = 0 lies on a cell boundary
                 bool bCovered = false;
-                for (auto s : Room.ReadCellList(P))
+                for (auto s : Room.ReadCellList(P, N))
                 {
                     const auto& S = Room.m_Levels[0][s];
                     bCovered = bCovered || (S.m_Normal.Dot(N) >= 0.5f && (P - S.m_Center).Length() < 2 * S.m_Radius);
@@ -425,6 +434,7 @@ int main()
             }
         }
         std::printf("coverage: %d of %d surface points read no surfel\n", nUncovered, nPoints);
+        for (const auto& E : Room.Coverage(4).m_Examples) std::printf("  hole %.3f %.3f %.3f N %.2f %.2f %.2f: %d listed, nearest compatible %.3f, any %.3f\n", E.m_P.m_X, E.m_P.m_Y, E.m_P.m_Z, E.m_N.m_X, E.m_N.m_Y, E.m_N.m_Z, E.m_nList, E.m_NearestCompatible, E.m_NearestAny);
         CHECK(nUncovered == 0, "%d of %d surface points read no surfel (black in the debug view)", nUncovered, nPoints);
     }
 
@@ -459,6 +469,24 @@ int main()
         std::printf("stability: %.2f%% change per update once converged; the light doubled: 90%% of it after %d updates\n", 100 * Swim, Passes);
         CHECK(Swim < 0.01, "the light swims: %.2f%% per update once converged", 100 * Swim);
         CHECK(Passes < 40, "the light follows a change too slowly (%d updates)", Passes);
+    }
+
+    // 6e. The read grid's hash table on a big regular layout (a 60 m floor, a row of pillars along a wall: what a building is): its
+    //     probes stay short (the GPU looks a cell up within the longest probe; a lattice used to cluster an xor-of-primes hash)
+    {
+        surfel_mesh Hall;
+        AddQuad(Hall, { -30, 0, -30 }, { 0, 0, 60 }, { 60, 0, 0 }, 60.0f);
+        AddQuad(Hall, { 0, 0, -30 }, { 0, 4, 0 }, { 0, 0, 60 }, 60.0f);
+        for (int k = 0; k < 30; ++k)
+        {
+            const v3 Lo{ -0.6f, 0, -29.0f + 2.0f * k };
+            const v3 X{ 0.6f, 0, 0 }, Y{ 0, 4, 0 }, Z{ 0, 0, 0.6f };
+            AddQuad(Hall, Lo, Z, Y, 4); AddQuad(Hall, Lo + Z, X, Y, 4); AddQuad(Hall, Lo, Y, X, 4);
+        }
+        Hall.Bake(0.5f, 1.5f);
+        Hall.BuildReadGrid();
+        std::printf("read grid of a 60 m hall: %zu table entries, the longest probe %u\n", Hall.m_ReadTable.size(), Hall.m_ReadMaxProbe);
+        CHECK(Hall.m_ReadMaxProbe <= 32, "the read grid's hash clusters: a probe of %u", Hall.m_ReadMaxProbe);
     }
 
     // 6. Buried surfels decay for long (the box's bottom on the floor: their validity heads to 0, then underflows), far and back:
