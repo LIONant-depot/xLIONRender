@@ -39,11 +39,9 @@ namespace xlionrender
         struct stats
         {
             int m_Meshes = 0, m_Drawn = 0, m_Waiting = 0, m_Lights = 0, m_bSun = 0, m_Materials = 0, m_ConstantSlots = 0, m_GIMeshes = 0;
-            double m_BakeMs = 0;                                        // surfel bakes this frame
         };
-        float                                           m_GISurfelSize = 0.5f;
-        double                                          m_TotalBakeMs  = 0;            // every surfel bake so far (DescribeScene)
-        std::unordered_map<const void*, int>            m_GIBaked;      // per geometry: baked (1) - never twice (ponytail: a new surfel size needs a reopen)
+        double                                          m_TotalGILoadMs = 0;           // every geometry's surfels made ready so far (DescribeScene)
+        std::unordered_map<const void*, int>            m_GIBaked;      // per geometry: its surfels given to the renderer (1), or it has none (0)
         stats                                           m_Stats;
 
         bool Init(xgpu::device& Device) noexcept
@@ -62,19 +60,17 @@ namespace xlionrender
             if (!pGeom) return nullptr;
             auto [It, bNew] = m_Meshes.try_emplace(pGeom);
             if (bNew && m_Renderer.CreateClusterGeom(It->second, MakeClusterGeom(*pGeom))) { m_Meshes.erase(It); return nullptr; }
-            // GI on: the geometry's surfels, baked from its CPU copy the first time (the GeomStatic compiler's job next)
-            if (m_Scene.m_GI.m_bEnable && m_GIBaked.try_emplace(pGeom, 1).second)
+            // GI on: the surfels the GeomStatic compiler baked, with the rays' structures built from the geometry's CPU copy, the first time
+            if (m_Scene.m_GI.m_bEnable && !m_GIBaked.contains(pGeom))
             {
                 const auto T0 = std::chrono::steady_clock::now();
                 gi::surfel_mesh Surfels;
                 gi::FromXGeomStatic(Surfels, *pGeom);
-                Surfels.Bake(m_GISurfelSize, m_GISurfelSize * 3);
-                if (Surfels.m_Levels[0].size() < 0xFFFF) (void)m_Renderer.SetMeshGI(It->second, std::move(Surfels));
-                const double Ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
-                m_Stats.m_BakeMs += Ms;
-                m_TotalBakeMs    += Ms;
+                const bool bGI = gi::SurfelsFromXGeomStatic(Surfels, *pGeom) && Surfels.m_Levels[0].size() < 0xFFFF && !m_Renderer.SetMeshGI(It->second, std::move(Surfels));
+                m_GIBaked[pGeom] = bGI;
+                m_TotalGILoadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
             }
-            m_Stats.m_GIMeshes += m_GIBaked.count(pGeom) ? 1 : 0;
+            if (auto G = m_GIBaked.find(pGeom); G != m_GIBaked.end()) m_Stats.m_GIMeshes += G->second;
             return &It->second;
         }
 
@@ -149,7 +145,6 @@ namespace xlionrender
             m_Scene.m_Sky     = { .m_Zenith = E.m_SkyZenith, .m_Horizon = E.m_SkyHorizon, .m_Ground = E.m_SkyGround, .m_Intensity = E.m_SkyIntensity };
             m_Scene.m_Ambient = E.m_Ambient;
             m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget };
-            m_GISurfelSize    = std::max(E.m_GISurfelSize, 0.01f);
         }
 
         // A new frame's snapshot: no sun unless a LightSun says so, a dim flat ambient unless an Environment says otherwise

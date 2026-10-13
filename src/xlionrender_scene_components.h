@@ -115,7 +115,6 @@ namespace xlionrender
         xmath::fvec3    m_Ambient       { 0.03f, 0.03f, 0.04f };
         bool            m_bGI           = false;           // surfel GI: the meshes get surfels the first time it is on (baked at load until the GeomStatic compiler bakes them)
         int             m_GIRayBudget   = 16384;
-        float           m_GISurfelSize  = 0.5f;            // world units: the spacing of the GI samples baked on the meshes (finer: more detail, more cost)
 
         XPROPERTY_DEF
         ( "Environment", environment
@@ -126,7 +125,6 @@ namespace xlionrender
         , obj_member<"Ambient",      &environment::m_Ambient>
         , obj_member<"GI",           &environment::m_bGI,         member_help<"Diffuse global illumination (surfels): bounce light from every mesh that has surfels">>
         , obj_member<"GIRayBudget",  &environment::m_GIRayBudget, member_help<"Rays traced per frame for the GI: more converges faster, costs more CPU">>
-        , obj_member<"GISurfelSize", &environment::m_GISurfelSize, member_help<"Spacing of the GI samples (surfels) baked on the meshes, in world units: finer shows more detail and costs more">>
         )
     };
 

@@ -3,9 +3,11 @@
 //  - a Cornell box built from instances (the box rotated) converges to a path-traced reference
 //  - a rotated instance equals the same geometry pre-transformed (transforms reach surfels, normals and reads)
 //  - a city (400 buildings, sun + sky): cost per update, coverage, LOD levels, and a moved building dirtying only its block
+//  - surfels saved by the GeomStatic compiler load back as baked, and a receive-only mesh is not in the rays' way
 #include "features/gi/xlionrender_surfel_gi.h"
 #include <cstdio>
 #include <random>
+#include <span>
 
 using namespace xlionrender::gi;
 
@@ -244,6 +246,56 @@ int main()
         const auto St = W.Update(L, Eye, budget_v, 3000);
         std::printf("city steady: %.1f ms per update; a building moved: %d instances dirty (of %d), updated in %.1f ms\n", Steady / 10, St.m_Dirty, W.InstanceCount(), St.m_Ms);
         CHECK(St.m_Dirty > 1 && St.m_Dirty < 15, "a moved building dirtied %d instances", St.m_Dirty);
+    }
+
+    // 5. Surfels saved by the GeomStatic compiler load back as baked (SurfelsFromXGeomStatic), and a receive-only mesh is not in the rays' way
+    {
+        struct saved_geom       // the GeomStatic resource's GI part (xgeom_static::geom), the fields SurfelsFromXGeomStatic reads
+        {
+            enum class mode : std::uint8_t { OFF, RECEIVE, RECEIVE_AND_BOUNCE };
+            struct vec3 { float m_X, m_Y, m_Z; };
+            struct surfel { vec3 m_Center; float m_Radius; vec3 m_Normal; std::uint32_t m_iParent; };
+            std::vector<surfel>         m_Surfels;
+            std::vector<std::uint16_t>  m_Vert;
+            std::uint32_t               m_nFine = 0;
+            mode                        m_GIMode = mode::RECEIVE_AND_BOUNCE;
+            std::span<const surfel>        getGISurfels()       const { return { m_Surfels.data(), m_nFine }; }
+            std::span<const surfel>        getGIParents()       const { return { m_Surfels.data() + m_nFine, m_Surfels.size() - m_nFine }; }
+            std::span<const std::uint16_t> getGIVertexSurfels() const { return m_Vert; }
+        };
+        surfel_mesh Baked = Box({ 2, 2, 2 }, 0.25f);
+        Baked.Bake(0.3f, 0.9f);
+        saved_geom G;
+        G.m_nFine = std::uint32_t(Baked.m_Levels[0].size());
+        for (int L = 0; L < 2; ++L)
+            for (std::size_t s = 0; s < Baked.m_Levels[L].size(); ++s)
+            {
+                const auto& S = Baked.m_Levels[L][s];
+                G.m_Surfels.push_back({ { S.m_Center.m_X, S.m_Center.m_Y, S.m_Center.m_Z }, S.m_Radius, { S.m_Normal.m_X, S.m_Normal.m_Y, S.m_Normal.m_Z }, L ? 0u : std::uint32_t(Baked.m_ParentOf[s]) });
+            }
+        for (const auto& V : Baked.m_VertSurfels) for (int k : V) G.m_Vert.push_back(k < 0 ? 0xFFFF : std::uint16_t(k));
+
+        surfel_mesh Loaded = Box({ 2, 2, 2 }, 0.25f);
+        CHECK(SurfelsFromXGeomStatic(Loaded, G), "saved surfels did not load");
+        bool bSame = Loaded.m_Levels[0].size() == Baked.m_Levels[0].size() && Loaded.m_Levels[1].size() == Baked.m_Levels[1].size()
+                  && Loaded.m_ParentOf == Baked.m_ParentOf && Loaded.m_VertSurfels == Baked.m_VertSurfels && !Loaded.m_Bvh.m_Nodes.empty();
+        for (std::size_t s = 0; bSame && s < Baked.m_Levels[0].size(); ++s)
+            bSame = (Loaded.m_Levels[0][s].m_Center - Baked.m_Levels[0][s].m_Center).Length() < 1e-6f && Loaded.m_Levels[0][s].m_Radius == Baked.m_Levels[0][s].m_Radius;
+        CHECK(bSame, "the loaded surfels differ from the baked ones");
+        std::printf("saved surfels: %zu fine, %zu parents load back as baked\n", Loaded.m_Levels[0].size(), Loaded.m_Levels[1].size());
+
+        saved_geom Empty;
+        surfel_mesh None = Box({ 2, 2, 2 }, 0.25f);
+        CHECK(!SurfelsFromXGeomStatic(None, Empty), "a geometry without surfels loaded some");
+
+        G.m_GIMode = saved_geom::mode::RECEIVE;
+        surfel_mesh Receiver = Box({ 2, 2, 2 }, 0.25f);
+        CHECK(SurfelsFromXGeomStatic(Receiver, G) && !Receiver.m_bBounce, "RECEIVE did not make the mesh receive-only");
+        world W;
+        const int iBounce  = W.Add(Loaded,   xmath::fmat4::fromTranslation({ 0, 0, 5 }), { 0.5f, 0.5f, 0.5f });
+        const int iReceive = W.Add(Receiver, xmath::fmat4::fromTranslation({ 0, 0, -5 }), { 0.5f, 0.5f, 0.5f });
+        CHECK(W.Cast({ 0, 0, 0 }, { 0, 0, 1 }).m_Inst == iBounce, "a ray misses the bouncing mesh");
+        CHECK(W.Cast({ 0, 0, 0 }, { 0, 0, -1 }).m_Inst < 0, "a ray hit the receive-only mesh (instance %d)", iReceive);
     }
 
     if (g_nErrors) return 1;

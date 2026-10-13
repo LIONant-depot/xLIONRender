@@ -448,6 +448,7 @@ namespace xlionrender::gi
         bvh                                 m_Bvh;
         std::vector<tri4>                   m_Tri4;                 // per BVH leaf: its triangles in rows
         v3                                  m_Lo, m_Hi;
+        bool                                m_bBounce = true;       // false: receive only (the rays of the GI do not see it)
 
         // The 4 surfels of a level nearest P with a compatible normal
         std::array<int, 4> Nearest4(int Level, const v3& P, const v3& N) const noexcept
@@ -466,7 +467,7 @@ namespace xlionrender::gi
             return { Best[0].second, Best[1].second, Best[2].second, Best[3].second };
         }
 
-        // The bake (the resource pipeline's job; today also run at load for meshes compiled without it):
+        // The bake (the GeomStatic compiler's job: its surfels are saved in the geometry, see SurfelsFromXGeomStatic):
         //  - candidates sampled on the surface by area (about 4 per Radius^2 of each triangle, at least one per triangle), each with the
         //    interpolated vertex normal: the surfels follow the surface, not the vertices (a big wall gets as many as its area asks for)
         //  - Poisson-disk acceptance through a hash grid of cell Radius: a candidate is kept when no kept surfel with a similar normal
@@ -555,7 +556,13 @@ namespace xlionrender::gi
                 m_ParentOf[s] = std::max(B[0].second, 0);
             }
 
-            // 5. The rays' structures
+            BuildRays();
+        }
+
+        // The rays' structures (the BVH, its 4-triangle rows, the bounds) from m_Pos / m_Tris: the bake's last step, and all a geometry
+        // with baked surfels needs at load
+        void BuildRays() noexcept
+        {
             m_Lo = { 1e30f, 1e30f, 1e30f }; m_Hi = { -1e30f, -1e30f, -1e30f };
             for (const auto& P : m_Pos) { m_Lo = v3::Min(m_Lo, P); m_Hi = v3::Max(m_Hi, P); }
             m_Bvh.Build(int(m_Tris.size()), [&](int t, v3& Lo, v3& Hi)
@@ -608,7 +615,7 @@ namespace xlionrender::gi
 
     // A compiled xgeom_static's geometry (its CPU copy: positions quantized per cluster, 12-bit oct normals, 16-bit indices per cluster) into a
     // surfel_mesh, in the GPU buffer's vertex order (the vertex shader reads the surfels by gl_VertexIndex). Mirrors getVertexData of
-    // shaders/xgeom_static_mb_input_full.vert. Bake next.
+    // shaders/xgeom_static_mb_input_full.vert. Then Bake (the GeomStatic compiler) or SurfelsFromXGeomStatic (the renderer).
     template <class T_GEOM> void FromXGeomStatic(surfel_mesh& M, const T_GEOM& Geom) noexcept
     {
         const auto Verts = Geom.getVertices();
@@ -643,6 +650,25 @@ namespace xlionrender::gi
             for (std::uint32_t i = C.m_iIndex; i + 2 < C.m_iIndex + C.m_nIndices && i + 2 < Index.size(); i += 3)
                 M.m_Tris.push_back({ int(C.m_iVertex + Index[i]), int(C.m_iVertex + Index[i + 1]), int(C.m_iVertex + Index[i + 2]) });
         }
+    }
+
+    // A compiled xgeom_static's baked surfels (its GeomStatic compiler ran Bake) into a surfel_mesh already filled by FromXGeomStatic, then the
+    // rays' structures. False: the geometry has none (compiled with the GI off)
+    template <class T_GEOM> bool SurfelsFromXGeomStatic(surfel_mesh& M, const T_GEOM& Geom) noexcept
+    {
+        const auto Fine = Geom.getGISurfels(), Parents = Geom.getGIParents();
+        const auto VS   = Geom.getGIVertexSurfels();
+        if (Fine.empty() || VS.size() != 4 * M.m_Pos.size()) return false;
+        const auto ToSurfel = [](const auto& S) { return surfel{ v3{ S.m_Center.m_X, S.m_Center.m_Y, S.m_Center.m_Z }, v3{ S.m_Normal.m_X, S.m_Normal.m_Y, S.m_Normal.m_Z }, S.m_Radius }; };
+        M.m_Levels[0].clear(); M.m_Levels[1].clear(); M.m_ParentOf.clear();
+        for (const auto& S : Fine)    { M.m_Levels[0].push_back(ToSurfel(S)); M.m_ParentOf.push_back(int(S.m_iParent)); }
+        for (const auto& S : Parents) M.m_Levels[1].push_back(ToSurfel(S));
+        M.m_VertSurfels.resize(M.m_Pos.size());
+        for (std::size_t v = 0; v < M.m_Pos.size(); ++v)
+            for (int k = 0; k < 4; ++k) M.m_VertSurfels[v][k] = VS[4 * v + k] == 0xFFFF ? -1 : int(VS[4 * v + k]);
+        M.m_bBounce = Geom.m_GIMode != decltype(Geom.m_GIMode)::RECEIVE;
+        M.BuildRays();
+        return true;
     }
 
     struct lights
@@ -1019,7 +1045,7 @@ namespace xlionrender::gi
         {
             if (!m_bTlasDirty) return;
             m_TlasIds.clear();
-            for (int i = 0; i < int(m_Instances.size()); ++i) if (m_Instances[i].m_bAlive) m_TlasIds.push_back(i);
+            for (int i = 0; i < int(m_Instances.size()); ++i) if (m_Instances[i].m_bAlive && m_Instances[i].m_pMesh->m_bBounce) m_TlasIds.push_back(i);
             m_Tlas.Build(int(m_TlasIds.size()), [&](int t, v3& Lo, v3& Hi) { Lo = m_Instances[m_TlasIds[t]].m_Lo; Hi = m_Instances[m_TlasIds[t]].m_Hi; });
             m_bTlasDirty = false;
         }
