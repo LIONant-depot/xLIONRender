@@ -13,6 +13,7 @@
 // A light points along its entity's -Y: with no rotation the sun shines straight down and a spot looks at the floor; rotate the entity to aim it.
 #include "dependencies/xECSV2/src/xecs.h"
 #include "dependencies/xmath/source/xmath.h"
+#include "scene/xlionrender_scene.h"         // gi_debug
 #include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"
 
 #include <vector>
@@ -103,6 +104,12 @@ namespace xlionrender
         )
     };
 
+    static constexpr auto gi_debug_v = std::array
+    { xproperty::settings::enum_item("NONE",    gi_debug::NONE)
+    , xproperty::settings::enum_item("SURFELS", gi_debug::SURFELS)
+    , xproperty::settings::enum_item("LIGHT",   gi_debug::LIGHT)
+    };
+
     // The level's sky, ambient and diffuse GI (one per level: the first one found; without one: a dim flat ambient)
     struct environment
     {
@@ -113,8 +120,10 @@ namespace xlionrender
         xmath::fvec3    m_SkyGround     { 0.22f, 0.20f, 0.18f };
         float           m_SkyIntensity  = 0.3f;            // 0: no sky (the flat ambient lights instead)
         xmath::fvec3    m_Ambient       { 0.03f, 0.03f, 0.04f };
-        bool            m_bGI           = false;           // surfel GI: the meshes get surfels the first time it is on (baked at load until the GeomStatic compiler bakes them)
+        bool            m_bGI           = false;           // surfel GI: the meshes with surfels (baked by their GeomStatic compiler) are lit by it
         int             m_GIRayBudget   = 16384;
+        bool            m_bGIPerPixel   = true;            // near, every pixel reads the surfels (no extra vertices needed); off: the vertices only
+        gi_debug        m_GIDebug       = gi_debug::NONE;
 
         XPROPERTY_DEF
         ( "Environment", environment
@@ -125,6 +134,8 @@ namespace xlionrender
         , obj_member<"Ambient",      &environment::m_Ambient>
         , obj_member<"GI",           &environment::m_bGI,         member_help<"Diffuse global illumination (surfels): bounce light from every mesh that has surfels">>
         , obj_member<"GIRayBudget",  &environment::m_GIRayBudget, member_help<"Rays traced per frame for the GI: more converges faster, costs more CPU">>
+        , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone">>
+        , obj_member<"GIPerPixel",   &environment::m_bGIPerPixel, member_help<"Near meshes read the GI per pixel (a mesh needs no extra vertices for it); off: per vertex only (cheaper, needs dense meshes)">>
         )
     };
 

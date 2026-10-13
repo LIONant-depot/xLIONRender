@@ -28,21 +28,19 @@ layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 layout(location = 0) out VaryingFull Out;
 layout(location = 8) flat out uint OutInstance;     // the slot, for fragment shaders that read the instance record (geom standard)
 layout(location = 9) out vec4 OutGI;                // surfel GI: sum(w E), sum(w), interpolated and divided per pixel (mb_standard_pbr.frag); 0 without GI
+layout(location = 10) out vec3 OutGIPos;            // the per-pixel read (mb_standard_pbr.frag): mesh space position,
+layout(location = 11) out vec3 OutGINormal;         //   normal,
+layout(location = 12) flat out uvec2 OutGIRef;      //   the first surfel in GILight, the GI level (xlionrender_surfel_gi.glsl gi_none_v: none)
 
 #ifdef XLION_GI
-// Surfel GI (features/gi/xlionrender_surfel_gi.h): the mesh's surfel data and this frame's surfel irradiance
-//  GIMesh: [0] level 0 surfels' first uint, [1] level 1's; from 2: per vertex 2 uints (4 x 16-bit level 0 surfel indices,
-//          0xFFFF none); per surfel 8 floats: center xyz, radius, normal xyz, parent index (uint bits; level 0)
-//  GILight: per surfel of the instance's active level: rgb irradiance, a validity (0: buried)
-layout(std430, set = 1, binding = 5) readonly buffer GIMeshBuffer  { uint GIMesh[]; };
-layout(std430, set = 1, binding = 6) readonly buffer GILightBuffer { vec4 GILight[]; };
+#include "xlionrender_surfel_gi.glsl"
 
 // The weighted sum over the vertex's surfels at the instance's level (world space distances: any scale)
 vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4 L2wRows, in const float MeanScale)
 {
-    if (push.giLevel == 0xFFFFFFFFu) return vec4(0.0);
-    const uint Level = push.giLevel, LevelBase = GIMesh[Level];
-    const uint P0 = GIMesh[2u + 2u * uint(gl_VertexIndex)], P1 = GIMesh[3u + 2u * uint(gl_VertexIndex)];
+    if (push.giLevel == gi_none_v) return vec4(0.0);
+    const uint Level = push.giLevel & 0xFFu, LevelBase = GIMesh[Level];
+    const uint P0 = GIMesh[8u + 2u * uint(gl_VertexIndex)], P1 = GIMesh[9u + 2u * uint(gl_VertexIndex)];
     const uint Idx[4] = uint[4](P0 & 0xFFFFu, P0 >> 16, P1 & 0xFFFFu, P1 >> 16);
     uint Seen[4] = uint[4](0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
     vec4 Sum = vec4(0.0);
@@ -67,7 +65,7 @@ vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4
         const float d      = length(vec4(LocalPos - Center, 0.0) * L2wRows) / (2.0 * Radius * MeanScale);
         const float f      = max(0.0, 1.0 - d);
         const vec4  E      = GILight[push.giOffset + s];
-        const float w      = (f * f * c + 1e-6) * E.w;
+        const float w      = (f * f * c + 1e-6) * E.w * GIVisibility(LocalPos, Center, Normal, Radius, push.giOffset + s);
         Sum += vec4(E.rgb * w, w);
     }
     return Sum;
@@ -120,9 +118,13 @@ void main()
     Out.VertColor = VertData.VertColor;
 
 #ifdef XLION_GI
-    OutGI = SurfelGI(VertData.LocalPos.xyz, normalize(VertData.Normal.xyz), L2wRows, (scales.x + scales.y + scales.z) / 3.0);
+    OutGI       = SurfelGI(VertData.LocalPos.xyz, normalize(VertData.Normal.xyz), L2wRows, (scales.x + scales.y + scales.z) / 3.0);
+    OutGIRef    = uvec2(push.giOffset, push.giLevel);
 #else
-    OutGI = vec4(0.0);
+    OutGI       = vec4(0.0);
+    OutGIRef    = uvec2(0u, 0xFFFFFFFFu);
 #endif
+    OutGIPos    = VertData.LocalPos.xyz;
+    OutGINormal = VertData.Normal.xyz;
 }
 

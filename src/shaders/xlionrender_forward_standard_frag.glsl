@@ -1,6 +1,7 @@
 #version 450
 // Forward plan, standard material: constant metal/roughness parameters through mb_standard_pbr.frag's PBRLighting.
 // Writes scene-linear HDR (no tone mapping here - that is the tone map pass).
+#define XLION_NO_GI_PIXEL          // xlionrender_forward_vert.glsl: no mesh surfels (and the pipeline has no GI buffers)
 #include "mb_standard_pbr.frag"
 
 layout(set = 2, binding = 2) uniform material_uniforms

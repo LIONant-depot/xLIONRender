@@ -119,6 +119,7 @@ namespace xlionrender
         for( auto& M : m_Meshes ) if( M.m_bAlive && !M.m_bCluster ) { ReleaseBuffer(M.m_VertexBuffer); ReleaseBuffer(M.m_IndexBuffer); }
         for( auto& M : m_Meshes ) if( M.m_bAlive && M.m_pGI ) ReleaseBuffer(M.m_GIBuffer);
         ReleaseBuffer(m_GILightRing);
+        ReleaseBuffer(m_GIMomentRing);
         ReleaseBuffer(m_GIDummy);
         for( auto& M : m_Materials ) if( M.m_bAlive ) for( std::size_t k = 0; k < M.m_Pipeline.size(); ++k )
         {
@@ -215,8 +216,9 @@ namespace xlionrender
         if( auto Err = Device.Create(m_LightUBO,    { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_lighting), .m_EntryCount = 16 }); Err ) return Err;
         if( auto Err = Device.Create(m_LightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_light_data), .m_EntryCount = ring_frames_v * light_region_v }); Err ) return Err;
         if( auto Err = Device.Create(m_GILightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * gi_light_region_v }); Err ) return Err;
+        if( auto Err = Device.Create(m_GIMomentRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * gi_light_region_v * gi::moment_texels_v }); Err ) return Err;
         {
-            const std::uint32_t Zeros[4] = {};
+            const std::uint32_t Zeros[8] = {};     // a GIMesh header: no surfels, no read grid
             if( auto Err = Device.Create(m_GIDummy, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(Zeros), .m_EntryCount = 1, .m_pData = const_cast<std::uint32_t*>(Zeros) }); Err ) return Err;
         }
         if( auto Err = Device.Create(m_CellRing,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * max_cell_uints_v }); Err ) return Err;
@@ -312,8 +314,9 @@ namespace xlionrender
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // instances (transform; constant material)
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 3, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // lights
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 4, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // light cells
-            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 5, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // GI: the mesh's surfels
-            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 6, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // GI: the surfels' light
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 5, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // GI: the mesh's surfels (+ the per-pixel read)
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 6, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // GI: the surfels' light
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 7, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // GI: their depth moments
             };
             if( auto Err = Device.Create(m_StaticGeomPipeline, { .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                                                , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
@@ -554,15 +557,18 @@ namespace xlionrender
         if( findMesh(Id) == nullptr ) return nullptr;
         auto& M = m_Meshes[Id.m_Index];
         assert(M.m_bCluster && M.m_Geom.m_Kind == geom_kind::RIGID && Surfels.m_Levels[0].size() < 0xFFFF);
+        // The layout of shaders/xlionrender_surfel_gi.glsl: a header of 8 uints ([0] level 0 surfels, [1] level 1 surfels, [2] the read
+        // grid's table, [3] its mask (0: none), [4] its cell (float bits), [5] its lists), per vertex 2 uints, the surfels, the grid
+        if( Surfels.m_ReadTable.empty() ) Surfels.BuildReadGrid();
         const std::uint32_t nVerts = std::uint32_t(Surfels.m_Pos.size());
-        std::vector<std::uint32_t> Data(2 + 2 * nVerts);
+        std::vector<std::uint32_t> Data(8 + 2 * nVerts);
         Data[0] = std::uint32_t(Data.size());
         for( std::uint32_t v = 0; v < nVerts; ++v )
         {
             const auto& I = Surfels.m_VertSurfels[v];
             const auto  U = [&](int k) { return I[k] < 0 ? 0xFFFFu : std::uint32_t(I[k]); };
-            Data[2 + 2 * v] = U(0) | (U(1) << 16);
-            Data[3 + 2 * v] = U(2) | (U(3) << 16);
+            Data[8 + 2 * v] = U(0) | (U(1) << 16);
+            Data[9 + 2 * v] = U(2) | (U(3) << 16);
         }
         for( int L = 0; L < 2; ++L )
         {
@@ -575,6 +581,15 @@ namespace xlionrender
                 for( float f : F ) Data.push_back(std::bit_cast<std::uint32_t>(f));
                 Data.push_back(L == 0 ? std::uint32_t(Surfels.m_ParentOf[s]) : 0u);
             }
+        }
+        if( !Surfels.m_ReadTable.empty() )
+        {
+            Data[2] = std::uint32_t(Data.size());
+            Data[3] = std::uint32_t(Surfels.m_ReadTable.size() - 1);
+            Data[4] = std::bit_cast<std::uint32_t>(Surfels.m_ReadCell);
+            for( const auto& E : Surfels.m_ReadTable ) Data.insert(Data.end(), E.begin(), E.end());
+            Data[5] = std::uint32_t(Data.size());
+            Data.insert(Data.end(), Surfels.m_ReadList.begin(), Surfels.m_ReadList.end());
         }
         if( M.m_pGI ) ReleaseBuffer(M.m_GIBuffer);
         if( auto Err = m_Device.Create(M.m_GIBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
@@ -633,6 +648,7 @@ namespace xlionrender
         using ub = xgpu::pipeline::uniform_binds;
         const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
         const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
+        const auto BothSSBO     = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
         std::vector<ub> UniformBinds
         { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
         , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
@@ -642,7 +658,9 @@ namespace xlionrender
         if( bSkin ) UniformBinds.push_back(VertexSSBO(2));     // SKIN: instances
         UniformBinds.push_back(FragmentSSBO(3));                // lights
         UniformBinds.push_back(FragmentSSBO(4));                // light cells
-        if( !bSkin ) { UniformBinds.push_back(VertexSSBO(5)); UniformBinds.push_back(VertexSSBO(6)); }     // RIGID: the GI (the mesh's surfels, their light)
+        UniformBinds.push_back(BothSSBO(5));                    // the GI: the mesh's surfels (RIGID: the vertex read; both: the per-pixel read
+        UniformBinds.push_back(BothSSBO(6));                    // of mb_standard_pbr.frag, off on the skin path), their light
+        UniformBinds.push_back(BothSSBO(7));                    //   and their depth moments
         const auto Binds = std::span{ UniformBinds };
         if( m_Device.Create(M.m_Pipeline[k], { .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                              , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)

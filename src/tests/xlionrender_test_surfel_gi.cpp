@@ -284,6 +284,25 @@ int main()
         CHECK(bSame, "the loaded surfels differ from the baked ones");
         std::printf("saved surfels: %zu fine, %zu parents load back as baked\n", Loaded.m_Levels[0].size(), Loaded.m_Levels[1].size());
 
+        // The per-pixel read grid: the cell of any point on the surface lists every surfel that reaches it (within 2 radii, a compatible normal)
+        Loaded.BuildReadGrid();
+        rng R(99);
+        int nMissing = 0, nPoints = 0, MaxList = 0;
+        for (const auto& T : Loaded.m_Tris)
+            for (int k = 0; k < 4; ++k, ++nPoints)
+            {
+                float u = R.Next(), v = R.Next();
+                if (u + v > 1) { u = 1 - u; v = 1 - v; }
+                const v3 P = Loaded.m_Pos[T[0]] + (Loaded.m_Pos[T[1]] - Loaded.m_Pos[T[0]]) * u + (Loaded.m_Pos[T[2]] - Loaded.m_Pos[T[0]]) * v;
+                const auto List = Loaded.ReadCellList(P);
+                MaxList = std::max(MaxList, int(List.size()));
+                for (int s = 0; s < int(Loaded.m_Levels[0].size()); ++s)
+                    if ((P - Loaded.m_Levels[0][s].m_Center).Length() < 2 * Loaded.m_Levels[0][s].m_Radius && Loaded.m_Levels[0][s].m_Normal.Dot((Loaded.m_Pos[T[1]] - Loaded.m_Pos[T[0]]).Cross(Loaded.m_Pos[T[2]] - Loaded.m_Pos[T[0]]).NormalizeCopy()) >= 0.5f && std::find(List.begin(), List.end(), std::uint32_t(s)) == List.end()) ++nMissing;
+            }
+        std::printf("read grid: %zu cells, %zu list entries, at most %d surfels per cell; %d of the surfels reaching %d surface points not listed\n"
+                   , std::count_if(Loaded.m_ReadTable.begin(), Loaded.m_ReadTable.end(), [](const auto& E) { return E[1] != 0xFFFFFFFFu; }), Loaded.m_ReadList.size(), MaxList, nMissing, nPoints);
+        CHECK(nMissing == 0, "the read grid misses %d surfels that reach a surface point", nMissing);
+
         saved_geom Empty;
         surfel_mesh None = Box({ 2, 2, 2 }, 0.25f);
         CHECK(!SurfelsFromXGeomStatic(None, Empty), "a geometry without surfels loaded some");
@@ -296,6 +315,198 @@ int main()
         const int iReceive = W.Add(Receiver, xmath::fmat4::fromTranslation({ 0, 0, -5 }), { 0.5f, 0.5f, 0.5f });
         CHECK(W.Cast({ 0, 0, 0 }, { 0, 0, 1 }).m_Inst == iBounce, "a ray misses the bouncing mesh");
         CHECK(W.Cast({ 0, 0, 0 }, { 0, 0, -1 }).m_Inst < 0, "a ray hit the receive-only mesh (instance %d)", iReceive);
+
+        // Far and back (the parent level, then the fine one again): the surfels' light stays finite and in range
+        lights L;
+        L.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = { 3, 3, 3 }; L.m_Sky = { 0.2f, 0.3f, 0.5f };
+        const auto Bad = [&](int Id)
+        {
+            int n = 0;
+            const auto& E = W.InstanceLight(Id); const auto& V = W.InstanceValid(Id);
+            for (std::size_t s = 0; s < E.size(); ++s) n += !(std::isfinite(E[s].m_X) && std::isfinite(E[s].m_Y) && std::isfinite(E[s].m_Z) && std::isfinite(V[s]) && V[s] >= 0 && V[s] <= 1.0001f && E[s].m_X >= 0);
+            return n;
+        };
+        for (int f = 0; f < 8; ++f) W.Update(L, { 0, 0, 0 }, 1 << 20, 4000 + f);
+        const std::size_t nNear = W.InstanceLight(iBounce).size();
+        for (int f = 0; f < 8; ++f) W.Update(L, { 0, 0, 500 }, 1 << 20, 4100 + f);
+        const std::size_t nFar = W.InstanceLight(iBounce).size();
+        const int BadFar = Bad(iBounce);
+        for (int f = 0; f < 8; ++f) W.Update(L, { 0, 0, 0 }, 1 << 20, 4200 + f);
+        std::printf("far and back: %zu surfels near, %zu far; %d bad far, %d bad back\n", nNear, nFar, BadFar, Bad(iBounce));
+        CHECK(nFar < nNear && W.InstanceLight(iBounce).size() == nNear, "the levels did not switch (%zu, %zu)", nNear, nFar);
+        CHECK(BadFar == 0 && Bad(iBounce) == 0, "the surfels' light went bad far (%d) or back (%d)", BadFar, Bad(iBounce));
+    }
+
+    // 6a. No leak through a wall: a floor running under a thin wall (one mesh, as an imported building): a vertex of the floor on one
+    //     side takes no surfel of the other side, though they are within reach and face the same way (the pixels: 6b)
+    {
+        surfel_mesh Room;
+        AddQuad(Room, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);                 // the floor, y = 0, up
+        AddQuad(Room, { 0.1f, 0, -2 }, { 0, 1.5f, 0 }, { 0, 0, 4 }, 0.25f);           // the wall's -x face (x = 0.1: the wall is across a read cell)
+        AddQuad(Room, { 0.2f, 0, -2 }, { 0, 0, 4 }, { 0, 1.5f, 0 }, 0.25f);           // its +x face
+        AddQuad(Room, { 0.1f, 1.5f, -2 }, { 0.1f, 0, 0 }, { 0, 0, 4 }, 0.25f);        // its top
+        Room.Bake(0.3f, 0.9f);
+        Room.BuildReadGrid();
+        const auto Side = [](float x) { return x < 0.1f ? -1 : x > 0.2f ? 1 : 0; };
+        int nLeaks = 0, nReads = 0;
+        for (std::size_t v = 0; v < Room.m_Pos.size(); ++v)
+        {
+            if (Room.m_Nrm[v].m_Y < 0.9f || Side(Room.m_Pos[v].m_X) == 0) continue;
+            for (int s : Room.m_VertSurfels[v]) if (s >= 0) { ++nReads; nLeaks += Side(Room.m_Levels[0][s].m_Center.m_X) == -Side(Room.m_Pos[v].m_X); }
+        }
+
+        std::printf("a wall between: %d of %d reads cross it\n", nLeaks, nReads);
+        CHECK(nReads > 0 && nLeaks == 0, "%d of %d reads of the floor cross the wall", nLeaks, nReads);
+    }
+
+    // 6b. A wall that is another mesh (the bake cannot see it): the floor's surfels on one side learn from their rays that the wall is
+    //     in the way (the depth moments), and the reads fade them for points on the other side; points on their own side keep them
+    {
+        surfel_mesh Floor, Wall = Box({ 0.1f, 1.5f, 4 }, 0.25f);
+        AddQuad(Floor, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
+        Floor.Bake(0.3f, 0.9f); Wall.Bake(0.3f, 0.9f);
+        world W;
+        const int iFloor = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        W.Add(Wall, xmath::fmat4::fromTranslation({ 0.15f, 0.75f, 0 }), { 0.5f, 0.5f, 0.5f });       // x 0.1 .. 0.2, on the floor
+        lights L; L.m_Sky = { 1, 1, 1 };
+        for (int f = 0; f < 300; ++f) W.Update(L, { 0, 1, 0 }, 1 << 30, 9000 + f);
+        double Across = 0, Same = 0; int nAcross = 0, nSame = 0;
+        const auto& S0 = Floor.m_Levels[0];
+        for (int s = 0; s < int(S0.size()); ++s)
+        {
+            const float x = S0[s].m_Center.m_X;
+            if (x > -0.05f || x < -0.5f) continue;                                         // the floor's surfels just left of the wall
+            for (float dx : { 0.35f, 0.5f })                                               // a point that far to the right: across or not
+            {
+                const v3 P{ x + dx, 0, S0[s].m_Center.m_Z };
+                if ((P - S0[s].m_Center).Length() >= 2 * S0[s].m_Radius) continue;
+                const float w = W.Visibility(iFloor, s, P);
+                if (P.m_X > 0.2f) { Across += w; ++nAcross; } else { Same += w; ++nSame; }
+            }
+            const v3 Q{ x - 0.3f, 0, S0[s].m_Center.m_Z };                                 // to the left: open floor
+            Same += W.Visibility(iFloor, s, Q); ++nSame;
+        }
+        std::printf("a wall of another mesh: mean visibility across it %.3f (%d), on the surfels' own side %.3f (%d)\n", Across / std::max(nAcross, 1), nAcross, Same / std::max(nSame, 1), nSame);
+        CHECK(nAcross > 0 && Across / nAcross < 0.1, "the moments do not stop the read across the wall (%.3f)", Across / std::max(nAcross, 1));
+        CHECK(nSame > 0 && Same / nSame > 0.7, "the moments fade the surfels on their own side too (%.3f)", Same / std::max(nSame, 1));
+    }
+
+    // 6c. Coverage: every point of the surface finds a surfel to read in its cell (the debug view's black: none), at a wall's foot and on a
+    //     thin plank too (both used to lose their surfels to a gap filter), on big triangles as authored (2 per face)
+    {
+        surfel_mesh Room;
+        AddQuad(Room, { -3, 0, -3 }, { 0, 0, 6 }, { 6, 0, 0 }, 6.0f);                 // the floor: 2 triangles
+        AddQuad(Room, { 0, 0, -3 }, { 0, 2, 0 }, { 0, 0, 6 }, 6.0f);                  // a wall standing on it (x = 0, facing -x)
+        const auto Plank = [&](v3 Lo, v3 S)                                          // a 2 cm plank hanging in the room
+        {
+            const v3 X{ S.m_X, 0, 0 }, Y{ 0, S.m_Y, 0 }, Z{ 0, 0, S.m_Z };
+            AddQuad(Room, Lo, X, Z, 6); AddQuad(Room, Lo + Y, Z, X, 6); AddQuad(Room, Lo, Z, Y, 6); AddQuad(Room, Lo + X, Y, Z, 6); AddQuad(Room, Lo, Y, X, 6); AddQuad(Room, Lo + Z, X, Y, 6);
+        };
+        Plank({ -2.0f, 1.5f, -0.6f }, { 1.2f, 0.02f, 0.3f });
+        Room.Bake(0.3f, 0.9f);
+        Room.BuildReadGrid();
+        rng R(7);
+        int nPoints = 0, nUncovered = 0;
+        for (const auto& T : Room.m_Tris)
+        {
+            const v3 A = Room.m_Pos[T[0]], B = Room.m_Pos[T[1]], C = Room.m_Pos[T[2]], N = (B - A).Cross(C - A).NormalizeCopy();
+            for (int k = 0; k < 400; ++k, ++nPoints)
+            {
+                float u = R.Next(), v = R.Next();
+                if (u + v > 1) { u = 1 - u; v = 1 - v; }
+                const v3 P = A + (B - A) * u + (C - A) * v;
+                bool bCovered = false;
+                for (auto s : Room.ReadCellList(P))
+                {
+                    const auto& S = Room.m_Levels[0][s];
+                    bCovered = bCovered || (S.m_Normal.Dot(N) >= 0.5f && (P - S.m_Center).Length() < 2 * S.m_Radius);
+                }
+                nUncovered += !bCovered;
+            }
+        }
+        std::printf("coverage: %d of %d surface points read no surfel\n", nUncovered, nPoints);
+        CHECK(nUncovered == 0, "%d of %d surface points read no surfel (black in the debug view)", nUncovered, nPoints);
+    }
+
+    // 6d. Stable and responsive (the estimator): once converged, the light holds still from one update to the next (no swimming), and
+    //     when the light doubles it follows within a few dozen passes
+    {
+        cornell C;
+        MakeCornell(C, 0.5f, false);
+        auto& W = C.m_World;
+        const auto Snapshot = [&]
+        {
+            std::vector<v3> All;
+            for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i)) All.push_back(e);
+            return All;
+        };
+        const auto Mean = [](const std::vector<v3>& A) { double m = 0; for (const auto& e : A) m += e.m_X + e.m_Y + e.m_Z; return m / std::max<std::size_t>(A.size(), 1); };
+        for (int f = 0; f < 300; ++f) W.Update(C.m_Lights, { 0, 0, -0.9f }, 1 << 30, 11000 + f);
+        double Swim = 0; auto Prev = Snapshot();
+        for (int f = 0; f < 20; ++f)
+        {
+            W.Update(C.m_Lights, { 0, 0, -0.9f }, 1 << 30, 11300 + f);
+            const auto Now = Snapshot();
+            double d = 0, m = 0;
+            for (std::size_t k = 0; k < Now.size(); ++k) { d += (Now[k] - Prev[k]).Length(); m += Now[k].Length(); }
+            Swim += d / std::max(m, 1e-9) / 20;
+            Prev = Now;
+        }
+        const double Before = Mean(Prev);
+        for (auto& P : C.m_Lights.m_Points) P.m_Color = P.m_Color * 2;
+        int Passes = 0;
+        for (; Passes < 200 && Mean(Snapshot()) < 1.8 * Before; ++Passes) W.Update(C.m_Lights, { 0, 0, -0.9f }, 1 << 30, 11400 + Passes);
+        std::printf("stability: %.2f%% change per update once converged; the light doubled: 90%% of it after %d updates\n", 100 * Swim, Passes);
+        CHECK(Swim < 0.01, "the light swims: %.2f%% per update once converged", 100 * Swim);
+        CHECK(Passes < 40, "the light follows a change too slowly (%d updates)", Passes);
+    }
+
+    // 6. Buried surfels decay for long (the box's bottom on the floor: their validity heads to 0, then underflows), far and back:
+    //    the reads at the ray hits divide by a total weight that is ~0, and nothing may come out as inf / NaN (it spreads to every surfel)
+    {
+        cornell C;
+        MakeCornell(C, 0.5f, false);
+        const auto Bad = [&]
+        {
+            int n = 0;
+            for (int i = 0; i < C.m_World.InstanceCount(); ++i)
+            {
+                const auto& E = C.m_World.InstanceLight(i);
+                for (const auto& e : E) n += !(std::isfinite(e.m_X + e.m_Y + e.m_Z) && e.m_X >= 0 && e.m_Y >= 0 && e.m_Z >= 0);
+            }
+            return n;
+        };
+        int Worst = 0;
+        for (int f = 0; f < 3000; ++f)
+        {
+            const v3 Eye = (f / 250) % 2 ? v3{ 0, 0, 200 } : v3{ 0, 0, -0.9f };          // near, far, near...
+            C.m_World.Update(C.m_Lights, Eye, 1 << 30, 5000 + f);
+            if (f % 50 == 49) Worst = std::max(Worst, Bad());
+        }
+        std::printf("long decay, far and back: at most %d bad surfels\n", Worst);
+        CHECK(Worst == 0, "%d surfels went inf / NaN after a long decay and level switches", Worst);
+    }
+
+    // 7. A buried surfel (a quad through the wall of a closed box: inside, its rays meet back faces; at the wall, some do) decays to a validity of exactly 0, never to the denormals
+    //    under 1e-6 (the Police Station: a sum of such weights divided into inf, then NaN that spread to the whole mesh)
+    {
+        surfel_mesh Shell = Box({ 2, 2, 2 }, 0.25f), Inner;
+        AddQuad(Inner, { -0.5f, 0, -0.5f }, { 0, 0, 1 }, { 2, 0, 0 }, 0.25f);     // through the +x wall: the surfels at the wall half buried (noisy validity)
+        Shell.Bake(0.3f, 0.9f); Inner.Bake(0.3f, 0.9f);
+        world W;
+        W.Add(Shell, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iInner = W.Add(Inner, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        lights L; L.m_Sky = { 1, 1, 1 };
+        int nDenormal = 0, nZero = 0;
+        for (int f = 0; f < 2000; ++f)
+        {
+            W.Update(L, { 0, 0, 0 }, 1 << 30, 7000 + f);
+            for (int i = 0; i < W.InstanceCount(); ++i) for (float v : W.InstanceValid(i)) nDenormal += v > 0 && v < 1e-6f;
+        }
+        for (float v : W.InstanceValid(iInner)) nZero += v == 0;
+        std::printf("buried surfels: %d of %zu at validity 0; %d validities under 1e-6 over 2000 updates\n", nZero, W.InstanceValid(iInner).size(), nDenormal);
+        CHECK(nZero > 0, "the buried quad has no buried surfels");
+        CHECK(nDenormal == 0, "%d validities decayed under 1e-6 instead of to 0", nDenormal);
     }
 
     if (g_nErrors) return 1;

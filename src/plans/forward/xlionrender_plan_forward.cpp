@@ -131,6 +131,8 @@ namespace xlionrender
         const std::uint64_t Frame = m_Device.getFrameIndex();
         if( Frame != m_GIFrame ) { m_GIFrame = Frame; m_GIRingUsed = 0; }
         const int Base = int(Frame % ring_frames_v) * gi_light_region_v;
+        std::vector<std::pair<int, int>> Written;          // (first surfel of the region, instance): their moments next
+        const int Start = m_GIRingUsed;
         (void)m_GILightRing.MemoryMap(Base + m_GIRingUsed, gi_light_region_v - m_GIRingUsed, [&](void* pMemory)
         {
             auto* pOut = static_cast<xmath::fvec4*>(pMemory);
@@ -143,11 +145,26 @@ namespace xlionrender
                 const auto& V = W.InstanceValid(Id);
                 if( m_GIRingUsed + Used + int(E.size()) > gi_light_region_v ) continue;      // ponytail: no GI for what does not fit
                 for( std::size_t k = 0; k < E.size(); ++k ) pOut[Used + k] = xmath::fvec4(E[k], V[k]);
-                m_DrawGI[i] = { std::uint32_t(Base + m_GIRingUsed + Used), std::uint32_t(W.Level(Id)) };
+                Written.push_back({ Used, Id });
+                m_DrawGI[i] = { std::uint32_t(Base + m_GIRingUsed + Used), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | (std::uint32_t(Scene.m_GI.m_Debug) << 9) };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
                 Used += int(E.size());
             }
             m_GIRingUsed += Used;
         });
+
+        // The surfels' depth moments at the same index (gi::moment_texels_v per surfel, each a mean and a mean^2 in two 16-bit floats)
+        if( m_GIRingUsed > Start )
+            (void)m_GIMomentRing.MemoryMap(std::size_t(Base + Start) * gi::moment_texels_v, std::size_t(m_GIRingUsed - Start) * gi::moment_texels_v, [&](void* pMemory)
+            {
+                auto* pOut = static_cast<std::uint32_t*>(pMemory);
+                for( const auto& [First, Id] : Written )
+                {
+                    const auto& M = W.InstanceMoments(Id);
+                    for( std::size_t k = 0; k < M.size(); ++k )
+                        for( int t = 0; t < gi::moment_texels_v; ++t )
+                            pOut[(First + k) * gi::moment_texels_v + t] = details::Half(M[k][2 * t]) | (std::uint32_t(details::Half(M[k][2 * t + 1])) << 16);
+                }
+            });
     }
 
     //------------------------------------------------------------------------------------------------
@@ -800,11 +817,11 @@ namespace xlionrender
                 const auto& G     = pMesh->m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
                 if( Slot == instance_slots::none_v ) continue;
-                std::array<xgpu::buffer*, 5> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 5>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing }
-                                                                   : std::array<xgpu::buffer*, 5>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr };
-                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{5} : std::size_t{4} };
-                std::array<xgpu::buffer*, 6> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
-                                                      , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing };
+                std::array<xgpu::buffer*, 8> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 8>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing }
+                                                                   : std::array<xgpu::buffer*, 8>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr, nullptr, nullptr, nullptr };
+                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{8} : std::size_t{4} };       // SKIN: the GI bindings of the material fragment (no surfels)
+                std::array<xgpu::buffer*, 7> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
+                                                      , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing, &m_GIMomentRing };
                 const auto  GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
 
                 for( const auto& Sub : G.m_Submeshes )

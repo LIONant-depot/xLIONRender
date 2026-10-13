@@ -5,6 +5,7 @@
 // Plan A (forward, the reference path). CPU mirrors of the GPU data its shaders read; keep them field-for-field
 // in step with shaders/xlionrender_forward_*.glsl and shaders/mb_standard_pbr.frag.
 
+#include <bit>
 #include "dependencies/xmath/source/xmath.h"
 #include "scene/xlionrender_scene.h"
 #include "features/lights/xlionrender_light_cells.h"
@@ -42,6 +43,17 @@ namespace xlionrender::details
         }
     };
     static_assert(sizeof(instance_data) == 96);
+
+    // A float into an IEEE half (round to nearest; overflow to inf, tiny to 0): the GI depth moments' upload (GLSL unpackHalf2x16)
+    inline std::uint16_t Half(float f) noexcept
+    {
+        const std::uint32_t x = std::bit_cast<std::uint32_t>(f), Sign = (x >> 16) & 0x8000u;
+        const int           E = int((x >> 23) & 0xFF) - 127 + 15;
+        if (E <= 0)  return std::uint16_t(Sign);
+        if (E >= 31) return std::uint16_t(Sign | 0x7C00u);
+        const std::uint32_t M = x & 0x7FFFFFu, H = Sign | (std::uint32_t(E) << 10) | (M >> 13);
+        return std::uint16_t(H + ((M >> 12) & 1u));                       // carries into the exponent when it rounds up: still correct
+    }
 
     struct push_static_geom
     {

@@ -144,7 +144,7 @@ namespace xlionrender
         {
             m_Scene.m_Sky     = { .m_Zenith = E.m_SkyZenith, .m_Horizon = E.m_SkyHorizon, .m_Ground = E.m_SkyGround, .m_Intensity = E.m_SkyIntensity };
             m_Scene.m_Ambient = E.m_Ambient;
-            m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget };
+            m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget, .m_bPerPixel = E.m_bGIPerPixel, .m_Debug = E.m_GIDebug };
         }
 
         // A new frame's snapshot: no sun unless a LightSun says so, a dim flat ambient unless an Environment says otherwise

@@ -5,6 +5,7 @@
 //    xgpu::view's screen x runs to world -x here: the green wall (+x) is on the left of the image
 //  - GI adds light (the bounces) and nothing breaks (no validation errors)
 //  - a moved box re-lights (the world follows the draws) and a removed draw leaves the world
+//  - the per-pixel read: matches the vertex read on dense meshes, and on sparse ones (2 triangles a face) stays near the dense image
 #include "xlionrender_test_common.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../../stb/stb_image_write.h"
@@ -110,6 +111,52 @@ int main()
     CHECK(std::abs(OffL - OffR) < 0.1, "without GI the floor's two sides differ in color (%.2f vs %.2f)", OffL, OffR);
     CHECK(OnR > OnL * 1.15, "no color bleeding with GI (near red %.2f, near green %.2f)", OnR, OnL);
     CHECK(MOn[1] > MOff[1] * 1.05, "GI adds no light");
+
+    // The per-pixel read (the mesh's read grid, scene::m_GI.m_bPerPixel, on above): on these dense meshes it matches the vertex read; on the
+    // same room with 2 triangles a face it stays near the dense image, where the vertex read (the corners only) does not
+    const auto Luma = [](const std::array<float, 3>& c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+    const auto Diff = [&](const std::vector<std::array<float, 3>>& A, const std::vector<std::array<float, 3>>& B)
+    {
+        double S = 0, R = 0;
+        for (std::size_t i = 0; i < A.size(); ++i) { S += std::abs(Luma(A[i]) - Luma(B[i])); R += Luma(B[i]); }
+        return S / std::max(R, 1e-9);
+    };
+    {
+        Scene.m_GI.m_bPerPixel = false;
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render dense, vertex read");
+        const auto DenseV = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bPerPixel = true;
+
+        std::array<cluster_buffers, n_v>      SparseBuffers;
+        std::array<xlionrender::mesh_id, n_v> SparseMeshes;
+        xlionrender::scene Sparse = Scene;
+        for (int i = 0; i < n_v; ++i)
+        {
+            const auto Prim = xprim_geom::cube::Generate(1, 1, 1, 1, Pieces[i].m_Size);
+            CHECK(MakeStaticBuffers(Device, Prim, 2.2f, SparseBuffers[i]), "sparse buffers %d", i);
+            CHECK(!Renderer.CreateClusterGeom(SparseMeshes[i], SparseBuffers[i].Geom()), "sparse geom %d", i);
+            CHECK(!Renderer.SetMeshGI(SparseMeshes[i], MakeSurfels(Prim, 0.3f, 0.9f)), "sparse surfels %d", i);
+            Sparse.m_Draws[i].m_Mesh     = SparseMeshes[i];
+            Sparse.m_Draws[i].m_Instance = std::uint64_t(101 + i);
+        }
+        for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Sparse, View, Camera), "Render sparse, pixel read");
+        const auto SparseP = ReadRGB(Device, View, W, H);
+        Sparse.m_GI.m_bPerPixel = false;
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Sparse, View, Camera), "Render sparse, vertex read");
+        const auto SparseV = ReadRGB(Device, View, W, H);
+        DumpRGB("gi_dense_vertex", DenseV, W, H);
+        DumpRGB("gi_sparse_pixel", SparseP, W, H);
+        DumpRGB("gi_sparse_vertex", SparseV, W, H);
+
+        const double DenseErr = Diff(DenseV, On), PixelErr = Diff(SparseP, On), VertexErr = Diff(SparseV, On);
+        std::printf("per-pixel read vs the dense image: dense vertex read %.1f%%; sparse (2 triangles a face): pixel read %.1f%%, vertex read %.1f%%\n"
+                   , 100 * DenseErr, 100 * PixelErr, 100 * VertexErr);
+        CHECK(DenseErr < 0.05, "on dense meshes the pixel and the vertex reads differ by %.1f%%", 100 * DenseErr);
+        CHECK(PixelErr < 0.04 && PixelErr < 0.75 * VertexErr,     // the dense reads differ by ~2% themselves (vertex spacing vs surfel size)
+                  "on sparse meshes the pixel read is %.1f%% off the dense image (the vertex read %.1f%%)", 100 * PixelErr, 100 * VertexErr);
+        for (int f = 0; f < 2; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render dense again");
+        for (auto& M : SparseMeshes) Renderer.DestroyMesh(M);
+    }
 
     // The box moves: its instance moves in the world (no new instance); removed: the world drops it
     Scene.m_Draws[5].m_L2W = xmath::fmat4::fromTranslation({ 0.8f, 0.8f, 0.4f });

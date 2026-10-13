@@ -201,6 +201,7 @@ namespace xlionrender
         std::vector<gi_track>       m_GITrack;                          // per world instance
         std::vector<std::pair<std::uint32_t, std::uint32_t>> m_DrawGI;  // per draw: offset, level (0xFFFFFFFF: none)
         xgpu::buffer                m_GILightRing;
+        xgpu::buffer                m_GIMomentRing;             // per surfel of m_GILightRing: gi::moment_texels_v uints (half mean, half mean^2) - ponytail: 48 MB host-visible, size it to the scenes if it matters
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
         std::uint64_t               m_GIRender = 0, m_GIFrame = ~0ull;
         int                         m_GIRingUsed = 0;

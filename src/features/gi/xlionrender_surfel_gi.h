@@ -37,6 +37,7 @@
 #include <cstring>
 #include <thread>
 #include <unordered_map>
+#include <span>
 #include <vector>
 #if defined(_M_X64) || defined(_M_IX86) || defined(__SSE2__)
 #include <xmmintrin.h>
@@ -407,6 +408,57 @@ namespace xlionrender::gi
         }
     };
 
+    // A surfel's depth moments (Wicked Engine's surfel GI, after DDGI's probe visibility): over its hemisphere, 4 x 4 hemi-octahedral texels
+    // in mesh space, the mean and mean squared distance its rays travel (capped at its reach). A point farther than the mean in its
+    // direction is probably behind something: the reads fade it (Chebyshev). Mirrored by shaders/xlionrender_surfel_gi.glsl
+    constexpr int moment_res_v = 4, moment_texels_v = moment_res_v * moment_res_v;
+    inline int MomentTexel(const v3& N, const v3& D) noexcept           // N: the surfel's normal, D: a direction (both mesh space, unit)
+    {
+        const v3 T = (std::abs(N.m_X) < 0.9f ? v3{ 1, 0, 0 } : v3{ 0, 1, 0 }).Cross(N).NormalizeCopy(), B = N.Cross(T);
+        const float x = D.Dot(T), y = D.Dot(B), z = std::max(D.Dot(N), 0.0f);
+        const float k = 1.0f / std::max(std::abs(x) + std::abs(y) + z, 1e-6f);
+        const float u = (x + y) * k, v = (x - y) * k;                       // the hemi-octahedron's diamond into [-1, 1]^2
+        const int   tu = std::clamp(int((u * 0.5f + 0.5f) * moment_res_v), 0, moment_res_v - 1), tv = std::clamp(int((v * 0.5f + 0.5f) * moment_res_v), 0, moment_res_v - 1);
+        return tv * moment_res_v + tu;
+    }
+    using moments = std::array<float, 2 * moment_texels_v>;            // per texel: mean, mean^2 (mesh units)
+
+    // A surfel's light over time (Wicked Engine's MultiscaleMeanEstimator, MIT): a short-window mean and the variance of the samples
+    // around it; the long mean follows the samples at a rate that falls as low as 1/256 while they agree with it (within their own
+    // noise: the light settles, no swimming) and rises toward 1 when they move away from it beyond that noise (a light changed: it
+    // catches up). Samples far above the noise are clipped (fireflies).
+    struct estimator
+    {
+        v3      m_Mean{ 0, 0, 0 }, m_Short{ 0, 0, 0 }, m_Variance{ 0, 0, 0 };
+        float   m_Vbbr          = 1;        // the variance-based blend reduction
+        float   m_Inconsistency = 0;
+
+        void Seed(const v3& E) noexcept { m_Mean = m_Short = E; m_Variance = { 0, 0, 0 }; m_Vbbr = 1; m_Inconsistency = 0; }
+
+        void Add(v3 y, float ShortBlend = 0.08f) noexcept
+        {
+            const auto Luma = [](const v3& c) { return 0.299f * c.m_X + 0.587f * c.m_Y + 0.114f * c.m_Z; };
+            const auto Dev  = [&] { return v3{ std::sqrt(std::max(1e-5f, m_Variance.m_X)), std::sqrt(std::max(1e-5f, m_Variance.m_Y)), std::sqrt(std::max(1e-5f, m_Variance.m_Z)) }; };
+            {
+                const v3 D = Dev(), Hi = m_Short + D * 8 + v3{ 0.1f, 0.1f, 0.1f };
+                y = v3::Min(y, Hi);
+            }
+            const v3 Delta = y - m_Short;
+            m_Short = m_Short + (y - m_Short) * ShortBlend;
+            const v3 Delta2 = y - m_Short;
+            m_Variance = m_Variance + (v3{ Delta.m_X * Delta2.m_X, Delta.m_Y * Delta2.m_Y, Delta.m_Z * Delta2.m_Z } - m_Variance) * (ShortBlend * 0.5f);
+            const v3 D = Dev(), Diff = m_Mean - m_Short;
+            const float Relative = Luma(v3{ std::abs(Diff.m_X) / D.m_X, std::abs(Diff.m_Y) / D.m_Y, std::abs(Diff.m_Z) / D.m_Z });
+            m_Inconsistency += (Relative - m_Inconsistency) * 0.08f;
+            const float Vbbr = std::clamp(Luma(v3{ m_Short.m_X / D.m_X, m_Short.m_Y / D.m_Y, m_Short.m_Z / D.m_Z }) * 0.5f, 1.0f / 32, 1.0f);
+            const float x = std::clamp(Relative * std::max(0.02f, m_Inconsistency - 0.2f), 0.0f, 1.0f);
+            const float CatchUp = std::clamp(x * x * (3 - 2 * x), 1.0f / 256, 1.0f) * m_Vbbr;
+            m_Vbbr += (Vbbr - m_Vbbr) * 0.1f;
+            m_Mean = m_Mean + (y - m_Mean) * std::clamp(CatchUp, 0.0f, 1.0f);
+        }
+    };
+    constexpr int warmup_passes_v = 16;     // after a change: a running average (1 / n) for this many passes, the estimator after
+
     struct surfel
     {
         v3      m_Center, m_Normal;     // mesh space
@@ -450,6 +502,108 @@ namespace xlionrender::gi
         v3                                  m_Lo, m_Hi;
         bool                                m_bBounce = true;       // false: receive only (the rays of the GI do not see it)
 
+        // The per-pixel read (BuildReadGrid): a sparse grid in mesh space, cells of the fine surfels' radius, only the cells the surface
+        // crosses. Per cell the fine surfels whose reach (2 radii) touches it: a point reads its own cell, no neighbor search. On the GPU an
+        // open-addressing hash table (ReadKey / ReadHash, mirrored by shaders/xlionrender_surfel_gi.glsl) of { key low, key high, first,
+        // count } into m_ReadList.
+        float                                       m_ReadCell = 0;
+        std::vector<std::array<std::uint32_t, 4>>   m_ReadTable;    // a power of 2 entries; key high 0xFFFFFFFF: empty
+        std::vector<std::uint32_t>                  m_ReadList;
+
+        static std::array<int, 3> ReadCellOf(const v3& P, float Cell) noexcept { return { int(std::floor(P.m_X / Cell)), int(std::floor(P.m_Y / Cell)), int(std::floor(P.m_Z / Cell)) }; }
+        static std::array<std::uint32_t, 2> ReadKey(const std::array<int, 3>& C) noexcept
+        {
+            const std::uint64_t K = surfel_grid::Key(C[0], C[1], C[2]);
+            return { std::uint32_t(K), std::uint32_t(K >> 32) };
+        }
+        static std::uint32_t ReadHash(const std::array<int, 3>& C) noexcept { return (std::uint32_t(C[0]) * 73856093u) ^ (std::uint32_t(C[1]) * 19349663u) ^ (std::uint32_t(C[2]) * 83492791u); }
+
+        // The fine surfels listed for the cell of P (empty: P is off the surface's cells)
+        std::span<const std::uint32_t> ReadCellList(const v3& P) const noexcept
+        {
+            if (m_ReadTable.empty()) return {};
+            const auto C = ReadCellOf(P, m_ReadCell);
+            const auto K = ReadKey(C);
+            const std::uint32_t Mask = std::uint32_t(m_ReadTable.size() - 1);
+            for (std::uint32_t h = ReadHash(C) & Mask, n = 0; n <= Mask; h = (h + 1) & Mask, ++n)
+            {
+                const auto& E = m_ReadTable[h];
+                if (E[1] == 0xFFFFFFFFu) return {};
+                if (E[0] == K[0] && E[1] == K[1]) return { m_ReadList.data() + E[2], E[3] };
+            }
+            return {};
+        }
+
+        void BuildReadGrid() noexcept
+        {
+            m_ReadTable.clear(); m_ReadList.clear();
+            const auto& L = m_Levels[0];
+            if (L.empty()) return;
+            m_ReadCell = L[0].m_Radius;
+            const float Cell = m_ReadCell, Reach = 2 * L[0].m_Radius;
+
+            // The cells the surface crosses: points on every triangle no further apart than half a cell
+            struct cell { std::array<int, 3> m_C; int n = 0; std::array<v3, 16> m_P, m_N; };    // up to 16 surface points (and normals) in it: every face of a thin piece gets some
+            std::unordered_map<std::uint64_t, cell> Cells;
+            const auto Touch = [&](const v3& P, const v3& N)
+            {
+                const auto C  = ReadCellOf(P, Cell);
+                auto&      Ce = Cells.try_emplace(surfel_grid::Key(C[0], C[1], C[2]), cell{ C }).first->second;
+                for (int p = 0; p < Ce.n; ++p) if (Ce.m_N[p].Dot(N) > 0.9f && (Ce.m_P[p] - P).Length() < 0.5f * Cell) return;     // spread: faces, corners
+                if (Ce.n < 16) { Ce.m_P[Ce.n] = P; Ce.m_N[Ce.n] = N; ++Ce.n; }
+            };
+            for (const auto& T : m_Tris)
+            {
+                const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], Cc = m_Pos[T[2]];
+                const float Longest = std::max({ (B - A).Length(), (Cc - B).Length(), (A - Cc).Length() });
+                const int   k       = std::min(4096, std::max(1, int(std::ceil(Longest / (0.5f * Cell)))));     // every cell it crosses (a 60 m floor: 240)
+                for (int i = 0; i <= k; ++i) for (int j = 0; i + j <= k; ++j)
+                {
+                    const float u = float(i) / k, w = float(j) / k;
+                    v3 N = m_Nrm[T[0]] * (1 - u - w) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * w;
+                    N = N.Length() > 1e-6f ? N.NormalizeCopy() : (B - A).Cross(Cc - A).NormalizeCopy();
+                    Touch(A + (B - A) * u + (Cc - A) * w, N);
+                }
+            }
+
+            // Per cell the surfels whose reach touches its box, with a normal compatible with one of its surface points
+            surfel_grid G{ Cell, {} };
+            for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
+            const int Ring = int(std::ceil(Reach / Cell));
+            std::uint32_t Size = 1;
+            while (Size < 2 * Cells.size()) Size <<= 1;
+            m_ReadTable.assign(Size, { 0, 0xFFFFFFFFu, 0, 0 });
+            std::vector<const cell*> Order;
+            for (const auto& [Key, Ce] : Cells) Order.push_back(&Ce);
+            std::vector<std::vector<std::uint32_t>> Lists(Order.size());
+            ParallelFor(int(Order.size()), [&](int c)
+            {
+                const auto& Ce = *Order[c];
+                const v3 Lo{ Ce.m_C[0] * Cell, Ce.m_C[1] * Cell, Ce.m_C[2] * Cell }, Hi = Lo + v3{ Cell, Cell, Cell };
+                G.Near((Lo + Hi) * 0.5f, Ring, [&](int s)
+                {
+                    const v3 Q = v3::Max(Lo, v3::Min(Hi, L[s].m_Center));
+                    if ((Q - L[s].m_Center).Length() >= Reach) return;
+                    // No visibility here: a cell's list is all a pixel of it may read, and a surfel culled from one cell but not its neighbor
+                    // switches off along their edge (squares). What hides behind something fades per pixel instead (GIVisibility: the plane
+                    // distance and the depth moments), continuously
+                    for (int p = 0; p < Ce.n; ++p)
+                        if ((Ce.m_P[p] - L[s].m_Center).Length() < Reach + 1.75f * Cell && L[s].m_Normal.Dot(Ce.m_N[p]) >= 0.5f) { Lists[c].push_back(std::uint32_t(s)); return; }
+                });
+            });
+            for (std::size_t c = 0; c < Order.size(); ++c)
+            {
+                const auto& C = Order[c]->m_C;
+                const auto First = std::uint32_t(m_ReadList.size());
+                m_ReadList.insert(m_ReadList.end(), Lists[c].begin(), Lists[c].end());
+                if (m_ReadList.size() == First) continue;
+                const auto K = ReadKey(C);
+                std::uint32_t h = ReadHash(C) & (Size - 1);
+                while (m_ReadTable[h][1] != 0xFFFFFFFFu) h = (h + 1) & (Size - 1);
+                m_ReadTable[h] = { K[0], K[1], First, std::uint32_t(m_ReadList.size()) - First };
+            }
+        }
+
         // The 4 surfels of a level nearest P with a compatible normal
         std::array<int, 4> Nearest4(int Level, const v3& P, const v3& N) const noexcept
         {
@@ -478,6 +632,7 @@ namespace xlionrender::gi
         // Deterministic (fixed seeds): the same mesh bakes the same surfels.
         void Bake(float Radius, float ParentRadius) noexcept
         {
+            BuildRays();                                            // the vertices' visibility tests cast against the mesh
 
             // Dart throwing over weighted candidates: the kept ones become surfels of radius R
             const auto Poisson = [](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G)
@@ -498,8 +653,9 @@ namespace xlionrender::gi
                 }
             };
 
-            // The nearest compatible surfels of a point (up to 4), widening the search until something is found
-            const auto Nearest = [](const std::vector<surfel>& L, const surfel_grid& G, const v3& P, const v3& N, int nMax)
+            // The nearest compatible surfels of a point (up to 4) that the point sees (nothing between them: a surfel behind a wall, or
+            // in a gap the point only reaches through solid geometry, is not its surfel), widening the search until something is found
+            const auto Nearest = [this](const std::vector<surfel>& L, const surfel_grid& G, const v3& P, const v3& N, int nMax)
             {
                 std::array<std::pair<float, int>, 4> Best;
                 Best.fill({ 1e30f, -1 });
@@ -509,6 +665,7 @@ namespace xlionrender::gi
                         if (L[s].m_Normal.Dot(N) < 0.5f) return;
                         const float d = (P - L[s].m_Center).Length();
                         if (d >= Best[nMax - 1].first || std::any_of(Best.begin(), Best.end(), [&](const auto& b) { return b.second == s; })) return;
+                        if (!Sees(P, N, L[s])) return;
                         Best[nMax - 1] = { d, s };
                         std::sort(Best.begin(), Best.begin() + nMax);
                     });
@@ -539,24 +696,23 @@ namespace xlionrender::gi
             surfel_grid G0, G1;
             Poisson(CP, CN, Radius, m_Levels[0], G0);
             m_VertSurfels.resize(m_Pos.size());
-            for (std::size_t v = 0; v < m_Pos.size(); ++v)
+            ParallelFor(int(m_Pos.size()), [&](int v)
             {
                 const auto B = Nearest(m_Levels[0], G0, m_Pos[v], m_Nrm[v], 4);
                 m_VertSurfels[v] = { B[0].second, B[1].second, B[2].second, B[3].second };
-            }
+            });
 
             // 4. Parents
             std::vector<v3> SP(m_Levels[0].size()), SN(m_Levels[0].size());
             for (std::size_t s = 0; s < SP.size(); ++s) { SP[s] = m_Levels[0][s].m_Center; SN[s] = m_Levels[0][s].m_Normal; }
             Poisson(SP, SN, ParentRadius, m_Levels[1], G1);
             m_ParentOf.assign(SP.size(), 0);
-            for (std::size_t s = 0; s < SP.size(); ++s)
+            ParallelFor(int(SP.size()), [&](int s)
             {
                 const auto B = Nearest(m_Levels[1], G1, SP[s], SN[s], 1);
                 m_ParentOf[s] = std::max(B[0].second, 0);
-            }
+            });
 
-            BuildRays();
         }
 
         // The rays' structures (the BVH, its 4-triangle rows, the bounds) from m_Pos / m_Tris: the bake's last step, and all a geometry
@@ -585,6 +741,15 @@ namespace xlionrender::gi
                     Q.m_Tri[k] = t;
                 }
             }
+        }
+
+        // Does a point on the surface (its normal) see a surfel: nothing between them, both lifted off their surfaces a little
+        bool Sees(const v3& P, const v3& N, const surfel& S) const noexcept
+        {
+            const float e = 0.02f * S.m_Radius;
+            const v3 A = P + N * e, D = (S.m_Center + S.m_Normal * e) - A;
+            const float L = D.Length();
+            return L < 1e-6f || !Occluded(A, D * (1.0f / L), L);
         }
 
         // Is anything between O and O + D TMax (mesh space)? Stops at the first hit
@@ -692,7 +857,7 @@ namespace xlionrender::gi
         struct setup
         {
             int     m_RaysPerSurfel = 8;
-            float   m_MinBlend      = 0.2f;     // temporal accumulation: 1 / n after a change, never below this
+            float   m_MinBlend      = 0;        // the warm-up's blend (1 / n after a change) never below this (1: every pass replaces)
             float   m_LodDistance   = 40;       // beyond it (eye to bounds) an instance holds its parent level
             float   m_ChangeMargin  = 4;        // a moved instance dirties the instances within this distance of its bounds
         };
@@ -705,6 +870,7 @@ namespace xlionrender::gi
             int     m_Dirty     = 0;            // instances waiting with a change
             double  m_Ms        = 0;
             double  m_TraceMs   = 0;            // the parallel part (rays); the rest is bookkeeping
+            int     m_nBad      = 0;            // surfels whose light is not a finite, positive value (0: always; a bad one spreads through the bounces)
         };
 
         struct hit
@@ -754,6 +920,24 @@ namespace xlionrender::gi
         // What the GPU buffer would hold for an instance: its active level's irradiance and validity per surfel
         const std::vector<v3>&    InstanceLight( int Id ) const noexcept { return m_Instances[Id].m_E; }
         const std::vector<float>& InstanceValid( int Id ) const noexcept { return m_Instances[Id].m_Valid; }
+        const std::vector<moments>& InstanceMoments( int Id ) const noexcept { return m_Instances[Id].m_Moments; }
+
+        // The anti-leak weight of the reads at P (mesh space) for surfel s of instance Id's active level: the plane distance times the
+        // depth moments' Chebyshev term (the CPU twin of GIVisibility in shaders/xlionrender_surfel_gi.glsl)
+        float Visibility( int Id, int s, const v3& P ) const noexcept
+        {
+            const auto& I = m_Instances[Id];
+            const auto& S = I.m_pMesh->m_Levels[I.m_Level][s];
+            const v3    D = P - S.m_Center;
+            const float Reach = 2 * S.m_Radius, d = D.Length();
+            float w = std::clamp(1.0f - std::abs(D.Dot(S.m_Normal)) / (0.7f * Reach), 0.0f, 1.0f);
+            if (d < 1e-5f * Reach || w <= 0) return w;
+            const auto& M = I.m_Moments[s];
+            const int   t = MomentTexel(S.m_Normal, D * (1.0f / d));
+            const float Mean = M[2 * t], Var = std::abs(Mean * Mean - M[2 * t + 1]);
+            if (d > Mean) w *= std::pow(Var / (Var + (d - Mean) * (d - Mean) + 1e-12f), 3.0f);
+            return w;
+        }
 
         // The nearest hit before TMax (the instances as they are now: the TLAS is rebuilt after Add / SetTransform; not
         // thread safe across that rebuild - Update rebuilds before its parallel part)
@@ -867,6 +1051,7 @@ namespace xlionrender::gi
                 }
                 I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0;
                 I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
+                ResetMoments(I);
             }
 
             // Pick: dirty first, then a pass in progress, then age over distance, until the budget is spent. An instance is updated in
@@ -917,10 +1102,21 @@ namespace xlionrender::gi
                 v3 Sum{ 0, 0, 0 };
                 int nBack = 0;
                 const int R = m_Setup.m_RaysPerSurfel;
+                auto& MA = I.m_MomAcc[s];
+                MA.fill(0);
+                const float Reach = 2 * S.m_Radius;                         // mesh units
                 for (int r = 0; r < R; ++r)
                 {
                     const v3 D = CosineDir(N, Rng);
                     const hit H = Cast(C + N * 1e-3f, D);
+                    {
+                        v3 Dm = I.m_W2L.TransformDirection(D);              // mesh space: the reads compare in mesh units
+                        const float Lm = Dm.Length();
+                        Dm = Dm * (1.0f / Lm);
+                        const float d = H.m_Inst < 0 ? Reach : std::min(H.m_T * Lm, Reach);
+                        const int t = MomentTexel(S.m_Normal, Dm);
+                        MA[3 * t] += d; MA[3 * t + 1] += d * d; MA[3 * t + 2] += 1;
+                    }
                     if (H.m_Inst < 0) { Sum = Sum + L.m_Sky; continue; }
                     const v3 Nh = HitNormal(H);
                     if (Nh.Dot(D) > 0) { ++nBack; continue; }               // a back face: no light, and maybe buried
@@ -934,8 +1130,33 @@ namespace xlionrender::gi
             for (const auto& [i, s] : m_Work)
             {
                 auto& I = m_Instances[i];
-                I.m_E[s]     = I.m_E[s] * (1 - I.m_PassAlpha) + I.m_Acc[s] * I.m_PassAlpha;
-                I.m_Valid[s] = I.m_Valid[s] * (1 - I.m_PassAlpha) + I.m_AccValid[s] * I.m_PassAlpha;
+                // The light: a running average while warming up (after a change), then the estimator (it settles, and still follows a
+                // change). The validity and the depth moments: their own slow blends (they weigh the reads: noise there swims too)
+                auto& Es = I.m_Est[s];
+                if (I.m_History <= warmup_passes_v || I.m_PassAlpha >= 1)
+                {
+                    I.m_E[s] = I.m_E[s] * (1 - I.m_PassAlpha) + I.m_Acc[s] * I.m_PassAlpha;
+                    Es.Seed(I.m_E[s]);
+                }
+                else
+                {
+                    Es.Add(I.m_Acc[s]);
+                    I.m_E[s] = Es.m_Mean;
+                }
+                const float av = std::max(I.m_PassAlpha, 0.05f);
+                I.m_Valid[s] = I.m_Valid[s] * (1 - av) + I.m_AccValid[s] * av;
+                for (int t = 0; t < moment_texels_v; ++t)
+                {
+                    const auto& MA = I.m_MomAcc[s];
+                    if (MA[3 * t + 2] == 0) continue;
+                    auto& n = I.m_MomCount[s][t];
+                    if (n < 0xFFFF) ++n;
+                    const float a = std::max(1.0f / float(n), 0.03f);
+                    auto& Mo = I.m_Moments[s];
+                    Mo[2 * t]     += (MA[3 * t] / MA[3 * t + 2] - Mo[2 * t]) * a;
+                    Mo[2 * t + 1] += (MA[3 * t + 1] / MA[3 * t + 2] - Mo[2 * t + 1]) * a;
+                }
+                if (I.m_Valid[s] < 1e-6f) I.m_Valid[s] = 0;         // buried: 0, not a decay into denormals (the reads divide by sums of these weights)
             }
             for (auto& I : m_Instances)
             {
@@ -944,6 +1165,9 @@ namespace xlionrender::gi
                 I.m_bPicked = false;
             }
             St.m_Ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+            for (const auto& I : m_Instances)
+                for (std::size_t s = 0; s < I.m_E.size(); ++s)
+                    St.m_nBad += !(std::isfinite(I.m_E[s].m_X + I.m_E[s].m_Y + I.m_E[s].m_Z + I.m_Valid[s]) && I.m_E[s].m_X >= 0 && I.m_E[s].m_Y >= 0 && I.m_E[s].m_Z >= 0);
             return St;
         }
 
@@ -964,6 +1188,10 @@ namespace xlionrender::gi
             v3                      m_Albedo, m_Lo, m_Hi;
             std::vector<v3>         m_E, m_Acc;                 // per surfel of the active level
             std::vector<float>      m_Valid, m_AccValid;
+            std::vector<moments>    m_Moments;                  // per surfel of the active level (MomentTexel)
+            std::vector<std::array<float, 3 * moment_texels_v>> m_MomAcc;     // this pass: per texel the sum of d, of d^2, the count
+            std::vector<std::array<std::uint16_t, moment_texels_v>> m_MomCount; // per texel the samples it has had (its blend: 1 / n, then slow)
+            std::vector<estimator>  m_Est;                      // per surfel of the active level: its light over time
             int                     m_Level     = 0;
             int                     m_Age       = 0;
             int                     m_History   = 0;
@@ -995,6 +1223,23 @@ namespace xlionrender::gi
             const std::size_t n = I.m_pMesh->m_Levels[I.m_Level].size();
             I.m_E.assign(n, v3{ 0, 0, 0 }); I.m_Acc.assign(n, v3{ 0, 0, 0 });
             I.m_Valid.assign(n, 1); I.m_AccValid.assign(n, 1);
+            ResetMoments(I);
+        }
+
+        // Fully open (every direction travels the whole reach): a new surfel reads at full weight until its rays say otherwise
+        static void ResetMoments(instance& I) noexcept
+        {
+            const auto& L = I.m_pMesh->m_Levels[I.m_Level];
+            I.m_Moments.resize(L.size());
+            I.m_MomAcc.assign(L.size(), {});
+            I.m_MomCount.assign(L.size(), {});
+            I.m_Est.resize(L.size());
+            for (std::size_t s = 0; s < L.size(); ++s) I.m_Est[s].Seed(I.m_E[s]);
+            for (std::size_t s = 0; s < L.size(); ++s)
+            {
+                const float R = 2 * L[s].m_Radius;
+                for (int t = 0; t < moment_texels_v; ++t) { I.m_Moments[s][2 * t] = R; I.m_Moments[s][2 * t + 1] = R * R; }
+            }
         }
 
         void DirtyNear(const v3& Lo, const v3& Hi) noexcept

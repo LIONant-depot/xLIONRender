@@ -115,10 +115,16 @@ namespace xlionrender
 
     // Diffuse GI (features/gi/xlionrender_surfel_gi.h): draws of meshes given surfels (instance::SetMeshGI) with a persistent
     // m_Instance id; solved on the CPU (m_RayBudget rays per render, the changed first), read per vertex (surfel weights)
+    // The GI's debug views (shaders/xlionrender_surfel_gi.glsl): every pixel the color of the surfel that dominates its read (black: none
+    // reaches it - a gap in the placement), or the GI light alone (no textures, no direct light)
+    enum class gi_debug : std::uint8_t { NONE, SURFELS, LIGHT };
+
     struct gi_settings
     {
         bool            m_bEnable       = false;
         int             m_RayBudget     = 16384;
+        bool            m_bPerPixel     = true;     // near (the fine surfels) the pixels read the surfels themselves (the mesh's read grid), far the vertices
+        gi_debug        m_Debug         = gi_debug::NONE;
     };
 
     struct scene

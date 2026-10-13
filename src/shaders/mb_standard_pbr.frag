@@ -58,6 +58,15 @@
 layout(location = 0) in VaryingFull In;
 #ifndef XLION_LDR_OUTPUT
 layout(location = 9) in vec4 InGI;     // xLIONRender surfel GI: sum(w E), sum(w) from the vertex shader (0 without GI) - divided here, into g_GI
+#ifndef XLION_NO_GI_PIXEL
+layout(location = 10) in vec3 InGIPos;          // the per-pixel read: mesh space position, normal, { first surfel in GILight, GI level }
+layout(location = 11) in vec3 InGINormal;
+layout(location = 12) flat in uvec2 InGIRef;
+#include "xlionrender_surfel_gi.glsl"
+#endif
+#endif
+#ifndef XLIONRENDER_SURFEL_GI_GLSL
+#define GIDebugOr(Lit) (Lit)
 #endif
 
 #ifndef XLION_LDR_OUTPUT
@@ -244,6 +253,16 @@ vec3 PBRLighting
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 #ifndef XLION_LDR_OUTPUT
 	if (InGI.w > 1e-6) g_GI = vec4(InGI.rgb / InGI.w, 1.0);
+#ifndef XLION_NO_GI_PIXEL
+	if (InGIRef.y != gi_none_v && (InGIRef.y & gi_per_pixel_v) != 0u && (InGIRef.y & 0xFFu) == 0u)     // near (the fine surfels): the pixel reads them itself
+	{
+		const vec4 Px = SurfelGIPixel(InGIPos, normalize(InGINormal), InGIRef.x);
+		if (Px.w > 1e-6) g_GI = vec4(Px.rgb / Px.w, 1.0);
+	}
+	const uint GIDebug = InGIRef.y == gi_none_v ? 0u : (InGIRef.y >> gi_debug_shift_v) & 3u;
+	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, normalize(InGINormal)); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
+	if (GIDebug == 2u) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0);
+#endif
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
 #endif
 
@@ -275,7 +294,7 @@ vec3 PBRLighting
 #else
 	const vec3 Local = vec3(0.0);
 #endif
-	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return ambient + Local + emissive;
+	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return GIDebugOr(ambient + Local + emissive);
 
 	// Commit to lit path: Rest here.
 	vec3	H					= normalize(V + L);
@@ -306,5 +325,5 @@ vec3 PBRLighting
 	vec3	radiance			= UBOLight.LightColor.rgb * lightTint * att * UBOLight.LightParams.z; // Apply intensity mult
 	vec3	directLighting		= (diffuse + specular) * radiance * NdotL * Shadow;
 
-	return ambient + directLighting + Local + emissive;
+	return GIDebugOr(ambient + directLighting + Local + emissive);
 }
