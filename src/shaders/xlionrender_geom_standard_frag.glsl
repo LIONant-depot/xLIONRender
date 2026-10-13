@@ -15,11 +15,13 @@ layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 } instances;
 
 layout(location = 8) flat in uint InInstance;       // the vertex shader's push.instanceIndex
+layout(location = 9) in vec4 InGI;                  // surfel GI: sum(w E), sum(w) (xlionrender_static_geom_gi_vert.glsl)
 layout(location = 0) out vec4 outColor;
 
 void main()
 {
     const InstanceData I = instances.Instances[InInstance];
+    if (InGI.w > 1e-6) g_GI = vec4(InGI.rgb / InGI.w, 1.0);
     const vec3 C = PBRLighting
     ( vec3(0.0, 0.0, 1.0)           // tangent-space normal (no normal map)
     , I.Material[0].rgb

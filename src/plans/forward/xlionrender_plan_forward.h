@@ -47,6 +47,8 @@ namespace xlionrender::details
     {
         std::uint32_t   m_ClusterIndex;
         std::uint32_t   m_InstanceIndex;
+        std::uint32_t   m_GIOffset      = 0;            // surfel GI (xlionrender_static_geom_gi_vert.glsl): the first surfel in GILight
+        std::uint32_t   m_GILevel       = 0xFFFFFFFFu;  // its level (0xFFFFFFFF: none)
     };
 
     // xlionrender_skin_geom_vert.glsl (xgeom_skin_mb_clusters.vert) push constant

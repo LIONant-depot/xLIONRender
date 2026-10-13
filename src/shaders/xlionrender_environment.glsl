@@ -11,6 +11,10 @@ layout(binding = 8)  uniform sampler2D SamplerEnvironment;
 layout(binding = 9)  uniform sampler2D SamplerEnvDFG;
 layout(binding = 10) uniform sampler2D SamplerProbes;
 
+// Surfel GI (features/gi/xlionrender_surfel_gi.h): the diffuse irradiance at this pixel, set by the fragment shaders that have it
+// (xlionrender_geom_standard_frag.glsl); w > 0.5: it replaces the probes' and the sky's diffuse (it holds the sky and the bounces)
+vec4 g_GI = vec4(0.0);
+
 const vec2 kProbeAtlas = vec2(3072.0, 1024.0);          // 8 x 4 slots of the sky atlas' layout (384 x 256) - instance::probe_slots_v
 
 vec3 AtlasSample(in const sampler2D Atlas, in const vec2 Origin, in const vec2 AtlasSize, in const vec3 Dir, in const float PerceptualRoughness)
@@ -97,6 +101,7 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         }
     }
 
+    if (g_GI.w > 0.5) Diff = g_GI.rgb / 3.14159265359;            // irradiance -> the diffuse term's radiance
     const vec2 DFG = textureLod(SamplerEnvDFG, vec2(NdotV, PerceptualRoughness), 0.0).rg;
     return (Diff * Albedo * (1.0 - Metallic) + Spec * (F0 * DFG.x + DFG.y)) * AO;
 }

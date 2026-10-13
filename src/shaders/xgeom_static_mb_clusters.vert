@@ -23,5 +23,9 @@ layout(push_constant) uniform PushConstants
 {
     uint    clusterIndex;  // Index into cluster array
     uint    instanceIndex; // xLIONRender: the draw's slot in the instance buffer
+#ifdef XLION_GI
+    uint    giOffset;      // xLIONRender surfel GI: the instance's first surfel in GILight
+    uint    giLevel;       // its active surfel level (0xFFFFFFFF: no GI)
+#endif
 } push;
 

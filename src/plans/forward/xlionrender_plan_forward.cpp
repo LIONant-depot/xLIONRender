@@ -77,6 +77,81 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    // Surfel GI (features/gi/xlionrender_surfel_gi.h): the draws of meshes with surfels and a persistent id become world instances
+    // (added, moved, removed when no longer drawn), the scene's lights its lights, one Update on the ray budget; then every drawn
+    // instance's active-level light into this frame's region of the GI light ring (m_DrawGI: where, which level)
+    void instance::updateGI( const scene& Scene, const xmath::fvec3& Eye ) noexcept
+    {
+        m_DrawGI.assign(Scene.m_Draws.size(), { 0u, 0xFFFFFFFFu });
+        if( !Scene.m_GI.m_bEnable ) return;
+        if( !m_pGIWorld ) m_pGIWorld = std::make_unique<gi::world>();
+        auto& W = *m_pGIWorld;
+        ++m_GIRender;
+
+        std::vector<int> DrawId(Scene.m_Draws.size(), -1);
+        for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
+        {
+            const auto&         D  = Scene.m_Draws[i];
+            const std::uint32_t ID = std::uint32_t(D.m_Instance);
+            const auto*         pM = findMesh(D.m_Mesh);
+            if( ID == 0 || pM == nullptr || !pM->m_pGI ) continue;
+            auto [It, bNew] = m_GIIds.try_emplace(ID, -1);
+            if( It->second >= 0 && m_GITrack[It->second].m_pMesh != pM->m_pGI.get() ) { W.Remove(It->second); It->second = -1; }
+            if( It->second < 0 )
+            {
+                const auto& Mat = D.m_Material;
+                It->second = W.Add(*pM->m_pGI, D.m_L2W, Mat.m_BaseColor * (1 - Mat.m_Metallic));
+                m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), It->second + 1));
+                m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), 0 };
+            }
+            else if( std::memcmp(&m_GITrack[It->second].m_L2W, &D.m_L2W, sizeof(xmath::fmat4)) != 0 )
+            {
+                W.SetTransform(It->second, D.m_L2W);
+                m_GITrack[It->second].m_L2W = D.m_L2W;
+            }
+            m_GITrack[It->second].m_Render = m_GIRender;
+            DrawId[i] = It->second;
+        }
+        for( auto It = m_GIIds.begin(); It != m_GIIds.end(); )
+        {
+            if( m_GITrack[It->second].m_Render != m_GIRender ) { W.Remove(It->second); It = m_GIIds.erase(It); }
+            else ++It;
+        }
+
+        // The lights: the sun, the sky (or the flat ambient as a sky), the local lights as points (ponytail: spots as points)
+        gi::lights L;
+        L.m_SunDirection = Scene.m_Sun.m_Direction.NormalizeCopy();
+        L.m_SunColor     = Scene.m_Sun.m_Color * Scene.m_Sun.m_Intensity;
+        L.m_Sky          = Scene.m_Sky.m_Intensity > 0 ? (Scene.m_Sky.m_Zenith + Scene.m_Sky.m_Horizon) * (0.5f * Scene.m_Sky.m_Intensity) : Scene.m_Ambient * (1.0f / gi::pi_v);
+        L.m_Points.reserve(Scene.m_LocalLights.size());
+        for( const auto& LL : Scene.m_LocalLights ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });
+        m_GIStats = W.Update(L, Eye, Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));
+
+        // This frame's light region (several renders per frame append)
+        const std::uint64_t Frame = m_Device.getFrameIndex();
+        if( Frame != m_GIFrame ) { m_GIFrame = Frame; m_GIRingUsed = 0; }
+        const int Base = int(Frame % ring_frames_v) * gi_light_region_v;
+        (void)m_GILightRing.MemoryMap(Base + m_GIRingUsed, gi_light_region_v - m_GIRingUsed, [&](void* pMemory)
+        {
+            auto* pOut = static_cast<xmath::fvec4*>(pMemory);
+            int   Used = 0;
+            for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
+            {
+                const int Id = DrawId[i];
+                if( Id < 0 ) continue;
+                const auto& E = W.InstanceLight(Id);
+                const auto& V = W.InstanceValid(Id);
+                if( m_GIRingUsed + Used + int(E.size()) > gi_light_region_v ) continue;      // ponytail: no GI for what does not fit
+                for( std::size_t k = 0; k < E.size(); ++k ) pOut[Used + k] = xmath::fvec4(E[k], V[k]);
+                m_DrawGI[i] = { std::uint32_t(Base + m_GIRingUsed + Used), std::uint32_t(W.Level(Id)) };
+                Used += int(E.size());
+            }
+            m_GIRingUsed += Used;
+        });
+    }
+
+    //------------------------------------------------------------------------------------------------
+
     // The local lights and the captured reflection probes for this render: into this frame's region of the light buffer, and in
     // modes CELLS / SAMPLED their world cells into the cell buffer (features/lights/xlionrender_light_cells.h). Fills the lighting
     // block's local and probe parts.
@@ -728,6 +803,9 @@ namespace xlionrender
                 std::array<xgpu::buffer*, 5> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 5>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing }
                                                                    : std::array<xgpu::buffer*, 5>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr };
                 const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{5} : std::size_t{4} };
+                std::array<xgpu::buffer*, 6> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
+                                                      , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing };
+                const auto  GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
 
                 for( const auto& Sub : G.m_Submeshes )
                 {
@@ -740,7 +818,8 @@ namespace xlionrender
                     }
                     if( pInstance != pBound || &G != pBoundGeom )
                     {
-                        Cmd.setPipelineInstance(*pInstance, Static);
+                        if( pInstance == &m_StaticGeomInstance ) Cmd.setPipelineInstance(*pInstance, std::span{ GIBuffers });   // + the GI buffers
+                        else                                     Cmd.setPipelineInstance(*pInstance, Static);
                         Cmd.setDynamicUBO(m_LightUBO, 1);
                         Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                         Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
@@ -752,7 +831,7 @@ namespace xlionrender
                     {
                         const auto& C = G.m_Clusters[c];
                         if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot });
-                        else        Cmd.setPushConstants(details::push_static_geom{ c, Slot });
+                        else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                     }
                 }
@@ -780,6 +859,7 @@ namespace xlionrender
         const auto T0 = clock::now();
         updateEnvironment(Window, Scene);
         updateInstances(Window, Scene, Eye);
+        updateGI(Scene, Eye);                                   // CPU (getGIStats); the probes' captures read it too
         const auto T1 = clock::now();
         Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
         renderShadows(Window, Scene, Eye, ProjScale);

@@ -14,6 +14,8 @@
 #include "features/instances/xlionrender_instance_slots.h"
 #include "features/lights/xlionrender_light_cells.h"
 #include "features/culling/xlionrender_frustum.h"
+#include "features/gi/xlionrender_surfel_gi.h"
+#include <memory>
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
 #include <vector>
@@ -58,6 +60,11 @@ namespace xlionrender
         // copied): they must outlive the mesh id
         [[nodiscard]] xgpu::device::error* CreateClusterGeom( mesh_id& Id, cluster_geom Geom )                  noexcept;
                       void                 DestroyMesh  ( mesh_id Id )                                          noexcept;
+        // Surfel GI for a cluster mesh (CreateClusterGeom, rigid): its baked surfels (gi::surfel_mesh::Bake) in the mesh's vertex
+        // order - the resource pipeline's product (the xgeom GI options); kept by the renderer. scene::m_GI turns GI on.
+        [[nodiscard]] xgpu::device::error* SetMeshGI    ( mesh_id Id, gi::surfel_mesh&& Surfels )             noexcept;
+        // The last render's GI update (instances, rays, CPU ms)
+                      const gi::world::stats& getGIStats( void ) const                                      noexcept { return m_GIStats; }
 
         // A material: its HDR fragment shader (xmaterial::rt::getShaderHDR()) and its sampler bindings in shader order - slot 0
         // is the shadow map: the renderer binds its shadow atlas there whatever is given; then the textures. Neither is
@@ -128,6 +135,8 @@ namespace xlionrender
             int                     m_nIndices      = 0;
             xmath::fbbox            m_BBox;                             // local bounds of a CreateMesh mesh
             cluster_geom            m_Geom;                             // used when m_bCluster
+            std::unique_ptr<gi::surfel_mesh> m_pGI;                     // SetMeshGI: the surfels (CPU) ...
+            xgpu::buffer            m_GIBuffer;                         // ... and the vertex shader's copy (xlionrender_static_geom_body.glsl GIMesh)
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             bool                    m_bCluster      = false;
@@ -178,6 +187,25 @@ namespace xlionrender
         int                         m_RingUsed              = 0;        // entries of this frame's ring region already written
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
         std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
+
+        // Surfel GI: the CPU world, draw id -> world instance, per draw this render's (first surfel in the light ring, level)
+        static constexpr int        gi_light_region_v       = 1 << 18;  // surfels per frame (vec4: irradiance, validity)
+        struct gi_track
+        {
+            xmath::fmat4            m_L2W;
+            const gi::surfel_mesh*  m_pMesh     = nullptr;
+            std::uint64_t           m_Render    = 0;                    // the last render that drew it
+        };
+        std::unique_ptr<gi::world>  m_pGIWorld;
+        std::unordered_map<std::uint32_t, int> m_GIIds;
+        std::vector<gi_track>       m_GITrack;                          // per world instance
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> m_DrawGI;  // per draw: offset, level (0xFFFFFFFF: none)
+        xgpu::buffer                m_GILightRing;
+        xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
+        std::uint64_t               m_GIRender = 0, m_GIFrame = ~0ull;
+        int                         m_GIRingUsed = 0;
+        gi::world::stats            m_GIStats;
+        void                        updateGI        ( const scene& Scene, const xmath::fvec3& Eye ) noexcept;
 
         // Shadow casters by persistent slot: what they were the last time they were seen, so an unchanged caster costs a compare,
         // not a hash, and a caster that stops being drawn is found from the list of the last render's slots

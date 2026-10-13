@@ -264,7 +264,7 @@ vec3 PBRLightingImageBase
 	ambient += indirectSpec;
 #else
 	// xLIONRender: the renderer's environment probe (diffuse + specular) when the sky is on
-	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, perceptualRoughness, inMetalic, inAO);
+	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, perceptualRoughness, inMetalic, inAO);
 #endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).

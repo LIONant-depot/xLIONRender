@@ -113,6 +113,14 @@ namespace xlionrender
         float           m_Blend     = 1.0f;
     };
 
+    // Diffuse GI (features/gi/xlionrender_surfel_gi.h): draws of meshes given surfels (instance::SetMeshGI) with a persistent
+    // m_Instance id; solved on the CPU (m_RayBudget rays per render, the changed first), read per vertex (surfel weights)
+    struct gi_settings
+    {
+        bool            m_bEnable       = false;
+        int             m_RayBudget     = 16384;
+    };
+
     struct scene
     {
         std::vector<draw>           m_Draws;
@@ -120,6 +128,7 @@ namespace xlionrender
         std::vector<local_light>    m_LocalLights;
         xmath::fvec3                m_Ambient   { 0, 0, 0 };
         sky                         m_Sky;
+        gi_settings                 m_GI;
         std::vector<reflection_probe> m_Probes;           // any number: the nearest 32 (instance::probe_slots_v) are resident
     };
 }

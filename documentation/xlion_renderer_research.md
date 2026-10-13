@@ -745,3 +745,214 @@ at the far end swaps in 8; a far light does not re-capture, a light moving into 
 sun. Stress (street, 64 probes): GPU scene 1.09 ms (1.06 with 8).
 ponytail: residency has no hysteresis (a probe on the boundary can swap as the camera moves); the light key tests every
 resident probe against every light (the cells' lists when it shows).
+
+## Diffuse GI research (2026-10-13)
+
+Owner direction: grid probes (re-rendered or relit) are rejected. GI, like reflection probes, is "location, location,
+location": a probe in the wrong place leaks or misses, and every probe engine spends its complexity fighting that. Study every
+reference; do not settle for an existing technique if we can argue for a better one.
+
+### What each reference does (read from the source in E:\source_code)
+
+| Engine | Tracing structure | Where radiance lives | Dynamic geometry | Fights location with | Cost / limits |
+|---|---|---|---|---|---|
+| **Godot SDFGI** (`renderer_rd/environment/gi.cpp`, `sdfgi_*.glsl`) | Up to 8 cascades of 128^3 voxels around the camera, voxelized from **static** meshes, SDF by jump flood (`sdfgi_preprocess.glsl`); per-voxel light with anisotropy (`sdfgi_direct_light.glsl`, RGBE) | **Grid probes**: 17^3 per cascade (`PROBE_DIVISOR` 16), SH -> 6x6 octahedral (`sdfgi_integrate.glsl`), rays marched through the SDF with history | Not in the SDF: dynamic objects only receive | Per-probe occlusion texture, cascade blend | Blotchy, leaks at thin walls, cascade seams; PC/console only |
+| **Godot VoxelGI** (`voxel_gi.glsl`) | Baked octree per volume; dynamic objects re-voxelized each frame into a dynamic map | Voxels, cone traced | Partly (dynamic map) | Voxel occlusion | Needs a bake, local volumes only |
+| **Flax** (`Renderer/GI`, `Utils/GlobalSignDistanceFieldPass.cpp`) | **Per-mesh SDFs** (built per model asset) composited into a cascaded global SDF (R8_SNORM, 32^3 chunks, dirty chunks re-rasterized) | **Global Surface Atlas**: each object's 6 axis projections rasterized into an atlas (albedo/normal/emissive/depth), relit by lights + GI; **DDGI** grid probes (up to 4 cascades, 6^2 irradiance / 14^2 distance texels) trace the SDF and read the atlas at hits | Yes (SDF chunks and atlas tiles redrawn when dirty) | DDGI probe relocation + classification, Chebyshev depth visibility | Lumen-lite; still grid probes for the gather |
+| **Unreal Lumen** | Mesh SDFs + global SDF clipmaps (or hardware RT) | **Surface cache** (mesh cards, relit + radiosity) for hits; **screen probes** on the visible pixels (about every 16 px, 8^2 octahedral) for the gather; a world radiance cache for distant rays | Yes | Screen probes sit on the surfaces being shaded | ~4+ ms on consoles, temporal noise/ghosting, thin walls (<10 cm) leak, no mobile |
+| **Wicked** (`ddgi_*`, `surfel_*`, `vxgi_*`) | Three systems: DDGI (BVH ray tracing, compute or RT API), surfel GI (RT), VXGI (voxel clipmap + jump-flood SDF, cone tracing) | DDGI grid probes / surfels on surfaces / voxels | Yes | Surfels: on the surfaces | RT for two of the three |
+| **ARTnGAME Lumina** (SEGI) | Voxelized cascades (6 mip levels), re-voxelized every few frames | Voxels, cone traced (diffuse + specular) | Yes (re-voxelize) | Nothing: cone tracing leaks | Heavy, light leaks, voxel crawl |
+| **HTrace SSGI** (`HRestirSSGI.compute`, `HFallbackSSGI.hlsl`) | Depth pyramid ray march (screen) | Per-pixel ReSTIR reservoirs (temporal + spatial resampling, occlusion validation, checkerboarding) | Yes (screen) | Pixels are on the surfaces | Off screen: **falls back to probes (Unity APV) or sky SH**. Screen space alone is not GI |
+| **CryEngine SVOGI** (`Cry3DEngine/SVO`) | Sparse voxel octree of static geometry, built in the background | Voxels, cone traced | Mostly static | - | Leaks, static |
+| **O3DE DiffuseProbeGrid** | RTXGI: hardware RT (or baked) | Grid probes | Yes with RT | Probe relocation | RT required for real time |
+| **Bevy Solari** (`bevy_solari/src/realtime/world_cache_*.wesl`) | Hardware RT only | ReSTIR DI/GI per pixel + a **hashed world cache**: cells keyed by quantized position **and normal**, created where queried, size growing with distance, freed after 10 frames unqueried | Yes | Cache cells are on the surfaces, normal in the key | RT only |
+| Filament, Stride, Quake 4, id Tech 5 | No dynamic GI (IBL / baked) | | | | |
+| HypeHype (SIGGRAPH 2024) | Mobile: GTAO; plans a top-down Z-buffer for long range sky visibility and screen-space approximate GI | | | | The mobile reality: an AO-class budget |
+
+### What the references teach
+
+1. **Every grid-probe system ends up fighting placement** (DDGI relocation and classification, Chebyshev visibility, SDFGI
+   occlusion textures, cascade blending). The leak is structural: a probe interpolates across a wall it cannot know about.
+2. **The systems that do not leak keep radiance on the surfaces**: Lumen's surface cache + screen probes, Wicked's surfels,
+   Solari's world cache (normal in the key). Location is solved by construction, not by repair.
+3. **The tracing structure and the radiance store are separate choices.** SDF, voxels, BVH or screen space only answer "what
+   does this ray hit"; the store answers "how bright is it there".
+4. **Screen space is a detail layer, never the GI**: HTrace itself falls back to world-space probes off screen.
+5. **Static-only SDFs (Godot) fail our rule** that most things are dynamic. Flax/Lumen's per-mesh SDFs composited into a global
+   one handle moving and newly spawned objects, at the cost of an asset-pipeline bake.
+6. **Nobody spans mobile to RT with one representation.** Godot, Unreal, Wicked and Flax have no mobile dynamic GI; Solari
+   and O3DE need RT.
+
+### Proposal: the xLION surface radiance cache (SRC), our own technique
+
+One representation on every tier, radiance on the surfaces, cost follows change.
+
+- **Store: a sparse hashed surface cache** (Solari's idea, without requiring RT). A GPU hash table of cells keyed by quantized
+  world position **and** quantized normal, the cell size growing with distance from the camera (our "little world" levels:
+  the same snapped origins as the light cells). A cell is created where something asks for it (a visible pixel, a trace hit)
+  and freed after N frames unused. Each cell holds irradiance (L1 SH: directional, so normal maps still respond) and a sample
+  count. The two sides of a wall have opposite normals, so they are different cells: **no leak through walls by
+  construction**, and no probe to place.
+- **Update: L = D + T L, stochastically (the handoff's §11 operator).** Each frame a budget of cells traces a few rays; a hit
+  returns its direct light (the sun clipmap, local lights through the **world cells** - the reason world cells exist: lookups
+  outside the view) + the cache's own value at the hit (one more bounce per frame: infinite bounces over time) + the sky on a
+  miss. The cells are the handoff's persistent diffuse elements and the update is a stochastic Jacobi iteration. Storing a
+  few hit links per cell later (re-light from the links when only lights change) is the handoff's transport-reuse
+  experiment, on the same data.
+- **Change response (ADGI-like):** cells whose rays crossed a changed caster's bounds, or whose lights changed (the probes'
+  light keys), get more rays and a shorter history. We already produce both signals.
+- **Tracing: a tier choice behind one interface.**
+  - *Mobile / web:* a coarse camera-centered **brick SDF clipmap** (8^3 R8 bricks, only where geometry is), few rays per
+    frame, long histories.
+  - *PC raster:* the same SDF at finer levels, plus a short screen-space trace first (HTrace-style) for contact detail.
+  - *PC RT:* ray queries instead of the SDF; the same cache (= Solari's world cache).
+  The SDF is composited from **per-mesh SDFs baked by the resource pipeline** (Flax/Lumen): moving, rotating and spawned
+  objects re-composite only their bricks (we already track changed caster bounds). Skinned meshes are receivers, with
+  optional capsule proxies (a stated approximation).
+- **Gather: one lookup per pixel.** The pixel reads the cache at its own position and normal (jittered in the tangent plane
+  against grid look, as Solari does): the cheapest possible final gather, mobile friendly. PC adds the screen-space detail
+  trace, and later per-pixel ReSTIR on top.
+- **Specular synergy:** a rough reflection ray traced through the SDF reads the same cache at its hit, so reflections stop
+  depending on probe placement too; reflection probes remain the fallback.
+
+**Why it beats the references:** no probe placement (vs Godot, Flax, Wicked DDGI, O3DE); dynamic geometry included (vs Godot
+SDFGI, CryEngine); world space, works off screen (vs HTrace); a cheaper gather than Lumen's screen probes (one lookup vs an
+8^2 probe per 16 px + filtering); one representation from mobile to RT (nobody else); lighting changes re-light cells and
+geometry changes touch only their bricks (D2: cost follows change).
+
+**Known risks:** hash occupancy and collisions (Solari: linear probing, 3 steps; size the table from the visible surface
+area); geometry thinner than an SDF voxel still leaks for tracing (mitigated by the per-mesh SDF resolution and a minimum
+thickness flag); the cache shows grid structure without jitter; convergence after camera cuts (new cells start from the
+coarser level or the sky); **xGPU has no compute pipelines yet** - the cache needs compute + atomics (Vulkan core, within our
+mobile floor); the per-mesh SDF bake is a new xgeom pipeline product.
+
+**Steps (each leaves tests, as the probes did):**
+1. xGPU compute: pipelines, dispatch, storage buffers/images, barriers. Prerequisite.
+2. The cache alone, traced against analytic test scenes (box/sphere SDFs, no assets): hash, allocation/eviction, update
+   rays, gather. A Cornell box against a CPU path-traced reference.
+3. Per-mesh SDF bake (xgeom) + the brick clipmap compositing, change driven.
+4. Change response (caster bounds, light keys), multi-bounce, stress city numbers.
+5. Tiers: screen-space detail (PC), ray queries (RT), rough specular through the cache.
+
+### Owner discussion -> chosen direction: mesh-owned vertex surfels (2026-10-13)
+
+The hashed surface cache above is rejected: its cells are still a world grid (sparse voxels) - an up-facing floor and table
+top in one cell share light. Chosen instead (owner ideas, refined):
+
+- **Surfels belong to the mesh, not to space.** The pipeline bakes them per mesh asset: patches of the surface (position,
+  normal, area, radius in mesh space). Instances store only their surfels' light (a range of one GPU buffer, ~8 B each).
+  Skinned meshes carry them with the bones; nothing spawns, so nothing pops (Wicked's surfel header has 55 constants, most
+  fighting spawn density, popping, edge leaks and noise - baking removes that class).
+- **Read like skinning:** a vertex stores up to 4 surfel indices (the "direction"); the vertex shader computes the weights
+  from the distance to each surfel's center/radius and the normal match (a distance field over the surface), normalized.
+  No stored weights. Gather cost ~ skinning, no per-pixel search, no denoiser.
+- **Hierarchy = LOD:** the pipeline merges surfels into parent surfels down to a few per mesh, plus a parent table. A vertex
+  keeps its finest indices; the shader walks `parent[]` to the instance's active level and weighs against the parents'
+  centers - one vertex stream serves every mesh LOD and every surfel level. An instance holds only its active level
+  (distance / screen size): memory and update cost follow the view. Going finer: children start at the parent's value;
+  coarser: the parent is the area-weighted mean of its children. Ray hits resolve to the level the hit instance holds.
+- **Solver:** L = D + T L on the surfels, coarse to fine (hierarchical radiosity, Hanrahan 1991 / multigrid: light crosses
+  a room in few coarse iterations). Start on CPU worker threads (Enlighten shipped a CPU runtime on mobile): rays against
+  per-mesh BVHs + a top level over instances; upload only changed surfels. Compute later.
+- **Low vertex density:** the pipeline splits triangles larger than the surfel size. A per-pixel read of the same surfels
+  (same weighting function, Wicked-style) is the fallback for content that cannot take more vertices.
+- Later: merging surfels across instances (HLOD-like) for distant districts; stored links per surfel (transport reuse, the
+  handoff §11 experiment).
+
+**Experiment 1 (next):** bake surfel hierarchy + vertex indices on test meshes (Cornell box, moving box, triangle splitting);
+CPU tracing + coarse-to-fine solve; read through vertex indices (runtime weights) and, for comparison, per pixel; measure vs
+a CPU path-traced reference: quality, leaks, LOD-change popping, convergence after a change, CPU ms, memory per instance.
+- **Descriptor options (xgeom, owner 2026-10-13):** a GI group, two separate settings - *GI* (off / receive only / receive +
+  bounce: whether surfels are baked and whether the mesh contributes light) and *GI sample density* (split triangles
+  (default) / per-pixel read / vertices as they are), with the target surfel size. Density only applies when GI is on.
+
+### Experiment 1 results (2026-10-13, `src/tools/gi_lab/xlionrender_gi_lab.cpp`, CPU, `xlionrender_gi_lab.exe [--quick]`)
+
+Cornell box (1 m half size) + a box, a point light; 31 test points (floor, back wall, a contact point 5 cm from the box);
+error = |indirect irradiance - path-traced reference (2048 paths, 6 bounces)| / the scene's mean, after convergence.
+
+| vertex split / surfel radius (m) | vertices | surfels | vertex read mean / max | per-point read mean / max |
+|---|---|---|---|---|
+| 2 / 2 (as authored) | 48 | 30 | 83% / 106% | 83% / 106% |
+| 0.5 / 0.5 | 192 | 174 | 28% / 45% | 28% / 43% |
+| 0.25 / 0.25 | 580 | 536 | 10.6% / 16.7% | 8.5% / 13.8% |
+| 0.125 / 0.125 | 1970 | 1852 | 2.3% / 7.0% | 2.2% / 5.9% |
+| **0.125 / 0.3** | 1970 | **250** | **2.7% / 17.9%** | 2.9% / 14.0% |
+
+What it shows:
+1. **The owner's idea holds: vertices carry the detail, surfels can be few.** 250 surfels under dense vertices (2.7%) match
+   1852 (2.3%) and beat 536 surfels on 0.25 m vertices (10.6%). Interpolation density (vertices) drives quality; the
+   solver's cost (surfels) can be ~7x lower. Authored low-poly geometry is unusable as is (83%): the pipeline split is
+   required, as decided.
+2. **The vertex read equals the per-pixel read** once (3) and (4) are in: the per-pixel fallback is for meshes that cannot
+   take vertices, not for quality.
+3. **Location problem, found and fixed: buried surfels.** Floor surfels under the box read black and darkened the contact
+   (57% max error). A surfel whose rays mostly start inside geometry (> 25% back-face hits - DDGI's probe test, per surfel,
+   at runtime, so it follows moving instances) gets weight 0: max 57% -> 47% (0.125 / 0.125), 40% -> 18% (0.125 / 0.3).
+4. **The homogeneous vertex read:** a vertex under the box still interpolated a zero into the triangle. Interpolating
+   (sum w E, sum w) as two varyings and dividing per pixel drops a buried vertex automatically: max 57% -> 7%.
+5. **No leak:** a sealed room behind a 2 cm wall reads exactly 0 (lit side 1.35).
+6. **Hierarchy pays twice.** A light switching on, same budget (2000 rays/frame, 250 surfels / 55 parents):
+   fine only 55% / 35% / 25% at frames 1 / 4 / 8; coarse-to-fine (4 parent bounces per frame, the fine level gathers from
+   the parents for 8 frames, starts from them) 16% / 8.7% / 5.3%; both reach the 8-ray noise floor (3-4%) later. As a LOD,
+   the parent level read through the same vertex indices is 7.2% from the fine level.
+7. Change response (box moves, 8 rays/surfel/frame, 0.2 blend): back wall 7.1% off before, at the noise floor (4-5%) from
+   frame 1-2. CPU: 536 surfels x 8 rays = 1.2-2.6 ms/frame brute force on all cores (no BVH yet).
+
+Next: a real BVH + instances (the CPU cost at city scale), skinned and moving instances (validity follows them), the
+pipeline bake on xgeom meshes, then the GPU read (vertex shader: 4 indices, parent walk, two varyings) in the forward plan.
+
+### Step 2: the CPU module (2026-10-13, `src/features/gi/xlionrender_surfel_gi.h`, test `xlionrender_test_surfel_gi`)
+
+The lab's method as the renderer's module: `surfel_mesh` (bake: surfels, one parent level, parent table, 4 indices per
+vertex, a BVH) shared by instances; `world` (instances with transforms, a TLAS, Update(lights, eye, ray budget)): dirty
+instances first (moved, near a moved one within 4 m, in a changed point light's sphere; a sun/sky change dirties all),
+then age over distance; per-instance LOD (the parent level beyond 40 m: finer starts from the parent, coarser averages the
+children); point lights with the renderer's falloff; any-hit shadow rays; PCG random numbers.
+
+- BVHs (mesh + TLAS, nearest child first) = brute force on 2000 rays. Cornell built from 7 instances (the box rotated):
+  4.0% mean / 7.5% max vs path traced; a rotated instance = the same geometry pre-transformed.
+- City (400 buildings from 3 shared meshes + a 220 m ground, sun + sky, eye at street level, 28 threads): 103k surfels at
+  full detail, 42k active with LOD (61 instances fine, 340 at the parent level), 662 KB of GPU buffer. Every instance lit
+  after 7 updates of 64k rays. A moved building dirties 10 instances of 401.
+- CPU cost, first version (median-split binary BVH, scalar, threads spawned per update): 64k rays 7.8 ms, 16k 2.5 ms,
+  4k 1.3 ms (~1 ms fixed). **After the references' methods** - a binned SAH build (16 bins, Wald 2007 / Jolt's
+  TriangleSplitterBinning), collapsed to a 4-wide BVH tested with SSE (Embree's BVH4 node: bounds in rows, the near plane
+  from the direction's sign; Triangle4: 4 Moller-Trumbore tests at once), nearest-first traversal that re-checks popped
+  nodes, any-hit shadow rays, PCG random numbers, a persistent worker pool: **64k rays 1.8 ms, 16k 0.52 ms, 4k 0.29 ms**
+  (4.3x; ~1.3 M rays/s per thread plus shadow rays). Same hits as brute force, same Cornell error.
+  ponytail: SSE only (NEON for mobile next), Update still blocks its caller (asynchronous, Enlighten-style, later).
+
+**Renderer integration - decisions needed (owner):**
+1. *Which meshes:* `CreateMesh` meshes have CPU vertices; `CreateClusterGeom` (xgeom, the editor's) only GPU buffers - the
+   surfel bake belongs in the xgeom compiler (the descriptor's GI options), so xgeom meshes wait for that.
+2. *Low-poly render meshes:* the vertex read needs the split vertices *rendered*. With GI on, the renderer renders the split
+   mesh (the descriptor's density option), or reads per pixel for meshes that keep their triangles.
+3. *Non-uniform scale* (the stress city scales a unit cube per building): surfel radii are mesh-space; non-uniform scale
+   stretches them. Bake per scale class, or measure distances in world space in the weight function.
+4. *GPU read:* per mesh an SSBO of the 4 surfel indices per vertex (read by gl_VertexIndex: no vertex format change) + the
+   surfels and parent table; per instance a base offset into one irradiance buffer (the instance record grows 4 bytes);
+   two varyings (sum w E, sum w), divided in the fragment shader; the material's ambient diffuse uses it instead of the
+   probes' / sky's diffuse.
+
+### Step 3: in the renderer (2026-10-13) - the decisions above, first pass
+
+- **API:** `instance::SetMeshGI(mesh, gi::surfel_mesh&&)` for cluster (xgeom static) meshes - the caller hands the baked surfels
+  (the xgeom compiler's job next); `scene::m_GI { m_bEnable, m_RayBudget }`; `getGIStats()`. Draws with a persistent
+  `m_Instance` id and a mesh with surfels become world instances (added, moved when their L2W changes, removed when no longer
+  drawn); the sun, the sky (or the flat ambient) and the local lights (as points, found through a BVH over their spheres) are
+  the solver's lights. One `Update` per render on the ray budget.
+- **GPU read:** the constant-material pipeline uses `xlionrender_static_geom_gi_vert.glsl` (the static body with `XLION_GI`):
+  per mesh an SSBO (level offsets; per vertex 4 x 16-bit surfel indices; per surfel center, radius, normal, parent), per
+  frame a ring of surfel irradiance + validity (`push_static_geom` carries the instance's offset and level). Weights use
+  world-space distances and the transform's mean scale (non-uniform scale: decision 3); normals in the solver go through the
+  inverse transpose. Two varyings' worth (`vec4`: sum w E, sum w) at location 9, divided per pixel; `g_GI` in
+  `xlionrender_environment.glsl` replaces the probes' / sky's diffuse. xmaterial materials and skinned meshes: not yet (they
+  keep the non-GI vertex shader).
+- **Test `xlionrender_test_gi_render`:** a room of cluster meshes (red wall, green wall, a box, a point light): without GI the
+  floor's red/green is 1.00 on both sides; with GI 1.14 near the red wall and 0.90 near the green one; mean luminance
+  0.55 -> 0.98; the shadow behind the box fills; a moved and a removed box; no validation errors.
+- **Stress city (`--gi 16384`, 8001 draws, 1024 lights, street walk):** frame 4.3 ms (233 FPS); GPU scene 0.98 ms (1.06 without
+  GI: the vertex read is free); CPU GI update 1.26 ms mean on the render thread.
+  ponytail: the update blocks Render (asynchronous next), the whole ring region is rewritten per render (changed instances
+  only, into a device-local buffer, next), albedo is the constant material's base color.

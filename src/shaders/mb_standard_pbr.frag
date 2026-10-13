@@ -240,7 +240,7 @@ vec3 PBRLighting
 	vec3	ambientSpec			= F_grazing * UBOLight.AmbientLightColor.rgb * inAO * (1.0 - inRoughness) * 0.04;
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 #ifndef XLION_LDR_OUTPUT
-	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
+	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
 #endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).
