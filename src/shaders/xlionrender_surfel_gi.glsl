@@ -99,7 +99,7 @@ vec3 SurfelDebugColor(in const uint s)
 // sum(w E), sum(w) of the level 0 surfels that reach a point (mesh space position and normal): its cell of the read grid lists them.
 // The weight of the vertex read (falloff over 2 radii squared, times the normal match, times the validity). 0: no grid, or off the
 // surface's cells (the caller falls back to the vertex read)
-vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const uint LightOffset)
+vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const uint LightOffset, in const uint Level)
 {
     uint First, Count;
     if (!GIReadCell(P, N, First, Count)) return vec4(0.0);
@@ -112,8 +112,12 @@ vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const uint LightOffset)
         if (c < 0.5) continue;
         const float f = max(0.0, 1.0 - length(P - GISurfelCenter(b)) / (2.0 * uintBitsToFloat(GIMesh[b + 3u])));
         if (f <= 0.0) continue;
-        const vec4  E = GILight[LightOffset + s];
-        const float w = f * f * c * E.w * GIVisibility(P, GISurfelCenter(b), GISurfelNormal(b), uintBitsToFloat(GIMesh[b + 3u]), LightOffset + s);
+        // Level 1 (far): the fine surfels still find what reaches the pixel, their parents give the light (the same coverage at both
+        // levels: no pop at the switch)
+        const uint  sl = Level == 1u ? GIMesh[b + 7u] : s;
+        const uint  bl = Level == 1u ? GIMesh[1] + 8u * sl : b;
+        const vec4  E = GILight[LightOffset + sl];
+        const float w = f * f * c * E.w * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
         Sum += vec4(E.rgb * w, w);
     }
     return Sum;

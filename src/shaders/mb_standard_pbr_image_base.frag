@@ -278,9 +278,9 @@ vec3 PBRLightingImageBase
 	// xLIONRender: the renderer's environment probe (diffuse + specular) when the sky is on
 	if (InGI.w > 1e-6) g_GI = vec4(InGI.rgb / InGI.w, 1.0);
 #ifndef XLION_NO_GI_PIXEL
-	if (InGIRef.y != gi_none_v && (InGIRef.y & gi_per_pixel_v) != 0u && (InGIRef.y & 0xFFu) == 0u)     // near (the fine surfels): the pixel reads them itself
+	if (InGIRef.y != gi_none_v && (InGIRef.y & gi_per_pixel_v) != 0u)     // the pixel reads the surfels itself (far: through their parents)
 	{
-		const vec4 Px = SurfelGIPixel(InGIPos, normalize(InGINormal), InGIRef.x);
+		const vec4 Px = SurfelGIPixel(InGIPos, normalize(InGINormal), InGIRef.x, InGIRef.y & 0xFFu);
 		if (Px.w > 1e-6) g_GI = vec4(Px.rgb / Px.w, 1.0);
 	}
 	const uint GIDebug = InGIRef.y == gi_none_v ? 0u : (InGIRef.y >> gi_debug_shift_v) & 3u;
