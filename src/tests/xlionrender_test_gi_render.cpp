@@ -158,6 +158,19 @@ int main()
         for (auto& M : SparseMeshes) Renderer.DestroyMesh(M);
     }
 
+    // The material capture: each mesh's surfels drawn through its material (here the constant one, from the instance record) and read
+    // back: the red wall's surfels have its albedo, the floor's its gray, and nothing emits
+    {
+        for (int f = 0; f < 40 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing");
+        const auto* pW = Renderer.getGIWorld();
+        CHECK(pW && !Renderer.isGICapturing(), "the captures did not finish");
+        const auto Mean = [&](const std::vector<xmath::fvec3>& V) { xmath::fvec3 m{ 0, 0, 0 }; for (const auto& v : V) m = m + v; return V.empty() ? m : m * (1.0f / float(V.size())); };
+        const auto Red = Mean(pW->SurfelAlbedo(3)), Floor = Mean(pW->SurfelAlbedo(0)), Glow = Mean(pW->SurfelEmission(3));
+        std::printf("captured: red wall %.3f %.3f %.3f (0.8 0.05 0.05), floor %.3f %.3f %.3f (0.75), emission %.3f\n", Red.m_X, Red.m_Y, Red.m_Z, Floor.m_X, Floor.m_Y, Floor.m_Z, Glow.m_X + Glow.m_Y + Glow.m_Z);
+        CHECK(std::abs(Red.m_X - 0.8f) < 0.05f && Red.m_Y < 0.1f && std::abs(Floor.m_X - 0.75f) < 0.05f, "the captured albedo is wrong");
+        CHECK(Glow.m_X + Glow.m_Y + Glow.m_Z < 0.01f, "something emits");
+    }
+
     // The GPU's per-pixel lookup agrees with the CPU's read grid: in the SURFELS debug view every pixel of the room (the camera is inside
     // it: every pixel is geometry) has a surfel's color, none is black (a cell the GPU does not find)
     {

@@ -489,6 +489,127 @@ int main()
         CHECK(Hall.m_ReadMaxProbe <= 32, "the read grid's hash clusters: a probe of %u", Hall.m_ReadMaxProbe);
     }
 
+    // 6f. The spatial filter: a floor under a ceiling, a uniform sky (in the middle every surfel's true light is about the same): what the reads show spreads less across
+    //     the surfels than their raw light (the independent noise of neighbors averages out), with the same mean
+    {
+        surfel_mesh Floor;                                                           // a floor under a ceiling 0.5 m above: only grazing rays escape (noisy)
+        AddQuad(Floor, { -6, 0, -6 }, { 0, 0, 12 }, { 12, 0, 0 }, 0.5f);
+        AddQuad(Floor, { -6, 0.5f, -6 }, { 12, 0, 0 }, { 0, 0, 12 }, 0.5f);
+        Floor.Bake(0.3f, 0.9f);
+        world W;
+        const int Id = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        lights L; L.m_Sky = { 1, 1, 1 };
+        for (int f = 0; f < 3; ++f) W.Update(L, { 0, 1, 0 }, 1 << 30, 12000 + f);       // few passes: still noisy
+        const auto Spread = [&](const std::vector<v3>& E, double& Mean)             // the floor's middle (the true light nearly uniform there)
+        {
+            double m = 0, m2 = 0; int n = 0;
+            for (std::size_t s = 0; s < E.size(); ++s)
+            {
+                const auto& S = Floor.m_Levels[0][s];
+                if (S.m_Normal.m_Y < 0.9f || std::abs(S.m_Center.m_X) > 2 || std::abs(S.m_Center.m_Z) > 2) continue;
+                m += E[s].m_X; m2 += double(E[s].m_X) * E[s].m_X; ++n;
+            }
+            m /= std::max(n, 1); Mean = m;
+            return std::sqrt(std::max(0.0, m2 / std::max(n, 1) - m * m)) / std::max(m, 1e-9);
+        };
+        double MRaw, MFil;
+        const double Raw = Spread(W.InstanceLight(Id), MRaw), Fil = Spread(W.FilteredLight(Id), MFil);
+        std::printf("spatial filter: the spread across surfels %.1f%% raw, %.1f%% shown; mean %.3f -> %.3f\n", 100 * Raw, 100 * Fil, MRaw, MFil);
+        CHECK(Fil < 0.6 * Raw, "the filter does not smooth: %.1f%% -> %.1f%%", 100 * Raw, 100 * Fil);
+        CHECK(std::abs(MFil - MRaw) < 0.05 * MRaw, "the filter moves the mean: %.3f -> %.3f", MRaw, MFil);
+    }
+
+    // 6g. The HL2 basis: a floor between a red wall (+x) and a green one (-x), a white sky: a normal leaning toward the red wall reads
+    //     redder than one leaning toward the green (the bounce comes from its side), and the floor's own normal reads their mean
+    {
+        surfel_mesh Floor, Red, Green;
+        AddQuad(Floor, { -1, 0, -2 }, { 0, 0, 4 }, { 2, 0, 0 }, 0.25f);
+        AddQuad(Red,   {  1, 0, -2 }, { 0, 0, 4 }, { 0, 2, 0 }, 0.25f);       // x = 1, facing -x
+        AddQuad(Green, { -1, 0, -2 }, { 0, 2, 0 }, { 0, 0, 4 }, 0.25f);       // x = -1, facing +x
+        Floor.Bake(0.3f, 0.9f); Red.Bake(0.3f, 0.9f); Green.Bake(0.3f, 0.9f);
+        world W;
+        const int iFloor = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        W.Add(Red,   xmath::fmat4::fromIdentity(), { 0.9f, 0.05f, 0.05f });
+        W.Add(Green, xmath::fmat4::fromIdentity(), { 0.05f, 0.9f, 0.05f });
+        lights L; L.m_Sky = { 0.05f, 0.05f, 0.05f };                            // dim: the walls' bounce shows
+        L.m_SunDirection = v3{ 0, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = { 3, 3, 3 };
+        for (int f = 0; f < 200; ++f) W.Update(L, { 0, 1, 0 }, 1 << 30, 13000 + f);
+        int s0 = 0; float Best = 1e30f;
+        for (int s = 0; s < int(Floor.m_Levels[0].size()); ++s) { const float d = Floor.m_Levels[0][s].m_Center.Length(); if (d < Best) { Best = d; s0 = s; } }
+        const v3 ToRed   = W.BasisRead(iFloor, s0, v3{ 0.8f, 0.6f, 0 }.NormalizeCopy());
+        const v3 ToGreen = W.BasisRead(iFloor, s0, v3{ -0.8f, 0.6f, 0 }.NormalizeCopy());
+        const v3 Up = W.BasisRead(iFloor, s0, v3{ 0, 1, 0 }), Mean = W.FilteredLight(iFloor)[s0];
+        const float RgRed = ToRed.m_X / std::max(ToRed.m_Y, 1e-6f), RgGreen = ToGreen.m_X / std::max(ToGreen.m_Y, 1e-6f);
+        std::printf("HL2 basis: red/green leaning to the red wall %.2f, to the green wall %.2f; the floor's normal %.3f (the mean %.3f)\n", RgRed, RgGreen, Up.m_X + Up.m_Y + Up.m_Z, Mean.m_X + Mean.m_Y + Mean.m_Z);
+        CHECK(RgRed > 1.3f * RgGreen, "the basis gives no direction: red/green %.2f toward red, %.2f toward green", RgRed, RgGreen);
+        CHECK(std::abs((Up - Mean).Length()) < 0.02f * Mean.Length(), "the surfel's own normal does not read the mean");
+    }
+
+    // 6h. Where each surfel samples its material (the bake): two quads of different slots, UVs a known function of the position (u = x/4 +
+    //     0.5, v = z/4 + 0.5): every surfel has its quad's slot, the UV of its center, and a footprint of its radius at the UV density (1/4)
+    {
+        surfel_mesh Two;
+        AddQuad(Two, { -2, 0, -2 }, { 0, 0, 4 }, { 2, 0, 0 }, 0.5f);                 // x in [-2, 0]: slot 0
+        const std::size_t nFirst = Two.m_Tris.size();
+        AddQuad(Two, {  0, 0, -2 }, { 0, 0, 4 }, { 2, 0, 0 }, 0.5f);                 // x in [0, 2]: slot 1
+        for (const auto& P : Two.m_Pos) Two.m_UV.push_back({ P.m_X / 4 + 0.5f, P.m_Z / 4 + 0.5f });
+        for (std::size_t t = 0; t < Two.m_Tris.size(); ++t) Two.m_TriMaterial.push_back(t < nFirst ? 0 : 1);
+        Two.Bake(0.3f, 0.9f);
+        int nBad = 0;
+        for (std::size_t s = 0; s < Two.m_Levels[0].size(); ++s)
+        {
+            const auto& S = Two.m_Levels[0][s];
+            const auto& M = Two.m_SurfelMaterial[s];
+            const bool bSlot = (S.m_Center.m_X < -1e-4f && M.m_iMaterial == 0) || (S.m_Center.m_X > 1e-4f && M.m_iMaterial == 1) || std::abs(S.m_Center.m_X) <= 1e-4f;
+            const bool bUV   = std::abs(M.m_U - (S.m_Center.m_X / 4 + 0.5f)) < 1e-3f && std::abs(M.m_V - (S.m_Center.m_Z / 4 + 0.5f)) < 1e-3f;
+            nBad += !(bSlot && bUV && std::abs(M.m_UVRadius - 0.3f / 4) < 1e-3f);
+        }
+        std::printf("surfel materials: %d of %zu surfels with a wrong slot, UV or footprint\n", nBad, Two.m_Levels[0].size());
+        CHECK(Two.m_SurfelMaterial.size() == Two.m_Levels[0].size() && nBad == 0, "%d surfels sample their material in the wrong place", nBad);
+    }
+
+    // 6i. The surface's colors per surfel (SetSurfelMaterial): (a) both walls one white mesh, colored per surfel (red at +x, green at -x):
+    //     the floor's basis leans red toward the red wall as with two colored meshes; (b) no sky, no sun: an emissive panel above a floor
+    //     is all that lights it
+    {
+        surfel_mesh Floor, Walls;
+        AddQuad(Floor, { -1, 0, -2 }, { 0, 0, 4 }, { 2, 0, 0 }, 0.25f);
+        AddQuad(Walls, {  1, 0, -2 }, { 0, 0, 4 }, { 0, 2, 0 }, 0.25f);
+        AddQuad(Walls, { -1, 0, -2 }, { 0, 2, 0 }, { 0, 0, 4 }, 0.25f);
+        Floor.Bake(0.3f, 0.9f); Walls.Bake(0.3f, 0.9f);
+        world W;
+        const int iFloor = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iWalls = W.Add(Walls, xmath::fmat4::fromIdentity(), { 1, 1, 1 });
+        std::vector<v3> Albedo;
+        for (const auto& S : Walls.m_Levels[0]) Albedo.push_back(S.m_Center.m_X > 0 ? v3{ 0.9f, 0.05f, 0.05f } : v3{ 0.05f, 0.9f, 0.05f });
+        W.SetSurfelMaterial(iWalls, Albedo, {});
+        lights L; L.m_Sky = { 0.05f, 0.05f, 0.05f };
+        L.m_SunDirection = v3{ 0, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = { 3, 3, 3 };
+        for (int f = 0; f < 200; ++f) W.Update(L, { 0, 1, 0 }, 1 << 30, 14000 + f);
+        int s0 = 0; float Best = 1e30f;
+        for (int s = 0; s < int(Floor.m_Levels[0].size()); ++s) { const float d = Floor.m_Levels[0][s].m_Center.Length(); if (d < Best) { Best = d; s0 = s; } }
+        const v3 ToRed = W.BasisRead(iFloor, s0, v3{ 0.8f, 0.6f, 0 }.NormalizeCopy()), ToGreen = W.BasisRead(iFloor, s0, v3{ -0.8f, 0.6f, 0 }.NormalizeCopy());
+        const float RgRed = ToRed.m_X / std::max(ToRed.m_Y, 1e-6f), RgGreen = ToGreen.m_X / std::max(ToGreen.m_Y, 1e-6f);
+
+        surfel_mesh Ground, Panel;
+        AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
+        AddQuad(Panel,  { -0.5f, 1, -0.5f }, { 1, 0, 0 }, { 0, 0, 1 }, 0.25f);    // facing down
+        Ground.Bake(0.3f, 0.9f); Panel.Bake(0.3f, 0.9f);
+        world D;
+        const int iGround = D.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iPanel  = D.Add(Panel, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        D.SetSurfelMaterial(iPanel, {}, std::vector<v3>(Panel.m_Levels[0].size(), v3{ 2, 2, 2 }));
+        lights Dark;
+        for (int f = 0; f < 60; ++f) D.Update(Dark, { 0, 1, 0 }, 1 << 30, 15000 + f);
+        double Under = 0; int nUnder = 0;
+        for (std::size_t s = 0; s < Ground.m_Levels[0].size(); ++s)
+            if (Ground.m_Levels[0][s].m_Center.Length() < 0.3f) { Under += D.InstanceLight(iGround)[s].m_X; ++nUnder; }
+        Under /= std::max(nUnder, 1);
+        std::printf("surfel colors: red/green toward the red wall %.2f, the green %.2f; a dark room lit by an emissive panel: %.3f under it\n", RgRed, RgGreen, Under);
+        CHECK(RgRed > 1.3f * RgGreen, "the walls' surfel colors do not reach the floor (%.2f vs %.2f)", RgRed, RgGreen);
+        CHECK(Under > 0.5, "the emissive panel lights nothing (%.3f)", Under);
+    }
+
     // 6. Buried surfels decay for long (the box's bottom on the floor: their validity heads to 0, then underflows), far and back:
     //    the reads at the ray hits divide by a total weight that is ~0, and nothing may come out as inf / NaN (it spreads to every surfel)
     {

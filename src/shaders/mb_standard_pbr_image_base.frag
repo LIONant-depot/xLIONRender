@@ -61,6 +61,7 @@ layout(location = 9) in vec4 InGI;     // xLIONRender surfel GI: sum(w E), sum(w
 layout(location = 10) in vec3 InGIPos;          // the per-pixel read: mesh space position, normal, { first surfel in GILight, GI level }
 layout(location = 11) in vec3 InGINormal;
 layout(location = 12) flat in uvec2 InGIRef;
+layout(location = 13) in vec4 InGITangent;      // mesh space (w: the binormal's sign): the normal map's normal into mesh space
 #include "xlionrender_surfel_gi.glsl"
 #endif
 #endif
@@ -280,12 +281,15 @@ vec3 PBRLightingImageBase
 #ifndef XLION_NO_GI_PIXEL
 	if (InGIRef.y != gi_none_v && (InGIRef.y & gi_per_pixel_v) != 0u)     // the pixel reads the surfels itself (far: through their parents)
 	{
-		const vec4 Px = SurfelGIPixel(InGIPos, normalize(InGINormal), InGIRef.x, InGIRef.y & 0xFFu);
+		const vec3 GN = normalize(InGINormal), GT = normalize(InGITangent.xyz);
+		const vec3 GNmap = normalize(inNormal.x * GT + inNormal.y * (InGITangent.w * cross(GN, GT)) + inNormal.z * GN);     // as TransformNotmalToWorld, in mesh space
+		const vec4 Px = SurfelGIPixel(InGIPos, GN, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
 		if (Px.w > 1e-6) g_GI = vec4(Px.rgb / Px.w, 1.0);
 	}
 	const uint GIDebug = InGIRef.y == gi_none_v ? 0u : (InGIRef.y >> gi_debug_shift_v) & 3u;
 	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, normalize(InGINormal)); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
 	if (GIDebug == 2u) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0);
+	if (GIDebug == 3u) g_GIDebug = vec4((InGIRef.y & 0x800u) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
 #endif
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, perceptualRoughness, inMetalic, inAO);
 #endif

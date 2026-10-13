@@ -423,6 +423,27 @@ namespace xlionrender::gi
     }
     using moments = std::array<float, 2 * moment_texels_v>;            // per texel: mean, mean^2 (mesh units)
 
+    // The Half-Life 2 basis (Valve's radiosity normal mapping, Mitchell et al. 2006), on a surfel: 3 directions of its hemisphere, in
+    // its tangent frame (the one of MomentTexel), each a color of the light from around it. A surfel sees a hemisphere only: 3 colors
+    // cover it where spherical harmonics spend half their coefficients behind the surface. A normal reads them weighted by its
+    // squared cosines to them (normalized): the surfel's own normal reads their mean, a normal-mapped one leans toward its side.
+    // Mirrored by shaders/xlionrender_surfel_gi.glsl
+    using basis = std::array<v3, 3>;
+    inline basis BasisDirs(const v3& N) noexcept
+    {
+        const v3 T = (std::abs(N.m_X) < 0.9f ? v3{ 1, 0, 0 } : v3{ 0, 1, 0 }).Cross(N).NormalizeCopy(), B = N.Cross(T);
+        constexpr float a = 0.40824829f, b = 0.70710678f, c = 0.57735027f, d = 0.81649658f;     // 1/sqrt6, 1/sqrt2, 1/sqrt3, sqrt(2/3)
+        return { T * -a + B * b + N * c, T * -a + B * -b + N * c, T * d + N * c };
+    }
+    inline std::array<float, 3> BasisWeights(const basis& Dirs, const v3& n) noexcept
+    {
+        std::array<float, 3> w;
+        float Sum = 0;
+        for (int i = 0; i < 3; ++i) { const float c = std::max(Dirs[i].Dot(n), 0.0f); w[i] = c * c; Sum += w[i]; }
+        for (auto& x : w) x = Sum > 1e-12f ? x / Sum : 1.0f / 3;
+        return w;
+    }
+
     // A surfel's light over time (Wicked Engine's MultiscaleMeanEstimator, MIT): a short-window mean and the variance of the samples
     // around it; the long mean follows the samples at a rate that falls as low as 1/256 while they agree with it (within their own
     // noise: the light settles, no swimming) and rises toward 1 when they move away from it beyond that noise (a light changed: it
@@ -494,6 +515,13 @@ namespace xlionrender::gi
     {
         std::vector<v3>                     m_Pos, m_Nrm;           // mesh space; triangles counter-clockwise or not (normals decide)
         std::vector<std::array<int, 3>>     m_Tris;
+        std::vector<std::array<float, 2>>   m_UV;                   // per vertex (optional): where the surfels sample their material
+        std::vector<std::uint16_t>          m_TriMaterial;          // per triangle (optional): its material slot
+
+        // Where each fine surfel samples its material (Bake; its color is the material there, averaged over its footprint): the slot,
+        // the UV of its center, the UV radius of its footprint (its radius through its triangle's UV density)
+        struct surfel_material { float m_U = 0, m_V = 0, m_UVRadius = 0; std::uint32_t m_iMaterial = 0; };
+        std::vector<surfel_material>        m_SurfelMaterial;
         std::array<std::vector<surfel>, 2>  m_Levels;               // 0: the surfels, 1: their parents
         std::vector<int>                    m_ParentOf;
         std::vector<std::array<int, 4>>     m_VertSurfels;          // per vertex: its 4 nearest level 0 surfels (-1: none)
@@ -688,9 +716,10 @@ namespace xlionrender::gi
             BuildRays();                                            // the vertices' visibility tests cast against the mesh
 
             // Dart throwing over weighted candidates: the kept ones become surfels of radius R
-            const auto Poisson = [](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G)
+            const auto Poisson = [](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G, std::vector<int>* pFrom = nullptr)
             {
                 Out.clear();
+                if (pFrom) pFrom->clear();
                 G = { R, {} };
                 std::vector<int> Order(P.size());
                 for (std::size_t i = 0; i < Order.size(); ++i) Order[i] = int(i);
@@ -703,6 +732,7 @@ namespace xlionrender::gi
                     if (bTaken) continue;
                     G.Add(P[i], int(Out.size()));
                     Out.push_back({ P[i], N[i], R });
+                    if (pFrom) pFrom->push_back(i);
                 }
             };
 
@@ -727,6 +757,7 @@ namespace xlionrender::gi
 
             // 1. Candidates on the surface, by area
             std::vector<v3> CP, CN;
+            std::vector<std::array<float, 3>> CT;                  // per candidate: its triangle, u, v (where its material is)
             rng Sample(0xBA4Eu);
             const float PerArea = 4.0f / (Radius * Radius);
             for (const auto& T : m_Tris)
@@ -743,12 +774,33 @@ namespace xlionrender::gi
                     v3 Nn = m_Nrm[T[0]] * (1 - u - v) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * v;
                     if (Nn.Length() < 1e-6f) Nn = (B - A).Cross(C - A);
                     CN.push_back(Nn.NormalizeCopy());
+                    CT.push_back({ float(&T - m_Tris.data()), u, v });
                 }
             }
 
             // 2. Surfels, 3. vertex indices
             surfel_grid G0, G1;
-            Poisson(CP, CN, Radius, m_Levels[0], G0);
+            std::vector<int> From;
+            Poisson(CP, CN, Radius, m_Levels[0], G0, &From);
+
+            // Each surfel's material sample: its triangle's slot, the UV at its center, its radius in UV units (the triangle's UV area
+            // over its area, square-rooted: how much texture a mesh unit covers there)
+            m_SurfelMaterial.assign(m_Levels[0].size(), surfel_material{});
+            for (std::size_t s = 0; s < From.size(); ++s)
+            {
+                const int   t = int(CT[From[s]][0]);
+                const float u = CT[From[s]][1], v = CT[From[s]][2];
+                auto&       M = m_SurfelMaterial[s];
+                M.m_iMaterial = t < int(m_TriMaterial.size()) ? m_TriMaterial[t] : 0u;
+                if (m_UV.size() != m_Pos.size()) continue;
+                const auto& T = m_Tris[t];
+                const auto& A = m_UV[T[0]]; const auto& B = m_UV[T[1]]; const auto& C = m_UV[T[2]];
+                M.m_U = A[0] + (B[0] - A[0]) * u + (C[0] - A[0]) * v;
+                M.m_V = A[1] + (B[1] - A[1]) * u + (C[1] - A[1]) * v;
+                const float UVArea = 0.5f * std::abs((B[0] - A[0]) * (C[1] - A[1]) - (C[0] - A[0]) * (B[1] - A[1]));
+                const float Area   = 0.5f * (m_Pos[T[1]] - m_Pos[T[0]]).Cross(m_Pos[T[2]] - m_Pos[T[0]]).Length();
+                M.m_UVRadius = Area > 1e-12f ? Radius * std::sqrt(UVArea / Area) : 0.0f;
+            }
             m_VertSurfels.resize(m_Pos.size());
             ParallelFor(int(m_Pos.size()), [&](int v)
             {
@@ -767,6 +819,49 @@ namespace xlionrender::gi
                 m_ParentOf[s] = std::max(B[0].second, 0);
             });
 
+            BuildNeighbors();
+        }
+
+        // The spatial filter's neighbors (world::FilteredLight), per level: the surfels within a surfel's reach that face about the same
+        // way (cos >= 0.8) and that it sees, each with its geometric weight (a linear falloff over the reach, times the normal match). Built once
+        struct neighbors
+        {
+            std::vector<std::uint32_t>  m_First;        // per surfel + 1: where its neighbors start in m_Index
+            std::vector<std::uint32_t>  m_Index;
+            std::vector<float>          m_Weight;
+        };
+        std::array<neighbors, 2>            m_Neighbors;
+
+        void BuildNeighbors() noexcept
+        {
+            for (int Lv = 0; Lv < 2; ++Lv)
+            {
+                const auto& L = m_Levels[Lv];
+                auto&       Nb = m_Neighbors[Lv];
+                Nb = {};
+                if (L.empty()) continue;
+                surfel_grid G{ 2 * L[0].m_Radius, {} };
+                for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
+                std::vector<std::vector<std::pair<std::uint32_t, float>>> Per(L.size());
+                ParallelFor(int(L.size()), [&](int s)
+                {
+                    G.Near(L[s].m_Center, 1, [&](int n)
+                    {
+                        if (n == s) return;
+                        const float c = L[s].m_Normal.Dot(L[n].m_Normal);
+                        if (c < 0.8f) return;
+                        const float f = 1.0f - (L[n].m_Center - L[s].m_Center).Length() / (2 * L[s].m_Radius);
+                        if (f <= 0 || !Sees(L[s].m_Center, L[s].m_Normal, L[n])) return;
+                        Per[s].push_back({ std::uint32_t(n), f * c });      // linear: a neighbor counts (squared, the read's falloff, it barely did)
+                    });
+                });
+                Nb.m_First.assign(L.size() + 1, 0);
+                for (std::size_t s = 0; s < L.size(); ++s)
+                {
+                    Nb.m_First[s + 1] = Nb.m_First[s] + std::uint32_t(Per[s].size());
+                    for (const auto& [n, w] : Per[s]) { Nb.m_Index.push_back(n); Nb.m_Weight.push_back(w); }
+                }
+            }
         }
 
         // The rays' structures (the BVH, its 4-triangle rows, the bounds) from m_Pos / m_Tris: the bake's last step, and all a geometry
@@ -843,7 +938,12 @@ namespace xlionrender::gi
         const auto Data  = Geom.getClusterData();
         M.m_Pos.assign(Verts.size(), v3{ 0, 0, 0 });
         M.m_Nrm.assign(Verts.size(), v3{ 0, 1, 0 });
+        M.m_UV.assign(Verts.size(), { 0.0f, 0.0f });
         M.m_Tris.clear();
+        M.m_TriMaterial.clear();
+        std::vector<std::uint16_t> ClusterMaterial(Geom.getClusters().size(), 0);       // a cluster's material: its submesh's
+        for (const auto& Sub : Geom.getSubmeshes())
+            for (std::uint32_t c = Sub.m_iCluster; c < std::uint32_t(Sub.m_iCluster) + Sub.m_nCluster && c < ClusterMaterial.size(); ++c) ClusterMaterial[c] = Sub.m_iMaterial;
         const auto OctDecode = [](float x, float y) noexcept
         {
             x = x * 2 - 1; y = y * 2 - 1;
@@ -865,9 +965,14 @@ namespace xlionrender::gi
                 const std::uint32_t Bits = std::uint16_t(V.m_Extra);
                 const std::uint32_t Nx = (std::uint32_t(Extra[v].m_OctNormal[0]) << 4) | (Bits & 0xF), Ny = (std::uint32_t(Extra[v].m_OctNormal[1]) << 4) | ((Bits >> 4) & 0xF);
                 M.m_Nrm[v] = OctDecode(float(Nx) / 4095.0f, float(Ny) / 4095.0f);
+                M.m_UV[v]  = { float(Extra[v].m_UV[0]) / 65535.0f * D.m_UVScaleTranslation.m_X + D.m_UVScaleTranslation.m_Z
+                             , float(Extra[v].m_UV[1]) / 65535.0f * D.m_UVScaleTranslation.m_Y + D.m_UVScaleTranslation.m_W };
             }
             for (std::uint32_t i = C.m_iIndex; i + 2 < C.m_iIndex + C.m_nIndices && i + 2 < Index.size(); i += 3)
+            {
                 M.m_Tris.push_back({ int(C.m_iVertex + Index[i]), int(C.m_iVertex + Index[i + 1]), int(C.m_iVertex + Index[i + 2]) });
+                M.m_TriMaterial.push_back(ClusterMaterial[c]);
+            }
         }
     }
 
@@ -886,7 +991,13 @@ namespace xlionrender::gi
         for (std::size_t v = 0; v < M.m_Pos.size(); ++v)
             for (int k = 0; k < 4; ++k) M.m_VertSurfels[v][k] = VS[4 * v + k] == 0xFFFF ? -1 : int(VS[4 * v + k]);
         M.m_bBounce = Geom.m_GIMode != decltype(Geom.m_GIMode)::RECEIVE;
+        if constexpr (requires { Geom.getGISurfelMaterials(); })
+        {
+            M.m_SurfelMaterial.clear();
+            for (const auto& S : Geom.getGISurfelMaterials()) M.m_SurfelMaterial.push_back({ S.m_U, S.m_V, S.m_UVRadius, S.m_iMaterial });
+        }
         M.BuildRays();
+        M.BuildNeighbors();
         return true;
     }
 
@@ -925,6 +1036,9 @@ namespace xlionrender::gi
             double  m_Ms        = 0;
             double  m_TraceMs   = 0;            // the parallel part (rays); the rest is bookkeeping
             int     m_nBad      = 0;            // surfels whose light is not a finite, positive value (0: always; a bad one spreads through the bounces)
+            int     m_nColored  = 0;            // instances with their surfels' material colors (the GPU capture)
+            int     m_nEmissive = 0;            // surfels that emit
+            v3      m_MeanAlbedo{ 0, 0, 0 };    // over the colored surfels
         };
 
         struct hit
@@ -945,6 +1059,21 @@ namespace xlionrender::gi
             m_bTlasDirty = true;
             return int(m_Instances.size()) - 1;
         }
+
+        // The colors of an instance's surface, per fine surfel (its material sampled where the surfel is: albedo and emitted radiance).
+        // The light a ray brings back from the instance is its color there times what lights it, plus what it emits. Empty: the
+        // instance's albedo, no emission. Its neighbors re-solve (what they see changed)
+        void SetSurfelMaterial(int Id, std::vector<v3> Albedo, std::vector<v3> Emission) noexcept
+        {
+            auto& I = m_Instances[Id];
+            const std::size_t n = I.m_pMesh->m_Levels[0].size();
+            I.m_SurfAlbedo   = Albedo.size() == n ? std::move(Albedo) : std::vector<v3>{};
+            I.m_SurfEmission = Emission.size() == n ? std::move(Emission) : std::vector<v3>{};
+            DirtyNear(I.m_Lo, I.m_Hi);
+        }
+
+        const std::vector<v3>& SurfelAlbedo  ( int Id ) const noexcept { return m_Instances[Id].m_SurfAlbedo; }
+        const std::vector<v3>& SurfelEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }
 
         // The instance stops casting, bouncing and updating (its id is not reused)
         void Remove(int Id) noexcept
@@ -973,6 +1102,57 @@ namespace xlionrender::gi
         const v3&       Albedo         ( int Id ) const noexcept { return m_Instances[Id].m_Albedo; }
         // What the GPU buffer would hold for an instance: its active level's irradiance and validity per surfel
         const std::vector<v3>&    InstanceLight( int Id ) const noexcept { return m_Instances[Id].m_E; }
+
+        // The light the reads show (the GPU's upload), per basis direction: 3 x the light times its fractions (their mean is the light),
+        // blended with the neighbors' (the mesh's neighbor lists, their weights times their validity; itself at weight 1, twice over: about
+        // twice the radius). The independent noise of neighboring surfels averages out. Only what is shown: the solver keeps its own
+        // light (a filter fed back every update would keep spreading the light)
+        const std::vector<basis>& BasisLight( int Id ) const noexcept
+        {
+            const auto& I  = m_Instances[Id];
+            const auto& Nb = I.m_pMesh->m_Neighbors[I.m_Level];
+            auto&       F  = I.m_Filtered;
+            F.resize(I.m_E.size());
+            for (std::size_t s = 0; s < F.size(); ++s)
+                for (int i = 0; i < 3; ++i) { const v3& f = I.m_Frac[s][i]; F[s][i] = v3{ I.m_E[s].m_X * f.m_X, I.m_E[s].m_Y * f.m_Y, I.m_E[s].m_Z * f.m_Z } * 3.0f; }
+            if (Nb.m_First.size() != I.m_E.size() + 1) return F;
+            std::vector<basis> In;
+            for (int Pass = 0; Pass < 2; ++Pass)
+            {
+                In.swap(F);
+                F.resize(In.size());
+                for (std::size_t s = 0; s < In.size(); ++s)
+                {
+                    basis Sum = In[s]; float W = 1;
+                    for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k)
+                    {
+                        const float w = Nb.m_Weight[k] * I.m_Valid[Nb.m_Index[k]];
+                        for (int i = 0; i < 3; ++i) Sum[i] = Sum[i] + In[Nb.m_Index[k]][i] * w;
+                        W += w;
+                    }
+                    for (int i = 0; i < 3; ++i) F[s][i] = Sum[i] * (1.0f / W);
+                }
+            }
+            return F;
+        }
+
+        // The mean of the shown basis (what a surfel's own normal reads)
+        std::vector<v3> FilteredLight( int Id ) const noexcept
+        {
+            const auto& B = BasisLight(Id);
+            std::vector<v3> E(B.size());
+            for (std::size_t s = 0; s < B.size(); ++s) E[s] = (B[s][0] + B[s][1] + B[s][2]) * (1.0f / 3);
+            return E;
+        }
+
+        // What a normal n (mesh space) reads of a surfel's shown light (the CPU twin of the shaders' basis read)
+        v3 BasisRead( int Id, int s, const v3& n ) const noexcept
+        {
+            const auto& I = m_Instances[Id];
+            const auto  B = BasisLight(Id)[s];
+            const auto  w = BasisWeights(BasisDirs(I.m_pMesh->m_Levels[I.m_Level][s].m_Normal), n);
+            return B[0] * w[0] + B[1] * w[1] + B[2] * w[2];
+        }
         const std::vector<float>& InstanceValid( int Id ) const noexcept { return m_Instances[Id].m_Valid; }
         const std::vector<moments>& InstanceMoments( int Id ) const noexcept { return m_Instances[Id].m_Moments; }
 
@@ -1158,6 +1338,10 @@ namespace xlionrender::gi
                 const int R = m_Setup.m_RaysPerSurfel;
                 auto& MA = I.m_MomAcc[s];
                 MA.fill(0);
+                auto& BA = I.m_BasisAcc[s];
+                BA.fill(v3{ 0, 0, 0 });
+                const basis Dirs = BasisDirs(S.m_Normal);
+                std::array<float, 3> Bw{};
                 const float Reach = 2 * S.m_Radius;                         // mesh units
                 for (int r = 0; r < R; ++r)
                 {
@@ -1170,11 +1354,17 @@ namespace xlionrender::gi
                         const float d = H.m_Inst < 0 ? Reach : std::min(H.m_T * Lm, Reach);
                         const int t = MomentTexel(S.m_Normal, Dm);
                         MA[3 * t] += d; MA[3 * t + 1] += d * d; MA[3 * t + 2] += 1;
+                        Bw = BasisWeights(Dirs, Dm);                        // the ray's share of each basis direction
                     }
-                    if (H.m_Inst < 0) { Sum = Sum + L.m_Sky; continue; }
+                    if (H.m_Inst < 0) { Sum = Sum + L.m_Sky; for (int i = 0; i < 3; ++i) BA[i] = BA[i] + L.m_Sky * Bw[i]; continue; }
                     const v3 Nh = HitNormal(H);
                     if (Nh.Dot(D) > 0) { ++nBack; continue; }               // a back face: no light, and maybe buried
-                    Sum = Sum + m_Instances[H.m_Inst].m_Albedo * (Direct(HitPosition(H), Nh, L) + Indirect(H)) * (1.0f / pi_v);
+                    v3 Albedo, Emission;
+                    SurfaceAt(H, Albedo, Emission);
+                    const v3 In = Direct(HitPosition(H), Nh, L) + Indirect(H);
+                    const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + Emission;
+                    Sum = Sum + Lr;
+                    for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Lr * Bw[i];
                 }
                 I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
                 I.m_AccValid[s] = std::clamp(1.0f - (float(nBack) / float(R) - 0.1f) / 0.15f, 0.0f, 1.0f);
@@ -1199,6 +1389,16 @@ namespace xlionrender::gi
                 }
                 const float av = std::max(I.m_PassAlpha, 0.05f);
                 I.m_Valid[s] = I.m_Valid[s] * (1 - av) + I.m_AccValid[s] * av;
+                {   // the basis: what fraction of the light came from around each direction (per channel), slowly (8 rays split 3 ways)
+                    const auto& BA = I.m_BasisAcc[s];
+                    const v3 Tot = BA[0] + BA[1] + BA[2];
+                    const float af = std::max(I.m_PassAlpha, 0.1f);
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        const v3 F{ Tot.m_X > 1e-9f ? BA[i].m_X / Tot.m_X : 1.0f / 3, Tot.m_Y > 1e-9f ? BA[i].m_Y / Tot.m_Y : 1.0f / 3, Tot.m_Z > 1e-9f ? BA[i].m_Z / Tot.m_Z : 1.0f / 3 };
+                        I.m_Frac[s][i] = I.m_Frac[s][i] + (F - I.m_Frac[s][i]) * af;
+                    }
+                }
                 for (int t = 0; t < moment_texels_v; ++t)
                 {
                     const auto& MA = I.m_MomAcc[s];
@@ -1222,6 +1422,16 @@ namespace xlionrender::gi
             for (const auto& I : m_Instances)
                 for (std::size_t s = 0; s < I.m_E.size(); ++s)
                     St.m_nBad += !(std::isfinite(I.m_E[s].m_X + I.m_E[s].m_Y + I.m_E[s].m_Z + I.m_Valid[s]) && I.m_E[s].m_X >= 0 && I.m_E[s].m_Y >= 0 && I.m_E[s].m_Z >= 0);
+            std::size_t nAlbedo = 0;
+            for (const auto& I : m_Instances)
+            {
+                if (!I.m_bAlive || I.m_SurfAlbedo.empty()) continue;
+                ++St.m_nColored;
+                for (const auto& a : I.m_SurfAlbedo) St.m_MeanAlbedo = St.m_MeanAlbedo + a;
+                nAlbedo += I.m_SurfAlbedo.size();
+                for (const auto& e : I.m_SurfEmission) St.m_nEmissive += (e.m_X + e.m_Y + e.m_Z) > 0.01f;
+            }
+            if (nAlbedo) St.m_MeanAlbedo = St.m_MeanAlbedo * (1.0f / float(nAlbedo));
             return St;
         }
 
@@ -1243,6 +1453,10 @@ namespace xlionrender::gi
             std::vector<v3>         m_E, m_Acc;                 // per surfel of the active level
             std::vector<float>      m_Valid, m_AccValid;
             std::vector<moments>    m_Moments;                  // per surfel of the active level (MomentTexel)
+            std::vector<v3>         m_SurfAlbedo, m_SurfEmission;     // per fine surfel (SetSurfelMaterial; empty: m_Albedo, none)
+            std::vector<basis>      m_Frac;                     // per surfel: the fraction of its light from around each basis direction (per channel)
+            std::vector<basis>      m_BasisAcc;                 // this pass: the light per basis direction
+            mutable std::vector<basis> m_Filtered;              // BasisLight's
             std::vector<std::array<float, 3 * moment_texels_v>> m_MomAcc;     // this pass: per texel the sum of d, of d^2, the count
             std::vector<std::array<std::uint16_t, moment_texels_v>> m_MomCount; // per texel the samples it has had (its blend: 1 / n, then slow)
             std::vector<estimator>  m_Est;                      // per surfel of the active level: its light over time
@@ -1287,6 +1501,9 @@ namespace xlionrender::gi
             I.m_Moments.resize(L.size());
             I.m_MomAcc.assign(L.size(), {});
             I.m_MomCount.assign(L.size(), {});
+            const v3 Third{ 1.0f / 3, 1.0f / 3, 1.0f / 3 };
+            I.m_Frac.assign(L.size(), basis{ Third, Third, Third });
+            I.m_BasisAcc.assign(L.size(), basis{});
             I.m_Est.resize(L.size());
             for (std::size_t s = 0; s < L.size(); ++s) I.m_Est[s].Seed(I.m_E[s]);
             for (std::size_t s = 0; s < L.size(); ++s)
@@ -1365,6 +1582,35 @@ namespace xlionrender::gi
         }
 
         // A vertex's weighted sum over its surfels at the instance's level (W: the total weight)
+        // The surface's colors at a ray hit: its fine surfels' (the hit triangle's vertices' surfels, the reads' weights), or the
+        // instance's albedo and no emission when it has none
+        void SurfaceAt(const hit& H, v3& Albedo, v3& Emission) const noexcept
+        {
+            const auto& I = m_Instances[H.m_Inst];
+            Albedo = I.m_Albedo; Emission = { 0, 0, 0 };
+            if (I.m_SurfAlbedo.empty() && I.m_SurfEmission.empty()) return;
+            const auto& M = *I.m_pMesh; const auto& T = M.m_Tris[H.m_Tri];
+            const float Bc[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
+            const v3 P = M.m_Pos[T[0]] * Bc[0] + M.m_Pos[T[1]] * Bc[1] + M.m_Pos[T[2]] * Bc[2];
+            v3 SA{ 0, 0, 0 }, SE{ 0, 0, 0 }; float W = 0;
+            for (int k = 0; k < 3; ++k)
+                for (int s : M.m_VertSurfels[T[k]])
+                {
+                    if (s < 0) continue;
+                    const auto& S = M.m_Levels[0][s];
+                    const float c = S.m_Normal.Dot(M.m_Nrm[T[k]]);
+                    if (c < 0.5f) continue;
+                    const float f = std::max(0.0f, 1.0f - (P - S.m_Center).Length() / (2.0f * S.m_Radius));
+                    const float w = (f * f * c + 1e-6f) * Bc[k];
+                    if (!I.m_SurfAlbedo.empty())   SA = SA + I.m_SurfAlbedo[s] * w;
+                    if (!I.m_SurfEmission.empty()) SE = SE + I.m_SurfEmission[s] * w;
+                    W += w;
+                }
+            if (W <= 0) return;
+            if (!I.m_SurfAlbedo.empty()) Albedo = SA * (1.0f / W);
+            Emission = SE * (1.0f / W);
+        }
+
         v3 ReadVertex(const instance& I, int Vertex, float& W) const noexcept
         {
             const auto& M = *I.m_pMesh;

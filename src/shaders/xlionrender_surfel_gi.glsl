@@ -4,7 +4,8 @@
 //          [4] its cell size (float bits), [5] its lists, [6] the table's longest probe; from 8: per vertex 2 uints (4 x 16-bit level 0 surfel indices, 0xFFFF none);
 //          per surfel 8 floats: center xyz, radius, normal xyz, parent index (uint bits; level 0); the grid (surfel_mesh::BuildReadGrid):
 //          per table entry 4 uints { key low, key high (0xFFFFFFFF: empty), first, count }, the lists of level 0 surfel indices
-//  GILight: per surfel of the instance's active level: rgb irradiance, a validity (0: buried)
+//  GILight: per surfel of the instance's active level 3 vec4: its light around the 3 directions of the HL2 basis (GIBasisRead), the first
+//          one's w its validity (0: buried)
 //  GIMoment: per GILight surfel its depth moments (gi::MomentTexel): 16 hemi-octahedral texels of the mean and mean^2 distance its rays
 //          travel (mesh units, capped at its reach)
 #ifndef XLIONRENDER_SURFEL_GI_GLSL
@@ -25,6 +26,19 @@ vec3 GIDebugOr(in const vec3 Lit) { return g_GIDebug.w > 0.0 ? g_GIDebug.rgb : L
 
 vec3 GISurfelCenter(in const uint b) { return vec3(uintBitsToFloat(GIMesh[b]), uintBitsToFloat(GIMesh[b + 1u]), uintBitsToFloat(GIMesh[b + 2u])); }
 vec3 GISurfelNormal(in const uint b) { return vec3(uintBitsToFloat(GIMesh[b + 4u]), uintBitsToFloat(GIMesh[b + 5u]), uintBitsToFloat(GIMesh[b + 6u])); }
+
+// What a normal n reads of a surfel's light (its HL2 basis, gi::BasisDirs / BasisWeights): the 3 colors weighted by n's squared
+// cosines to the surfel's basis directions (normalized). The surfel's own normal reads their mean; a normal-mapped one leans to its side
+vec3 GIBasisRead(in const uint LightIndex, in const vec3 SurfelNormal, in const vec3 n)
+{
+    const vec3  T = normalize(cross(abs(SurfelNormal.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), SurfelNormal)), B = cross(SurfelNormal, T);
+    const float a = 0.40824829, b = 0.70710678, c = 0.57735027, d = 0.81649658;
+    const vec3  w = pow(max(vec3(dot(n, T * -a + B * b + SurfelNormal * c), dot(n, T * -a - B * b + SurfelNormal * c), dot(n, T * d + SurfelNormal * c)), vec3(0.0)), vec3(2.0));
+    const float s = w.x + w.y + w.z;
+    const vec3  wn = s > 1e-12 ? w / s : vec3(1.0 / 3.0);
+    return GILight[3u * LightIndex].rgb * wn.x + GILight[3u * LightIndex + 1u].rgb * wn.y + GILight[3u * LightIndex + 2u].rgb * wn.z;
+}
+float GIValidity(in const uint LightIndex) { return GILight[3u * LightIndex].w; }
 
 // The anti-leak terms of a read (Wicked Engine's surfel GI), times the falloff and normal weight:
 //  - the plane distance: a point off the surfel's plane (across a corner, the far side of a seam) fades within 0.7 of its reach
@@ -99,7 +113,7 @@ vec3 SurfelDebugColor(in const uint s)
 // sum(w E), sum(w) of the level 0 surfels that reach a point (mesh space position and normal): its cell of the read grid lists them.
 // The weight of the vertex read (falloff over 2 radii squared, times the normal match, times the validity). 0: no grid, or off the
 // surface's cells (the caller falls back to the vertex read)
-vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const uint LightOffset, in const uint Level)
+vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level)
 {
     uint First, Count;
     if (!GIReadCell(P, N, First, Count)) return vec4(0.0);
@@ -116,9 +130,9 @@ vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const uint LightOffset, 
         // levels: no pop at the switch)
         const uint  sl = Level == 1u ? GIMesh[b + 7u] : s;
         const uint  bl = Level == 1u ? GIMesh[1] + 8u * sl : b;
-        const vec4  E = GILight[LightOffset + sl];
-        const float w = f * f * c * E.w * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
-        Sum += vec4(E.rgb * w, w);
+        const float w = f * f * c * GIValidity(LightOffset + sl) * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
+        if (w <= 0.0) continue;
+        Sum += vec4(GIBasisRead(LightOffset + sl, GISurfelNormal(bl), Nmap) * w, w);       // the normal-mapped normal reads the basis
     }
     return Sum;
 }

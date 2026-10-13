@@ -21,6 +21,7 @@
 #include <vector>
 #include <functional>
 #include <unordered_map>
+#include <deque>
 
 namespace xlionrender
 {
@@ -65,6 +66,8 @@ namespace xlionrender
         [[nodiscard]] xgpu::device::error* SetMeshGI    ( mesh_id Id, gi::surfel_mesh&& Surfels )             noexcept;
         // The last render's GI update (instances, rays, CPU ms)
                       const gi::world::stats& getGIStats( void ) const                                      noexcept { return m_GIStats; }
+                      const gi::world*        getGIWorld( void ) const                                      noexcept { return m_pGIWorld.get(); }      // tests, tools
+                      bool                    isGICapturing( void ) const                                   noexcept { return !m_GICaptures.empty(); }
 
         // A material: its HDR fragment shader (xmaterial::rt::getShaderHDR()) and its sampler bindings in shader order - slot 0
         // is the shadow map: the renderer binds its shadow atlas there whatever is given; then the textures. Neither is
@@ -142,12 +145,14 @@ namespace xlionrender
             bool                    m_bCluster      = false;
         };
 
+        static constexpr std::size_t capture_path_v = std::size_t(geom_kind::COUNT);      // the GI material capture's pipelines (getCaptureInstance)
+
         struct material_slot
         {
             const xgpu::shader*                                     m_pFragment = nullptr;
             std::vector<xgpu::texture*>                             m_Textures;     // slot 0 (shadow map) may be nullptr: white
-            std::array<xgpu::pipeline,          size_t(geom_kind::COUNT)> m_Pipeline;     // per vertex path, built on first use
-            std::array<xgpu::pipeline_instance, size_t(geom_kind::COUNT)> m_Instance;
+            std::array<xgpu::pipeline,          capture_path_v + 1> m_Pipeline;     // per vertex path (geom_kind, the GI capture last), built on first use
+            std::array<xgpu::pipeline_instance, capture_path_v + 1> m_Instance;
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
         };
@@ -164,6 +169,30 @@ namespace xlionrender
         std::vector<xgpu::pipeline::sampler>                    LitSamplers ( void ) const                     noexcept;
         std::vector<xgpu::pipeline_instance::sampler_binding>   LitBindings ( std::span<xgpu::texture* const> Textures ) noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
+        xgpu::pipeline_instance*    getCaptureInstance ( material_slot& Material )                              noexcept;
+        void                        processGICapture( xgpu::window& Window )                                    noexcept;
+
+        // The GI's material capture (processGICapture): a mesh's surfels drawn through their slots' real material shaders into
+        // m_GICaptureTex (each a 2 x 2 block: the albedo in the top half, the emission in the bottom), read back a few frames later into
+        // the solver (gi::world::SetSurfelMaterial). One job at a time
+        struct gi_capture_job
+        {
+            int                         m_GIId = -1;
+            mesh_id                     m_Mesh;
+            std::vector<material_id>    m_Materials;
+            std::uint32_t               m_Slot = 0;             // the draw's instance slot (the constant material reads it)
+            std::vector<int>            m_Order;                // placement -> surfel (sorted by material slot)
+            xgpu::buffer                m_Data;
+            std::uint64_t               m_Frame = 0;
+            bool                        m_bRecorded = false;
+        };
+        static constexpr int        gi_capture_w_v = 1024, gi_capture_h_v = 512, gi_capture_max_v = (gi_capture_w_v / 2) * (gi_capture_h_v / 4);   // 65536 surfels
+        std::deque<gi_capture_job>  m_GICaptures;
+        xgpu::texture               m_GICaptureTex;
+        xgpu::renderpass            m_GICapturePass;
+        xgpu::buffer                m_GICaptureVB, m_GICaptureIB;
+        xgpu::pipeline              m_GIConstCapturePipeline;   // the constant material's capture (geom standard)
+        xgpu::pipeline_instance     m_GIConstCaptureInstance;
 
         xgpu::device                m_Device;
         xgpu::vertex_descriptor     m_MeshVD;
@@ -189,7 +218,7 @@ namespace xlionrender
         std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
 
         // Surfel GI: the CPU world, draw id -> world instance, per draw this render's (first surfel in the light ring, level)
-        static constexpr int        gi_light_region_v       = 1 << 18;  // surfels per frame (vec4: irradiance, validity)
+        static constexpr int        gi_light_region_v       = 1 << 17;  // surfels per frame (3 vec4: the HL2 basis' colors, the first's w the validity)
         struct gi_track
         {
             xmath::fmat4            m_L2W;
@@ -205,6 +234,7 @@ namespace xlionrender
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
         std::uint64_t               m_GIRender = 0, m_GIFrame = ~0ull;
         int                         m_GIRingUsed = 0;
+        std::unordered_map<int, int> m_GIFrameRegion;           // this frame: per GI instance the first surfel of its uploaded light (one upload a frame)
         gi::world::stats            m_GIStats;
         void                        updateGI        ( const scene& Scene, const xmath::fvec3& Eye ) noexcept;
 

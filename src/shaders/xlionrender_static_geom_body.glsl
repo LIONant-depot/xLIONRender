@@ -31,6 +31,7 @@ layout(location = 9) out vec4 OutGI;                // surfel GI: sum(w E), sum(
 layout(location = 10) out vec3 OutGIPos;            // the per-pixel read (mb_standard_pbr.frag): mesh space position,
 layout(location = 11) out vec3 OutGINormal;         //   normal,
 layout(location = 12) flat out uvec2 OutGIRef;      //   the first surfel in GILight, the GI level (xlionrender_surfel_gi.glsl gi_none_v: none)
+layout(location = 13) out vec4 OutGITangent;        //   and the tangent (w: the binormal's sign): the normal-mapped normal in mesh space
 
 #ifdef XLION_GI
 #include "xlionrender_surfel_gi.glsl"
@@ -64,9 +65,8 @@ vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4
         if (c < 0.5) continue;
         const float d      = length(vec4(LocalPos - Center, 0.0) * L2wRows) / (2.0 * Radius * MeanScale);
         const float f      = max(0.0, 1.0 - d);
-        const vec4  E      = GILight[push.giOffset + s];
-        const float w      = (f * f * c + 1e-6) * E.w * GIVisibility(LocalPos, Center, Normal, Radius, push.giOffset + s);
-        Sum += vec4(E.rgb * w, w);
+        const float w      = (f * f * c + 1e-6) * GIValidity(push.giOffset + s) * GIVisibility(LocalPos, Center, Normal, Radius, push.giOffset + s);
+        Sum += vec4(GIBasisRead(push.giOffset + s, Normal, LocalNormal) * w, w);
     }
     return Sum;
 }
@@ -126,5 +126,6 @@ void main()
 #endif
     OutGIPos    = VertData.LocalPos.xyz;
     OutGINormal = VertData.Normal.xyz;
+    OutGITangent = VertData.Tangent;
 }
 

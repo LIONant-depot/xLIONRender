@@ -15,6 +15,9 @@ namespace xlionrender
         constexpr std::uint32_t s_StaticGeomVert[] = {
             #include "xlionrender_static_geom_vert.h"
         };
+        constexpr std::uint32_t s_GICaptureVert[] = {
+            #include "xlionrender_gi_capture_vert.h"
+        };
         constexpr std::uint32_t s_StaticGeomGIVert[] = {
             #include "xlionrender_static_geom_gi_vert.h"
         };
@@ -155,6 +158,13 @@ namespace xlionrender
         for( auto* p : { &m_EnvAtlasPass, &m_EnvDFGPass } )                                 m_Device.Destroy(std::move(*p));
         for( auto& P : m_EnvSourcePass ) m_Device.Destroy(std::move(P));
         for( auto* p : { &m_EnvAtlas, &m_EnvDFG } )                                         m_Device.Destroy(std::move(*p));
+        m_GICaptures.clear();
+        m_Device.Destroy(std::move(m_GICapturePass));
+        m_Device.Destroy(std::move(m_GICaptureTex));
+        ReleaseBuffer(m_GICaptureVB);
+        ReleaseBuffer(m_GICaptureIB);
+        m_Device.Destroy(std::move(m_GIConstCaptureInstance));
+        m_Device.Destroy(std::move(m_GIConstCapturePipeline));
         for( auto& T : m_EnvSource ) m_Device.Destroy(std::move(T));
         ReleaseBuffer(m_CellRing);
         ReleaseBuffer(m_MaterialUBO);
@@ -215,7 +225,7 @@ namespace xlionrender
         // Uniforms (dynamic UBO rings) - layouts in shaders/xlionrender_forward_standard_frag.glsl
         if( auto Err = Device.Create(m_LightUBO,    { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_lighting), .m_EntryCount = 16 }); Err ) return Err;
         if( auto Err = Device.Create(m_LightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_light_data), .m_EntryCount = ring_frames_v * light_region_v }); Err ) return Err;
-        if( auto Err = Device.Create(m_GILightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * gi_light_region_v }); Err ) return Err;
+        if( auto Err = Device.Create(m_GILightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * gi_light_region_v * 3 }); Err ) return Err;     // 3 vec4 a surfel: the HL2 basis
         if( auto Err = Device.Create(m_GIMomentRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * gi_light_region_v * gi::moment_texels_v }); Err ) return Err;
         {
             const std::uint32_t Zeros[8] = {};     // a GIMesh header: no surfels, no read grid
@@ -245,6 +255,20 @@ namespace xlionrender
             if( auto Err = Device.Create(m_EnvSource[k], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = env_source_size_v >> k, .m_Height = env_source_size_v >> k, .m_isGamma = false }); Err ) return Err;
         if( auto Err = Device.Create(m_EnvAtlas,  { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 384, .m_Height = 256, .m_isGamma = false }); Err ) return Err;
         if( auto Err = Device.Create(m_EnvDFG,    { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = env_dfg_size_v, .m_Height = env_dfg_size_v, .m_isGamma = false }); Err ) return Err;
+
+        // The GI's material capture: its target, pass, the quads (4 corners a surfel, twice: albedo and emission) and their indices
+        if( auto Err = Device.Create(m_GICaptureTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = gi_capture_w_v, .m_Height = gi_capture_h_v, .m_isGamma = false }); Err ) return Err;
+        {
+            auto A = std::array{ xgpu::renderpass::attachment{ m_GICaptureTex } };
+            if( auto Err = Device.Create(m_GICapturePass, { .m_Attachments = A }); Err ) return Err;
+        }
+        if( auto Err = Device.Create(m_GICaptureVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 8 * gi_capture_max_v }); Err ) return Err;
+        if( auto Err = Device.Create(m_GICaptureIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6 * gi_capture_max_v }); Err ) return Err;
+        (void)m_GICaptureIB.MemoryMap(0, 6 * gi_capture_max_v, [](void* p)
+        {
+            auto* I = static_cast<std::uint32_t*>(p);
+            for( std::uint32_t q = 0; q < std::uint32_t(gi_capture_max_v); ++q ) { const std::uint32_t v = 4 * q; const std::uint32_t Q[6] = { v, v + 1, v + 2, v, v + 2, v + 3 }; std::memcpy(I + 6 * q, Q, sizeof(Q)); }
+        });
         if( auto Err = Device.Create(m_ProbeAtlas,{ .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = probe_slots_x_v * 384, .m_Height = probe_slots_v / probe_slots_x_v * 256, .m_isGamma = false }); Err ) return Err;
 
         // Forward standard-material pipeline
@@ -323,6 +347,16 @@ namespace xlionrender
 
             auto Bindings = LitBindings({});
             if( auto Err = Device.Create(m_StaticGeomInstance, { .m_PipeLine = m_StaticGeomPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+
+            // and its GI capture (the constant material's albedo and emission, from the instance record)
+            xgpu::shader CaptureVert;
+            if( auto Err = Device.Create(CaptureVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
+            auto CaptureShaders = std::array<const xgpu::shader*, 2>{ &Frag, &CaptureVert };
+            xgpu::pipeline::setup CaptureSetup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = CaptureShaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
+                                              , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers };
+            CaptureSetup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+            if( auto Err = Device.Create(m_GIConstCapturePipeline, CaptureSetup); Err ) return Err;
+            if( auto Err = Device.Create(m_GIConstCaptureInstance, { .m_PipeLine = m_GIConstCapturePipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
         }
 
         // Tone map pipeline (fullscreen triangle sampling the view's HDR target)
@@ -683,6 +717,40 @@ namespace xlionrender
     xgpu::device::error* instance::CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept
     {
         return CreateMaterial(Id, m_DefaultMaterialFrag, Textures);
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    // A material's GI capture pipeline: its fragment shader in capture mode behind the capture vertex shader (the quads of
+    // shaders/xlionrender_gi_capture_vert.glsl), the rigid path's bindings (binding 0: the capture's surfel data)
+    xgpu::pipeline_instance* instance::getCaptureInstance( material_slot& M ) noexcept
+    {
+        constexpr auto k = capture_path_v;
+        if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
+        xgpu::shader Vert;
+        if( m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_GICaptureVert) }) ) return nullptr;
+        const auto Samplers = LitSamplers();
+        auto Shaders = std::array<const xgpu::shader*, 2>{ M.m_pFragment, &Vert };
+        using ub = xgpu::pipeline::uniform_binds;
+        const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
+        const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
+        const auto BothSSBO     = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
+        auto Binds = std::array
+        { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
+        , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
+        , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7)
+        };
+        xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
+                                   , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers };
+        Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+        if( m_Device.Create(M.m_Pipeline[k], Setup) ) return nullptr;
+        auto Bindings = LitBindings(M.m_Textures);
+        if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
+        {
+            m_Device.Destroy(std::move(M.m_Pipeline[k]));
+            return nullptr;
+        }
+        return &M.m_Instance[k];
     }
 
     //------------------------------------------------------------------------------------------------

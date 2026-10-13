@@ -101,6 +101,8 @@ namespace xlionrender
             {
                 const auto& Mat = D.m_Material;
                 It->second = W.Add(*pM->m_pGI, D.m_L2W, Mat.m_BaseColor * (1 - Mat.m_Metallic));
+                if( !pM->m_pGI->m_SurfelMaterial.empty() )      // its surfels' colors: captured from its materials (processGICapture)
+                    m_GICaptures.push_back({ .m_GIId = It->second, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u });
                 m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), It->second + 1));
                 m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), 0 };
             }
@@ -129,11 +131,11 @@ namespace xlionrender
 
         // This frame's light region (several renders per frame append)
         const std::uint64_t Frame = m_Device.getFrameIndex();
-        if( Frame != m_GIFrame ) { m_GIFrame = Frame; m_GIRingUsed = 0; }
+        if( Frame != m_GIFrame ) { m_GIFrame = Frame; m_GIRingUsed = 0; m_GIFrameRegion.clear(); }
         const int Base = int(Frame % ring_frames_v) * gi_light_region_v;
         std::vector<std::pair<int, int>> Written;          // (first surfel of the region, instance): their moments next
         const int Start = m_GIRingUsed;
-        (void)m_GILightRing.MemoryMap(Base + m_GIRingUsed, gi_light_region_v - m_GIRingUsed, [&](void* pMemory)
+        (void)m_GILightRing.MemoryMap(std::size_t(Base + m_GIRingUsed) * 3, std::size_t(gi_light_region_v - m_GIRingUsed) * 3, [&](void* pMemory)     // 3 vec4 a surfel
         {
             auto* pOut = static_cast<xmath::fvec4*>(pMemory);
             int   Used = 0;
@@ -141,11 +143,24 @@ namespace xlionrender
             {
                 const int Id = DrawId[i];
                 if( Id < 0 ) continue;
-                const auto& E = W.InstanceLight(Id);
+                // One upload a frame: the frame's other renders (the probes' faces, other views) read the same region. Each used to
+                // upload its own copy and the frame's region ran out: a render without GI, a different one every frame (flashing)
+                if( auto It = m_GIFrameRegion.find(Id); It != m_GIFrameRegion.end() )
+                {
+                    m_DrawGI[i] = { std::uint32_t(Base + It->second), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | (std::uint32_t(Scene.m_GI.m_Debug) << 9) };
+                    continue;
+                }
+                const auto& E = W.BasisLight(Id);              // shown: the HL2 basis, spatially filtered (the solver keeps its own)
                 const auto& V = W.InstanceValid(Id);
                 if( m_GIRingUsed + Used + int(E.size()) > gi_light_region_v ) continue;      // ponytail: no GI for what does not fit
-                for( std::size_t k = 0; k < E.size(); ++k ) pOut[Used + k] = xmath::fvec4(E[k], V[k]);
+                for( std::size_t k = 0; k < E.size(); ++k )
+                {
+                    pOut[3 * (Used + k) + 0] = xmath::fvec4(E[k][0], V[k]);
+                    pOut[3 * (Used + k) + 1] = xmath::fvec4(E[k][1], 0);
+                    pOut[3 * (Used + k) + 2] = xmath::fvec4(E[k][2], 0);
+                }
                 Written.push_back({ Used, Id });
+                m_GIFrameRegion[Id] = m_GIRingUsed + Used;
                 m_DrawGI[i] = { std::uint32_t(Base + m_GIRingUsed + Used), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | (std::uint32_t(Scene.m_GI.m_Debug) << 9) };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
                 Used += int(E.size());
             }
@@ -860,6 +875,114 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    // The GI's material capture, one job at a time: recorded (the mesh's surfels sorted by material slot, each a 2 x 2 quad through its
+    // slot's material in capture mode: the albedo in the top half, the emission in the bottom), then a few frames later (the GPU done
+    // with it) read back: each surfel's color the mean of its block, into the solver
+    void instance::processGICapture( xgpu::window& Window ) noexcept
+    {
+        if( m_GICaptures.empty() || !m_pGIWorld ) return;
+        auto&       J     = m_GICaptures.front();
+        const auto  Frame = m_Device.getFrameIndex();
+        const auto* pM    = findMesh(J.m_Mesh);
+        if( pM == nullptr || !pM->m_pGI ) { m_GICaptures.pop_front(); return; }     // (its buffer goes with it)
+        const auto& Mats  = pM->m_pGI->m_SurfelMaterial;
+        const int   n     = int(Mats.size());
+
+        if( !J.m_bRecorded )
+        {
+            if( n == 0 || n > gi_capture_max_v ) { m_GICaptures.pop_front(); return; }
+            J.m_Order.resize(n);
+            for( int i = 0; i < n; ++i ) J.m_Order[i] = i;
+            std::stable_sort(J.m_Order.begin(), J.m_Order.end(), [&](int a, int b) { return Mats[a].m_iMaterial < Mats[b].m_iMaterial; });
+
+            std::vector<xmath::fvec4> Data(2 * std::size_t(n));
+            const auto& L0 = pM->m_pGI->m_Levels[0];
+            for( int i = 0; i < n; ++i )
+            {
+                const auto& S = Mats[J.m_Order[i]];
+                Data[2 * i]     = xmath::fvec4(S.m_U, S.m_V, S.m_UVRadius, 0);
+                Data[2 * i + 1] = xmath::fvec4(L0[J.m_Order[i]].m_Normal, 0);
+            }
+            if( m_Device.Create(J.m_Data, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = 2 * n, .m_pData = Data.data() }) )
+            { m_GICaptures.pop_front(); return; }
+
+            (void)m_GICaptureVB.MemoryMap(0, 8 * std::size_t(n), [&](void* p)
+            {
+                auto* V = static_cast<float*>(p);
+                for( int Pass = 0; Pass < 2; ++Pass )
+                    for( int i = 0; i < n; ++i )
+                    {
+                        const float x0 = float(2 * (i % (gi_capture_w_v / 2))), y0 = float(2 * (i / (gi_capture_w_v / 2)) + Pass * gi_capture_h_v / 2);
+                        const float X[4] = { x0, x0 + 2, x0 + 2, x0 }, Y[4] = { y0, y0, y0 + 2, y0 + 2 };
+                        for( int c = 0; c < 4; ++c )
+                        {
+                            float* q = V + 2 * (std::size_t(Pass) * 4 * n + 4 * std::size_t(i) + c);
+                            q[0] = X[c] / gi_capture_w_v * 2 - 1;
+                            q[1] = Y[c] / gi_capture_h_v * 2 - 1;
+                        }
+                    }
+            });
+
+            auto  Cmd = Window.StartRenderPass(m_GICapturePass);
+            auto& ViewBlock = m_StaticGeomUBO.allocEntry<details::ubo_geom_view>();
+            std::memset(&ViewBlock, 0, sizeof(ViewBlock));
+            auto& Light = m_LightUBO.allocEntry<details::ubo_lighting>();
+            std::memset(&Light, 0, sizeof(Light));
+            std::array<xgpu::buffer*, 7> Buffers{ &J.m_Data, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(&pM->m_GIBuffer), &m_GILightRing, &m_GIMomentRing };
+            for( int a = 0; a < n; )
+            {
+                const std::uint32_t Slot = Mats[J.m_Order[a]].m_iMaterial;
+                int b = a;
+                while( b < n && Mats[J.m_Order[b]].m_iMaterial == Slot ) ++b;
+                auto* pMat  = Slot < J.m_Materials.size() ? findMaterial(J.m_Materials[Slot]) : nullptr;
+                auto* pInst = pMat ? getCaptureInstance(*pMat) : &m_GIConstCaptureInstance;
+                if( pInst == nullptr ) pInst = &m_GIConstCaptureInstance;
+                Cmd.setPipelineInstance(*pInst, std::span{ Buffers });
+                Cmd.setDynamicUBO(m_LightUBO, 1);
+                Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                Cmd.setBuffer(m_GICaptureVB);
+                Cmd.setBuffer(m_GICaptureIB);
+                for( int Pass = 0; Pass < 2; ++Pass )
+                {
+                    Cmd.setPushConstants(details::push_static_geom{ Pass ? std::uint32_t(-n) : 0u, J.m_Slot, 0u, (3u << 9) | (Pass ? 0x800u : 0u) });
+                    Cmd.Draw(6 * (b - a), 6 * a, Pass * 4 * n);
+                }
+                a = b;
+            }
+            J.m_bRecorded = true;
+            J.m_Frame     = Frame;
+            return;
+        }
+
+        if( Frame < J.m_Frame + ring_frames_v + 1 ) return;         // the GPU is done with it after the frames in flight
+        std::vector<std::byte> Raw;
+        int W = 0, H = 0;
+        if( m_Device.ReadTexture(m_GICaptureTex, Raw, W, H) == nullptr && W == gi_capture_w_v && H == gi_capture_h_v )
+        {
+            const auto Half = [](std::uint16_t h)
+            {
+                const std::uint32_t e = (h >> 10) & 0x1F, m = h & 0x3FF, s = std::uint32_t(h >> 15) << 31;
+                if( e == 0 ) return std::bit_cast<float>(s) + (m ? float(m) * (1.0f / 16777216.0f) * (s ? -1.0f : 1.0f) : 0.0f);
+                if( e == 31 ) return std::bit_cast<float>(s | 0x7F800000u | (m << 13));
+                return std::bit_cast<float>(s | ((e + 112) << 23) | (m << 13));
+            };
+            const auto* P = reinterpret_cast<const std::uint16_t*>(Raw.data());
+            const auto Texel = [&](int x, int y) { const auto* t = P + 4 * (std::size_t(y) * W + x); return xmath::fvec3(Half(t[0]), Half(t[1]), Half(t[2])); };
+            std::vector<xmath::fvec3> Albedo(n), Emission(n);
+            for( int i = 0; i < n; ++i )
+            {
+                const int x0 = 2 * (i % (W / 2)), y0 = 2 * (i / (W / 2));
+                const auto Block = [&](int y) { return (Texel(x0, y) + Texel(x0 + 1, y) + Texel(x0, y + 1) + Texel(x0 + 1, y + 1)) * 0.25f; };
+                Albedo[J.m_Order[i]]   = Block(y0);
+                Emission[J.m_Order[i]] = Block(y0 + H / 2);
+            }
+            m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission));
+        }
+        m_GICaptures.pop_front();                                       // its buffer goes with it (xgpu's deferred destroy)
+    }
+
+    //------------------------------------------------------------------------------------------------
+
     void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& Camera, const overlay_fn& Overlay ) noexcept
     {
         assert(m_bReady && View.m_Width > 0);
@@ -877,6 +1000,7 @@ namespace xlionrender
         updateEnvironment(Window, Scene);
         updateInstances(Window, Scene, Eye);
         updateGI(Scene, Eye);                                   // CPU (getGIStats); the probes' captures read it too
+        processGICapture(Window);                               // the surfels' material colors (one mesh at a time)
         const auto T1 = clock::now();
         Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
         renderShadows(Window, Scene, Eye, ProjScale);
