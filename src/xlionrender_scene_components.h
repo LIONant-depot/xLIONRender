@@ -124,6 +124,7 @@ namespace xlionrender
         int             m_GIRayBudget   = 16384;
         bool            m_bGIPerPixel   = true;            // near, every pixel reads the surfels (no extra vertices needed); off: the vertices only
         gi_debug        m_GIDebug       = gi_debug::NONE;
+        float           m_GIEmissiveScale = 100.0f;         // self-illumination as lights: their emission x this, for the GI
 
         XPROPERTY_DEF
         ( "Environment", environment
@@ -134,6 +135,7 @@ namespace xlionrender
         , obj_member<"Ambient",      &environment::m_Ambient>
         , obj_member<"GI",           &environment::m_bGI,         member_help<"Diffuse global illumination (surfels): bounce light from every mesh that has surfels">>
         , obj_member<"GIRayBudget",  &environment::m_GIRayBudget, member_help<"Rays traced per frame for the GI: more converges faster, costs more CPU">>
+        , obj_member<"GIEmissiveScale", &environment::m_GIEmissiveScale, member_help<"Self-illuminated materials light the scene through the GI with their emission times this (0: they light nothing; their own look does not change)">>
         , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone">>
         , obj_member<"GIPerPixel",   &environment::m_bGIPerPixel, member_help<"Near meshes read the GI per pixel (a mesh needs no extra vertices for it); off: per vertex only (cheaper, needs dense meshes)">>
         )

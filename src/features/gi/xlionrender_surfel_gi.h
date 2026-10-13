@@ -1029,6 +1029,7 @@ namespace xlionrender::gi
         {
             int     m_RaysPerSurfel = 8;
             float   m_MinBlend      = 0;        // the warm-up's blend (1 / n after a change) never below this (1: every pass replaces)
+            float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
             float   m_LodDistance   = 40;       // beyond it (eye to bounds) an instance holds its parent level
             float   m_ChangeMargin  = 4;        // a moved instance dirties the instances within this distance of its bounds
         };
@@ -1086,6 +1087,8 @@ namespace xlionrender::gi
 
         const std::vector<v3>& SurfelAlbedo  ( int Id ) const noexcept { return m_Instances[Id].m_SurfAlbedo; }
         const std::vector<v3>& SurfelEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }
+
+        void DirtyAll() noexcept { for (auto& I : m_Instances) if (I.m_bAlive) I.m_bDirty = true; }
 
         // The instance stops casting, bouncing and updating (its id is not reused)
         void Remove(int Id) noexcept
@@ -1465,7 +1468,7 @@ namespace xlionrender::gi
             }
             for (const auto& [i, e] : m_Emitters)
             {
-                const v3 Le = m_Instances[i].m_SurfEmission[e];
+                const v3 Le = m_Instances[i].m_SurfEmission[e] * m_Setup.m_EmissiveScale;
                 if (Le.m_X + Le.m_Y + Le.m_Z > St.m_MaxEmitter.m_X + St.m_MaxEmitter.m_Y + St.m_MaxEmitter.m_Z) St.m_MaxEmitter = Le;
             }
             return St;
@@ -1629,7 +1632,7 @@ namespace xlionrender::gi
         // (an emitter's light reaches it as its radiance x its area x both cosines / distance^2) and keeps the strongest that nothing
         // hides (a shadow ray each), once - not by waiting for 8 random rays to find a small sign. Rebuilt when emitters or placements
         // change
-        static constexpr int max_links_v = 16;
+        static constexpr int max_links_v = 32;                 // enough that neighbors keep about the same emitters (no steps where their sets differ)
         void RebuildEmitterLinks() noexcept
         {
             m_Emitters.clear();
@@ -1669,7 +1672,7 @@ namespace xlionrender::gi
                         const v3 Dn = D * (1.0f / std::sqrt(d2));
                         const float cr = N.Dot(Dn), ce = -Em[k].m_N.Dot(Dn);
                         if (cr <= 0 || ce <= 0) continue;
-                        Cand.push_back({ Em[k].m_A * cr * ce / std::max(d2, Em[k].m_A), k });
+                        Cand.push_back({ Em[k].m_A * cr * ce / (d2 + Em[k].m_A), k });       // a small disk, not a point: soft up close (no hotspot next to an emitter)
                     }
                     std::sort(Cand.begin(), Cand.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
                     const basis Dirs = BasisDirs(L[s].m_Normal);
@@ -1708,7 +1711,7 @@ namespace xlionrender::gi
                     {
                         const auto& Lk = I.m_Links[k];
                         const auto& Em = m_Emitters[Lk.m_Emitter];
-                        const v3    Le = m_Instances[Em.first].m_SurfEmission[Em.second] * Lk.m_W;
+                        const v3    Le = m_Instances[Em.first].m_SurfEmission[Em.second] * (Lk.m_W * m_Setup.m_EmissiveScale);
                         for (int i = 0; i < 3; ++i) Fine[s][i] = Fine[s][i] + Le * (3.0f * Lk.m_Bw[i]);     // the basis' mean is the irradiance
                     }
                 if (I.m_Level == 0) { I.m_EmitB = std::move(Fine); continue; }
@@ -1750,7 +1753,7 @@ namespace xlionrender::gi
                 }
             if (W <= 0) return;
             if (!I.m_SurfAlbedo.empty()) Albedo = SA * (1.0f / W);
-            Emission = SE * (1.0f / W);
+            Emission = SE * (m_Setup.m_EmissiveScale / W);
         }
 
         v3 ReadVertex(const instance& I, int Vertex, float& W) const noexcept

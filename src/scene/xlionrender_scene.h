@@ -125,6 +125,7 @@ namespace xlionrender
         int             m_RayBudget     = 16384;
         bool            m_bPerPixel     = true;     // near (the fine surfels) the pixels read the surfels themselves (the mesh's read grid), far the vertices
         gi_debug        m_Debug         = gi_debug::NONE;
+        float           m_EmissiveScale = 100;      // self-illuminated materials are lights with no light entity, their emission a texture color (0..1): the GI takes it this many times brighter (their look on screen stays)
     };
 
     struct scene

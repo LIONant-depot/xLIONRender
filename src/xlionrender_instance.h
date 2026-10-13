@@ -186,9 +186,6 @@ namespace xlionrender
             std::uint64_t               m_Frame = 0;
             bool                        m_bRecorded = false;
         };
-        // Self-illuminated materials are lights the scene has no light entity for, but their emission is a texture color (0..1): the GI
-        // takes it this many times brighter (their look on screen stays as it is)
-        static constexpr float      gi_emissive_scale_v = 100.0f;
         static constexpr int        gi_capture_w_v = 1024, gi_capture_h_v = 512, gi_capture_max_v = (gi_capture_w_v / 2) * (gi_capture_h_v / 4);   // 65536 surfels
         std::deque<gi_capture_job>  m_GICaptures;
         xgpu::texture               m_GICaptureTex;

@@ -127,6 +127,11 @@ namespace xlionrender
         L.m_Sky          = Scene.m_Sky.m_Intensity > 0 ? (Scene.m_Sky.m_Zenith + Scene.m_Sky.m_Horizon) * (0.5f * Scene.m_Sky.m_Intensity) : Scene.m_Ambient * (1.0f / gi::pi_v);
         L.m_Points.reserve(Scene.m_LocalLights.size());
         for( const auto& LL : Scene.m_LocalLights ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });
+        if( W.m_Setup.m_EmissiveScale != Scene.m_GI.m_EmissiveScale )          // a new scale: every instance re-solves
+        {
+            W.m_Setup.m_EmissiveScale = Scene.m_GI.m_EmissiveScale;
+            W.DirtyAll();
+        }
         m_GIStats = W.Update(L, Eye, Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));
 
         // This frame's light region (several renders per frame append)
@@ -974,7 +979,7 @@ namespace xlionrender
                 const int x0 = 2 * (i % (W / 2)), y0 = 2 * (i / (W / 2));
                 const auto Block = [&](int y) { return (Texel(x0, y) + Texel(x0 + 1, y) + Texel(x0, y + 1) + Texel(x0 + 1, y + 1)) * 0.25f; };
                 Albedo[J.m_Order[i]]   = Block(y0);
-                Emission[J.m_Order[i]] = Block(y0 + H / 2) * gi_emissive_scale_v;      // as the lights they are (gi_emissive_scale_v)
+                Emission[J.m_Order[i]] = Block(y0 + H / 2);                           // as captured (the world scales it: scene::gi_settings::m_EmissiveScale)
             }
             m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission));
         }
