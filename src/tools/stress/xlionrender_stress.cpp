@@ -31,6 +31,7 @@ namespace
         std::string     m_Csv       = "xlionrender_stress.csv";
         bool            m_bValidate = false;
         bool            m_bLoop     = false;
+        int             m_GI        = 0;            // surfel GI: rays per render (0: off); the meshes are tessellated and get surfels
         int             m_Probes    = 0;            // reflection probes along the walked street (captured 1 face per frame)        // repeat the scenarios until the window closes (to watch the title's readout)
     };
 
@@ -50,6 +51,7 @@ namespace
             else if (A == "--validate") O.m_bValidate = true;
             else if (A == "--loop")     O.m_bLoop     = true;
             else if (A == "--probes")   O.m_Probes    = std::max(0, std::atoi(Next().c_str()));
+            else if (A == "--gi")       O.m_GI        = std::max(1, std::atoi(Next().c_str()));
         }
         return O;
     }
@@ -70,11 +72,14 @@ namespace
     bool BuildCity(xgpu::device& Device, xlionrender::instance& Renderer, const options& O, city& C)
     {
         // Primitive kinds: box, sphere, cylinder, capsule (unit sized; a cluster scale of 1)
+        // With GI: tessellated (the vertex read needs vertices where the light changes: ~1 m on a building) and a ground of its own
+        const bool bGI = O.m_GI > 0;
         const xprim_geom::mesh Prims[] =
-        { xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 })
+        { bGI ? xprim_geom::cube::Generate(7, 7, 7, 7, xprim_geom::float3{ 1, 1, 1 }) : xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 })
         , xprim_geom::uvsphere::Generate(16, 16, 1, 0.5f)
-        , xprim_geom::cylinder::Generate(1, 16, 1.0f, 0.5f, 0.5f)
+        , xprim_geom::cylinder::Generate(bGI ? 3 : 1, 16, 1.0f, 0.5f, 0.5f)
         , xprim_geom::capsule::Generate(8, 16, 0.25f, 1.0f)
+        , bGI ? xprim_geom::cube::Generate(95, 1, 95, 95, xprim_geom::float3{ 1, 1, 1 }) : xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 })   // the ground
         };
         C.m_Buffers.resize(std::size(Prims));
         C.m_Meshes.resize(std::size(Prims));
@@ -82,7 +87,9 @@ namespace
         {
             if (!MakeStaticBuffers(Device, Prims[k], 1.0f, C.m_Buffers[k])) return false;
             if (Renderer.CreateClusterGeom(C.m_Meshes[k], C.m_Buffers[k].Geom())) return false;
+            if (bGI && Renderer.SetMeshGI(C.m_Meshes[k], MakeSurfels(Prims[k], k == 4 ? 0.012f : 0.15f, k == 4 ? 0.04f : 0.45f))) return false;   // unit meshes: radii in mesh units
         }
+        C.m_Scene.m_GI = { .m_bEnable = bGI, .m_RayBudget = O.m_GI };
 
         std::mt19937 R(1234);
         std::uniform_real_distribution<float> U(0, 1);
@@ -95,7 +102,7 @@ namespace
         auto& Draws = C.m_Scene.m_Draws;
         std::uint32_t ID = 1;
         C.m_HalfSize = O.m_Grid * pitch_v * 0.5f;
-        Draws.push_back({ .m_Mesh = C.m_Meshes[0], .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.5f, 0 }) * xmath::fmat4::fromScale({ 2 * C.m_HalfSize + 20, 1, 2 * C.m_HalfSize + 20 })
+        Draws.push_back({ .m_Mesh = C.m_Meshes[4], .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.5f, 0 }) * xmath::fmat4::fromScale({ 2 * C.m_HalfSize + 20, 1, 2 * C.m_HalfSize + 20 })
                         , .m_Material = { .m_BaseColor = { 0.25f, 0.25f, 0.27f }, .m_Roughness = 0.9f }, .m_Instance = ID++ });
         for (int bz = 0; bz < O.m_Grid; ++bz)
         for (int bx = 0; bx < O.m_Grid; ++bx)
@@ -165,6 +172,7 @@ namespace
     {
         double  m_WallMs, m_RenderMs, m_InstancesMs, m_ShadowsCpuMs, m_CellsMs, m_WaitMs;
         double  m_GpuShadowMs, m_GpuSceneMs, m_GpuToneMapMs;
+        double  m_GIMs;
         int     m_ShadowTiles;
         int     m_DrawsRendered;
     };
@@ -187,6 +195,7 @@ namespace
         Report("  instances ms",        [](const frame_sample& s) { return s.m_InstancesMs; });
         Report("  shadows ms",          [](const frame_sample& s) { return s.m_ShadowsCpuMs; });
         Report("  light cells ms",      [](const frame_sample& s) { return s.m_CellsMs; });
+        Report("  GI update ms",        [](const frame_sample& s) { return s.m_GIMs; });
         Report("CPU wait ms",           [](const frame_sample& s) { return s.m_WaitMs; });
         Report("GPU shadows ms",        [](const frame_sample& s) { return s.m_GpuShadowMs; });
         Report("GPU scene ms",          [](const frame_sample& s) { return s.m_GpuSceneMs; });
@@ -263,7 +272,7 @@ int main(int argc, char** argv)
             const auto  Now = clock::now();
             const auto& Cpu = Renderer.getCPUTimes();
             frame_sample S{ Ms(Last, Now), Cpu.m_RenderMs, Cpu.m_InstancesMs, Cpu.m_ShadowsMs, Cpu.m_LightCellsMs, Ms(W0, W1) + Ms(P0, P1)
-                          , Gpu.m_ShadowMs, Gpu.m_SceneMs, Gpu.m_ToneMapMs, Renderer.getShadowTilesRendered(), Renderer.getDrawsRendered() };
+                          , Gpu.m_ShadowMs, Gpu.m_SceneMs, Gpu.m_ToneMapMs, O.m_GI ? Renderer.getGIStats().m_Ms : 0.0, Renderer.getShadowTilesRendered(), Renderer.getDrawsRendered() };
             Last = Now;
             Samples.push_back(S);
             static const char* Modes[] = { "exact", "cells", "sampled" };
@@ -276,9 +285,9 @@ int main(int argc, char** argv)
                 if (TitleMs >= 500.0)
                 {
                     char Title[256];
-                    std::snprintf(Title, sizeof(Title), "xLIONRender stress - %s - %.0f FPS (%.2f ms) - CPU Render %.2f ms - GPU %.2f ms - %d/%d draws - %d lights %s"
-                                 , Scenario.c_str(), 1000.0 * nTitle / TitleMs, TitleMs / nTitle, TitleCpu / nTitle, TitleGpu / nTitle
-                                 , S.m_DrawsRendered, int(C.m_Scene.m_Draws.size()), int(C.m_Scene.m_LocalLights.size()), Modes[int(Renderer.getLightModeUsed())]);
+                    std::snprintf(Title, sizeof(Title), "xLIONRender stress - %s - %.0f FPS (%.2f ms) - CPU Render %.2f ms (GI %.2f) - GPU %.2f ms - %d/%d draws - %d lights %s%s"
+                                 , Scenario.c_str(), 1000.0 * nTitle / TitleMs, TitleMs / nTitle, TitleCpu / nTitle, S.m_GIMs, TitleGpu / nTitle
+                                 , S.m_DrawsRendered, int(C.m_Scene.m_Draws.size()), int(C.m_Scene.m_LocalLights.size()), Modes[int(Renderer.getLightModeUsed())], O.m_GI ? " - GI on" : "");
                     Window.setTitle(Title);
                     TitleMs = TitleCpu = TitleGpu = 0;
                     nTitle  = 0;

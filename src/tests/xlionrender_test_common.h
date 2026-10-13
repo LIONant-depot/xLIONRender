@@ -58,6 +58,20 @@ namespace xlionrender::test
 
     inline xprim_geom::mesh MakeSphere() noexcept { return xprim_geom::uvsphere::Generate(32, 32, 1, 0.5f); }
 
+    // A mesh's surfels for GI (gi::surfel_mesh::Bake) in its vertex order - what the xgeom compiler's GI options will bake
+    inline gi::surfel_mesh MakeSurfels(const xprim_geom::mesh& Prim, float Radius, float ParentRadius) noexcept
+    {
+        gi::surfel_mesh S;
+        for (const auto& V : Prim.m_Vertices)
+        {
+            S.m_Pos.push_back({ V.m_Position.m_X, V.m_Position.m_Y, V.m_Position.m_Z });
+            S.m_Nrm.push_back({ V.m_Normal.m_X, V.m_Normal.m_Y, V.m_Normal.m_Z });
+        }
+        for (std::size_t i = 0; i + 2 < Prim.m_Indices.size(); i += 3) S.m_Tris.push_back({ int(Prim.m_Indices[i]), int(Prim.m_Indices[i + 1]), int(Prim.m_Indices[i + 2]) });
+        S.Bake(Radius, ParentRadius);
+        return S;
+    }
+
     // Octahedral encoding into [0,1]^2, the inverse of oct_decode in the xgeom_* vertex shaders
     inline void OctEncode(float X, float Y, float Z, float& U, float& V) noexcept
     {
