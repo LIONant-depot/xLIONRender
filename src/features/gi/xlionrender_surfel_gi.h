@@ -1044,7 +1044,7 @@ namespace xlionrender::gi
                         const float c = L[s].m_Normal.Dot(L[n].m_Normal);
                         if (c < 0.8f) return;
                         const float f = 1.0f - (L[n].m_Center - L[s].m_Center).Length() / (2 * L[s].m_Radius);
-                        if (f <= 0 || !(Sees(L[s].m_Center, L[s].m_Normal, L[n]) || SeesLifted(L[s], L[n]))) return;
+                        if (f <= 0 || !SameLayer(L[s], L[n])) return;
                         Per[s].push_back({ std::uint32_t(n), f * c });      // linear: a neighbor counts (squared, the read's falloff, it barely did)
                     });
                 });
@@ -1149,12 +1149,23 @@ namespace xlionrender::gi
             }
         }
 
-        // Does a point on the surface (its normal) see a surfel: nothing between them, both lifted off their surfaces a little
-        // Do two surfels see each other from half a radius off their surfaces? Fine stacked geometry (blinds, louvres) blocks the line
-        // along the surface between its surfels, but not the room in front of it; a wall between two floor surfels still blocks it
-        bool SeesLifted(const surfel& A, const surfel& B) const noexcept
+        // The display filter's neighbors (BuildNeighbors): one surface layer, not merely in sight of each other. A layer is layer_v of a
+        // radius thick: each center within it of the other's plane (blinds' slats, a centimeter of relief, are one layer; the window
+        // frame 10 cm behind them is another), and nothing between them higher than it (the line between them lifted by it is clear:
+        // the slats' edges do not stop it, a baseboard or a wall does). It was: in sight from half a radius off the surface - over
+        // everything lower than that, into the layer behind
+        static constexpr float layer_v = 0.1f;
+        bool SameLayer(const surfel& A, const surfel& B) const noexcept
         {
-            const float h = 0.5f * A.m_Radius;
+            const float h = layer_v * A.m_Radius;
+            const v3 D = B.m_Center - A.m_Center;
+            if (std::abs(D.Dot(A.m_Normal)) > h || std::abs(D.Dot(B.m_Normal)) > h) return false;
+            return Sees(A.m_Center, A.m_Normal, B) || SeesLifted(A, B, h);
+        }
+
+        // Do two surfels see each other from h off their surfaces (the risers up to there clear too)?
+        bool SeesLifted(const surfel& A, const surfel& B, float h) const noexcept
+        {
             const v3 P = A.m_Center + A.m_Normal * h, Q = B.m_Center + B.m_Normal * h;
             const auto Clear = [&](const v3& From, const v3& To)
             {

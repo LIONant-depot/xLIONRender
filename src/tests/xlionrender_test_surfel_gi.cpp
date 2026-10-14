@@ -413,6 +413,37 @@ int main()
         CHECK(nCross == 0, "%d floor surfels are filtered with the other side of the wall", nCross);
     }
 
+    // 6o. The filter's neighbors are one surface layer (SameLayer), not merely in sight from half a radius off the surface: a 10 cm step
+    //     (two layers) and a 15 cm curb between two floors (a barrier) keep the two sides apart, at the Police Station's surfel size
+    {
+        const auto Across = [](const surfel_mesh& M)
+        {
+            const auto& L0 = M.m_Levels[0]; const auto& Nb = M.m_Neighbors[0];
+            int n = 0;
+            for (std::size_t s = 0; s < L0.size(); ++s)
+                for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k)
+                {
+                    const auto& A = L0[s]; const auto& B = L0[Nb.m_Index[k]];
+                    n += A.m_Normal.m_Y > 0.9f && B.m_Normal.m_Y > 0.9f && (A.m_Center.m_X < -0.05f) != (B.m_Center.m_X < -0.05f) && std::abs(A.m_Center.m_X) > 0.05f && std::abs(B.m_Center.m_X) > 0.05f;
+                }
+            return n;
+        };
+        surfel_mesh Step;
+        AddQuad(Step, { -2, 0, -2 }, { 0, 0, 4 }, { 2, 0, 0 }, 0.5f);                  // the lower floor
+        AddQuad(Step, { 0, 0.1f, -2 }, { 0, 0, 4 }, { 2, 0, 0 }, 0.5f);               // the upper one, 10 cm up
+        AddQuad(Step, { 0, 0, -2 }, { 0, 0.1f, 0 }, { 0, 0, 4 }, 0.5f);                // the riser, facing -x
+        Step.Bake(0.5f, 1.5f);
+        surfel_mesh Curb;
+        AddQuad(Curb, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);                  // one floor
+        AddQuad(Curb, { -0.02f, 0, -2 }, { 0, 0.15f, 0 }, { 0, 0, 4 }, 0.5f);          // a curb across it: 15 cm high, 4 cm wide
+        AddQuad(Curb, { 0.02f, 0, -2 }, { 0, 0, 4 }, { 0, 0.15f, 0 }, 0.5f);
+        AddQuad(Curb, { -0.02f, 0.15f, -2 }, { 0, 0, 4 }, { 0.04f, 0, 0 }, 0.5f);
+        Curb.Bake(0.5f, 1.5f);
+        const int nStep = Across(Step), nCurb = Across(Curb);
+        std::printf("filter neighbors across a 10 cm step: %d, across a 15 cm curb: %d\n", nStep, nCurb);
+        CHECK(nStep == 0 && nCurb == 0, "the filter blends surfaces apart: %d across the step, %d across the curb", nStep, nCurb);
+    }
+
     // 6n. Closed blinds (slats stacked tighter than a surfel, each tilted): the slats block the line along the surface between their
     //     surfels, but lifted off it they see each other - the spatial filter blends them (else each keeps its own slat's shadowing: blotches)
     {
