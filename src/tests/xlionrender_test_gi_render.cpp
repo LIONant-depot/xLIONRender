@@ -165,15 +165,61 @@ int main()
         const auto* pW = Renderer.getGIWorld();
         CHECK(pW && !Renderer.isGICapturing(), "the captures did not finish");
         const auto Mean = [&](const std::vector<xmath::fvec3>& V) { xmath::fvec3 m{ 0, 0, 0 }; for (const auto& v : V) m = m + v; return V.empty() ? m : m * (1.0f / float(V.size())); };
-        const auto Red = Mean(pW->SurfelAlbedo(3)), Floor = Mean(pW->SurfelAlbedo(0)), Glow = Mean(pW->SurfelEmission(3));
+        const auto Red = Mean(pW->SurfelAlbedo(Renderer.getGIId(4))), Floor = Mean(pW->SurfelAlbedo(Renderer.getGIId(1))), Glow = Mean(pW->SurfelEmission(Renderer.getGIId(4)));
         std::printf("captured: red wall %.3f %.3f %.3f (0.8 0.05 0.05), floor %.3f %.3f %.3f (0.75), emission %.3f\n", Red.m_X, Red.m_Y, Red.m_Z, Floor.m_X, Floor.m_Y, Floor.m_Z, Glow.m_X + Glow.m_Y + Glow.m_Z);
         CHECK(std::abs(Red.m_X - 0.8f) < 0.05f && Red.m_Y < 0.1f && std::abs(Floor.m_X - 0.75f) < 0.05f, "the captured albedo is wrong");
         CHECK(Glow.m_X + Glow.m_Y + Glow.m_Z < 0.01f, "something emits");
         // ... and each triangle its own (what a ray hit bounces)
-        const auto& Tri = pW->TriangleAlbedo(3);
+        const auto& Tri = pW->TriangleAlbedo(Renderer.getGIId(4));
         const auto  TRed = Mean(Tri);
         std::printf("captured triangles: red wall %zu, %.3f %.3f %.3f\n", Tri.size(), TRed.m_X, TRed.m_Y, TRed.m_Z);
         CHECK(!Tri.empty() && std::abs(TRed.m_X - 0.8f) < 0.05f && TRed.m_Y < 0.1f, "the triangles' captured albedo is wrong");
+    }
+
+    // The red wall's material changes (a material compiled again makes a new material_id): its surfels and triangles are captured again.
+    // Changed twice in a row (the first capture still in flight): only the last one's colors stay
+    {
+        const auto MakeColor = [&](std::uint32_t Texel, xgpu::texture& T, xlionrender::material_id& Id)
+        {
+            const auto Mips = std::array{ xgpu::texture::setup::mip_size{ sizeof(Texel) } };
+            const auto Slots = std::array<xgpu::texture*, 2>{ nullptr, &T };       // slot 0: no shadow map
+            return !Device.Create(T, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
+                                     , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Texel), sizeof(Texel) }, .m_isGamma = false })
+                && !Renderer.CreateDefaultMaterial(Id, Slots);
+        };
+        xgpu::texture GreenT, BlueT;
+        xlionrender::material_id Green, Blue;
+        CHECK(MakeColor(0xff00cc00u, GreenT, Green) && MakeColor(0xffcc0000u, BlueT, Blue), "the green and blue materials");     // RGBA little endian
+        const auto* pW = Renderer.getGIWorld();
+        const auto Mean = [&](const std::vector<xmath::fvec3>& V) { xmath::fvec3 m{ 0, 0, 0 }; for (const auto& v : V) m = m + v; return V.empty() ? m : m * (1.0f / float(V.size())); };
+        float MaxBlue = 0;                                                          // the wall's blue on any frame (the blue capture must never land)
+        const auto Recapture = [&](std::vector<xlionrender::material_id> M)
+        {
+            Scene.m_Draws[3].m_Materials = std::move(M);
+            bool bOk = App.RenderFrame(Scene, View, Camera);
+            for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f)
+            {
+                bOk = App.RenderFrame(Scene, View, Camera) && bOk;
+                MaxBlue = std::max(MaxBlue, Mean(pW->SurfelAlbedo(Renderer.getGIId(4))).m_Z);
+            }
+            return bOk && !Renderer.isGICapturing();
+        };
+        CHECK(Recapture({ Green }), "the green capture did not finish");
+        const auto G = Mean(pW->SurfelAlbedo(Renderer.getGIId(4))), GT = Mean(pW->TriangleAlbedo(Renderer.getGIId(4)));
+        Scene.m_Draws[3].m_Materials = { Blue };
+        CHECK(App.RenderFrame(Scene, View, Camera), "Render blue");               // its capture queued (and maybe recorded): then the material changes back
+        MaxBlue = 0;
+        CHECK(Recapture({}), "the red capture did not finish");
+        CHECK(MaxBlue < 0.1f, "the capture of the material it no longer has landed (blue %.2f)", MaxBlue);
+        const auto R = Mean(pW->SurfelAlbedo(Renderer.getGIId(4))), RT = Mean(pW->TriangleAlbedo(Renderer.getGIId(4)));
+        std::printf("recaptured: green %.2f %.2f %.2f (triangles %.2f %.2f %.2f); blue then red: %.2f %.2f %.2f (triangles %.2f %.2f %.2f)\n"
+                   , G.m_X, G.m_Y, G.m_Z, GT.m_X, GT.m_Y, GT.m_Z, R.m_X, R.m_Y, R.m_Z, RT.m_X, RT.m_Y, RT.m_Z);
+        CHECK(G.m_Y > 0.5f && G.m_X < 0.1f && GT.m_Y > 0.5f && GT.m_X < 0.1f, "the new material was not captured again");
+        CHECK(std::abs(R.m_X - 0.8f) < 0.05f && R.m_Z < 0.1f && std::abs(RT.m_X - 0.8f) < 0.05f && RT.m_Z < 0.1f, "a capture of a material the wall no longer has stayed");
+        Renderer.DestroyMaterial(Green);
+        Renderer.DestroyMaterial(Blue);
+        Device.Destroy(std::move(GreenT));
+        Device.Destroy(std::move(BlueT));
     }
 
     // The GPU's per-pixel lookup agrees with the CPU's read grid: in the SURFELS debug view every pixel of the room (the camera is inside

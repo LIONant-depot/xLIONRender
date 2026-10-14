@@ -67,6 +67,7 @@ namespace xlionrender
         // The last render's GI update (instances, rays, CPU ms)
                       const gi::world::stats& getGIStats( void ) const                                      noexcept { return m_GIStats; }
                       const gi::world*        getGIWorld( void ) const                                      noexcept { return m_pGIWorld.get(); }      // tests, tools
+                      int                     getGIId( std::uint64_t Instance ) const                       noexcept { const auto It = m_GIIds.find(std::uint32_t(Instance)); return It == m_GIIds.end() ? -1 : It->second; }    // a draw's instance in getGIWorld (-1: none)
                       bool                    isGICapturing( void ) const                                   noexcept { return !m_GICaptures.empty(); }
 
         // A material: its HDR fragment shader (xmaterial::rt::getShaderHDR()) and its sampler bindings in shader order - slot 0
@@ -230,6 +231,7 @@ namespace xlionrender
             xmath::fmat4            m_L2W;
             const gi::surfel_mesh*  m_pMesh     = nullptr;
             std::uint64_t           m_Render    = 0;                    // the last render that drew it
+            std::vector<material_id> m_Materials;                       // what its colors are captured from (a change: captured again)
         };
         std::unique_ptr<gi::world>  m_pGIWorld;
         std::unordered_map<std::uint32_t, int> m_GIIds;

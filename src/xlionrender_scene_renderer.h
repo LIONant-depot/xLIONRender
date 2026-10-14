@@ -34,7 +34,9 @@ namespace xlionrender
         bool                                            m_bReady    = false;
         bool                                            m_bFailed   = false;
         std::unordered_map<const void*, mesh_id>        m_Meshes;       // per loaded geometry
-        std::unordered_map<std::uint64_t, material_id>  m_Materials;    // per material instance (instance guid)
+        struct made_material { material_id m_Id; std::vector<const void*> m_From; };     // m_From: the instance, its material, its textures it was made from
+        std::unordered_map<std::uint64_t, made_material> m_Materials;  // per material instance (instance guid)
+        std::uint32_t                                   m_UpdateCount = 0;              // xlioncore::resources::UpdateCount when the materials were last checked
 
         struct stats
         {
@@ -78,24 +80,42 @@ namespace xlionrender
         material_id MaterialOf(std::uint64_t MIInstance) noexcept
         {
             if (MIInstance == 0) return {};
-            if (auto It = m_Materials.find(MIInstance); It != m_Materials.end()) return It->second;
-            using namespace xlioncore::resources;
-            auto* pMI  = static_cast<xmaterial_instance::rt*>(GetResource(material_instance_type_guid_v.m_Value, MIInstance));
-            if (!pMI) return {};
-            auto* pMat = static_cast<xmaterial::rt*>(GetResource(material_type_guid_v.m_Value, pMI->m_MaterialRef.m_Instance.m_Value));
-            if (!pMat) return {};
+            if (auto It = m_Materials.find(MIInstance); It != m_Materials.end()) return It->second.m_Id;
+            std::vector<const void*> From;
+            if (!MaterialSources(MIInstance, From)) return {};
+            auto* pMI  = static_cast<xmaterial_instance::rt*>(const_cast<void*>(From[0]));
+            auto* pMat = static_cast<xmaterial::rt*>(const_cast<void*>(From[1]));
             std::vector<xgpu::texture*> Textures;
             for (auto& E : pMI->getTextures())
             {
                 if (&E == pMI->getTextures().data()) { Textures.push_back(nullptr); continue; }    // slot 0: the renderer's shadow atlas
-                auto* pTexture = static_cast<xgpu::texture*>(GetResource(texture_type_guid_v.m_Value, E.m_TexureRef.m_Instance.m_Value));
-                if (!pTexture) return {};
-                Textures.push_back(pTexture);
+                Textures.push_back(static_cast<xgpu::texture*>(const_cast<void*>(From[1 + Textures.size()])));
             }
             material_id Id;
             if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, pMat->m_Flags.m_bAlpha)) return {};
-            m_Materials[MIInstance] = Id;
+            m_Materials[MIInstance] = { Id, std::move(From) };
             return Id;
+        }
+
+        // What a material instance's renderer material is made from, as loaded now: the instance, its material, its textures (but slot 0's).
+        // False while one of them cannot be had.
+        static bool MaterialSources(std::uint64_t MIInstance, std::vector<const void*>& From) noexcept
+        {
+            using namespace xlioncore::resources;
+            From.clear();
+            auto* pMI  = static_cast<xmaterial_instance::rt*>(GetResource(material_instance_type_guid_v.m_Value, MIInstance));
+            if (!pMI) return false;
+            auto* pMat = GetResource(material_type_guid_v.m_Value, pMI->m_MaterialRef.m_Instance.m_Value);
+            if (!pMat) return false;
+            From = { pMI, pMat };
+            for (auto& E : pMI->getTextures())
+            {
+                if (&E == pMI->getTextures().data()) continue;
+                auto* pTexture = GetResource(texture_type_guid_v.m_Value, E.m_TexureRef.m_Instance.m_Value);
+                if (!pTexture) return false;
+                From.push_back(pTexture);
+            }
+            return true;
         }
 
         // A Mesh entity into the scene: its geometry's mesh and per slot the component's material instance, else the geometry's own
@@ -157,6 +177,19 @@ namespace xlionrender
             m_Scene.m_Ambient = { 0.15f, 0.15f, 0.17f };
             m_Scene.m_GI      = {};
             m_Stats           = {};
+
+            // Something was compiled again (xlioncore::resources::MarkUpdated): a material made from what changed is made again when next asked for
+            if (const auto n = xlioncore::resources::UpdateCount(); n != m_UpdateCount)
+            {
+                m_UpdateCount = n;
+                std::vector<const void*> Now;
+                for (auto It = m_Materials.begin(); It != m_Materials.end();)
+                {
+                    if (MaterialSources(It->first, Now) && Now == It->second.m_From) { ++It; continue; }
+                    m_Renderer.DestroyMaterial(It->second.m_Id);
+                    It = m_Materials.erase(It);
+                }
+            }
         }
 
         using overlay_fn = void (*)(xgpu::cmd_buffer& CmdBuffer, void* pUser) noexcept;
@@ -181,7 +214,7 @@ namespace xlionrender
         {
             if (!m_bReady) return;
             m_Renderer.DestroyView(m_View);
-            for (auto& [Key, Id] : m_Materials) m_Renderer.DestroyMaterial(Id);
+            for (auto& [Key, M] : m_Materials) m_Renderer.DestroyMaterial(M.m_Id);
             for (auto& [Key, Id] : m_Meshes)    m_Renderer.DestroyMesh(Id);
         }
     };

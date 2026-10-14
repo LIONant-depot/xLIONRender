@@ -39,6 +39,7 @@ namespace xlionrender
         std::uint32_t   m_Index         = ~0u;
         std::uint32_t   m_Generation    = 0;
         bool isValid() const noexcept { return m_Index != ~0u; }
+        bool operator==(const material_id&) const noexcept = default;
     };
 
     // Standard metal/roughness material (glTF-style), scene-linear values

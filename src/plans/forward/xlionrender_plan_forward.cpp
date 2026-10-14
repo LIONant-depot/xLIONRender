@@ -97,30 +97,43 @@ namespace xlionrender
             if( ID == 0 || pM == nullptr || !pM->m_pGI ) continue;
             auto [It, bNew] = m_GIIds.try_emplace(ID, -1);
             if( It->second >= 0 && m_GITrack[It->second].m_pMesh != pM->m_pGI.get() ) { W.Remove(It->second); It->second = -1; }
+            // What the GI takes from the draw's materials: which slots it sees through (transparent ones), and its colors (captured)
+            const auto TakeMaterials = [&](int Id)
+            {
+                std::vector<bool> Alpha(D.m_Materials.size(), false);
+                for( std::size_t k = 0; k < D.m_Materials.size(); ++k ) if( const auto* pMat = findMaterial(D.m_Materials[k]); pMat && pMat->m_bAlpha ) Alpha[k] = true;
+                W.SetSeeThrough(Id, Alpha);
+                const_cast<mesh_slot*>(pM)->m_bTriColors = false;              // the SURFACE_COLOR view's table: made again from the new capture
+                // a capture still waiting for this instance is of materials it no longer has (one in flight does not publish: processGICapture)
+                std::erase_if(m_GICaptures, [&](const gi_capture_job& J) { return J.m_GIId == Id && !J.m_bRecorded; });
+                if( !pM->m_pGI->m_SurfelMaterial.empty() )      // its surfels' and its triangles' colors: captured from its materials (processGICapture)
+                {
+                    m_GICaptures.push_back({ .m_GIId = Id, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u });
+                    for( std::size_t t = 0; t < pM->m_pGI->m_Tris.size(); t += gi_capture_max_v )
+                        m_GICaptures.push_back({ .m_GIId = Id, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u
+                                               , .m_bTriangles = true, .m_First = std::uint32_t(t) });
+                }
+            };
             if( It->second < 0 )
             {
                 const auto& Mat = D.m_Material;
                 It->second = W.Add(*pM->m_pGI, D.m_L2W, Mat.m_BaseColor * (1 - Mat.m_Metallic));
-                {   // its transparent material slots: the GI sees through them
-                    std::vector<bool> Alpha(D.m_Materials.size(), false);
-                    bool bAny = false;
-                    for( std::size_t k = 0; k < D.m_Materials.size(); ++k ) if( const auto* pMat = findMaterial(D.m_Materials[k]); pMat && pMat->m_bAlpha ) bAny = Alpha[k] = true;
-                    if( bAny ) W.SetSeeThrough(It->second, Alpha);
-                }
-                if( !pM->m_pGI->m_SurfelMaterial.empty() )      // its surfels' and its triangles' colors: captured from its materials (processGICapture)
-                {
-                    m_GICaptures.push_back({ .m_GIId = It->second, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u });
-                    for( std::size_t t = 0; t < pM->m_pGI->m_Tris.size(); t += gi_capture_max_v )
-                        m_GICaptures.push_back({ .m_GIId = It->second, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u
-                                               , .m_bTriangles = true, .m_First = std::uint32_t(t) });
-                }
                 m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), It->second + 1));
-                m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), 0 };
+                m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), 0, D.m_Materials };
+                TakeMaterials(It->second);
             }
-            else if( std::memcmp(&m_GITrack[It->second].m_L2W, &D.m_L2W, sizeof(xmath::fmat4)) != 0 )
+            else
             {
-                W.SetTransform(It->second, D.m_L2W);
-                m_GITrack[It->second].m_L2W = D.m_L2W;
+                if( m_GITrack[It->second].m_Materials != D.m_Materials )      // its materials were made again (a material compiled again) or changed
+                {
+                    m_GITrack[It->second].m_Materials = D.m_Materials;
+                    TakeMaterials(It->second);
+                }
+                if( std::memcmp(&m_GITrack[It->second].m_L2W, &D.m_L2W, sizeof(xmath::fmat4)) != 0 )
+                {
+                    W.SetTransform(It->second, D.m_L2W);
+                    m_GITrack[It->second].m_L2W = D.m_L2W;
+                }
             }
             m_GITrack[It->second].m_Render = m_GIRender;
             DrawId[i] = It->second;
@@ -1058,8 +1071,10 @@ namespace xlionrender
                 Albedo[J.m_Order[i]]   = Block(y0);
                 Emission[J.m_Order[i]] = Block(y0 + H / 2);                           // as captured (the world scales it: scene::gi_settings::m_EmissiveScale)
             }
-            if( !J.m_bTriangles ) m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission));
-            else
+            // Captured from materials the instance no longer has (they were made again while this was in flight): not published - its new capture is queued
+            const bool bCurrent = std::size_t(J.m_GIId) < m_GITrack.size() && m_GITrack[J.m_GIId].m_Materials == J.m_Materials;
+            if( bCurrent && !J.m_bTriangles ) m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission));
+            else if( bCurrent )
             {
                 m_pGIWorld->SetTriangleAlbedo(J.m_GIId, J.m_First, Albedo);
                 if( J.m_First + std::size_t(n) >= G.m_Tris.size() )         // its last batch: the SURFACE_COLOR view's table (the mesh's first instance)
