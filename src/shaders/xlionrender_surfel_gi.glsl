@@ -190,20 +190,29 @@ vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const
     }
     return Sum;
 }
-vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level)
+// A GI read: the irradiance, how much stands behind it, and whether anything does. Unsupported is not dark: no surfel the point may read
+// (off the surface's cells, its patch sees none of them, or all of them are out of sight or invalid) says nothing about its light, so its
+// irradiance is not a black observation - the caller applies the policy (the materials: the vertex read where that one is supported, else
+// no GI at all, the scene's ambient as without GI; the COVERAGE debug view shows which). The confidence is a convention, not an error bound:
+// the read's total weight (falloff x normal x visibility x validity of the surfels it blends; about 0.25 and up is a full read)
+struct GIQueryResult
+{
+    vec3  Irradiance;
+    float Confidence;
+    bool  bSupported;
+};
+// The per-pixel read: the surfels of the cell's patch the point matches (GIReadCell), nothing else - no other patch's surfels, no surfels
+// out of the patch's sight (those were the fail-open fallbacks: plausible light, from the wrong surface)
+GIQueryResult SurfelGIQuery(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level)
 {
     uint First, Count, Patches, nPatches;
     vec3 PatchN;
-    if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches) && nPatches == 0u) return vec4(0.0);
-    vec4 Sum = SurfelGIList(P, N, Nmap, LightOffset, Level, First, Count, PatchN);
-    // nothing from the patch it matches (a thin edge seen edge-on: its derived normal is off), then all of the cell's patches
-    if (Sum.w <= 1e-6)
-        for (uint p = 0u; p < nPatches; ++p)
-        {
-            const uint a = Patches + 4u * p;
-            Sum += SurfelGIList(P, N, Nmap, LightOffset, Level, GIMesh[a + 2u], GIMesh[a + 3u], GIOctDecode(unpackSnorm2x16(GIMesh[a])));
-        }
-    return Sum;
+    GIQueryResult R = GIQueryResult(vec3(0.0), 0.0, false);
+    if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches)) return R;
+    const vec4 Sum = SurfelGIList(P, N, Nmap, LightOffset, Level, First, Count, PatchN);
+    if (Sum.w <= 1e-6) return R;
+    R.Irradiance = Sum.rgb / Sum.w; R.Confidence = Sum.w; R.bSupported = true;
+    return R;
 }
 
 #endif

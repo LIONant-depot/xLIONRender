@@ -250,6 +250,23 @@ int main()
         const auto CRed = Mean(Color, W, H, 0.9f, 0.4f, 0.98f, 0.6f), CFloor = Mean(Color, W, H, 0.4f, 0.85f, 0.6f, 0.95f);
         std::printf("surface color: red wall %.2f %.2f %.2f, floor %.2f %.2f %.2f\n", CRed[0], CRed[1], CRed[2], CFloor[0], CFloor[1], CFloor[2]);
         CHECK(CRed[0] > 0.6 && CRed[1] < 0.15 && std::abs(CFloor[0] - 0.75) < 0.08, "the SURFACE_COLOR view does not show the captured colors");
+
+        // The COVERAGE view (the GI query policy, GIQueryResult): which read lights each pixel - green the pixel read, blue the vertex
+        // read, magenta none. The room is all supported per pixel; with per-pixel reads off, all by its vertices
+        const auto Classes = [&](const std::vector<std::array<float, 3>>& C)
+        {
+            std::array<int, 4> n{};     // pixel, vertex, unsupported, other
+            for (const auto& c : C) n[c[1] > 0.3f && c[0] < 0.1f && c[2] < 0.1f ? 0 : c[2] > 0.5f && c[0] < 0.1f ? 1 : c[0] > 0.5f && c[2] > 0.5f && c[1] < 0.1f ? 2 : 3]++;
+            return n;
+        };
+        const auto Pixel = Classes(View3(xlionrender::gi_debug::COVERAGE));
+        Scene.m_GI.m_bPerPixel = false;
+        const auto Vertex = Classes(View3(xlionrender::gi_debug::COVERAGE));
+        Scene.m_GI.m_bPerPixel = true;
+        std::printf("coverage view: per pixel %d pixel / %d vertex / %d unsupported / %d other; per vertex only %d / %d / %d / %d\n"
+                   , Pixel[0], Pixel[1], Pixel[2], Pixel[3], Vertex[0], Vertex[1], Vertex[2], Vertex[3]);
+        CHECK(Pixel[0] >= W * H * 99 / 100 && Pixel[2] <= W * H / 1000, "the room is not read per pixel everywhere (%d of %d)", Pixel[0], W * H);
+        CHECK(Vertex[1] >= W * H * 99 / 100, "per-pixel reads off, the room is not read by its vertices (%d of %d)", Vertex[1], W * H);
     }
 
     // The box moves: its instance moves in the world (no new instance); removed: the world drops it

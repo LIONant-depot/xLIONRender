@@ -14,6 +14,7 @@ layout(binding = 10) uniform sampler2D SamplerProbes;
 // Surfel GI (features/gi/xlionrender_surfel_gi.h): the diffuse irradiance at this pixel, set by the fragment shaders that have it
 // (xlionrender_geom_standard_frag.glsl); w > 0.5: it replaces the probes' and the sky's diffuse (it holds the sky and the bounces)
 vec4 g_GI = vec4(0.0);
+uint g_GISource = 0u;      // which read set g_GI (the COVERAGE debug view): 0 none (the ambient, as without GI), 1 the vertex read, 2 the pixel read
 
 const vec2 kProbeAtlas = vec2(3072.0, 1024.0);          // 8 x 4 slots of the sky atlas' layout (384 x 256) - instance::probe_slots_v
 

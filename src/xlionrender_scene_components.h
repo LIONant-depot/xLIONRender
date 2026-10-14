@@ -109,6 +109,7 @@ namespace xlionrender
     , xproperty::settings::enum_item("SURFELS", gi_debug::SURFELS)
     , xproperty::settings::enum_item("LIGHT",   gi_debug::LIGHT)
     , xproperty::settings::enum_item("SURFACE_COLOR", gi_debug::SURFACE_COLOR)
+    , xproperty::settings::enum_item("COVERAGE", gi_debug::COVERAGE)
     };
 
     // The level's sky, ambient and diffuse GI (one per level: the first one found; without one: a dim flat ambient)
@@ -143,7 +144,7 @@ namespace xlionrender
         , obj_member<"GIMoments", &environment::m_bGIMoments, member_help<"The GI reads' visibility test (each surfel's depth moments: a surfel hidden from the point is faded). Off: only the plane test - more light leaks, but no blotches from it (a diagnostic)">>
         , obj_member<"GIFilterPasses", &environment::m_GIFilterPasses, member_help<"How many times the GI light is blended with the neighboring surfels' before it is shown: more is smoother (blotches fade, contrast too); 0: none. The solve itself is not filtered">>
         , obj_member<"GIEmissiveScale", &environment::m_GIEmissiveScale, member_help<"Self-illuminated materials light the scene through the GI with their emission times this (0: they light nothing; their own look does not change)">>
-        , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone; SURFACE_COLOR: the surface color of the surfel each pixel reads most (the material capture: what the GI bounces)">>
+        , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone; SURFACE_COLOR: the surface color of the surfel each pixel reads most (the material capture: what the GI bounces); COVERAGE: which read lights each pixel - green its own surfels (per pixel), blue the vertices' (per pixel unsupported there), magenta none (no GI there: the ambient as without GI)">>
         , obj_member<"GIPerPixel",   &environment::m_bGIPerPixel, member_help<"Near meshes read the GI per pixel (a mesh needs no extra vertices for it); off: per vertex only (cheaper, needs dense meshes)">>
         )
     };

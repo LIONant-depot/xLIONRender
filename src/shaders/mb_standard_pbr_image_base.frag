@@ -277,7 +277,7 @@ vec3 PBRLightingImageBase
 	ambient += indirectSpec;
 #else
 	// xLIONRender: the renderer's environment probe (diffuse + specular) when the sky is on
-	if (InGI.w > 1e-6) g_GI = vec4(InGI.rgb / InGI.w, 1.0);
+	if (InGI.w > 1e-6) { g_GI = vec4(InGI.rgb / InGI.w, 1.0); g_GISource = 1u; }
 #ifndef XLION_NO_GI_PIXEL
 	// The face's normal (mesh space, to the smoothed normal's side): the GI's geometry tests use the surface as it is - smoothed corner
 	// normals step along the triangles (a sawtooth); the normal map still reads the basis (GNmap)
@@ -288,14 +288,16 @@ vec3 PBRLightingImageBase
 		const vec3 GN = normalize(InGINormal), GT = normalize(InGITangent.xyz);
 		const vec3 GNmap = normalize(inNormal.x * GT + inNormal.y * (InGITangent.w * cross(GN, GT)) + inNormal.z * GN);     // as TransformNotmalToWorld, in mesh space
 		g_GIMoments = (InGIRef.y & gi_no_moments_v) == 0u;
-		const vec4 Px = SurfelGIPixel(InGIPos, GFace, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
-		// little weight (the surfels near are mostly out of sight: the cell's lists fade them) blends into the vertex read, no edge
-		if (Px.w > 1e-6) g_GI = vec4(g_GI.w > 0.5 ? mix(g_GI.rgb, Px.rgb / Px.w, smoothstep(0.0, 0.25, Px.w)) : Px.rgb / Px.w, 1.0);
+		// The policy for a read (GIQueryResult): the pixel read where it is supported - a low confidence (the surfels near are mostly out of
+		// sight) blends into the vertex read where that one is supported (no edge); unsupported, the vertex read where it is; else no GI
+		const GIQueryResult Q = SurfelGIQuery(InGIPos, GFace, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
+		if (Q.bSupported) { g_GI = vec4(g_GI.w > 0.5 ? mix(g_GI.rgb, Q.Irradiance, smoothstep(0.0, 0.25, Q.Confidence)) : Q.Irradiance, 1.0); g_GISource = 2u; }
 	}
 	const uint GIDebug = GIDebugCode(InGIRef.y);
 	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, GFace); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
 	if (GIDebug == 2u) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0);
 	if (GIDebug == 3u) g_GIDebug = vec4((InGIRef.y & gi_capture_emission_v) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);
+	if (GIDebug == 5u) g_GIDebug = vec4(g_GISource == 2u ? vec3(0.0, 0.6, 0.0) : g_GISource == 1u ? vec3(0.0, 0.0, 0.8) : vec3(1.0, 0.0, 1.0), 1.0);     // COVERAGE: green the pixel read, blue the vertex read, magenta unsupported
 	if (GIDebug == 4u) g_GIDebug = vec4(SurfelGITriangleColor(InGIRef.x, uint(gl_PrimitiveID)), 1.0);        // the pixel's triangle's captured color     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
 #endif
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, perceptualRoughness, inMetalic, inAO);

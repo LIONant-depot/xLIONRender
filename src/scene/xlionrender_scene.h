@@ -121,7 +121,7 @@ namespace xlionrender
     // m_Instance id; solved on the CPU (m_RayBudget rays per render, the changed first), read per vertex (surfel weights)
     // The GI's debug views (shaders/xlionrender_surfel_gi.glsl): every pixel the color of the surfel that dominates its read (black: none
     // reaches it - a gap in the placement), or the GI light alone (no textures, no direct light)
-    enum class gi_debug : std::uint8_t { NONE = 0, SURFELS = 1, LIGHT = 2, SURFACE_COLOR = 4 };      // the shaders' codes (3: the GI's material capture; xlionrender_surfel_gi.glsl GIDebugCode)
+    enum class gi_debug : std::uint8_t { NONE = 0, SURFELS = 1, LIGHT = 2, SURFACE_COLOR = 4, COVERAGE = 5 };      // the shaders' codes (3: the GI's material capture; xlionrender_surfel_gi.glsl GIDebugCode)
 
     struct gi_settings
     {

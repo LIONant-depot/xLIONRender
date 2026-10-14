@@ -74,11 +74,13 @@ namespace
 
     float Lum(v3 c) { return 0.2126f * c.m_X + 0.7152f * c.m_Y + 0.0722f * c.m_Z; }
 
-    // The cache's indirect irradiance at a surface point (cast down its normal onto it)
+    // The cache's indirect irradiance at a surface point (cast down its normal onto it), as the solver reads it (unsupported: its policy)
     v3 CacheAt(const world& W, v3 P, v3 N)
     {
         const auto H = W.Cast(P + N * 0.05f, N * -1.0f, 0.1f);
-        return H.m_Inst < 0 ? v3{ -1, -1, -1 } : W.Indirect(H);
+        if (H.m_Inst < 0) return v3{ -1, -1, -1 };
+        const auto Q = W.Indirect(H);
+        return Q.m_bSupported ? Q.m_E : W.Unsupported(H);
     }
 
     struct cornell
@@ -495,6 +497,27 @@ int main()
         std::printf("coverage: %d of %d surface points read no surfel\n", nUncovered, nPoints);
         for (const auto& E : Room.Coverage(4).m_Examples) std::printf("  hole %.3f %.3f %.3f N %.2f %.2f %.2f: %d listed, nearest compatible %.3f, any %.3f\n", E.m_P.m_X, E.m_P.m_Y, E.m_P.m_Z, E.m_N.m_X, E.m_N.m_Y, E.m_N.m_Z, E.m_nList, E.m_NearestCompatible, E.m_NearestAny);
         CHECK(nUncovered == 0, "%d of %d surface points read no surfel (black in the debug view)", nUncovered, nPoints);
+        CHECK(Room.m_ReadUnsupported == 0, "%u of the room's patches see none of their surfels", Room.m_ReadUnsupported);
+
+        // A patch lists only the surfels it sees: a small face sealed in a closed box lists its own surfel, none of the floor's or the
+        // box top's outside (a cell corner with no surface near it used to count as in plain sight: they leaked in). Without its own
+        // surfel it sees none: it lists none (unsupported: the read's policy), not all of them at full weight
+        surfel_mesh Sealed;
+        AddQuad(Sealed, { -1, 0, -1 }, { 0, 0, 2 }, { 2, 0, 0 }, 6);                                       // a floor facing up
+        const v3 Lo{ -0.06f, 0.001f, -0.06f }, S{ 0.12f, 0.12f, 0.12f };                                    // a closed box on it (faces outward)
+        const v3 X{ S.m_X, 0, 0 }, Y{ 0, S.m_Y, 0 }, Z{ 0, 0, S.m_Z };
+        AddQuad(Sealed, Lo, X, Z, 2); AddQuad(Sealed, Lo + Y, Z, X, 2); AddQuad(Sealed, Lo, Z, Y, 2); AddQuad(Sealed, Lo + X, Y, Z, 2); AddQuad(Sealed, Lo, Y, X, 2); AddQuad(Sealed, Lo + Z, X, Y, 2);
+        AddQuad(Sealed, { -0.02f, 0.06f, -0.02f }, { 0, 0, 0.04f }, { 0.04f, 0, 0 }, 1);                     // inside: a tiny face up (apart from the floor's and the top's planes)
+        Sealed.Bake(0.3f, 0.9f);
+        Sealed.BuildReadGrid();
+        const auto Listed = [&] { int nOwn = 0, nOther = 0; for (auto e : Sealed.ReadCellList({ 0, 0.06f, 0 }, { 0, 1, 0 })) (std::abs(Sealed.m_Levels[0][surfel_mesh::ReadEntrySurfel(e)].m_Center.m_Y - 0.06f) < 0.01f ? nOwn : nOther)++; return std::pair{ nOwn, nOther }; };
+        const auto [nOwn, nOther] = Listed();
+        std::erase_if(Sealed.m_Levels[0], [](const surfel& S) { return std::abs(S.m_Center.m_Y - 0.06f) < 0.01f; });     // its own surfel gone
+        Sealed.BuildReadGrid();
+        const auto [nOwn2, nOther2] = Listed();
+        std::printf("sealed face: lists %d own + %d outside surfels; without its own %d + %d, %u unsupported patches\n", nOwn, nOther, nOwn2, nOther2, Sealed.m_ReadUnsupported);
+        CHECK(nOwn == 1 && nOther == 0, "the sealed face lists surfels it does not see (%d outside)", nOther);
+        CHECK(nOwn2 + nOther2 == 0 && Sealed.m_ReadUnsupported > 0, "a face that sees no surfel still lists some (%d)", nOther2);
     }
 
     // 6d. Stable and responsive (the estimator): once converged, the light holds still from one update to the next (no swimming), and
@@ -809,6 +832,38 @@ int main()
         std::printf("a pane over the floor: floor light %.3f opaque, %.3f transparent (open sky pi = 3.142); the pane's validity %.2f -> %.2f\n", Opaque, Clear, OpaqueValid, ClearValid);
         CHECK(Clear > 0.95 * pi_v && Opaque < 0.5 * Clear, "the transparent pane still shades the floor (%f vs %f)", Clear, Opaque);
         CHECK(ClearValid < 1e-3, "the transparent pane's surfels are still read (validity %f)", ClearValid);
+    }
+
+    // 8. An unsupported solver query (world::Indirect: the hit's vertices read no surfel) is not dark: a floor next to a sunlit wall whose
+    //    vertices list no surfels gets about the light it gets from the same wall read normally (the policy: the wall's mean light, the ray
+    //    still one of the surfel's rays), and every such query is counted, with where it hit
+    {
+        surfel_mesh Floor, Wall;
+        AddQuad(Floor, { -1, 0, -1 }, { 0, 0, 2 }, { 2, 0, 0 }, 0.25f);
+        AddQuad(Wall, { -1, 0, -1 }, { 0, 1.5f, 0 }, { 0, 0, 2 }, 0.25f);         // at x = -1, facing +x
+        Floor.Bake(0.2f, 0.6f); Wall.Bake(0.2f, 0.6f);
+        surfel_mesh Unread = Wall;
+        for (auto& v : Unread.m_VertSurfels) v = { -1, -1, -1, -1 };
+        struct result { double m_Floor; int m_nUnsupported; std::size_t m_nAt; bool m_bOnWall; };
+        const auto FloorLight = [&](const surfel_mesh& W2)
+        {
+            world W;
+            const int iFloor = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            W.Add(W2, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f });
+            lights L; L.m_Sky = { 0.3f, 0.3f, 0.3f }; L.m_SunDirection = v3{ -1, -0.5f, 0 }.NormalizeCopy(); L.m_SunColor = { 3, 3, 3 };
+            int nUnsupported = 0;
+            for (int f = 0; f < 100; ++f) nUnsupported += W.Update(L, { 0, 1, 0 }, 1 << 30, 16000 + f).m_nUnsupported;
+            double Sum = 0;
+            for (const auto& e : W.InstanceLight(iFloor)) Sum += Lum(e);
+            bool bOnWall = !W.UnsupportedAt().empty();
+            for (const auto& P : W.UnsupportedAt()) bOnWall = bOnWall && std::abs(P.m_X + 1) < 0.01f;
+            return result{ Sum / std::max<std::size_t>(W.InstanceLight(iFloor).size(), 1), nUnsupported, W.UnsupportedAt().size(), bOnWall };
+        };
+        const auto Ref = FloorLight(Wall), Pol = FloorLight(Unread);
+        std::printf("unsupported queries: the floor's light %.3f with the wall read, %.3f with it unsupported (the policy); %d unsupported (%zu places kept, on the wall: %d), %d read normally\n"
+                   , Ref.m_Floor, Pol.m_Floor, Pol.m_nUnsupported, Pol.m_nAt, int(Pol.m_bOnWall), Ref.m_nUnsupported);
+        CHECK(Ref.m_nUnsupported == 0 && Pol.m_nUnsupported > 0 && Pol.m_bOnWall, "the unsupported queries are not counted where they are");
+        CHECK(std::abs(Pol.m_Floor - Ref.m_Floor) < 0.05 * Ref.m_Floor, "an unsupported query changes the light: %.3f vs %.3f", Pol.m_Floor, Ref.m_Floor);
     }
 
     std::printf("PASS\n");

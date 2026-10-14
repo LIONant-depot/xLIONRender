@@ -39,6 +39,7 @@
 #include <thread>
 #include <unordered_map>
 #include <span>
+#include <string>
 #include <vector>
 #if defined(_M_X64) || defined(_M_IX86) || defined(__SSE2__)
 #include <xmmintrin.h>
@@ -541,6 +542,7 @@ namespace xlionrender::gi
         std::vector<std::array<std::uint32_t, 4>>   m_ReadTable;    // a power of 2 entries; key high 0xFFFFFFFF: empty
         std::vector<std::uint32_t>                  m_ReadList;
         std::uint32_t                               m_ReadMaxProbe = 0;     // the longest probe of the table (the GPU's lookups go that far, no further)
+        std::uint32_t                               m_ReadUnsupported = 0;  // patches whose list is empty (none of their surfels in sight: their reads are unsupported)
 
         static std::array<int, 3> ReadCellOf(const v3& P, float Cell) noexcept { return { int(std::floor(P.m_X / Cell)), int(std::floor(P.m_Y / Cell)), int(std::floor(P.m_Z / Cell)) }; }
         static std::array<std::uint32_t, 2> ReadKey(const std::array<int, 3>& C) noexcept
@@ -648,7 +650,7 @@ namespace xlionrender::gi
 
         void BuildReadGrid() noexcept
         {
-            m_ReadTable.clear(); m_ReadList.clear(); m_ReadMaxProbe = 0;
+            m_ReadTable.clear(); m_ReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
             const auto& L = m_Levels[0];
             if (L.empty()) return;
             m_ReadCell = L[0].m_Radius;
@@ -698,6 +700,7 @@ namespace xlionrender::gi
             std::vector<const cell*> Order;
             for (const auto& [Key, Ce] : Cells) Order.push_back(&Ce);
             std::vector<std::vector<std::vector<std::uint32_t>>> Lists(Order.size());
+            std::atomic<std::uint32_t> Unsupported{ 0 };
             ParallelFor(int(Order.size()), [&](int c)
             {
                 const auto& Ce = *Order[c];
@@ -736,25 +739,33 @@ namespace xlionrender::gi
                     // Each facing surfel with how much of the surface around each corner sees it: the fraction of the corner's points in its
                     // sight, cubed (as the depth moments' fade), 4 bits a corner (the read blends them across the cell: ReadEntryWeight). Seen
                     // through the gaps of blinds by a few points: next to nothing; in plain sight: all. A weight, not a cut: no holes, no edges
-                    bool bAnySeen = false;
                     for (int s : Near)
                     {
                         if (L[s].m_Normal.Dot(Pa.m_N) < 0.5f) continue;
+                        // A corner with no surface near it knows nothing: it takes the mean of the corners that do (it was: in plain sight -
+                        // the surfels the surface does not see leaked in across the cell)
+                        std::array<float, 4> Frac{};
+                        float Known = 0; int nKnown = 0;
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            if (CornerPts[k].empty()) { Frac[k] = -1; continue; }
+                            int nSee = 0;
+                            for (const v3* Q : CornerPts[k]) nSee += Sees(*Q, Pa.m_N, L[s]);
+                            Frac[k] = float(nSee) / float(CornerPts[k].size());
+                            Known += Frac[k]; ++nKnown;
+                        }
                         std::uint32_t E = std::uint32_t(s);
                         for (int k = 0; k < 4; ++k)
                         {
-                            int nSee = 0;
-                            for (const v3* Q : CornerPts[k]) nSee += Sees(*Q, Pa.m_N, L[s]);
-                            const float Frac = CornerPts[k].empty() ? 1.0f : float(nSee) / float(CornerPts[k].size());
-                            E |= std::uint32_t(std::lround(Frac * Frac * Frac * 15.0f)) << (16 + 4 * k);
+                            const float F = Frac[k] >= 0 ? Frac[k] : nKnown ? Known / float(nKnown) : 0.0f;
+                            E |= std::uint32_t(std::lround(F * F * F * 15.0f)) << (16 + 4 * k);
                         }
-                        if ((E >> 16) != 0) bAnySeen = true;
                         Lists[c][p].push_back(E);
                     }
-                    // None in sight (a face tucked in, or all in reach behind something): all of them, as before this test (the vertex read
-                    // is no better there: a thin frame's edge reads black)
-                    if (!bAnySeen) for (auto& E : Lists[c][p]) E = (E & 0xFFFFu) | 0xFFFF0000u;
-                    else std::erase_if(Lists[c][p], [](std::uint32_t E) { return (E >> 16) == 0; });
+                    // Out of sight everywhere: not listed. None in sight (a face tucked in, or all in reach behind something): an empty list - the
+                    // read there is unsupported (GIQueryResult: the vertex read, else no GI), not filled from surfels it does not see
+                    std::erase_if(Lists[c][p], [](std::uint32_t E) { return (E >> 16) == 0; });
+                    if (Lists[c][p].empty()) Unsupported.fetch_add(1, std::memory_order_relaxed);
                 }
             });
 
@@ -785,6 +796,7 @@ namespace xlionrender::gi
                 m_ReadMaxProbe = std::max(m_ReadMaxProbe, nProbe + 1);
                 m_ReadTable[h] = { K[0], K[1], First, n };
             }
+            m_ReadUnsupported = Unsupported.load();
         }
 
         // A unit normal as 2 x snorm 16 octahedral (GLSL unpackSnorm2x16 + GIOctDecode)
@@ -1221,6 +1233,7 @@ namespace xlionrender::gi
             int     m_nLinks    = 0;            // emitter links (RebuildEmitterLinks)
             float   m_MaxEmitted = 0;           // the most emitted light a surfel receives (its links' irradiance, luminance)
             v3      m_MaxEmitter{ 0, 0, 0 };    // the brightest emitter's radiance
+            int     m_nUnsupported = 0;         // this update's rays whose hit read no surfel (Indirect unsupported: the policy's light, Unsupported)
         };
 
         struct hit
@@ -1395,6 +1408,17 @@ namespace xlionrender::gi
                 }
             }
             std::fclose(f);
+        #ifdef _WIN32
+            if (fopen_s(&f, (std::string(pPath) + ".unsupported.csv").c_str(), "w") != 0) f = nullptr;
+        #else
+            f = std::fopen((std::string(pPath) + ".unsupported.csv").c_str(), "w");
+        #endif
+            if (f)                                                  // the last update's unsupported queries (the first per surfel, up to 4096)
+            {
+                std::fprintf(f, "x,y,z\n");
+                for (const auto& P : m_UnsupportedAt) std::fprintf(f, "%.4f,%.4f,%.4f\n", P.m_X, P.m_Y, P.m_Z);
+                std::fclose(f);
+            }
             return n;
         }
 
@@ -1503,7 +1527,15 @@ namespace xlionrender::gi
         }
 
         // The cache's indirect irradiance at a hit: the hit instance's level through its triangle's vertices
-        v3 Indirect(const hit& H) const noexcept
+        // The light a ray's hit point reads (the hit triangle's vertices' surfels, as the GPU's vertex read): the solver's GI query. Unsupported
+        // (no valid surfel facing the hit's way at any of its vertices) is not dark: Update applies the policy (Unsupported)
+        struct query
+        {
+            v3      m_E{ 0, 0, 0 };
+            float   m_Confidence = 0;       // the read's total weight (a convention, not an error bound)
+            bool    m_bSupported = false;
+        };
+        query Indirect(const hit& H) const noexcept
         {
             const auto& I = m_Instances[H.m_Inst]; const auto& M = *I.m_pMesh; const auto& T = M.m_Tris[H.m_Tri];
             const float B[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
@@ -1515,8 +1547,13 @@ namespace xlionrender::gi
                 Sum = Sum + E * B[k];
                 W += w * B[k];
             }
-            return W > 0 ? Sum * (1.0f / W) : v3{ 0, 0, 0 };
+            if (W <= 0) return {};
+            return { Sum * (1.0f / W), W, true };
         }
+        // The policy for an unsupported query: the hit instance's mean light (its valid surfels', weighted by validity; MeanLight), not black and
+        // not dropped - the ray still counts as one of the surfel's rays, the same denominator. Counted, the first places kept (UnsupportedAt)
+        v3 Unsupported(const hit& H) const noexcept { return m_Instances[H.m_Inst].m_MeanE; }
+        const std::vector<v3>& UnsupportedAt() const noexcept { return m_UnsupportedAt; }
 
         // One update: the light changes, the levels, then the ray budget over the instances that need it most
         stats Update(const lights& L, const v3& Eye, int RayBudget, unsigned Seed) noexcept
@@ -1591,6 +1628,22 @@ namespace xlionrender::gi
             if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; }
             UpdateEmittedLight();
 
+            // The policy's value per instance (Unsupported): this update's mean light of its valid surfels; none valid: the world's
+            {
+                v3 WSum{ 0, 0, 0 }; float WW = 0;
+                for (auto& I : m_Instances)
+                {
+                    v3 S{ 0, 0, 0 }; float W = 0;
+                    if (I.m_bAlive) for (std::size_t s = 0; s < I.m_E.size(); ++s) { S = S + I.m_E[s] * I.m_Valid[s]; W += I.m_Valid[s]; }
+                    I.m_MeanE = W > 0 ? S * (1.0f / W) : v3{ -1, -1, -1 };
+                    WSum = WSum + S; WW += W;
+                }
+                const v3 World = WW > 0 ? WSum * (1.0f / WW) : v3{ 0, 0, 0 };
+                for (auto& I : m_Instances) if (I.m_MeanE.m_X < 0) I.m_MeanE = World;
+            }
+            m_WorkUnsupported.assign(m_Work.size(), 0);
+            m_WorkUnsupportedAt.resize(m_Work.size());
+
             const auto T1 = std::chrono::steady_clock::now();
             m_Pool.Run(int(m_Work.size()), [&](int w)
             {
@@ -1600,7 +1653,7 @@ namespace xlionrender::gi
                 const v3 C = I.m_L2W * S.m_Center, N = NormalToWorld(I, S.m_Normal);
                 rng Rng(Seed * 2654435761u + unsigned(w) * 7919u);
                 v3 Sum{ 0, 0, 0 };
-                int nBack = 0;
+                int nBack = 0, nUnsupported = 0;
                 const int R = m_Setup.m_RaysPerSurfel;
                 auto& MA = I.m_MomAcc[s];
                 MA.fill(0);
@@ -1637,7 +1690,9 @@ namespace xlionrender::gi
                     if (Nh.Dot(D) > 0) { ++nBack; continue; }               // a back face: no light, and maybe buried
                     v3 Albedo, Emission;
                     SurfaceAt(H, Albedo, Emission);
-                    const v3 In = Direct(HitPosition(H), Nh, L) + Indirect(H);
+                    const query Q  = Indirect(H);
+                    if (!Q.m_bSupported) { if (nUnsupported++ == 0) m_WorkUnsupportedAt[w] = HitPosition(H); }
+                    const v3 In = Direct(HitPosition(H), Nh, L) + (Q.m_bSupported ? Q.m_E : Unsupported(H));
                     const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (m_Emitters.empty() ? Emission : v3{ 0, 0, 0 });     // with emitters the links bring their light
                     Sum = Sum + Lr;
                     for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Lr * Bw[i];
@@ -1646,7 +1701,14 @@ namespace xlionrender::gi
                     for (int i = 0; i < 3; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance
                 I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
                 I.m_AccValid[s] = std::clamp(1.0f - (float(nBack) / float(R) - 0.1f) / 0.15f, 0.0f, 1.0f);
+                m_WorkUnsupported[w] = nUnsupported;
             });
+            m_UnsupportedAt.clear();
+            for (std::size_t w = 0; w < m_Work.size(); ++w)
+            {
+                St.m_nUnsupported += m_WorkUnsupported[w];
+                if (m_WorkUnsupported[w] && m_UnsupportedAt.size() < 4096) m_UnsupportedAt.push_back(m_WorkUnsupportedAt[w]);
+            }
 
             St.m_TraceMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
             for (const auto& [i, s] : m_Work)
@@ -1780,6 +1842,7 @@ namespace xlionrender::gi
             bool                    m_bPicked   = false;
             bool                    m_bAlive    = true;
             float                   m_MeanScale = 1;            // the transform's mean axis scale (surfel radii are mesh space)
+            v3                      m_MeanE{ 0, 0, 0 };                 // this update's mean light of its valid surfels: an unsupported query's value (Unsupported)
         };
 
         void Place(instance& I, const xmath::fmat4& L2W) noexcept
@@ -2063,6 +2126,9 @@ namespace xlionrender::gi
         std::vector<std::array<float, 7>>       m_PrevPoints;
         std::vector<std::pair<float, int>>      m_Order;
         std::vector<std::pair<int, int>>        m_Work;
+        std::vector<int>                        m_WorkUnsupported;      // per work item: its unsupported queries this update
+        std::vector<v3>                         m_WorkUnsupportedAt;    // per work item: the first one's hit point
+        std::vector<v3>                         m_UnsupportedAt;        // the last update's (UnsupportedAt)
     };
 }
 
