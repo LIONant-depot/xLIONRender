@@ -234,6 +234,8 @@ namespace xlionrender
             const gi::surfel_mesh*  m_pMesh     = nullptr;
             std::uint64_t           m_Render    = 0;                    // the last render that drew it
             std::vector<material_id> m_Materials;                       // what its colors are captured from (a change: captured again)
+            std::vector<std::uint32_t> m_Moments;                       // its moments packed for the GPU (the last update's surfels repacked)
+            std::uint32_t           m_MomentsReset = ~0u;               // gi::world::MomentsReset when they were packed (another: all again)
         };
         std::unique_ptr<gi::world>  m_pGIWorld;
         std::unordered_map<std::uint32_t, int> m_GIIds;

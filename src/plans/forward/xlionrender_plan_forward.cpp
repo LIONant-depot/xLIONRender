@@ -161,6 +161,20 @@ namespace xlionrender
             W.DirtyAll();
         }
         m_GIStats = W.Update(L, Eye, Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));
+        const auto TUpload = std::chrono::steady_clock::now();
+
+        // The packed moments (gi_track::m_Moments): the surfels this update changed (each a mean and a mean^2 per texel in two 16-bit floats)
+        const auto PackMoments = [&](std::uint32_t* pOut, const gi::moments& M)
+        {
+            for( int t = 0; t < gi::moment_texels_v; ++t ) pOut[t] = details::Half(M[2 * t]) | (std::uint32_t(details::Half(M[2 * t + 1])) << 16);
+        };
+        for( const auto& [i, s] : W.LastUpdated() )
+        {
+            if( std::size_t(i) >= m_GITrack.size() ) continue;
+            auto& T = m_GITrack[i];
+            const auto& M = W.InstanceMoments(i);
+            if( T.m_MomentsReset == W.MomentsReset(i) && T.m_Moments.size() == M.size() * gi::moment_texels_v ) PackMoments(T.m_Moments.data() + std::size_t(s) * gi::moment_texels_v, M[s]);
+        }
 
         // This frame's light region (several renders per frame append)
         const std::uint64_t Frame = m_Device.getFrameIndex();
@@ -210,12 +224,18 @@ namespace xlionrender
                 auto* pOut = static_cast<std::uint32_t*>(pMemory);
                 for( const auto& [First, Id] : Written )
                 {
+                    auto& T = m_GITrack[Id];
                     const auto& M = W.InstanceMoments(Id);
-                    for( std::size_t k = 0; k < M.size(); ++k )
-                        for( int t = 0; t < gi::moment_texels_v; ++t )
-                            pOut[(First + k) * gi::moment_texels_v + t] = details::Half(M[k][2 * t]) | (std::uint32_t(details::Half(M[k][2 * t + 1])) << 16);
+                    if( T.m_MomentsReset != W.MomentsReset(Id) || T.m_Moments.size() != M.size() * gi::moment_texels_v )     // all of them again
+                    {
+                        T.m_Moments.resize(M.size() * gi::moment_texels_v);
+                        for( std::size_t k = 0; k < M.size(); ++k ) PackMoments(T.m_Moments.data() + k * gi::moment_texels_v, M[k]);
+                        T.m_MomentsReset = W.MomentsReset(Id);
+                    }
+                    std::memcpy(pOut + std::size_t(First) * gi::moment_texels_v, T.m_Moments.data(), T.m_Moments.size() * sizeof(std::uint32_t));
                 }
             });
+        m_GIStats.m_UploadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TUpload).count();
     }
 
     //------------------------------------------------------------------------------------------------

@@ -1034,6 +1034,70 @@ namespace xlionrender::gi
             }
         }
 
+        // What BuildReadGrid and BuildNeighbors make (the read grid, the neighbor lists, the rays' origins) as one block of words: the
+        // GeomStatic compiler packs it into the resource, the renderer unpacks it at load instead of building it (seconds in Release, half
+        // a minute in Debug for the Police Station). Only what the surfels and the geometry decide: the same in both. Unpack checks the
+        // block's tag and sizes (false: build them)
+        static constexpr std::uint32_t derived_tag_v = 0x31444947u;    // "GID1": a change to the layout below is a new tag
+        std::vector<std::uint32_t> PackDerived() const noexcept
+        {
+            std::vector<std::uint32_t> W{ derived_tag_v, std::bit_cast<std::uint32_t>(m_ReadCell), m_ReadMaxProbe, m_ReadUnsupported
+                                        , std::uint32_t(m_ReadTable.size()), std::uint32_t(m_ReadList.size()) };
+            for (const auto& E : m_ReadTable) W.insert(W.end(), E.begin(), E.end());
+            W.insert(W.end(), m_ReadList.begin(), m_ReadList.end());
+            for (const auto& Nb : m_Neighbors)
+            {
+                W.push_back(std::uint32_t(Nb.m_First.size())); W.push_back(std::uint32_t(Nb.m_Index.size()));
+                W.insert(W.end(), Nb.m_First.begin(), Nb.m_First.end());
+                W.insert(W.end(), Nb.m_Index.begin(), Nb.m_Index.end());
+                for (float w : Nb.m_Weight) W.push_back(std::bit_cast<std::uint32_t>(w));
+            }
+            W.push_back(std::uint32_t(m_OriginFirst.size())); W.push_back(std::uint32_t(m_OriginPos.size()));
+            W.insert(W.end(), m_OriginFirst.begin(), m_OriginFirst.end());
+            for (const auto* pV : { &m_OriginPos, &m_OriginNrm }) for (const auto& v : *pV) for (int a = 0; a < 3; ++a) W.push_back(std::bit_cast<std::uint32_t>(v[a]));
+            return W;
+        }
+        bool UnpackDerived(std::span<const std::uint32_t> W) noexcept
+        {
+            std::size_t i = 0;
+            const auto Take = [&](std::size_t n) { const bool b = i + n <= W.size(); const std::size_t at = i; i += n; return b ? W.data() + at : nullptr; };
+            const std::uint32_t* p = Take(6);
+            if (p == nullptr || p[0] != derived_tag_v) return false;
+            const float Cell = std::bit_cast<float>(p[1]);
+            const std::uint32_t MaxProbe = p[2], Unsupported = p[3], nTable = p[4], nList = p[5];
+            const std::uint32_t* pTable = Take(4 * std::size_t(nTable));
+            const std::uint32_t* pList  = Take(nList);
+            if (!pTable || !pList) return false;
+            std::array<neighbors, 2> Nbs;
+            for (auto& Nb : Nbs)
+            {
+                const std::uint32_t* q = Take(2);
+                if (!q) return false;
+                const std::uint32_t nFirst = q[0], nIndex = q[1];
+                const std::uint32_t *pF = Take(nFirst), *pI = Take(nIndex), *pW = Take(nIndex);
+                if (!pF || !pI || !pW) return false;
+                Nb.m_First.assign(pF, pF + nFirst); Nb.m_Index.assign(pI, pI + nIndex);
+                Nb.m_Weight.resize(nIndex);
+                for (std::uint32_t k = 0; k < nIndex; ++k) Nb.m_Weight[k] = std::bit_cast<float>(pW[k]);
+            }
+            const std::uint32_t* q = Take(2);
+            if (!q) return false;
+            const std::uint32_t nOFirst = q[0], nO = q[1];
+            const std::uint32_t *pOF = Take(nOFirst), *pOP = Take(3 * std::size_t(nO)), *pON = Take(3 * std::size_t(nO));
+            if (!pOF || !pOP || !pON || i != W.size()) return false;
+            if (Nbs[0].m_First.size() != 0 && Nbs[0].m_First.size() != m_Levels[0].size() + 1) return false;       // made for other surfels
+            if (nOFirst != 0 && nOFirst != m_Levels[0].size() + 1) return false;
+            m_ReadCell = Cell; m_ReadMaxProbe = MaxProbe; m_ReadUnsupported = Unsupported;
+            m_ReadTable.resize(nTable);
+            for (std::uint32_t k = 0; k < nTable; ++k) m_ReadTable[k] = { pTable[4 * k], pTable[4 * k + 1], pTable[4 * k + 2], pTable[4 * k + 3] };
+            m_ReadList.assign(pList, pList + nList);
+            m_Neighbors = std::move(Nbs);
+            m_OriginFirst.assign(pOF, pOF + nOFirst);
+            const auto V = [](const std::uint32_t* f, std::uint32_t n) { std::vector<v3> Out(n); for (std::uint32_t k = 0; k < n; ++k) Out[k] = { std::bit_cast<float>(f[3 * k]), std::bit_cast<float>(f[3 * k + 1]), std::bit_cast<float>(f[3 * k + 2]) }; return Out; };
+            m_OriginPos = V(pOP, nO); m_OriginNrm = V(pON, nO);
+            return true;
+        }
+
         // The rays' structures (the BVH, its 4-triangle rows, the bounds) from m_Pos / m_Tris: the bake's last step, and all a geometry
         // with baked surfels needs at load
         void BuildRays() noexcept
@@ -1185,7 +1249,10 @@ namespace xlionrender::gi
             for (const auto& S : Geom.getGISurfelMaterials()) M.m_SurfelMaterial.push_back({ S.m_U, S.m_V, S.m_UVRadius, S.m_iMaterial });
         }
         M.BuildRays();
-        M.BuildNeighbors();
+        // The read grid, the neighbors, the rays' origins: the compiler's (a geometry compiled before it packed them: built here)
+        bool bDerived = false;
+        if constexpr (requires { Geom.getGIDerived(); }) bDerived = M.UnpackDerived(Geom.getGIDerived());
+        if (!bDerived) M.BuildNeighbors();
         return true;
     }
 
@@ -1234,6 +1301,7 @@ namespace xlionrender::gi
             float   m_MaxEmitted = 0;           // the most emitted light a surfel receives (its links' irradiance, luminance)
             v3      m_MaxEmitter{ 0, 0, 0 };    // the brightest emitter's radiance
             int     m_nUnsupported = 0;         // this update's rays whose hit read no surfel (Indirect unsupported: the policy's light, Unsupported)
+            double  m_UploadMs  = 0;            // the renderer's: the shown light (BasisLight, its filter) and the moments into the GPU's buffers
         };
 
         struct hit
@@ -1336,31 +1404,58 @@ namespace xlionrender::gi
         // blended with the neighbors' (the mesh's neighbor lists, their weights times their validity; itself at weight 1),
         // m_Setup.m_FilterPasses times over. The independent noise of neighboring surfels averages out. Only what is shown: the solver
         // keeps its own light (a filter fed back every update would keep spreading the light)
+        // Every frame for every shown instance (the GPU's upload): on plain floats through raw pointers (a Debug build calls every
+        // vector and v3 operator: 175 ms a frame for the Police Station's 63k surfels), the surfels in blocks across the workers
         const std::vector<basis>& BasisLight( int Id ) const noexcept
         {
             const auto& I  = m_Instances[Id];
             const auto& Nb = I.m_pMesh->m_Neighbors[I.m_Level];
+            const int   n  = int(I.m_E.size());
             auto&       F  = I.m_Filtered;
-            F.resize(I.m_E.size());
-            for (std::size_t s = 0; s < F.size(); ++s)
-                for (int i = 0; i < 3; ++i) { const v3& f = I.m_Frac[s][i]; F[s][i] = v3{ I.m_E[s].m_X * f.m_X, I.m_E[s].m_Y * f.m_Y, I.m_E[s].m_Z * f.m_Z } * 3.0f; }
-            if (Nb.m_First.size() != I.m_E.size() + 1) return F;
-            std::vector<basis> In;
+            F.resize(n);
+            {
+                const v3* pE = I.m_E.data(); const basis* pFrac = I.m_Frac.data(); basis* pF = F.data();
+                for (int s = 0; s < n; ++s)
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        const v3& f = pFrac[s][i];
+                        pF[s][i].m_X = pE[s].m_X * f.m_X * 3.0f; pF[s][i].m_Y = pE[s].m_Y * f.m_Y * 3.0f; pF[s][i].m_Z = pE[s].m_Z * f.m_Z * 3.0f;
+                    }
+            }
+            if (Nb.m_First.size() != std::size_t(n) + 1 || m_Setup.m_FilterPasses <= 0) return F;
+            auto& In = I.m_FilterIn;
+            In.resize(n);
+            const std::uint32_t* pFirst = Nb.m_First.data(); const std::uint32_t* pIdx = Nb.m_Index.data();
+            const float* pWt = Nb.m_Weight.data(); const float* pValid = I.m_Valid.data();
+            constexpr int block_v = 512;
             for (int Pass = 0; Pass < m_Setup.m_FilterPasses; ++Pass)
             {
                 In.swap(F);
-                F.resize(In.size());
-                for (std::size_t s = 0; s < In.size(); ++s)
+                const basis* pIn = In.data(); basis* pOut = F.data();
+                m_Pool.Run((n + block_v - 1) / block_v, [&](int b)
                 {
-                    basis Sum = In[s]; float W = 1;
-                    for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k)
+                    const int s1 = std::min(n, (b + 1) * block_v);
+                    for (int s = b * block_v; s < s1; ++s)
                     {
-                        const float w = Nb.m_Weight[k] * I.m_Valid[Nb.m_Index[k]];
-                        for (int i = 0; i < 3; ++i) Sum[i] = Sum[i] + In[Nb.m_Index[k]][i] * w;
-                        W += w;
+                        const basis& Me = pIn[s];
+                        float a0 = Me[0].m_X, a1 = Me[0].m_Y, a2 = Me[0].m_Z, a3 = Me[1].m_X, a4 = Me[1].m_Y, a5 = Me[1].m_Z, a6 = Me[2].m_X, a7 = Me[2].m_Y, a8 = Me[2].m_Z, W = 1;
+                        for (std::uint32_t k = pFirst[s], k1 = pFirst[s + 1]; k < k1; ++k)
+                        {
+                            const std::uint32_t j = pIdx[k];
+                            const float w = pWt[k] * pValid[j];
+                            const basis& B = pIn[j];
+                            a0 += B[0].m_X * w; a1 += B[0].m_Y * w; a2 += B[0].m_Z * w;
+                            a3 += B[1].m_X * w; a4 += B[1].m_Y * w; a5 += B[1].m_Z * w;
+                            a6 += B[2].m_X * w; a7 += B[2].m_Y * w; a8 += B[2].m_Z * w;
+                            W += w;
+                        }
+                        const float r = 1.0f / W;
+                        basis& O = pOut[s];
+                        O[0].m_X = a0 * r; O[0].m_Y = a1 * r; O[0].m_Z = a2 * r;
+                        O[1].m_X = a3 * r; O[1].m_Y = a4 * r; O[1].m_Z = a5 * r;
+                        O[2].m_X = a6 * r; O[2].m_Y = a7 * r; O[2].m_Z = a8 * r;
                     }
-                    for (int i = 0; i < 3; ++i) F[s][i] = Sum[i] * (1.0f / W);
-                }
+                });
             }
             return F;
         }
@@ -1432,6 +1527,10 @@ namespace xlionrender::gi
         }
         const std::vector<float>& InstanceValid( int Id ) const noexcept { return m_Instances[Id].m_Valid; }
         const std::vector<moments>& InstanceMoments( int Id ) const noexcept { return m_Instances[Id].m_Moments; }
+        // What changes an instance's moments: the last update's surfels (instance, surfel), and a reset of them all (a level switch, a
+        // new instance): a copy of them stays current with these two, without reading them all every frame
+        std::span<const std::pair<int, int>> LastUpdated( void ) const noexcept { return m_Work; }
+        std::uint32_t MomentsReset( int Id ) const noexcept { return m_Instances[Id].m_MomentsReset; }
 
         // The anti-leak weight of the reads at P (mesh space) for surfel s of instance Id's active level: the plane distance times the
         // depth moments' Chebyshev term (the CPU twin of GIVisibility in shaders/xlionrender_surfel_gi.glsl)
@@ -1584,6 +1683,7 @@ namespace xlionrender::gi
                     for (std::size_t p = 0; p < E.size(); ++p) if (Cnt[p]) { E[p] = E[p] * (1.0f / float(Cnt[p])); Valid[p] /= float(Cnt[p]); }
                 }
                 I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0;
+                m_bEmitDirty = true;
                 I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
                 ResetMoments(I);
             }
@@ -1625,8 +1725,10 @@ namespace xlionrender::gi
             St.m_Surfels = int(m_Work.size());
             St.m_Rays    = St.m_Surfels * m_Setup.m_RaysPerSurfel;
 
-            if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; }
-            UpdateEmittedLight();
+            if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; m_bEmitDirty = true; }
+            // The emitters' light: made of the links, the emissions (SetSurfelMaterial: the links again) and the scale; a level switch
+            // changes its layout. Nothing else: not every update
+            if (m_bEmitDirty || m_EmitScale != m_Setup.m_EmissiveScale) { UpdateEmittedLight(); m_bEmitDirty = false; m_EmitScale = m_Setup.m_EmissiveScale; }
 
             // The policy's value per instance (Unsupported): this update's mean light of its valid surfels; none valid: the world's
             {
@@ -1829,7 +1931,7 @@ namespace xlionrender::gi
             std::vector<basis>      m_EmitB;                    // per surfel of the active level: the emitters' irradiance this update, per basis direction
             std::vector<basis>      m_Frac;                     // per surfel: the fraction of its light from around each basis direction (per channel)
             std::vector<basis>      m_BasisAcc;                 // this pass: the light per basis direction
-            mutable std::vector<basis> m_Filtered;              // BasisLight's
+            mutable std::vector<basis> m_Filtered, m_FilterIn;  // BasisLight's (the result, the pass before)
             std::vector<std::array<float, 3 * moment_texels_v>> m_MomAcc;     // this pass: per texel the sum of d, of d^2, the count
             std::vector<std::array<std::uint16_t, moment_texels_v>> m_MomCount; // per texel the samples it has had (its blend: 1 / n, then slow)
             std::vector<estimator>  m_Est;                      // per surfel of the active level: its light over time
@@ -1843,6 +1945,7 @@ namespace xlionrender::gi
             bool                    m_bAlive    = true;
             float                   m_MeanScale = 1;            // the transform's mean axis scale (surfel radii are mesh space)
             v3                      m_MeanE{ 0, 0, 0 };                 // this update's mean light of its valid surfels: an unsupported query's value (Unsupported)
+            std::uint32_t           m_MomentsReset = 0;         // ResetMoments' count (MomentsReset)
         };
 
         void Place(instance& I, const xmath::fmat4& L2W) noexcept
@@ -1871,6 +1974,7 @@ namespace xlionrender::gi
         // Fully open (every direction travels the whole reach): a new surfel reads at full weight until its rays say otherwise
         static void ResetMoments(instance& I) noexcept
         {
+            ++I.m_MomentsReset;
             const auto& L = I.m_pMesh->m_Levels[I.m_Level];
             I.m_Moments.resize(L.size());
             I.m_MomAcc.assign(L.size(), {});
@@ -2114,8 +2218,10 @@ namespace xlionrender::gi
         }
 
         bool                                    m_bLinksDirty = false;
+        bool                                    m_bEmitDirty = true;        // UpdateEmittedLight's inputs changed (Update)
+        float                                   m_EmitScale = -1;           // the scale it was made with
         std::vector<std::pair<int, int>>        m_Emitters;         // (instance, fine surfel) of every surfel that emits
-        worker_pool                             m_Pool;
+        mutable worker_pool                     m_Pool;                 // (BasisLight, const, runs on it too)
         std::vector<instance>                   m_Instances;
         mutable bvh                             m_Tlas;
         mutable std::vector<int>                m_TlasIds;          // TLAS primitive -> instance (the alive ones)

@@ -277,6 +277,8 @@ int main()
             std::span<const surfel>        getGISurfels()       const { return { m_Surfels.data(), m_nFine }; }
             std::span<const surfel>        getGIParents()       const { return { m_Surfels.data() + m_nFine, m_Surfels.size() - m_nFine }; }
             std::span<const std::uint16_t> getGIVertexSurfels() const { return m_Vert; }
+            std::vector<std::uint32_t>  m_Derived;
+            std::span<const std::uint32_t> getGIDerived()       const { return m_Derived; }
         };
         surfel_mesh Baked = Box({ 2, 2, 2 }, 0.25f);
         Baked.Bake(0.3f, 0.9f);
@@ -317,6 +319,34 @@ int main()
         std::printf("read grid: %zu cells, %zu list entries, at most %d surfels per cell; %d of the surfels reaching %d surface points not listed\n"
                    , std::count_if(Loaded.m_ReadTable.begin(), Loaded.m_ReadTable.end(), [](const auto& E) { return E[1] != 0xFFFFFFFFu; }), Loaded.m_ReadList.size(), MaxList, nMissing, nPoints);
         CHECK(nMissing == 0, "the read grid misses %d surfels that reach a surface point", nMissing);
+
+        // The compiler's packed load-time structures (PackDerived) load back as the renderer would have built them; a block made for
+        // other surfels, or cut short, is refused (they are built instead)
+        {
+            Baked.BuildReadGrid();
+            G.m_Derived = Baked.PackDerived();
+            surfel_mesh Fast = Box({ 2, 2, 2 }, 0.25f);
+            CHECK(SurfelsFromXGeomStatic(Fast, G), "the surfels with their packed structures did not load");
+            const auto SameNb = [](const surfel_mesh& A, const surfel_mesh& B)
+            {
+                for (int Lv = 0; Lv < 2; ++Lv)
+                    if (A.m_Neighbors[Lv].m_First != B.m_Neighbors[Lv].m_First || A.m_Neighbors[Lv].m_Index != B.m_Neighbors[Lv].m_Index || A.m_Neighbors[Lv].m_Weight != B.m_Neighbors[Lv].m_Weight) return false;
+                if (A.m_OriginFirst != B.m_OriginFirst || A.m_OriginPos.size() != B.m_OriginPos.size()) return false;
+                for (std::size_t k = 0; k < A.m_OriginPos.size(); ++k) if ((A.m_OriginPos[k] - B.m_OriginPos[k]).Length() > 0 || (A.m_OriginNrm[k] - B.m_OriginNrm[k]).Length() > 0) return false;
+                return true;
+            };
+            const bool bGrid = Fast.m_ReadTable == Loaded.m_ReadTable && Fast.m_ReadList == Loaded.m_ReadList && Fast.m_ReadCell == Loaded.m_ReadCell && Fast.m_ReadMaxProbe == Loaded.m_ReadMaxProbe;
+            std::printf("packed load-time structures: %zu words; read grid %s, neighbors and origins %s as built at load\n", G.m_Derived.size(), bGrid ? "the same" : "DIFFERENT", SameNb(Fast, Loaded) ? "the same" : "DIFFERENT");
+            CHECK(bGrid && SameNb(Fast, Loaded), "the packed structures load differently from the ones built at load");
+            surfel_mesh Other = Box({ 2, 2, 2 }, 0.25f);
+            Other.m_Levels[0].resize(3);
+            CHECK(!Other.UnpackDerived(G.m_Derived), "a block made for other surfels was taken");
+            auto Short = G.m_Derived; Short.pop_back();
+            surfel_mesh Cut = Box({ 2, 2, 2 }, 0.25f);
+            Cut.m_Levels[0] = Baked.m_Levels[0];
+            CHECK(!Cut.UnpackDerived(Short), "a block cut short was taken");
+            G.m_Derived.clear();
+        }
 
         saved_geom Empty;
         surfel_mesh None = Box({ 2, 2, 2 }, 0.25f);
@@ -690,6 +720,30 @@ int main()
         std::printf("surfel colors: red/green toward the red wall %.2f, the green %.2f; a dark room lit by an emissive panel: %.3f under it\n", RgRed, RgGreen, Under);
         CHECK(RgRed > 1.3f * RgGreen, "the walls' surfel colors do not reach the floor (%.2f vs %.2f)", RgRed, RgGreen);
         CHECK(Under > 0.5, "the emissive panel lights nothing (%.3f)", Under);
+
+        // The emitters' light is made again only when its inputs change (Update: not every update): a new scale reaches the floor
+        D.m_Setup.m_EmissiveScale = 2;
+        D.DirtyAll();
+        for (int f = 0; f < 60; ++f) D.Update(Dark, { 0, 1, 0 }, 1 << 30, 15100 + f);
+        double Under2 = 0;
+        for (std::size_t s = 0; s < Ground.m_Levels[0].size(); ++s)
+            if (Ground.m_Levels[0][s].m_Center.Length() < 0.3f) Under2 += D.InstanceLight(iGround)[s].m_X;
+        Under2 /= std::max(nUnder, 1);
+        std::printf("emissive scale 1 -> 2: the floor under the panel %.3f -> %.3f\n", Under, Under2);
+        CHECK(std::abs(Under2 / Under - 2) < 0.15, "a new emissive scale does not reach the light (%.3f -> %.3f)", Under, Under2);
+
+        // What a copy of the moments relies on (the renderer keeps them packed): an update changes only the surfels it lists
+        // (LastUpdated), and a level switch resets them all (MomentsReset)
+        std::vector<moments> Before = D.InstanceMoments(iGround);
+        D.Update(Dark, { 0, 1, 0 }, 64 * 8, 15200);
+        std::vector<char> Listed(Before.size(), 0);
+        for (const auto& [i, s] : D.LastUpdated()) if (i == iGround) Listed[s] = 1;
+        int nUnlisted = 0;
+        for (std::size_t s = 0; s < Before.size(); ++s) nUnlisted += !Listed[s] && Before[s] != D.InstanceMoments(iGround)[s];
+        const auto Reset = D.MomentsReset(iGround);
+        D.Update(Dark, { 0, 1, 500 }, 64 * 8, 15201);                               // far: the parent level
+        std::printf("moments: %d changed without being listed; a level switch resets them: %d\n", nUnlisted, int(D.MomentsReset(iGround) != Reset));
+        CHECK(nUnlisted == 0 && D.MomentsReset(iGround) != Reset, "the moments change where a packed copy would not follow");
     }
 
     // 6j. The emitter lists: a small emissive tile (20 x 20 cm, an exit sign) 1 m above a floor in the dark, few rays: the floor under it
