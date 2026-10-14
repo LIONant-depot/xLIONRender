@@ -287,8 +287,10 @@ vec3 PBRLightingImageBase
 	{
 		const vec3 GN = normalize(InGINormal), GT = normalize(InGITangent.xyz);
 		const vec3 GNmap = normalize(inNormal.x * GT + inNormal.y * (InGITangent.w * cross(GN, GT)) + inNormal.z * GN);     // as TransformNotmalToWorld, in mesh space
+		g_GIMoments = (InGIRef.y & gi_no_moments_v) == 0u;
 		const vec4 Px = SurfelGIPixel(InGIPos, GFace, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
-		if (Px.w > 1e-6) g_GI = vec4(Px.rgb / Px.w, 1.0);
+		// little weight (the surfels near are mostly out of sight: the cell's lists fade them) blends into the vertex read, no edge
+		if (Px.w > 1e-6) g_GI = vec4(g_GI.w > 0.5 ? mix(g_GI.rgb, Px.rgb / Px.w, smoothstep(0.0, 0.25, Px.w)) : Px.rgb / Px.w, 1.0);
 	}
 	const uint GIDebug = GIDebugCode(InGIRef.y);
 	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, GFace); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }

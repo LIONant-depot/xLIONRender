@@ -140,6 +140,8 @@ namespace xlionrender
                          :                               (Scene.m_Sky.m_Zenith + Scene.m_Sky.m_Horizon) * (0.5f * Scene.m_Sky.m_Intensity);
         L.m_Points.reserve(Scene.m_LocalLights.size());
         for( const auto& LL : Scene.m_LocalLights ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });
+        W.m_Setup.m_FilterPasses  = std::clamp(Scene.m_GI.m_FilterPasses, 0, 16);   // what is shown only: no re-solve
+        W.m_Setup.m_RaysPerSurfel = std::clamp(Scene.m_GI.m_RaysPerSurfel, 1, 256);
         if( W.m_Setup.m_EmissiveScale != Scene.m_GI.m_EmissiveScale )          // a new scale: every instance re-solves
         {
             W.m_Setup.m_EmissiveScale = Scene.m_GI.m_EmissiveScale;
@@ -158,7 +160,8 @@ namespace xlionrender
             auto* pOut = static_cast<xmath::fvec4*>(pMemory);
             int   Used = 0;
             // scene::gi_debug in the shaders' bits (xlionrender_surfel_gi.glsl GIDebugCode): 1..3 at bit 9, 4 and 8 at bits 12 and 13
-            const std::uint32_t GIDebugBits = ((std::uint32_t(Scene.m_GI.m_Debug) & 3u) << 9) | ((std::uint32_t(Scene.m_GI.m_Debug) & 0xCu) << 10);
+            const std::uint32_t GIDebugBits = ((std::uint32_t(Scene.m_GI.m_Debug) & 3u) << 9) | ((std::uint32_t(Scene.m_GI.m_Debug) & 0xCu) << 10)
+                                            | (Scene.m_GI.m_bMoments ? 0u : 0x4000u);                   // gi_no_moments_v
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
             {
                 const int Id = DrawId[i];

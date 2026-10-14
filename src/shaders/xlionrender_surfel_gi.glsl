@@ -23,6 +23,8 @@ const uint gi_debug_shift_v = 9u;        // 2 bits (scene::gi_debug): 1 the surf
                                          // 3 the material capture (0x800: its emission pass); then 0x1000 the captured color of each pixel's triangle (what a
                                          // ray hitting it bounces). Kept apart: materials compiled before it still capture right
 const uint gi_capture_emission_v = 0x800u;
+const uint gi_no_moments_v       = 0x4000u;     // the reads skip the depth-moment test (scene::gi_settings::m_bMoments off)
+bool       g_GIMoments           = true;        // GIVisibility's moment test (the caller sets it from its GI reference)
 uint GIDebugCode(in const uint Ref) { return Ref == gi_none_v ? 0u : ((Ref >> gi_debug_shift_v) & 3u) | ((Ref >> 10u) & 0x4u); }    // scene::gi_debug
 
 vec4 g_GIDebug = vec4(0.0);             // w > 0: the debug view's color replaces the lit one (GIDebugOr)
@@ -52,7 +54,7 @@ float GIVisibility(in const vec3 P, in const vec3 Center, in const vec3 Normal, 
     const vec3  D     = P - Center;
     const float Reach = 2.0 * Radius;
     float       w     = clamp(1.0 - abs(dot(D, Normal)) / (0.7 * Reach), 0.0, 1.0);
-    if (w <= 0.0) return w;
+    if (w <= 0.0 || !g_GIMoments) return w;
     // The moments are looked up from the point lifted off the surface (DDGI's normal bias): a point on the surfel's own surface lies along
     // its tangent, where the texels mix in the rays that rise into nearby geometry (blinds, louvres) and read short - dark diamonds
     const vec3  Dq = D + Normal * (0.15 * Reach);
@@ -79,9 +81,15 @@ float GIVisibility(in const vec3 P, in const vec3 Center, in const vec3 Normal, 
 // The read grid's list for the cell of the surface point P (mesh space, its normal N): false when P is off the surface's cells, or there
 // is no grid. The cell is the one of P lifted 5% of a cell along N (surfel_mesh::ReadCellAt): a floor at a multiple of the cell size lies
 // on a boundary, and the interpolated position falls a hair to either side of it
-bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count)
+vec3 GIOctDecode(in const vec2 e)
 {
-    First = 0u; Count = 0u;
+    vec3 v = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(v);
+}
+bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count, out vec3 PatchN, out uint Patches, out uint nPatches)
+{
+    First = 0u; Count = 0u; PatchN = N; Patches = 0u; nPatches = 0u;
     const uint Mask = GIMesh[3];
     if (Mask == 0u) return false;
     const float Cell  = uintBitsToFloat(GIMesh[4]);
@@ -94,24 +102,51 @@ bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count
     {
         const uint e = GIMesh[2] + 4u * h;
         if (GIMesh[e + 1u] == 0xFFFFFFFFu) return false;
-        if (GIMesh[e] == KeyLo && GIMesh[e + 1u] == KeyHi) { First = GIMesh[e + 2u]; Count = GIMesh[e + 3u]; return true; }
+        if (GIMesh[e] != KeyLo || GIMesh[e + 1u] != KeyHi) continue;
+        // the cell's patch that matches the point best (facing its way, nearest its plane; surfel_mesh::ReadCellList): its list
+        Patches = GIMesh[5] + GIMesh[e + 2u]; nPatches = GIMesh[e + 3u];
+        float Best = -1e30;
+        for (uint p = 0u; p < GIMesh[e + 3u]; ++p)
+        {
+            const uint  a  = GIMesh[5] + GIMesh[e + 2u] + 4u * p;
+            const vec3  Np = GIOctDecode(unpackSnorm2x16(GIMesh[a]));
+            const float c  = dot(Np, N);
+            if (c < 0.5) continue;
+            const float Score = c - abs(dot(P, Np) - uintBitsToFloat(GIMesh[a + 1u])) / Cell;
+            if (Score > Best) { Best = Score; First = GIMesh[a + 2u]; Count = GIMesh[a + 3u]; PatchN = Np; }
+        }
+        return Best > -1e29;
     }
     return false;
+}
+
+// How much the surface at P sees a listed surfel (surfel_mesh::ReadEntryWeight): the entry's 4 corner weights (4 bits each, the cell's
+// corners in the patch's plane) blended by P's place in its cell
+float GIReadWeight(in const uint e, in const vec3 P, in const vec3 N, in const vec3 PatchN)
+{
+    const float Cell = uintBitsToFloat(GIMesh[4]);
+    const vec3  Lp   = (P + N * (0.05 * Cell)) / Cell;
+    const vec3  A    = abs(PatchN);
+    const vec2  uv   = A.x >= A.y && A.x >= A.z ? Lp.yz : A.y >= A.z ? Lp.xz : Lp.xy;
+    const vec2  f    = uv - floor(uv);
+    const vec4  w    = vec4(float((e >> 16u) & 15u), float((e >> 20u) & 15u), float((e >> 24u) & 15u), float((e >> 28u) & 15u));
+    return mix(mix(w.x, w.y, f.x), mix(w.z, w.w, f.x), f.y) / 15.0;
 }
 
 // The debug view of the surfels: the level 0 surfel with the most weight at P (0xFFFFFFFF: none reaches it), and a color of its own
 uint SurfelGIDominant(in const vec3 P, in const vec3 N)
 {
-    uint First, Count, Best = 0xFFFFFFFFu;
+    uint First, Count, Best = 0xFFFFFFFFu, Patches, nPatches;
     float BestW = 0.0;
-    GIReadCell(P, N, First, Count);
+    vec3 PatchN;
+    GIReadCell(P, N, First, Count, PatchN, Patches, nPatches);
     for (uint i = 0u; i < Count; ++i)
     {
-        const uint  s = GIMesh[GIMesh[5] + First + i];
+        const uint  e = GIMesh[GIMesh[5] + First + i], s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
         const uint  b = GIMesh[0] + 8u * s;
         const float c = dot(GISurfelNormal(b), N);
         const float f = max(0.0, 1.0 - length(P - GISurfelCenter(b)) / (2.0 * uintBitsToFloat(GIMesh[b + 3u])));
-        const float w = c < 0.5 ? 0.0 : f * f * c;
+        const float w = c < 0.5 ? 0.0 : f * f * c * GIReadWeight(e, P, N, PatchN);
         if (w > BestW) { BestW = w; Best = s; }
     }
     return Best;
@@ -133,14 +168,12 @@ vec3 SurfelDebugColor(in const uint s)
 // sum(w E), sum(w) of the level 0 surfels that reach a point (mesh space position and normal): its cell of the read grid lists them.
 // The weight of the vertex read (falloff over 2 radii squared, times the normal match, times the validity). 0: no grid, or off the
 // surface's cells (the caller falls back to the vertex read)
-vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level)
+vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level, in const uint First, in const uint Count, in const vec3 PatchN)
 {
-    uint First, Count;
-    if (!GIReadCell(P, N, First, Count)) return vec4(0.0);
     vec4 Sum = vec4(0.0);
     for (uint i = 0u; i < Count; ++i)
     {
-        const uint  s = GIMesh[GIMesh[5] + First + i];
+        const uint  e = GIMesh[GIMesh[5] + First + i], s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
         const uint  b = GIMesh[0] + 8u * s;
         const float c = dot(GISurfelNormal(b), N);
         if (c < 0.5) continue;
@@ -151,10 +184,25 @@ vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const vec3 Nmap, in cons
         // levels: no pop at the switch)
         const uint  sl = Level == 1u ? GIMesh[b + 7u] : s;
         const uint  bl = Level == 1u ? GIMesh[1] + 8u * sl : b;
-        const float w = f * f * c * cn * GIValidity(LightOffset + sl) * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
+        const float w = f * f * c * cn * GIReadWeight(e, P, N, PatchN) * GIValidity(LightOffset + sl) * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
         if (w <= 0.0) continue;
         Sum += vec4(GIBasisRead(LightOffset + sl, GISurfelNormal(bl), Nmap) * w, w);       // the normal-mapped normal reads the basis
     }
+    return Sum;
+}
+vec4 SurfelGIPixel(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level)
+{
+    uint First, Count, Patches, nPatches;
+    vec3 PatchN;
+    if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches) && nPatches == 0u) return vec4(0.0);
+    vec4 Sum = SurfelGIList(P, N, Nmap, LightOffset, Level, First, Count, PatchN);
+    // nothing from the patch it matches (a thin edge seen edge-on: its derived normal is off), then all of the cell's patches
+    if (Sum.w <= 1e-6)
+        for (uint p = 0u; p < nPatches; ++p)
+        {
+            const uint a = Patches + 4u * p;
+            Sum += SurfelGIList(P, N, Nmap, LightOffset, Level, GIMesh[a + 2u], GIMesh[a + 3u], GIOctDecode(unpackSnorm2x16(GIMesh[a])));
+        }
     return Sum;
 }
 

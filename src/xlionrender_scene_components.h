@@ -126,6 +126,9 @@ namespace xlionrender
         bool            m_bGIPerPixel   = true;            // near, every pixel reads the surfels (no extra vertices needed); off: the vertices only
         gi_debug        m_GIDebug       = gi_debug::NONE;
         float           m_GIEmissiveScale = 100.0f;         // self-illumination as lights: their emission x this, for the GI
+        int             m_GIRaysPerSurfel = 8;              // rays per surfel update
+        int             m_GIFilterPasses  = 4;              // the GI light's spatial filter passes (smoother with more)
+        bool            m_bGIMoments      = true;           // the reads' depth-moment visibility test
 
         XPROPERTY_DEF
         ( "Environment", environment
@@ -136,6 +139,9 @@ namespace xlionrender
         , obj_member<"Ambient",      &environment::m_Ambient>
         , obj_member<"GI",           &environment::m_bGI,         member_help<"Diffuse global illumination (surfels): bounce light from every mesh that has surfels">>
         , obj_member<"GIRayBudget",  &environment::m_GIRayBudget, member_help<"Rays traced per frame for the GI: more converges faster, costs more CPU">>
+        , obj_member<"GIRaysPerSurfel", &environment::m_GIRaysPerSurfel, member_help<"Rays each surfel casts per update, spread evenly over its hemisphere: more is less noise (blotches on fine geometry), but the ray budget then updates fewer surfels per frame (raise GIRayBudget with it)">>
+        , obj_member<"GIMoments", &environment::m_bGIMoments, member_help<"The GI reads' visibility test (each surfel's depth moments: a surfel hidden from the point is faded). Off: only the plane test - more light leaks, but no blotches from it (a diagnostic)">>
+        , obj_member<"GIFilterPasses", &environment::m_GIFilterPasses, member_help<"How many times the GI light is blended with the neighboring surfels' before it is shown: more is smoother (blotches fade, contrast too); 0: none. The solve itself is not filtered">>
         , obj_member<"GIEmissiveScale", &environment::m_GIEmissiveScale, member_help<"Self-illuminated materials light the scene through the GI with their emission times this (0: they light nothing; their own look does not change)">>
         , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone; SURFACE_COLOR: the surface color of the surfel each pixel reads most (the material capture: what the GI bounces)">>
         , obj_member<"GIPerPixel",   &environment::m_bGIPerPixel, member_help<"Near meshes read the GI per pixel (a mesh needs no extra vertices for it); off: per vertex only (cheaper, needs dense meshes)">>

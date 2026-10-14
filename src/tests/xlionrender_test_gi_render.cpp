@@ -94,7 +94,7 @@ int main()
     for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render without GI");
     const auto Off = ReadRGB(Device, View, W, H);
 
-    Scene.m_GI = { .m_bEnable = true, .m_RayBudget = 1 << 20 };             // every instance every frame
+    Scene.m_GI = { .m_bEnable = true, .m_RayBudget = 1 << 20, .m_FilterPasses = 2 };    // every instance every frame; the read checks below were tuned at 2 filter passes (more blurs the per-pixel / vertex difference they measure)
     for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render with GI");
     const auto On = ReadRGB(Device, View, W, H);
     const auto& St = Renderer.getGIStats();

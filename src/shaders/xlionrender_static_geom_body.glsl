@@ -40,6 +40,7 @@ layout(location = 13) out vec4 OutGITangent;        //   and the tangent (w: the
 vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4 L2wRows, in const float MeanScale)
 {
     if (push.giLevel == gi_none_v) return vec4(0.0);
+    g_GIMoments = (push.giLevel & gi_no_moments_v) == 0u;
     const uint Level = push.giLevel & 0xFFu, LevelBase = GIMesh[Level];
     const uint P0 = GIMesh[8u + 2u * uint(gl_VertexIndex)], P1 = GIMesh[9u + 2u * uint(gl_VertexIndex)];
     const uint Idx[4] = uint[4](P0 & 0xFFFFu, P0 >> 16, P1 & 0xFFFFu, P1 >> 16);
