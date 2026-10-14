@@ -34,6 +34,7 @@
 #include <mutex>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 #include <unordered_map>
@@ -1358,6 +1359,43 @@ namespace xlionrender::gi
             std::vector<v3> E(B.size());
             for (std::size_t s = 0; s < B.size(); ++s) E[s] = (B[s][0] + B[s][1] + B[s][2]) * (1.0f / 3);
             return E;
+        }
+
+        // Every live instance's surfels of its active level as CSV (the GI baseline, comparisons between runs): world position, normal and
+        // radius, the solver's light (unfiltered, InstanceLight), the shown light (FilteredLight), the validity, the captured albedo. The
+        // setup on the first lines (# comments). Returns the surfels written (-1: the file could not be made)
+        int Dump(const char* pPath) const noexcept
+        {
+            std::FILE* f = nullptr;
+        #ifdef _WIN32
+            if (fopen_s(&f, pPath, "w") != 0) f = nullptr;
+        #else
+            f = std::fopen(pPath, "w");
+        #endif
+            if (f == nullptr) return -1;
+            std::fprintf(f, "# RaysPerSurfel=%d FilterPasses=%d EmissiveScale=%g SpreadOrigins=%d LodDistance=%g\n"
+                        , m_Setup.m_RaysPerSurfel, m_Setup.m_FilterPasses, m_Setup.m_EmissiveScale, int(m_Setup.m_bSpreadOrigins), m_Setup.m_LodDistance);
+            std::fprintf(f, "inst,level,surfel,px,py,pz,nx,ny,nz,radius,er,eg,eb,fr,fg,fb,valid,ar,ag,ab\n");
+            int n = 0;
+            for (int Id = 0; Id < InstanceCount(); ++Id)
+            {
+                const auto& I = m_Instances[Id];
+                if (!I.m_bAlive || I.m_pMesh == nullptr) continue;
+                const auto& L = I.m_pMesh->m_Levels[I.m_Level];
+                const auto  F = FilteredLight(Id);
+                for (std::size_t s = 0; s < L.size() && s < I.m_E.size(); ++s, ++n)
+                {
+                    const v3 P = I.m_L2W * L[s].m_Center, N = I.m_L2W.TransformDirection(L[s].m_Normal).NormalizeCopy();
+                    const v3 A = I.m_Level == 0 && s < I.m_SurfAlbedo.size() ? I.m_SurfAlbedo[s] : I.m_Albedo;
+                    const v3 Fs = s < F.size() ? F[s] : v3{ 0, 0, 0 };
+                    std::fprintf(f, "%d,%d,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f\n"
+                                , Id, I.m_Level, s, P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z, L[s].m_Radius * I.m_MeanScale
+                                , I.m_E[s].m_X, I.m_E[s].m_Y, I.m_E[s].m_Z, Fs.m_X, Fs.m_Y, Fs.m_Z
+                                , s < I.m_Valid.size() ? I.m_Valid[s] : 0.0f, A.m_X, A.m_Y, A.m_Z);
+                }
+            }
+            std::fclose(f);
+            return n;
         }
 
         // What a normal n (mesh space) reads of a surfel's shown light (the CPU twin of the shaders' basis read)

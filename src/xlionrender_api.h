@@ -53,7 +53,7 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 5;                // 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
+        static constexpr std::uint32_t kVersion = 6;                // 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
@@ -79,6 +79,8 @@ namespace xlionrender
         virtual void          BlitScene(const void* pWorld, xgpu::cmd_buffer& CmdBuffer) noexcept = 0;
         // What the last RenderScene of the world had (Meshes, drawn, waiting for their resources, material slots on the constant material, lights), written like DescribeTextDraw. Version 5.
         virtual int           DescribeScene(const void* pWorld, char* pOut, int Capacity) noexcept = 0;
+        // The GI's surfels of the world's last RenderScene to a CSV file (positions, the solver's light, the shown light, validity, albedo). Returns the surfels written, -1: no GI or no file. Version 6.
+        virtual int           DumpGI(const void* pWorld, const char* pPath) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";

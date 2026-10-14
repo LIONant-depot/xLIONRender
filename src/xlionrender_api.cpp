@@ -95,6 +95,11 @@ namespace xlionrender
                 pOut[Length] = 0;
                 return Length;
             }
+            int           DumpGI(const void* pWorld, const char* pPath) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                return pSystem && pPath ? pSystem->DumpGI(pPath) : -1;
+            }
             int           DescribeText(const void* pWorld, std::uint64_t EntityValue, char* pOut, int Capacity) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);

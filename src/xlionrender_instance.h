@@ -67,6 +67,8 @@ namespace xlionrender
         // The last render's GI update (instances, rays, CPU ms)
                       const gi::world::stats& getGIStats( void ) const                                      noexcept { return m_GIStats; }
                       const gi::world*        getGIWorld( void ) const                                      noexcept { return m_pGIWorld.get(); }      // tests, tools
+                      bool                    isGICapturingAny( void ) const                                noexcept { return !m_GICaptures.empty(); }
+                      int                     DumpGI( const char* pPath ) const                             noexcept { return m_pGIWorld ? m_pGIWorld->Dump(pPath) : -1; }      // gi::world::Dump
                       int                     getGIId( std::uint64_t Instance ) const                       noexcept { const auto It = m_GIIds.find(std::uint32_t(Instance)); return It == m_GIIds.end() ? -1 : It->second; }    // a draw's instance in getGIWorld (-1: none)
                       bool                    isGICapturing( void ) const                                   noexcept { return !m_GICaptures.empty(); }
 

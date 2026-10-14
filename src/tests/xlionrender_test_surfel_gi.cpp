@@ -6,6 +6,8 @@
 //  - surfels saved by the GeomStatic compiler load back as baked, and a receive-only mesh is not in the rays' way
 #include "features/gi/xlionrender_surfel_gi.h"
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <numeric>
 #include <random>
 #include <span>
@@ -230,6 +232,16 @@ int main()
         std::printf("city: %d instances, %d surfels at full detail, %d active (fine %d / parent level %d instances); %d ray budget: first update %.1f ms, then %.1f ms; every instance lit after %d updates; GPU buffer %d KB\n"
                    , W.InstanceCount(), nSurfels, nActive, Fine, Coarse, budget_v, First, Ms / std::max(Frames - 1, 1), Frames + 1, nActive * 16 / 1024);
         CHECK(Coarse > 0 && Fine > 0, "the city uses one level only (fine %d, coarse %d)", Fine, Coarse);
+        {   // Dump (the GI baseline's DumpGI): every active surfel, one line each after the setup and the column names
+            const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_gi_dump_test.csv").string();
+            const int  n    = W.Dump(Path.c_str());
+            std::ifstream In(Path);
+            int nLines = 0;
+            for (std::string Line; std::getline(In, Line); ) nLines++;
+            In.close();
+            std::filesystem::remove(Path);
+            CHECK(n == nActive && nLines == nActive + 2, "Dump wrote %d surfels in %d lines (%d active)", n, nLines, nActive);
+        }
 
         // Steady state (nothing changes), then a building moves: its neighbors are dirty, not the city
         double Steady = 0, Trace = 0;
