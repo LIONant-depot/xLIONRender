@@ -6,6 +6,7 @@
 //  - surfels saved by the GeomStatic compiler load back as baked, and a receive-only mesh is not in the rays' way
 #include "features/gi/xlionrender_surfel_gi.h"
 #include <cstdio>
+#include <numeric>
 #include <random>
 #include <span>
 
@@ -724,6 +725,34 @@ int main()
     }
 
     if (g_nErrors) return 1;
+    // 6m. A transparent pane (SetSeeThrough: its material has alpha) over a floor under the sky: the floor's light comes through it as
+    //     if it were not there; opaque, the pane shades the floor
+    {
+        surfel_mesh Floor, Pane;
+        AddQuad(Floor, { -1, 0, -1 }, { 0, 0, 2 }, { 2, 0, 0 }, 0.25f);
+        AddQuad(Pane, { -3, 0.3f, -3 }, { 6, 0, 0 }, { 0, 0, 6 }, 0.5f);        // facing down, over the floor (and well past it)
+        Floor.Bake(0.2f, 0.6f); Pane.Bake(0.2f, 0.6f);
+        const auto FloorLight = [&](bool bSeeThrough)
+        {
+            world W;
+            const int iFloor = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            const int iPane  = W.Add(Pane,  xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            if (bSeeThrough) W.SetSeeThrough(iPane, { true });
+            lights L; L.m_Sky = { 1, 1, 1 };
+            for (int f = 0; f < 100; ++f) W.Update(L, { 0, 1, 0 }, 1 << 30, 15000 + f);
+            double Sum = 0;
+            for (const auto& e : W.InstanceLight(iFloor)) Sum += e.m_X;
+            const auto& V = W.InstanceValid(iPane);
+            const double PaneValid = V.empty() ? 0 : std::accumulate(V.begin(), V.end(), 0.0) / V.size();
+            return std::pair{ Sum / std::max<std::size_t>(W.InstanceLight(iFloor).size(), 1), PaneValid };
+        };
+        const auto [Opaque, OpaqueValid] = FloorLight(false);
+        const auto [Clear, ClearValid]   = FloorLight(true);
+        std::printf("a pane over the floor: floor light %.3f opaque, %.3f transparent (open sky pi = 3.142); the pane's validity %.2f -> %.2f\n", Opaque, Clear, OpaqueValid, ClearValid);
+        CHECK(Clear > 0.95 * pi_v && Opaque < 0.5 * Clear, "the transparent pane still shades the floor (%f vs %f)", Clear, Opaque);
+        CHECK(ClearValid < 1e-3, "the transparent pane's surfels are still read (validity %f)", ClearValid);
+    }
+
     std::printf("PASS\n");
     return 0;
 }

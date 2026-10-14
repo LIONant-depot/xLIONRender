@@ -120,7 +120,7 @@ void main()
 
 #ifdef XLION_GI
     OutGI       = SurfelGI(VertData.LocalPos.xyz, normalize(VertData.Normal.xyz), L2wRows, (scales.x + scales.y + scales.z) / 3.0);
-    OutGIRef    = uvec2(push.giOffset, push.giLevel);
+    OutGIRef    = uvec2(GIDebugCode(push.giLevel) == 4u ? push.clusterIndex : push.giOffset, push.giLevel);     // SURFACE_COLOR: the cluster (SurfelGITriangleColor)
 #else
     OutGI       = vec4(0.0);
     OutGIRef    = uvec2(0u, 0xFFFFFFFFu);

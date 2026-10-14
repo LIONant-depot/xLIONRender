@@ -93,7 +93,7 @@ namespace xlionrender
                 Textures.push_back(pTexture);
             }
             material_id Id;
-            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures)) return {};
+            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, pMat->m_Flags.m_bAlpha)) return {};
             m_Materials[MIInstance] = Id;
             return Id;
         }

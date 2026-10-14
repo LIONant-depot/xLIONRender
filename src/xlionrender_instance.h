@@ -73,7 +73,8 @@ namespace xlionrender
         // is the shadow map: the renderer binds its shadow atlas there whatever is given; then the textures. Neither is
         // copied or owned: they must outlive the id. The same material draws rigid and skinned geometry: the pipeline of each
         // vertex path is built the first time the material is drawn with it.
-        [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures ) noexcept;
+        // bAlpha: a transparent material (the material's alpha flag): the GI's rays pass through it (gi::world::SetSeeThrough)
+        [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, bool bAlpha = false ) noexcept;
         // The renderer's default material (shaders/xlionrender_default_material_frag.glsl: PBR with a diffuse texture), for a slot whose
         // material does not resolve. Textures: slot 0 the shadow map (the renderer's atlas), slot 1 the diffuse texture.
         [[nodiscard]] xgpu::device::error* CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept;
@@ -140,6 +141,7 @@ namespace xlionrender
             cluster_geom            m_Geom;                             // used when m_bCluster
             std::unique_ptr<gi::surfel_mesh> m_pGI;                     // SetMeshGI: the surfels (CPU) ...
             xgpu::buffer            m_GIBuffer;                         // ... and the vertex shader's copy (xlionrender_static_geom_body.glsl GIMesh)
+            bool                    m_bTriColors = false;               // m_GIBuffer has its triangles' captured colors (the SURFACE_COLOR view)
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             bool                    m_bCluster      = false;
@@ -155,6 +157,7 @@ namespace xlionrender
             std::array<xgpu::pipeline_instance, capture_path_v + 1> m_Instance;
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
+            bool                    m_bAlpha        = false;        // transparent (CreateMaterial): the GI sees through it
         };
 
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
@@ -182,10 +185,13 @@ namespace xlionrender
             std::vector<material_id>    m_Materials;
             std::uint32_t               m_Slot = 0;             // the draw's instance slot (the constant material reads it)
             std::vector<int>            m_Order;                // placement -> surfel (sorted by material slot)
+            bool                        m_bTriangles = false;   // the mesh's triangles m_First.. (else its surfels)
+            std::uint32_t               m_First = 0;
             xgpu::buffer                m_Data;
             std::uint64_t               m_Frame = 0;
             bool                        m_bRecorded = false;
         };
+        xgpu::device::error*        buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept;     // M.m_GIBuffer from M.m_pGI (+ its triangles' colors)
         static constexpr int        gi_capture_w_v = 1024, gi_capture_h_v = 512, gi_capture_max_v = (gi_capture_w_v / 2) * (gi_capture_h_v / 4);   // 65536 surfels
         std::deque<gi_capture_job>  m_GICaptures;
         xgpu::texture               m_GICaptureTex;
@@ -306,6 +312,11 @@ namespace xlionrender
         xgpu::pipeline              m_EnvSkyPipeline, m_EnvPrefilterPipeline, m_EnvDFGPipeline, m_EnvDownsamplePipeline;
         xgpu::pipeline_instance     m_EnvSkyInstance, m_EnvPrefilterInstance, m_EnvDFGInstance;
         std::uint64_t               m_EnvKey                = 0;            // the sky the atlas holds (0: none yet)
+        xgpu::pipeline              m_EnvCubemapPipeline;                   // a cubemap texture (scene::sky::m_pCubemap) into the source
+        xgpu::pipeline_instance     m_EnvCubemapInstance;
+        const xgpu::texture*        m_pEnvCubemap           = nullptr;      // the cubemap m_EnvCubemapInstance binds
+        xmath::fvec3                m_EnvMean               { 0, 0, 0 };    // the cubemap's mean color (the GI's sky)
+        std::uint64_t               m_EnvMeanFrame          = 0;            // the frame it was prefiltered in (0: read)
         bool                        m_bEnvDFGReady          = false;
         bool                        m_bEnvOn                = false;
         float                       m_EnvIntensity          = 0;
@@ -344,6 +355,7 @@ namespace xlionrender
                       const xgpu::texture& getProbeAtlas( void ) const                                          noexcept { return m_ProbeAtlas; }
         // How many times the environment's atlas was (re)built (tests: a static sky builds it once)
                       int                  getEnvironmentBuilds( void ) const                                   noexcept { return m_nEnvBuilds; }
+                      const xmath::fvec3&  getEnvironmentMean  ( void ) const                                   noexcept { return m_EnvMean; }     // a cubemap sky's mean color (the GI's sky)
         // The prefiltered environment atlas (tests read it back)
                       const xgpu::texture& getEnvironmentAtlas( void ) const                                    noexcept { return m_EnvAtlas; }
     private:

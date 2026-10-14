@@ -39,6 +39,9 @@ namespace xlionrender
         constexpr std::uint32_t s_EnvDownsampleFrag[] = {
             #include "xlionrender_env_downsample_frag.h"
         };
+        constexpr std::uint32_t s_EnvCubemapFrag[] = {
+            #include "xlionrender_env_cubemap_frag.h"
+        };
         constexpr std::uint32_t s_EnvCubeToOctFrag[] = {
             #include "xlionrender_env_cube_to_oct_frag.h"
         };
@@ -152,9 +155,9 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_WhiteTexture));
         ReleaseBuffer(m_LightUBO);
         ReleaseBuffer(m_LightRing);
-        for( auto* p : { &m_EnvSkyInstance, &m_EnvPrefilterInstance, &m_EnvDFGInstance } ) m_Device.Destroy(std::move(*p));
+        for( auto* p : { &m_EnvSkyInstance, &m_EnvPrefilterInstance, &m_EnvDFGInstance, &m_EnvCubemapInstance } ) m_Device.Destroy(std::move(*p));
         for( auto& I : m_EnvDownsampleInstance ) m_Device.Destroy(std::move(I));
-        for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline, &m_EnvDownsamplePipeline } ) m_Device.Destroy(std::move(*p));
+        for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline, &m_EnvDownsamplePipeline, &m_EnvCubemapPipeline } ) m_Device.Destroy(std::move(*p));
         for( auto* p : { &m_EnvAtlasPass, &m_EnvDFGPass } )                                 m_Device.Destroy(std::move(*p));
         for( auto& P : m_EnvSourcePass ) m_Device.Destroy(std::move(P));
         for( auto* p : { &m_EnvAtlas, &m_EnvDFG } )                                         m_Device.Destroy(std::move(*p));
@@ -458,7 +461,8 @@ namespace xlionrender
 
         // The environment probe's passes and pipelines (fullscreen triangles; the sky and the prefilter rebuild only on a sky change)
         {
-            xgpu::shader ClearVert2, Sky, Prefilter, DFG, Downsample;
+            xgpu::shader ClearVert2, Sky, Prefilter, DFG, Downsample, Cubemap;
+            if( auto Err = Device.Create(Cubemap,    { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvCubemapFrag) }); Err ) return Err;
             if( auto Err = Device.Create(ClearVert2, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_ClearDepthVert) }); Err ) return Err;
             if( auto Err = Device.Create(Sky,        { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvSkyFrag) }); Err ) return Err;
             if( auto Err = Device.Create(Prefilter,  { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvPrefilterFrag) }); Err ) return Err;
@@ -489,6 +493,7 @@ namespace xlionrender
             if( auto Err = MakePipe(m_EnvPrefilterPipeline,  Prefilter,  sizeof(details::push_env_prefilter),  env_source_levels_v); Err ) return Err;
             if( auto Err = MakePipe(m_EnvDFGPipeline,        DFG,        sizeof(details::push_env_dfg),        0); Err ) return Err;
             if( auto Err = MakePipe(m_EnvDownsamplePipeline, Downsample, sizeof(details::push_env_downsample), 1); Err ) return Err;
+            if( auto Err = MakePipe(m_EnvCubemapPipeline,    Cubemap,    sizeof(details::push_env_cube_to_oct), 1); Err ) return Err;
             if( auto Err = Device.Create(m_EnvSkyInstance, { .m_PipeLine = m_EnvSkyPipeline }); Err ) return Err;
             if( auto Err = Device.Create(m_EnvDFGInstance, { .m_PipeLine = m_EnvDFGPipeline }); Err ) return Err;
             {
@@ -595,6 +600,15 @@ namespace xlionrender
         // grid's table, [3] its mask (0: none), [4] its cell (float bits), [5] its lists, [6] its longest probe), per vertex 2 uints, the
         // surfels, the grid
         if( Surfels.m_ReadTable.empty() ) Surfels.BuildReadGrid();
+        M.m_pGI = std::make_unique<gi::surfel_mesh>(std::move(Surfels));
+        return buildMeshGI(M, {});
+    }
+
+    // [7]: the triangles' colors (0: none), the SURFACE_COLOR view's: the clusters' count, each cluster's first triangle, a color per
+    // triangle (unorm 4x8) - a pixel's triangle is its cluster's first + gl_PrimitiveID
+    xgpu::device::error* instance::buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept
+    {
+        const auto& Surfels = *M.m_pGI;
         const std::uint32_t nVerts = std::uint32_t(Surfels.m_Pos.size());
         std::vector<std::uint32_t> Data(8 + 2 * nVerts);
         Data[0] = std::uint32_t(Data.size());
@@ -627,10 +641,16 @@ namespace xlionrender
             Data[5] = std::uint32_t(Data.size());
             Data.insert(Data.end(), Surfels.m_ReadList.begin(), Surfels.m_ReadList.end());
         }
-        if( M.m_pGI ) ReleaseBuffer(M.m_GIBuffer);
-        if( auto Err = m_Device.Create(M.m_GIBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
-        M.m_pGI = std::make_unique<gi::surfel_mesh>(std::move(Surfels));
-        return nullptr;
+        if( !TriColors.empty() )
+        {
+            Data[7] = std::uint32_t(Data.size());
+            Data.push_back(std::uint32_t(M.m_Geom.m_Clusters.size()));
+            for( const auto& C : M.m_Geom.m_Clusters ) Data.push_back(C.m_iIndex / 3);
+            const auto U8 = [](float f) { return std::uint32_t(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f); };
+            for( const auto& c : TriColors ) Data.push_back(U8(c.m_X) | (U8(c.m_Y) << 8) | (U8(c.m_Z) << 16) | (255u << 24));
+        }
+        if( M.m_GIBuffer.m_Private ) ReleaseBuffer(M.m_GIBuffer);
+        return m_Device.Create(M.m_GIBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Data.size()), .m_pData = Data.data() });
     }
 
     //------------------------------------------------------------------------------------------------
@@ -649,11 +669,12 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    xgpu::device::error* instance::CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures ) noexcept
+    xgpu::device::error* instance::CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, bool bAlpha ) noexcept
     {
         assert(m_bReady && !Textures.empty());
 
         material_slot M;
+        M.m_bAlpha = bAlpha;
         M.m_pFragment = &FragmentHDR;
         M.m_Textures.assign(Textures.begin(), Textures.end());
 

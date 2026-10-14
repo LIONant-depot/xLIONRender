@@ -16,7 +16,7 @@ layout(push_constant) uniform PushConstants
     uint    firstSurfel;   // the batch's first surfel in Capture
     uint    instanceIndex; // the draw's slot in the instance buffer (the constant material reads it)
     uint    giOffset;      // unused
-    uint    giLevel;       // the capture's flags: (3 << 9) | 0x800 for the emission
+    uint    giLevel;       // the capture's flags: (3 << 9) | 0x800 for the emission (gi_capture_emission_v)
 } push;
 
 layout(location = 0) out VaryingFull Out;

@@ -266,10 +266,11 @@ vec3 PBRLighting
 		const vec4 Px = SurfelGIPixel(InGIPos, GFace, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
 		if (Px.w > 1e-6) g_GI = vec4(Px.rgb / Px.w, 1.0);
 	}
-	const uint GIDebug = InGIRef.y == gi_none_v ? 0u : (InGIRef.y >> gi_debug_shift_v) & 3u;
+	const uint GIDebug = GIDebugCode(InGIRef.y);
 	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, GFace); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
 	if (GIDebug == 2u) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0);
-	if (GIDebug == 3u) g_GIDebug = vec4((InGIRef.y & 0x800u) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
+	if (GIDebug == 3u) g_GIDebug = vec4((InGIRef.y & gi_capture_emission_v) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);
+	if (GIDebug == 4u) g_GIDebug = vec4(SurfelGITriangleColor(InGIRef.x, uint(gl_PrimitiveID)), 1.0);        // the pixel's triangle's captured color     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
 #endif
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
 #endif

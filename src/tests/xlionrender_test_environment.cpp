@@ -102,6 +102,54 @@ int main()
     Scene.m_Sky.m_Zenith = { 0.3f, 0.5f, 1.0f };
     CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.getEnvironmentBuilds() == nBuilds + 1, "A sky change did not rebuild the atlas");
 
+    // A cubemap texture instead of the gradient (scene::sky::m_pCubemap), HDR or not: an 8 bit white cube is a uniform sky of 1 (every
+    // texel of the atlas 1); a float cube bright overhead lights the sphere's top more than its bottom
+    {
+        const auto MakeCube = [&](xgpu::texture& T, xgpu::texture::format Fmt, std::size_t Texel, const auto& Fill)
+        {
+            constexpr int n_v = 16;
+            std::vector<std::byte> Data(6 * n_v * n_v * Texel);
+            for (int f = 0; f < 6; ++f) for (int i = 0; i < n_v * n_v; ++i) Fill(f, Data.data() + (std::size_t(f) * n_v * n_v + i) * Texel);
+            const std::array Mips{ xgpu::texture::setup::mip_size{ std::uint32_t(n_v * n_v * Texel) } };
+            return Device.Create(T, { .m_Format = Fmt, .m_AdressModes = { xgpu::texture::address_mode::CLAMP, xgpu::texture::address_mode::CLAMP, xgpu::texture::address_mode::CLAMP }
+                                    , .m_Width = n_v, .m_Height = n_v, .m_MipSizes = Mips, .m_AllFacesData = Data, .m_FaceCount = 6, .m_isGamma = false, .m_isCubemap = true }) == nullptr;
+        };
+        const auto Gradient = Scene.m_Sky;
+        xgpu::texture White, Hot;
+        CHECK(MakeCube(White, xgpu::texture::format::R8G8B8A8_UNORM, 4, [](int, std::byte* p) { for (int k = 0; k < 4; ++k) p[k] = std::byte{ 255 }; }), "the white cube");
+        CHECK(MakeCube(Hot, xgpu::texture::format::R32G32B32A32_SFLOAT, 16, [](int f, std::byte* p) { const float v[4] = { f == 2 ? 4.0f : 0.25f, f == 2 ? 4.0f : 0.25f, f == 2 ? 4.0f : 0.25f, 1 }; std::memcpy(p, v, 16); }), "the hot cube");
+
+        Scene.m_Draws = { { .m_Mesh = Sphere, .m_Material = { .m_BaseColor = { 1, 1, 1 }, .m_Metallic = 0, .m_Roughness = 1.0f, .m_F0 = 0.04f } } };
+        Scene.m_Sun   = { .m_Intensity = 0, .m_bCastShadows = false };
+        Camera.LookAt(xmath::fvec3{ 0, 0.3f, -2.5f }, xmath::fvec3{ 0, 0, 0 });
+        Scene.m_Sky   = { .m_Intensity = 1, .m_pCubemap = &White };
+        const int nBefore = Renderer.getEnvironmentBuilds();
+        CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.getEnvironmentBuilds() == nBefore + 1, "a cubemap did not build the atlas");
+        {
+            std::vector<float> Atlas;
+            int W;
+            CHECK(ReadAtlas(Device, Renderer.getEnvironmentAtlas(), Atlas, W), "Read the atlas");
+            float Lo = 1e9f, Hi = 0;
+            for (const auto& R : Rects) for (int y = R[1]; y < R[1] + R[2]; ++y) for (int x = R[0]; x < R[0] + R[2]; ++x) { Lo = std::min(Lo, Atlas[std::size_t(y) * W + x]); Hi = std::max(Hi, Atlas[std::size_t(y) * W + x]); }
+            std::printf("white cubemap: atlas %.4f .. %.4f\n", Lo, Hi);
+            CHECK(Lo > 0.99f && Hi < 1.01f, "a white cubemap is not a uniform sky of 1 (%f .. %f)", Lo, Hi);
+        }
+        for (int f = 0; f < 5; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the white cube");     // (its mean is read back after the frames in flight)
+        std::printf("white cubemap: mean %.4f\n", Renderer.getEnvironmentMean().m_X);
+        CHECK(std::abs(Renderer.getEnvironmentMean().m_X - 1) < 0.01f, "the white cubemap's mean is %f, not 1", Renderer.getEnvironmentMean().m_X);
+        Scene.m_Sky.m_pCubemap = &Hot;
+        std::vector<float> Img;
+        for (int f = 0; f < 2; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the hot cube");
+        CHECK(ReadHDR(Device, View, Img), "Read the hot cube");
+        const float Top = Img[std::size_t(size_v / 2 - 30) * size_v + size_v / 2], Bottom = Img[std::size_t(size_v / 2 + 30) * size_v + size_v / 2];
+        std::printf("hot cubemap overhead: the sphere's top %.3f, bottom %.3f\n", Top, Bottom);
+        CHECK(Top > 2 * Bottom, "the cubemap's bright top does not light the sphere's top (%f vs %f)", Top, Bottom);
+        Scene.m_Sky = Gradient;
+        CHECK(App.RenderFrame(Scene, View, Camera), "Render without the cubemaps");
+        Device.Destroy(std::move(White));
+        Device.Destroy(std::move(Hot));
+    }
+
     // A look (XLIONRENDER_TEST_DUMP): metal spheres from mirror to rough, then dielectrics, under the gradient sky and a sun
     {
         Scene.m_Draws.clear();

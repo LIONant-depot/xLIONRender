@@ -101,8 +101,19 @@ namespace xlionrender
             {
                 const auto& Mat = D.m_Material;
                 It->second = W.Add(*pM->m_pGI, D.m_L2W, Mat.m_BaseColor * (1 - Mat.m_Metallic));
-                if( !pM->m_pGI->m_SurfelMaterial.empty() )      // its surfels' colors: captured from its materials (processGICapture)
+                {   // its transparent material slots: the GI sees through them
+                    std::vector<bool> Alpha(D.m_Materials.size(), false);
+                    bool bAny = false;
+                    for( std::size_t k = 0; k < D.m_Materials.size(); ++k ) if( const auto* pMat = findMaterial(D.m_Materials[k]); pMat && pMat->m_bAlpha ) bAny = Alpha[k] = true;
+                    if( bAny ) W.SetSeeThrough(It->second, Alpha);
+                }
+                if( !pM->m_pGI->m_SurfelMaterial.empty() )      // its surfels' and its triangles' colors: captured from its materials (processGICapture)
+                {
                     m_GICaptures.push_back({ .m_GIId = It->second, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u });
+                    for( std::size_t t = 0; t < pM->m_pGI->m_Tris.size(); t += gi_capture_max_v )
+                        m_GICaptures.push_back({ .m_GIId = It->second, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u
+                                               , .m_bTriangles = true, .m_First = std::uint32_t(t) });
+                }
                 m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), It->second + 1));
                 m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), 0 };
             }
@@ -124,7 +135,9 @@ namespace xlionrender
         gi::lights L;
         L.m_SunDirection = Scene.m_Sun.m_Direction.NormalizeCopy();
         L.m_SunColor     = Scene.m_Sun.m_Color * Scene.m_Sun.m_Intensity;
-        L.m_Sky          = Scene.m_Sky.m_Intensity > 0 ? (Scene.m_Sky.m_Zenith + Scene.m_Sky.m_Horizon) * (0.5f * Scene.m_Sky.m_Intensity) : Scene.m_Ambient * (1.0f / gi::pi_v);
+        L.m_Sky          = Scene.m_Sky.m_Intensity <= 0 ? Scene.m_Ambient * (1.0f / gi::pi_v)
+                         : Scene.m_Sky.m_pCubemap      ? m_EnvMean * Scene.m_Sky.m_Intensity                                  // (updateEnvironment)
+                         :                               (Scene.m_Sky.m_Zenith + Scene.m_Sky.m_Horizon) * (0.5f * Scene.m_Sky.m_Intensity);
         L.m_Points.reserve(Scene.m_LocalLights.size());
         for( const auto& LL : Scene.m_LocalLights ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });
         if( W.m_Setup.m_EmissiveScale != Scene.m_GI.m_EmissiveScale )          // a new scale: every instance re-solves
@@ -144,6 +157,8 @@ namespace xlionrender
         {
             auto* pOut = static_cast<xmath::fvec4*>(pMemory);
             int   Used = 0;
+            // scene::gi_debug in the shaders' bits (xlionrender_surfel_gi.glsl GIDebugCode): 1..3 at bit 9, 4 and 8 at bits 12 and 13
+            const std::uint32_t GIDebugBits = ((std::uint32_t(Scene.m_GI.m_Debug) & 3u) << 9) | ((std::uint32_t(Scene.m_GI.m_Debug) & 0xCu) << 10);
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
             {
                 const int Id = DrawId[i];
@@ -152,7 +167,7 @@ namespace xlionrender
                 // upload its own copy and the frame's region ran out: a render without GI, a different one every frame (flashing)
                 if( auto It = m_GIFrameRegion.find(Id); It != m_GIFrameRegion.end() )
                 {
-                    m_DrawGI[i] = { std::uint32_t(Base + It->second), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | (std::uint32_t(Scene.m_GI.m_Debug) << 9) };
+                    m_DrawGI[i] = { std::uint32_t(Base + It->second), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };
                     continue;
                 }
                 const auto& E = W.BasisLight(Id);              // shown: the HL2 basis, spatially filtered (the solver keeps its own)
@@ -166,7 +181,7 @@ namespace xlionrender
                 }
                 Written.push_back({ Used, Id });
                 m_GIFrameRegion[Id] = m_GIRingUsed + Used;
-                m_DrawGI[i] = { std::uint32_t(Base + m_GIRingUsed + Used), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | (std::uint32_t(Scene.m_GI.m_Debug) << 9) };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
+                m_DrawGI[i] = { std::uint32_t(Base + m_GIRingUsed + Used), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
                 Used += int(E.size());
             }
             m_GIRingUsed += Used;
@@ -290,6 +305,25 @@ namespace xlionrender
         const auto& Sky = Scene.m_Sky;
         m_bEnvOn        = Sky.m_Intensity > 0;
         m_EnvIntensity  = Sky.m_Intensity;
+
+        // The cubemap's mean color (the GI's sky): its roughest prefiltered level, read back once the GPU is done with it
+        if( m_EnvMeanFrame && m_Device.getFrameIndex() >= m_EnvMeanFrame + ring_frames_v + 1 )
+        {
+            m_EnvMeanFrame = 0;
+            std::vector<std::byte> Raw;
+            int W = 0, H = 0;
+            if( m_Device.ReadTexture(m_EnvAtlas, Raw, W, H) == nullptr && W >= 376 && H >= 136 )
+            {
+                const auto* P = reinterpret_cast<const std::uint16_t*>(Raw.data());
+                xmath::fvec3 S{ 0, 0, 0 };
+                for( int y = 128; y < 136; ++y ) for( int x = 368; x < 376; ++x )      // level 5: (368, 128) 8x8 (prefilterInto)
+                {
+                    const auto* t = P + 4 * (std::size_t(y) * W + x);
+                    S = S + xmath::fvec3(details::HalfToFloat(t[0]), details::HalfToFloat(t[1]), details::HalfToFloat(t[2]));
+                }
+                m_EnvMean = S * (1.0f / 64.0f);
+            }
+        }
         if( !m_bEnvOn && m_bEnvDFGReady ) return;        // (the first render builds everything once: bound textures must have been rendered)
 
         if( !m_bEnvDFGReady )
@@ -304,11 +338,34 @@ namespace xlionrender
         }
 
         const float Key[] = { Sky.m_Zenith.m_X, Sky.m_Zenith.m_Y, Sky.m_Zenith.m_Z, Sky.m_Horizon.m_X, Sky.m_Horizon.m_Y, Sky.m_Horizon.m_Z, Sky.m_Ground.m_X, Sky.m_Ground.m_Y, Sky.m_Ground.m_Z };
-        const std::uint64_t K = Hash(1469598103934665603ull, Key, sizeof(Key)) | 1;
+        const std::uint64_t K = (Sky.m_pCubemap ? Hash(1469598103934665603ull, &Sky.m_pCubemap, sizeof(Sky.m_pCubemap)) : Hash(1469598103934665603ull, Key, sizeof(Key))) | 1;
         if( K == m_EnvKey ) return;
         m_EnvKey = K;
         ++m_nEnvBuilds;
 
+        if( Sky.m_pCubemap )
+        {
+            if( m_pEnvCubemap != Sky.m_pCubemap )       // its instance binds the texture
+            {
+                m_Device.Destroy(std::move(m_EnvCubemapInstance));
+                auto Bind = std::array{ xgpu::pipeline_instance::sampler_binding{ *const_cast<xgpu::texture*>(Sky.m_pCubemap) } };
+                m_pEnvCubemap = m_Device.Create(m_EnvCubemapInstance, { .m_PipeLine = m_EnvCubemapPipeline, .m_SamplersBindings = Bind }) == nullptr ? Sky.m_pCubemap : nullptr;
+            }
+            if( m_pEnvCubemap )
+            {
+                {
+                    auto Cmd = Window.StartRenderPass(m_EnvSourcePass[0]);        // (its pass ends with the scope, before the pyramid's)
+                    Cmd.setPipelineInstance(m_EnvCubemapInstance);
+                    Cmd.setPushConstants(details::push_env_cube_to_oct{ { float(env_source_size_v), 0, 0, 0 } });
+                    Cmd.setBuffer(m_FullscreenVB);
+                    Cmd.setBuffer(m_FullscreenIB);
+                    Cmd.Draw(3);
+                }
+                prefilterInto(Window, m_EnvAtlasPass, 0, 0);
+                m_EnvMeanFrame = std::max<std::uint64_t>(m_Device.getFrameIndex(), 1);
+                return;
+            }
+        }
         {
             auto Cmd = Window.StartRenderPass(m_EnvSourcePass[0]);
             Cmd.setPipelineInstance(m_EnvSkyInstance);
@@ -890,7 +947,30 @@ namespace xlionrender
         const auto  Frame = m_Device.getFrameIndex();
         const auto* pM    = findMesh(J.m_Mesh);
         if( pM == nullptr || !pM->m_pGI ) { m_GICaptures.pop_front(); return; }     // (its buffer goes with it)
-        const auto& Mats  = pM->m_pGI->m_SurfelMaterial;
+        const auto& G     = *pM->m_pGI;
+        std::vector<gi::surfel_mesh::surfel_material> TriMats;
+        std::vector<gi::v3>               TriN;
+        if( J.m_bTriangles )
+        {
+            const std::size_t End = std::min<std::size_t>(G.m_Tris.size(), J.m_First + std::size_t(gi_capture_max_v));
+            for( std::size_t t = J.m_First; t < End; ++t )
+            {
+                const auto& T = G.m_Tris[t];
+                gi::surfel_mesh::surfel_material S;
+                S.m_iMaterial = t < G.m_TriMaterial.size() ? G.m_TriMaterial[t] : 0u;
+                if( G.m_UV.size() == G.m_Pos.size() )
+                {
+                    const auto& A = G.m_UV[T[0]]; const auto& B = G.m_UV[T[1]]; const auto& C = G.m_UV[T[2]];
+                    S.m_U        = (A[0] + B[0] + C[0]) / 3;
+                    S.m_V        = (A[1] + B[1] + C[1]) / 3;
+                    S.m_UVRadius = 0.5f * std::sqrt(0.5f * std::abs((B[0] - A[0]) * (C[1] - A[1]) - (C[0] - A[0]) * (B[1] - A[1])));     // a square of its UV area
+                }
+                TriMats.push_back(S);
+                const gi::v3 F = (G.m_Pos[T[1]] - G.m_Pos[T[0]]).Cross(G.m_Pos[T[2]] - G.m_Pos[T[0]]);
+                TriN.push_back(F.Length() > 1e-12f ? F.NormalizeCopy() : G.m_Nrm[T[0]]);
+            }
+        }
+        const auto& Mats  = J.m_bTriangles ? TriMats : G.m_SurfelMaterial;
         const int   n     = int(Mats.size());
 
         if( !J.m_bRecorded )
@@ -906,7 +986,7 @@ namespace xlionrender
             {
                 const auto& S = Mats[J.m_Order[i]];
                 Data[2 * i]     = xmath::fvec4(S.m_U, S.m_V, S.m_UVRadius, 0);
-                Data[2 * i + 1] = xmath::fvec4(L0[J.m_Order[i]].m_Normal, 0);
+                Data[2 * i + 1] = xmath::fvec4(J.m_bTriangles ? TriN[J.m_Order[i]] : L0[J.m_Order[i]].m_Normal, 0);
             }
             if( m_Device.Create(J.m_Data, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = 2 * n, .m_pData = Data.data() }) )
             { m_GICaptures.pop_front(); return; }
@@ -964,13 +1044,7 @@ namespace xlionrender
         int W = 0, H = 0;
         if( m_Device.ReadTexture(m_GICaptureTex, Raw, W, H) == nullptr && W == gi_capture_w_v && H == gi_capture_h_v )
         {
-            const auto Half = [](std::uint16_t h)
-            {
-                const std::uint32_t e = (h >> 10) & 0x1F, m = h & 0x3FF, s = std::uint32_t(h >> 15) << 31;
-                if( e == 0 ) return std::bit_cast<float>(s) + (m ? float(m) * (1.0f / 16777216.0f) * (s ? -1.0f : 1.0f) : 0.0f);
-                if( e == 31 ) return std::bit_cast<float>(s | 0x7F800000u | (m << 13));
-                return std::bit_cast<float>(s | ((e + 112) << 23) | (m << 13));
-            };
+            const auto Half = details::HalfToFloat;
             const auto* P = reinterpret_cast<const std::uint16_t*>(Raw.data());
             const auto Texel = [&](int x, int y) { const auto* t = P + 4 * (std::size_t(y) * W + x); return xmath::fvec3(Half(t[0]), Half(t[1]), Half(t[2])); };
             std::vector<xmath::fvec3> Albedo(n), Emission(n);
@@ -981,7 +1055,21 @@ namespace xlionrender
                 Albedo[J.m_Order[i]]   = Block(y0);
                 Emission[J.m_Order[i]] = Block(y0 + H / 2);                           // as captured (the world scales it: scene::gi_settings::m_EmissiveScale)
             }
-            m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission));
+            if( !J.m_bTriangles ) m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission));
+            else
+            {
+                m_pGIWorld->SetTriangleAlbedo(J.m_GIId, J.m_First, Albedo);
+                if( J.m_First + std::size_t(n) >= G.m_Tris.size() )         // its last batch: the SURFACE_COLOR view's table (the mesh's first instance)
+                {
+                    const auto& All = m_pGIWorld->TriangleAlbedo(J.m_GIId);
+                    if( auto* pSlot = const_cast<mesh_slot*>(pM); pSlot->m_GIBuffer.m_Private && pSlot->m_bTriColors == false )
+                    {
+                        std::vector<xmath::fvec3> C(All.begin(), All.end());
+                        (void)buildMeshGI(*pSlot, C);
+                        pSlot->m_bTriColors = true;
+                    }
+                }
+            }
         }
         m_GICaptures.pop_front();                                       // its buffer goes with it (xgpu's deferred destroy)
     }

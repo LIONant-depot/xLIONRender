@@ -108,6 +108,7 @@ namespace xlionrender
     { xproperty::settings::enum_item("NONE",    gi_debug::NONE)
     , xproperty::settings::enum_item("SURFELS", gi_debug::SURFELS)
     , xproperty::settings::enum_item("LIGHT",   gi_debug::LIGHT)
+    , xproperty::settings::enum_item("SURFACE_COLOR", gi_debug::SURFACE_COLOR)
     };
 
     // The level's sky, ambient and diffuse GI (one per level: the first one found; without one: a dim flat ambient)
@@ -136,7 +137,7 @@ namespace xlionrender
         , obj_member<"GI",           &environment::m_bGI,         member_help<"Diffuse global illumination (surfels): bounce light from every mesh that has surfels">>
         , obj_member<"GIRayBudget",  &environment::m_GIRayBudget, member_help<"Rays traced per frame for the GI: more converges faster, costs more CPU">>
         , obj_member<"GIEmissiveScale", &environment::m_GIEmissiveScale, member_help<"Self-illuminated materials light the scene through the GI with their emission times this (0: they light nothing; their own look does not change)">>
-        , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone">>
+        , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone; SURFACE_COLOR: the surface color of the surfel each pixel reads most (the material capture: what the GI bounces)">>
         , obj_member<"GIPerPixel",   &environment::m_bGIPerPixel, member_help<"Near meshes read the GI per pixel (a mesh needs no extra vertices for it); off: per vertex only (cheaper, needs dense meshes)">>
         )
     };

@@ -19,7 +19,11 @@ layout(std430, set = 1, binding = 7) readonly buffer GIMomentBuffer { uint GIMom
 // pixels may read the grid, 0xFFFFFFFF: no GI
 const uint gi_none_v      = 0xFFFFFFFFu;
 const uint gi_per_pixel_v = 0x100u;
-const uint gi_debug_shift_v = 9u;        // 2 bits: 1 the surfels (each pixel the color of its dominant surfel), 2 the GI light only (scene::gi_settings::m_Debug)
+const uint gi_debug_shift_v = 9u;        // 2 bits (scene::gi_debug): 1 the surfels (each pixel the color of its dominant surfel), 2 the GI light only,
+                                         // 3 the material capture (0x800: its emission pass); then 0x1000 the captured color of each pixel's triangle (what a
+                                         // ray hitting it bounces). Kept apart: materials compiled before it still capture right
+const uint gi_capture_emission_v = 0x800u;
+uint GIDebugCode(in const uint Ref) { return Ref == gi_none_v ? 0u : ((Ref >> gi_debug_shift_v) & 3u) | ((Ref >> 10u) & 0x4u); }    // scene::gi_debug
 
 vec4 g_GIDebug = vec4(0.0);             // w > 0: the debug view's color replaces the lit one (GIDebugOr)
 vec3 GIDebugOr(in const vec3 Lit) { return g_GIDebug.w > 0.0 ? g_GIDebug.rgb : Lit; }
@@ -48,10 +52,13 @@ float GIVisibility(in const vec3 P, in const vec3 Center, in const vec3 Normal, 
     const vec3  D     = P - Center;
     const float Reach = 2.0 * Radius;
     float       w     = clamp(1.0 - abs(dot(D, Normal)) / (0.7 * Reach), 0.0, 1.0);
-    const float d     = length(D);
-    if (d < 1e-5 * Reach || w <= 0.0) return w;
+    if (w <= 0.0) return w;
+    // The moments are looked up from the point lifted off the surface (DDGI's normal bias): a point on the surfel's own surface lies along
+    // its tangent, where the texels mix in the rays that rise into nearby geometry (blinds, louvres) and read short - dark diamonds
+    const vec3  Dq = D + Normal * (0.15 * Reach);
+    const float d  = length(Dq);
     const vec3  T  = normalize(cross(abs(Normal.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), Normal)), B = cross(Normal, T);
-    const vec3  Dd = D / d;
+    const vec3  Dd = Dq / d;
     const float x  = dot(Dd, T), y = dot(Dd, B), z = max(dot(Dd, Normal), 0.0);
     const float k  = 1.0 / max(abs(x) + abs(y) + z, 1e-6);
     // bilinear over the 4 nearest texels (texel centers at 0.5..3.5): the nearest one alone jumps at each texel's edge (wedges)
@@ -108,6 +115,14 @@ uint SurfelGIDominant(in const vec3 P, in const vec3 N)
         if (w > BestW) { BestW = w; Best = s; }
     }
     return Best;
+}
+// The debug view of the surface colors (scene::gi_debug::SURFACE_COLOR): the captured color of the pixel's triangle, its cluster's first
+// triangle (the vertex shader passes the cluster in the GI reference's x) + gl_PrimitiveID; black: not captured yet
+vec3 SurfelGITriangleColor(in const uint Cluster, in const uint Primitive)
+{
+    const uint t = GIMesh[7];
+    if (t == 0u || Cluster >= GIMesh[t]) return vec3(0.0);
+    return unpackUnorm4x8(GIMesh[t + 1u + GIMesh[t] + GIMesh[t + 1u + Cluster] + Primitive]).rgb;
 }
 vec3 SurfelDebugColor(in const uint s)
 {

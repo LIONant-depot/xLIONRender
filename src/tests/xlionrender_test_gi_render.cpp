@@ -161,7 +161,7 @@ int main()
     // The material capture: each mesh's surfels drawn through its material (here the constant one, from the instance record) and read
     // back: the red wall's surfels have its albedo, the floor's its gray, and nothing emits
     {
-        for (int f = 0; f < 40 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing");
+        for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing");
         const auto* pW = Renderer.getGIWorld();
         CHECK(pW && !Renderer.isGICapturing(), "the captures did not finish");
         const auto Mean = [&](const std::vector<xmath::fvec3>& V) { xmath::fvec3 m{ 0, 0, 0 }; for (const auto& v : V) m = m + v; return V.empty() ? m : m * (1.0f / float(V.size())); };
@@ -169,6 +169,11 @@ int main()
         std::printf("captured: red wall %.3f %.3f %.3f (0.8 0.05 0.05), floor %.3f %.3f %.3f (0.75), emission %.3f\n", Red.m_X, Red.m_Y, Red.m_Z, Floor.m_X, Floor.m_Y, Floor.m_Z, Glow.m_X + Glow.m_Y + Glow.m_Z);
         CHECK(std::abs(Red.m_X - 0.8f) < 0.05f && Red.m_Y < 0.1f && std::abs(Floor.m_X - 0.75f) < 0.05f, "the captured albedo is wrong");
         CHECK(Glow.m_X + Glow.m_Y + Glow.m_Z < 0.01f, "something emits");
+        // ... and each triangle its own (what a ray hit bounces)
+        const auto& Tri = pW->TriangleAlbedo(3);
+        const auto  TRed = Mean(Tri);
+        std::printf("captured triangles: red wall %zu, %.3f %.3f %.3f\n", Tri.size(), TRed.m_X, TRed.m_Y, TRed.m_Z);
+        CHECK(!Tri.empty() && std::abs(TRed.m_X - 0.8f) < 0.05f && TRed.m_Y < 0.1f, "the triangles' captured albedo is wrong");
     }
 
     // The GPU's per-pixel lookup agrees with the CPU's read grid: in the SURFELS debug view every pixel of the room (the camera is inside
@@ -185,11 +190,53 @@ int main()
         CHECK(nBlack <= W * H / 1000, "the GPU's lookup misses: %d of %d pixels black in the surfels view", nBlack, W * H);
     }
 
+    // The SURFACE_COLOR view shows the dominant surfel's captured color (the red wall red, the floor gray)
+    {
+        const auto View3 = [&](xlionrender::gi_debug D)
+        {
+            Scene.m_GI.m_Debug = D;
+            for (int f = 0; f < 2; ++f) (void)App.RenderFrame(Scene, View, Camera);     // (CHECK returns from main: not in a lambda)
+            Scene.m_GI.m_Debug = xlionrender::gi_debug::NONE;
+            return ReadRGB(Device, View, W, H);
+        };
+        const auto Color = View3(xlionrender::gi_debug::SURFACE_COLOR);
+        DumpRGB("gi_surface_color", Color, W, H);
+        const auto CRed = Mean(Color, W, H, 0.9f, 0.4f, 0.98f, 0.6f), CFloor = Mean(Color, W, H, 0.4f, 0.85f, 0.6f, 0.95f);
+        std::printf("surface color: red wall %.2f %.2f %.2f, floor %.2f %.2f %.2f\n", CRed[0], CRed[1], CRed[2], CFloor[0], CFloor[1], CFloor[2]);
+        CHECK(CRed[0] > 0.6 && CRed[1] < 0.15 && std::abs(CFloor[0] - 0.75) < 0.08, "the SURFACE_COLOR view does not show the captured colors");
+    }
+
     // The box moves: its instance moves in the world (no new instance); removed: the world drops it
     Scene.m_Draws[5].m_L2W = xmath::fmat4::fromTranslation({ 0.8f, 0.8f, 0.4f });
     for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render moved box");
     Scene.m_Draws.pop_back();
     for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render without the box");
+
+    // The LIGHT view of a lone small mesh (the GeomStatic editor's preview: one object, surfels bigger than it, a sun and a flat ambient):
+    // its irradiance / pi is about the ambient's (a white surface's look), not a saturated white
+    {
+        const auto Prim = xprim_geom::cube::Generate(4, 4, 4, 4, { 0.4f, 0.1f, 0.1f });
+        cluster_buffers B; xlionrender::mesh_id M;
+        CHECK(MakeStaticBuffers(Device, Prim, 2.2f, B), "lone buffers");
+        CHECK(!Renderer.CreateClusterGeom(M, B.Geom()), "lone geom");
+        CHECK(!Renderer.SetMeshGI(M, MakeSurfels(Prim, 0.5f, 1.5f)), "lone surfels");
+        xlionrender::scene Lone;
+        Lone.m_Draws.push_back({ .m_Mesh = M, .m_Material = { .m_BaseColor = { 0.75f, 0.75f, 0.75f }, .m_Roughness = 0.9f }, .m_Instance = 900 });
+        Lone.m_Sun     = { .m_Direction = { 0.3f, -1.0f, 0.4f }, .m_Temperature = 6500, .m_Intensity = 4 };
+        Lone.m_Ambient = { 0.7f, 0.7f, 0.7f };
+        Lone.m_GI      = { .m_bEnable = true, .m_RayBudget = 1 << 16, .m_Debug = xlionrender::gi_debug::LIGHT };
+        xgpu::tools::view Cam;
+        Cam.setFov(xmath::radian{ 1.0f });
+        Cam.LookAt(xmath::fvec3{ 0, 0.25f, -0.5f }, xmath::fvec3{ 0, 0, 0 });
+        for (int f = 0; f < 60; ++f) CHECK(App.RenderFrame(Lone, View, Cam), "Render the lone mesh");
+        const auto Img = ReadRGB(Device, View, W, H);
+        DumpRGB("gi_lone_light", Img, W, H);
+        const auto c = Mean(Img, W, H, 0.45f, 0.45f, 0.55f, 0.55f);
+        float Max = 0; for (const auto& p : Img) Max = std::max({ Max, p[0], p[1], p[2] });
+        std::printf("lone mesh LIGHT view: middle %.3f %.3f %.3f, max %.3f (the ambient / pi %.3f)\n", c[0], c[1], c[2], Max, 0.7f / 3.14159f);
+        CHECK(c[0] < 1.0 && Max < 4.0f, "the lone mesh's LIGHT view is saturated (%.3f, max %.3f)", c[0], Max);
+        Renderer.DestroyMesh(M);
+    }
 
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);

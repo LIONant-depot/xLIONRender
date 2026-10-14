@@ -10,6 +10,8 @@
 #include <vector>
 #include <optional>
 
+namespace xgpu { struct texture; }
+
 namespace xlionrender
 {
     // Vertex layout of meshes created through instance::CreateMesh. Matches the mb_* varying interface
@@ -100,6 +102,7 @@ namespace xlionrender
         xmath::fvec3    m_Horizon       { 0.70f, 0.78f, 0.90f };
         xmath::fvec3    m_Ground        { 0.22f, 0.20f, 0.18f };
         float           m_Intensity     = 0.0f;
+        const xgpu::texture* m_pCubemap = nullptr;      // a cubemap texture lights instead of the gradient (its colors times m_Intensity; HDR or not)
     };
 
     // A reflection probe: the renderer captures the scene around m_Position (6 faces, prefiltered like the sky) and surfaces in its
@@ -117,7 +120,7 @@ namespace xlionrender
     // m_Instance id; solved on the CPU (m_RayBudget rays per render, the changed first), read per vertex (surfel weights)
     // The GI's debug views (shaders/xlionrender_surfel_gi.glsl): every pixel the color of the surfel that dominates its read (black: none
     // reaches it - a gap in the placement), or the GI light alone (no textures, no direct light)
-    enum class gi_debug : std::uint8_t { NONE, SURFELS, LIGHT };
+    enum class gi_debug : std::uint8_t { NONE = 0, SURFELS = 1, LIGHT = 2, SURFACE_COLOR = 4 };      // the shaders' codes (3: the GI's material capture; xlionrender_surfel_gi.glsl GIDebugCode)
 
     struct gi_settings
     {

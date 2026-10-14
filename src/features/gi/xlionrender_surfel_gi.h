@@ -349,8 +349,8 @@ namespace xlionrender::gi
         float   m_V0[3][4], m_E1[3][4], m_E2[3][4];
         int     m_Tri[4];
 
-        // The nearest lane hit before TMax (-1 none); Dist, U, V of it
-        int Intersect(const v3& O, const v3& D, float TMax, float& Dist, float& U, float& V) const noexcept
+        // The nearest lane hit before TMax (-1 none); Dist, U, V of it. Lanes: the lanes that may be hit (a bit each)
+        int Intersect(const v3& O, const v3& D, float TMax, float& Dist, float& U, float& V, int Lanes = 0xF) const noexcept
         {
 #if defined(_M_X64) || defined(_M_IX86) || defined(__SSE2__)
             const __m128 dx = _mm_set1_ps(D.m_X), dy = _mm_set1_ps(D.m_Y), dz = _mm_set1_ps(D.m_Z);
@@ -378,7 +378,7 @@ namespace xlionrender::gi
             ok = _mm_and_ps(ok, _mm_cmple_ps(_mm_add_ps(u, v), _mm_set1_ps(1.0f)));
             ok = _mm_and_ps(ok, _mm_cmpgt_ps(t, _mm_set1_ps(1e-5f)));
             ok = _mm_and_ps(ok, _mm_cmplt_ps(t, _mm_set1_ps(TMax)));
-            int Mask = _mm_movemask_ps(ok);
+            int Mask = _mm_movemask_ps(ok) & Lanes;
             if (!Mask) return -1;
             alignas(16) float T[4], Us[4], Vs[4];
             _mm_store_ps(T, t); _mm_store_ps(Us, u); _mm_store_ps(Vs, v);
@@ -399,6 +399,7 @@ namespace xlionrender::gi
                 T[k] = E2.Dot(Q) * inv;
                 if (Us[k] >= 0 && Vs[k] >= 0 && Us[k] + Vs[k] <= 1 && T[k] > 1e-5f && T[k] < TMax) Mask |= 1 << k;
             }
+            Mask &= Lanes;
             if (!Mask) return -1;
 #endif
             int Best = -1;
@@ -920,13 +921,17 @@ namespace xlionrender::gi
         }
 
         // The nearest triangle hit before TMax (mesh space, both faces)
-        bool Cast(const v3& O, const v3& D, float& TMax, int& Tri, float& U, float& V) const noexcept
+        // SeeThrough (per triangle, optional): triangles the rays pass through (transparent materials)
+        bool Cast(const v3& O, const v3& D, float& TMax, int& Tri, float& U, float& V, std::span<const std::uint8_t> SeeThrough = {}) const noexcept
         {
             bool bHit = false;
             m_Bvh.TraverseLeaves(ray4(O, D), TMax, [&](int l, float& TBest)
             {
                 float d, u, v;
-                const int k = m_Tri4[l].Intersect(O, D, TBest, d, u, v);
+                int Lanes = 0xF;
+                if (!SeeThrough.empty())
+                    for (int j = 0; j < 4; ++j) { const int t = m_Tri4[l].m_Tri[j]; if (t >= 0 && std::size_t(t) < SeeThrough.size() && SeeThrough[t]) Lanes &= ~(1 << j); }
+                const int k = m_Tri4[l].Intersect(O, D, TBest, d, u, v, Lanes);
                 if (k >= 0) { TBest = d; Tri = m_Tri4[l].m_Tri[k]; U = u; V = v; bHit = true; }
             });
             return bHit;
@@ -1085,6 +1090,34 @@ namespace xlionrender::gi
             DirtyNear(I.m_Lo, I.m_Hi);
         }
 
+        // An instance's triangles' colors (the material capture, triangle First on): a ray hit takes its triangle's (SurfaceAt), so a
+        // color ends where its triangles do - a surfel's color spreads over its whole footprint (a door frame's brown onto the wall)
+        void SetTriangleAlbedo(int Id, std::size_t First, const std::vector<v3>& Albedo) noexcept
+        {
+            auto& I = m_Instances[Id];
+            const std::size_t n = I.m_pMesh->m_Tris.size();
+            if (I.m_TriAlbedo.size() != n) I.m_TriAlbedo.assign(n, I.m_Albedo);
+            for (std::size_t k = 0; k < Albedo.size() && First + k < n; ++k) I.m_TriAlbedo[First + k] = Albedo[k];
+            DirtyNear(I.m_Lo, I.m_Hi);
+        }
+        const std::vector<v3>& TriangleAlbedo( int Id ) const noexcept { return m_Instances[Id].m_TriAlbedo; }
+
+        // An instance's transparent material slots (SlotSeeThrough[slot]: its material has alpha). The GI leaves them out, as the references
+        // do (Lumen, DDGI, Wicked: translucent surfaces neither block nor bounce): rays pass through their triangles, their surfels go dark
+        // (validity 0: the reads skip them) - a window lets the sky in, a glass pane does not bounce its own color
+        void SetSeeThrough(int Id, const std::vector<bool>& SlotSeeThrough) noexcept
+        {
+            auto& I = m_Instances[Id];
+            const auto& M = *I.m_pMesh;
+            const auto Slot = [&](std::size_t s) { return s < SlotSeeThrough.size() && SlotSeeThrough[s]; };
+            I.m_SeeThrough.assign(M.m_Tris.size(), 0);
+            for (std::size_t t = 0; t < M.m_Tris.size(); ++t) I.m_SeeThrough[t] = Slot(t < M.m_TriMaterial.size() ? M.m_TriMaterial[t] : 0u);
+            I.m_SurfSeeThrough.assign(M.m_Levels[0].size(), 0);
+            for (std::size_t s = 0; s < I.m_SurfSeeThrough.size(); ++s) I.m_SurfSeeThrough[s] = Slot(s < M.m_SurfelMaterial.size() ? M.m_SurfelMaterial[s].m_iMaterial : 0u);
+            if (std::find(I.m_SeeThrough.begin(), I.m_SeeThrough.end(), 1) == I.m_SeeThrough.end()) { I.m_SeeThrough.clear(); I.m_SurfSeeThrough.clear(); }
+            DirtyNear(I.m_Lo, I.m_Hi);
+        }
+
         const std::vector<v3>& SurfelAlbedo  ( int Id ) const noexcept { return m_Instances[Id].m_SurfAlbedo; }
         const std::vector<v3>& SurfelEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }
 
@@ -1179,11 +1212,13 @@ namespace xlionrender::gi
             const auto& I = m_Instances[Id];
             const auto& S = I.m_pMesh->m_Levels[I.m_Level][s];
             const v3    D = P - S.m_Center;
-            const float Reach = 2 * S.m_Radius, d = D.Length();
+            const float Reach = 2 * S.m_Radius;
             float w = std::clamp(1.0f - std::abs(D.Dot(S.m_Normal)) / (0.7f * Reach), 0.0f, 1.0f);
-            if (d < 1e-5f * Reach || w <= 0) return w;
+            if (w <= 0) return w;
+            const v3    Dq = D + S.m_Normal * (0.15f * Reach);          // lifted off the surface, as the shaders (GIVisibility)
+            const float d  = Dq.Length();
             const auto& M  = I.m_Moments[s];
-            const v3    Dd = D * (1.0f / d);
+            const v3    Dd = Dq * (1.0f / d);
             const v3    T  = (std::abs(S.m_Normal.m_X) < 0.9f ? v3{ 1, 0, 0 } : v3{ 0, 1, 0 }).Cross(S.m_Normal).NormalizeCopy(), B = S.m_Normal.Cross(T);
             const float x  = Dd.Dot(T), y = Dd.Dot(B), z = std::max(Dd.Dot(S.m_Normal), 0.0f), k = 1.0f / std::max(std::abs(x) + std::abs(y) + z, 1e-6f);
             const float u  = std::clamp(((x + y) * k * 0.5f + 0.5f) * moment_res_v - 0.5f, 0.0f, float(moment_res_v - 1));
@@ -1209,7 +1244,7 @@ namespace xlionrender::gi
                 const auto& I = m_Instances[i];
                 int Tri; float U, V;
                 // the ray in mesh space: t is the same parameter (the direction is transformed, not normalized)
-                if (I.m_pMesh->Cast(I.m_W2L * O, I.m_W2L.TransformDirection(D), TBest, Tri, U, V)) { H.m_Inst = i; H.m_Tri = Tri; H.m_U = U; H.m_V = V; H.m_T = TBest; }
+                if (I.m_pMesh->Cast(I.m_W2L * O, I.m_W2L.TransformDirection(D), TBest, Tri, U, V, I.m_SeeThrough)) { H.m_Inst = i; H.m_Tri = Tri; H.m_U = U; H.m_V = V; H.m_T = TBest; }
             });
             return H;
         }
@@ -1418,6 +1453,7 @@ namespace xlionrender::gi
                 }
                 const float av = std::max(I.m_PassAlpha, 0.05f);
                 I.m_Valid[s] = I.m_Valid[s] * (1 - av) + I.m_AccValid[s] * av;
+                if (I.m_Level == 0 && s < I.m_SurfSeeThrough.size() && I.m_SurfSeeThrough[s]) I.m_Valid[s] = 0;     // on a transparent material
                 {   // the basis: what fraction of the light came from around each direction (per channel), slowly (8 rays split 3 ways)
                     const auto& BA = I.m_BasisAcc[s];
                     const v3 Tot = BA[0] + BA[1] + BA[2];
@@ -1497,6 +1533,8 @@ namespace xlionrender::gi
             std::vector<float>      m_Valid, m_AccValid;
             std::vector<moments>    m_Moments;                  // per surfel of the active level (MomentTexel)
             std::vector<v3>         m_SurfAlbedo, m_SurfEmission;     // per fine surfel (SetSurfelMaterial; empty: m_Albedo, none)
+            std::vector<v3>         m_TriAlbedo;                      // per triangle (SetTriangleAlbedo; empty: the surfels')
+            std::vector<std::uint8_t> m_SeeThrough, m_SurfSeeThrough;   // per triangle, per fine surfel: transparent (SetSeeThrough; empty: none)
             std::vector<std::uint32_t> m_LinkFirst;              // per fine surfel + 1: its emitter links (RebuildEmitterLinks)
             std::vector<emit_link>  m_Links;
             std::vector<basis>      m_EmitB;                    // per surfel of the active level: the emitters' irradiance this update, per basis direction
@@ -1727,12 +1765,13 @@ namespace xlionrender::gi
             }
         }
 
-        // The surface's colors at a ray hit: its fine surfels' (the hit triangle's vertices' surfels, the reads' weights), or the
-        // instance's albedo and no emission when it has none
+        // The surface's colors at a ray hit: the hit triangle's albedo (SetTriangleAlbedo), else its fine surfels' (the hit triangle's
+        // vertices' surfels, the reads' weights); the emission the surfels'. The instance's albedo and no emission when it has none
         void SurfaceAt(const hit& H, v3& Albedo, v3& Emission) const noexcept
         {
             const auto& I = m_Instances[H.m_Inst];
-            Albedo = I.m_Albedo; Emission = { 0, 0, 0 };
+            const bool  bTri = std::size_t(H.m_Tri) < I.m_TriAlbedo.size();
+            Albedo = bTri ? I.m_TriAlbedo[H.m_Tri] : I.m_Albedo; Emission = { 0, 0, 0 };
             if (I.m_SurfAlbedo.empty() && I.m_SurfEmission.empty()) return;
             const auto& M = *I.m_pMesh; const auto& T = M.m_Tris[H.m_Tri];
             const float Bc[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
@@ -1752,7 +1791,7 @@ namespace xlionrender::gi
                     W += w;
                 }
             if (W <= 0) return;
-            if (!I.m_SurfAlbedo.empty()) Albedo = SA * (1.0f / W);
+            if (!I.m_SurfAlbedo.empty() && !bTri) Albedo = SA * (1.0f / W);
             Emission = SE * (m_Setup.m_EmissiveScale / W);
         }
 

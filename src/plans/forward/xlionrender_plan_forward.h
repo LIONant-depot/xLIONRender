@@ -55,6 +55,15 @@ namespace xlionrender::details
         return std::uint16_t(H + ((M >> 12) & 1u));                       // carries into the exponent when it rounds up: still correct
     }
 
+    // An IEEE half into a float (read backs of half float targets)
+    inline float HalfToFloat(std::uint16_t h) noexcept
+    {
+        const std::uint32_t e = (h >> 10) & 0x1F, m = h & 0x3FF, s = std::uint32_t(h >> 15) << 31;
+        if (e == 0)  return std::bit_cast<float>(s) + (m ? float(m) * (1.0f / 16777216.0f) * (s ? -1.0f : 1.0f) : 0.0f);
+        if (e == 31) return std::bit_cast<float>(s | 0x7F800000u | (m << 13));
+        return std::bit_cast<float>(s | ((e + 112) << 23) | (m << 13));
+    }
+
     struct push_static_geom
     {
         std::uint32_t   m_ClusterIndex;
