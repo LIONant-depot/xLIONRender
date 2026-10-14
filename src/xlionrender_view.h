@@ -12,6 +12,17 @@ namespace xlionrender
     // shows the game as it is.
     enum class view : std::uint8_t { SCENE, GAME };
 
+    // An editor's viewing choices for a world's RenderScene, on top of its Environment's GI settings: what the viewport shows, never
+    // saved (the Level is not changed). Version 7.
+    struct view_options
+    {
+        std::int8_t m_GIDebug     = -1;         // -1: the Environment's GIDebug; else a scene::gi_debug (0 NONE, 1 SURFELS, 2 LIGHT, 4 SURFACE_COLOR, 5 COVERAGE)
+        bool        m_bNoGI       = false;      // drawn without GI, whatever the Environment says
+        bool        m_bNoPerPixel = false;      // the vertex read only (the Environment's GIPerPixel off)
+        bool        m_bNoMoments  = false;      // the reads without the depth-moment visibility test (the Environment's GIMoments off)
+        bool operator==(const view_options&) const noexcept = default;
+    };
+
     // The roles of the entities of a world in an editing session (documentation/Editors/prefabs_plan.md, 3.7 and phase 7). The host knows which scene an entity is in, the render does not: it is told which
     // entities (their raw runtime values, sorted ascending) are CONTEXT - drawn first, faded by a full screen quad, never picked, so that what is not being edited is there to see and in the way of nothing -
     // and which are HIDDEN (the instance that is being edited in context: its prefab is the document, drawn in its place). Everything else is the document. No roles (null): every entity is the document.

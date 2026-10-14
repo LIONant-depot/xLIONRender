@@ -293,11 +293,14 @@ vec3 PBRLightingImageBase
 		const GIQueryResult Q = SurfelGIQuery(InGIPos, GFace, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
 		if (Q.bSupported) { g_GI = vec4(g_GI.w > 0.5 ? mix(g_GI.rgb, Q.Irradiance, smoothstep(0.0, 0.25, Q.Confidence)) : Q.Irradiance, 1.0); g_GISource = 2u; }
 	}
+	// Neither read supported (no surfel reaches the point: a thin face edge-on): the instance's mean light, not the no-GI ambient (a scene
+	// lit by its GI is black without it). COVERAGE still shows it magenta
+	if (InGIRef.y != gi_none_v && g_GISource == 0u) g_GI = vec4(SurfelGIMean(InGIRef.x), 1.0);
 	const uint GIDebug = GIDebugCode(InGIRef.y);
 	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, GFace); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
 	if (GIDebug == 2u) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0);
 	if (GIDebug == 3u) g_GIDebug = vec4((InGIRef.y & gi_capture_emission_v) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);
-	if (GIDebug == 5u) g_GIDebug = vec4(g_GISource == 2u ? vec3(0.0, 0.6, 0.0) : g_GISource == 1u ? vec3(0.0, 0.0, 0.8) : vec3(1.0, 0.0, 1.0), 1.0);     // COVERAGE: green the pixel read, blue the vertex read, magenta unsupported
+	if (GIDebug == 5u) g_GIDebug = vec4(g_GISource == 2u ? vec3(0.0, 0.6, 0.0) : g_GISource == 1u ? vec3(0.0, 0.0, 0.8) : vec3(1.0, 0.0, 1.0), 1.0);     // COVERAGE: green the pixel read, blue the vertex read, magenta unsupported (the mean light)
 	if (GIDebug == 4u) g_GIDebug = vec4(SurfelGITriangleColor(InGIRef.x, uint(gl_PrimitiveID)), 1.0);        // the pixel's triangle's captured color     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
 #endif
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, perceptualRoughness, inMetalic, inAO);

@@ -201,6 +201,10 @@ struct GIQueryResult
     float Confidence;
     bool  bSupported;
 };
+// An instance's mean light (the slot before its first surfel, the renderer's upload): what a point no read supports shows - not black,
+// the same as the solver's rays (gi::world::Unsupported)
+vec3 SurfelGIMean(in const uint LightOffset) { return GILight[3u * (LightOffset - 1u)].rgb; }
+
 // The per-pixel read: the surfels of the cell's patch the point matches (GIReadCell), nothing else - no other patch's surfels, no surfels
 // out of the patch's sight (those were the fail-open fallbacks: plausible light, from the wrong surface)
 GIQueryResult SurfelGIQuery(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level)

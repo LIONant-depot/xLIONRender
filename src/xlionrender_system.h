@@ -73,6 +73,7 @@ namespace xlionrender
         std::unordered_map<std::uint64_t, cached_text>  m_Texts;
         int                                             m_Frame = 0;
         std::unique_ptr<scene_renderer>                 m_pScene;       // the forward renderer of this world (Meshes, lights, Environment), made the first time it is asked to render
+        view_options                                    m_ViewOptions;  // the editor's viewing choices (xRenderEditor::SetViewOptions): on top of the Environment, never saved
 
         static void Mix(std::size_t& Hash, std::size_t Value) noexcept { Hash ^= Value + 0x9E3779B97F4A7C15ull + (Hash << 6) + (Hash >> 2); }
         static std::size_t Bits(float V) noexcept { std::uint32_t B; std::memcpy(&B, &V, sizeof(B)); return B; }
@@ -261,6 +262,11 @@ namespace xlionrender
                 auto S = Search(Query);
                 bool bFirst = true;
                 Foreach(S, [&](const environment& E) noexcept { if (bFirst) R.SetEnvironment(E); bFirst = false; });
+                auto& G = R.m_Scene.m_GI;                                   // the editor's viewing choices on top (view_options)
+                if (m_ViewOptions.m_GIDebug >= 0) G.m_Debug = static_cast<gi_debug>(m_ViewOptions.m_GIDebug);
+                if (m_ViewOptions.m_bNoGI)        G.m_bEnable   = false;
+                if (m_ViewOptions.m_bNoPerPixel)  G.m_bPerPixel = false;
+                if (m_ViewOptions.m_bNoMoments)   G.m_bMoments  = false;
             }
             Each.template operator()<mesh>       ([&](std::uint64_t E, const mesh& C,        const xmath::fmat4& L2W) { R.AddMesh(C, L2W, E); });
             Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });

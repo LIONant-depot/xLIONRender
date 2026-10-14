@@ -202,7 +202,12 @@ namespace xlionrender
                 }
                 const auto& E = W.BasisLight(Id);              // shown: the HL2 basis, spatially filtered (the solver keeps its own)
                 const auto& V = W.InstanceValid(Id);
-                if( m_GIRingUsed + Used + int(E.size()) > gi_light_region_v ) continue;      // ponytail: no GI for what does not fit
+                if( m_GIRingUsed + Used + 1 + int(E.size()) > gi_light_region_v ) continue;  // ponytail: no GI for what does not fit
+                // The slot before its surfels: its mean light, what a pixel no read supports shows (SurfelGIMean: the solver's policy too,
+                // gi::world::Unsupported). Then its surfels
+                const auto& Mean = W.MeanLight(Id);
+                for( int r = 0; r < 3; ++r ) pOut[3 * Used + r] = xmath::fvec4(Mean, 1);
+                ++Used;
                 for( std::size_t k = 0; k < E.size(); ++k )
                 {
                     pOut[3 * (Used + k) + 0] = xmath::fvec4(E[k][0], V[k]);

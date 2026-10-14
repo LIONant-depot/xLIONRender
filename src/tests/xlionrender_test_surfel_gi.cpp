@@ -548,6 +548,30 @@ int main()
         std::printf("sealed face: lists %d own + %d outside surfels; without its own %d + %d, %u unsupported patches\n", nOwn, nOther, nOwn2, nOther2, Sealed.m_ReadUnsupported);
         CHECK(nOwn == 1 && nOther == 0, "the sealed face lists surfels it does not see (%d outside)", nOther);
         CHECK(nOwn2 + nOther2 == 0 && Sealed.m_ReadUnsupported > 0, "a face that sees no surfel still lists some (%d)", nOther2);
+
+        // A door frame on a wall (the Police Station's black bar): the wall right beside the frame sees the wall's surfels, so it reads
+        // them - the wall's points under the frame (never seen) do not decide what its cells see
+        surfel_mesh Door;
+        // (as the Police Station's: the frame's edge 4 cm short of a cell's, the wall under it first, then beside it in big triangles)
+        AddQuad(Door, { 0, 0, -2 }, { 0, 3, 0 }, { 0, 0, 2.46f }, 6);                                       // the wall, facing +x: under the frame,
+        AddQuad(Door, { 0, 0, 0.46f }, { 0, 3, 0 }, { 0, 0, 2 }, 1);                                        // then beside it
+        const v3 FLo{ 0.001f, 0, -2 }, FS{ 0.06f, 3, 2.46f };                                               // the frame: 6 cm deep, over z -2..0.46
+        const v3 FX{ FS.m_X, 0, 0 }, FY{ 0, FS.m_Y, 0 }, FZ{ 0, 0, FS.m_Z };
+        AddQuad(Door, FLo, FX, FZ, 2); AddQuad(Door, FLo + FY, FZ, FX, 2); AddQuad(Door, FLo, FZ, FY, 2); AddQuad(Door, FLo + FX, FY, FZ, 4); AddQuad(Door, FLo, FY, FX, 4); AddQuad(Door, FLo + FZ, FX, FY, 4);
+        Door.Bake(0.5f, 1.5f);
+        Door.BuildReadGrid();
+        int nBeside = 0, nRead = 0;
+        for (float y = 0.3f; y < 2.8f; y += 0.1f)
+            for (float z : { 0.47f, 0.48f, 0.49f })
+            {
+                const v3 P{ 0, y, z };
+                ++nBeside;
+                float Wsum = 0;
+                for (auto e : Door.ReadCellList(P, { 1, 0, 0 })) if (Door.m_Levels[0][surfel_mesh::ReadEntrySurfel(e)].m_Center.m_X < 0.01f) Wsum += Door.ReadEntryWeight(e, P, { 1, 0, 0 }, { 1, 0, 0 });
+                nRead += Wsum > 0.05f;
+            }
+        std::printf("beside a door frame: %d of %d wall points read the wall's surfels\n", nRead, nBeside);
+        CHECK(nRead == nBeside, "the wall beside a door frame reads no surfel at %d of %d points", nBeside - nRead, nBeside);
     }
 
     // 6d. Stable and responsive (the estimator): once converged, the light holds still from one update to the next (no swimming), and

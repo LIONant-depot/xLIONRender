@@ -298,6 +298,25 @@ int main()
         float Max = 0; for (const auto& p : Img) Max = std::max({ Max, p[0], p[1], p[2] });
         std::printf("lone mesh LIGHT view: middle %.3f %.3f %.3f, max %.3f (the ambient / pi %.3f)\n", c[0], c[1], c[2], Max, 0.7f / 3.14159f);
         CHECK(c[0] < 1.0 && Max < 4.0f, "the lone mesh's LIGHT view is saturated (%.3f, max %.3f)", c[0], Max);
+
+        // No read supports it (its vertices list no surfel, no per-pixel read): the mesh's mean light, not black (a scene lit by its GI
+        // would be black there), and COVERAGE says unsupported (magenta)
+        auto Unread = MakeSurfels(Prim, 0.5f, 1.5f);
+        for (auto& v : Unread.m_VertSurfels) v = { -1, -1, -1, -1 };
+        xlionrender::mesh_id M2;
+        CHECK(!Renderer.CreateClusterGeom(M2, B.Geom()), "unread geom");
+        CHECK(!Renderer.SetMeshGI(M2, std::move(Unread)), "unread surfels");
+        Lone.m_Draws[0].m_Mesh = M2;
+        Lone.m_GI.m_bPerPixel  = false;
+        for (int f = 0; f < 60; ++f) CHECK(App.RenderFrame(Lone, View, Cam), "Render the unread mesh");
+        const auto u = Mean(ReadRGB(Device, View, W, H), W, H, 0.45f, 0.45f, 0.55f, 0.55f);
+        Lone.m_GI.m_Debug = xlionrender::gi_debug::COVERAGE;
+        for (int f = 0; f < 2; ++f) CHECK(App.RenderFrame(Lone, View, Cam), "Render the unread mesh's coverage");
+        const auto k = Mean(ReadRGB(Device, View, W, H), W, H, 0.45f, 0.45f, 0.55f, 0.55f);
+        std::printf("unsupported everywhere: LIGHT middle %.3f (supported %.3f), coverage %.2f %.2f %.2f (magenta)\n", u[0], c[0], k[0], k[1], k[2]);
+        CHECK(u[0] > 0.02f, "a point no read supports is black (%.3f)", u[0]);
+        CHECK(k[0] > 0.5f && k[2] > 0.5f && k[1] < 0.1f, "the coverage view does not say unsupported");
+        Renderer.DestroyMesh(M2);
         Renderer.DestroyMesh(M);
     }
 

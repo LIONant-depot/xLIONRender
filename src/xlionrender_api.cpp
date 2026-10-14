@@ -95,6 +95,10 @@ namespace xlionrender
                 pOut[Length] = 0;
                 return Length;
             }
+            void          SetViewOptions(const void* pWorld, const view_options& Options) noexcept override
+            {
+                if (auto* pSystem = FindSystem(pWorld)) pSystem->m_ViewOptions = Options;
+            }
             int           DumpGI(const void* pWorld, const char* pPath) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);
