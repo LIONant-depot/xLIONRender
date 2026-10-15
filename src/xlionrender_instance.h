@@ -155,8 +155,11 @@ namespace xlionrender
 
         struct material_slot
         {
-            const xgpu::shader*                                     m_pFragment = nullptr;
-            std::vector<xgpu::texture*>                             m_Textures;     // slot 0 (shadow map) may be nullptr: white
+            // Copies of the handles (they share the GPU objects): its pipelines are built on first use, after whoever handed them over may
+            // have let theirs go (a material instance's texture compiled again - pointers into a resource there were freed memory)
+            xgpu::shader                                            m_Fragment;
+            std::vector<xgpu::texture>                              m_Textures;     // slot 0 (shadow map) may be empty: white
+            std::vector<xgpu::texture*> TexturePointers() noexcept { std::vector<xgpu::texture*> P; for (auto& T : m_Textures) P.push_back(T.m_Private ? &T : nullptr); return P; }
             std::array<xgpu::pipeline,          capture_path_v + 1> m_Pipeline;     // per vertex path (geom_kind, the GI capture last), built on first use
             std::array<xgpu::pipeline_instance, capture_path_v + 1> m_Instance;
             std::uint32_t           m_Generation    = 0;

@@ -206,6 +206,42 @@ int main()
         Renderer.DestroyMaterial(Cutout);
     }
 
+    // A material outlives the texture handle it was made with (a material instance lets its texture go when the texture is compiled again):
+    // the pipelines it builds on first use - the GI capture's here, made only now - still have its texture (the material keeps its own
+    // handles; it once kept pointers, and the capture built its pipeline from freed memory)
+    {
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_material_frag.h"
+        };
+        xgpu::shader Frag;
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "material shader");
+        const std::uint32_t Texel = 0xff0000ffu;            // red (RGBA little endian)
+        const auto Mips = std::array{ xgpu::texture::setup::mip_size{ sizeof(Texel) } };
+        xlionrender::material_id Red;
+        xgpu::texture T;                                    // stays (empty) where a kept pointer would look: no luck of freed memory
+        CHECK(!Device.Create(T, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
+                                , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Texel), sizeof(Texel) }, .m_isGamma = false }), "red texture");
+        const auto Slots = std::array<xgpu::texture*, 2>{ nullptr, &T };
+        CHECK(!Renderer.CreateMaterial(Red, Frag, Slots), "red material");
+        Device.Destroy(std::move(T));                       // the caller lets its texture go (Destroy queues a copy: the handle's own share goes too) ...
+        T.m_Private.reset();
+        for (int f = 0; f < 6; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while the texture's death march runs");   // ... and the GPU's frames pass
+        Scene.m_Draws[3].m_Materials = { Red };
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the wall with the material whose texture handle went");
+        for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing it");
+        const auto* pW = Renderer.getGIWorld();
+        xmath::fvec3 Mean{ 0, 0, 0 };
+        for (const auto& v : pW->SurfelAlbedo(Renderer.getGIId(4))) Mean = Mean + v;
+        Mean = Mean * (1.0f / float(std::max<std::size_t>(pW->SurfelAlbedo(Renderer.getGIId(4)).size(), 1)));
+        std::printf("captured with the material's own texture: %.3f %.3f %.3f (red: its shader x3)\n", Mean.m_X, Mean.m_Y, Mean.m_Z);
+        CHECK(Mean.m_X > 0.5f && Mean.m_Y < 0.1f, "the material lost its texture");
+
+        Scene.m_Draws[3].m_Materials = {};
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the wall again");
+        for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing the wall again");
+        Renderer.DestroyMaterial(Red);
+    }
+
     // The red wall's material changes (a material compiled again makes a new material_id): its surfels and triangles are captured again.
     // Changed twice in a row (the first capture still in flight): only the last one's colors stay
     {

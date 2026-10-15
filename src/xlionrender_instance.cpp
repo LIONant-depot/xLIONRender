@@ -679,8 +679,9 @@ namespace xlionrender
 
         material_slot M;
         M.m_bAlpha = bAlpha;
-        M.m_pFragment = &FragmentHDR;
-        M.m_Textures.assign(Textures.begin(), Textures.end());
+        M.m_Fragment = FragmentHDR;
+        M.m_Textures.clear();
+        for( auto* p : Textures ) M.m_Textures.push_back(p ? *p : xgpu::texture{});
 
         // The rigid pipeline now, so a material that cannot build reports it here (the skin one is built on its first skinned draw)
         if( getMaterialInstance(M, geom_kind::RIGID) == nullptr ) return VGPU_ERROR(xgpu::device::error::FAILURE, "The material's pipeline could not be created");
@@ -705,7 +706,7 @@ namespace xlionrender
         assert(M.m_Textures.size() <= 8);       // slots 8, 9: the environment
         const auto Samplers = LitSamplers();
 
-        auto Shaders      = std::array<const xgpu::shader*, 2>{ M.m_pFragment, &Vert };
+        auto Shaders      = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, &Vert };
         using ub = xgpu::pipeline::uniform_binds;
         const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
         const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
@@ -728,7 +729,7 @@ namespace xlionrender
                                              , .m_UniformBinds = Binds, .m_Samplers = Samplers }) ) return nullptr;
 
         std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
-        Bindings = LitBindings(M.m_Textures);
+        Bindings = LitBindings(M.TexturePointers());
         if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
         {
             m_Device.Destroy(std::move(M.m_Pipeline[k]));
@@ -755,7 +756,7 @@ namespace xlionrender
         xgpu::shader Vert;
         if( m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_GICaptureVert) }) ) return nullptr;
         const auto Samplers = LitSamplers();
-        auto Shaders = std::array<const xgpu::shader*, 2>{ M.m_pFragment, &Vert };
+        auto Shaders = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, &Vert };
         using ub = xgpu::pipeline::uniform_binds;
         const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
         const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
@@ -769,7 +770,7 @@ namespace xlionrender
                                    , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers };
         Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
         if( m_Device.Create(M.m_Pipeline[k], Setup) ) return nullptr;
-        auto Bindings = LitBindings(M.m_Textures);
+        auto Bindings = LitBindings(M.TexturePointers());
         if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
         {
             m_Device.Destroy(std::move(M.m_Pipeline[k]));
@@ -790,6 +791,7 @@ namespace xlionrender
             if( pM->m_Pipeline[k].m_Private ) m_Device.Destroy(std::move(pM->m_Pipeline[k]));
         }
         pM->m_Textures.clear();
+        pM->m_Fragment = {};
         pM->m_bAlive = false;
     }
 
