@@ -87,6 +87,25 @@ vec3 GIOctDecode(in const vec2 e)
     if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);
     return normalize(v);
 }
+// How far (sub-cells) a point is from a patch's sub-cells (4 x 4 across the cell in the patch's plane, the mask: surfel_mesh::MaskDistance):
+// 0 inside one. The patch a point reads is the nearest (the strip by a wall's foot no sample fell in: its own side is still the nearer)
+float GIMaskDistance(in const vec3 P, in const vec3 N, in const vec3 PatchN, in const float Cell, in const uint Mask)
+{
+    const vec3 Lp = (P + N * (0.05 * Cell)) / Cell;
+    const vec3 A  = abs(PatchN);
+    vec2 uv = A.x >= A.y && A.x >= A.z ? Lp.yz : A.y >= A.z ? Lp.xz : Lp.xy;
+    uv -= floor(uv);
+    if (((Mask >> (uint(clamp(uv.y * 4.0, 0.0, 3.0)) * 4u + uint(clamp(uv.x * 4.0, 0.0, 3.0)))) & 1u) != 0u) return 0.0;     // inside one (the usual case)
+    float Best = 1e30;
+    for (uint b = 0u; b < 16u; ++b)
+    {
+        if ((Mask & (1u << b)) == 0u) continue;
+        const vec2 lo = vec2(float(b & 3u), float(b >> 2u)) * 0.25;
+        const vec2 d  = max(max(lo - uv, uv - (lo + 0.25)), vec2(0.0));
+        Best = min(Best, max(d.x, d.y) * 4.0);
+    }
+    return Best;
+}
 bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count, out vec3 PatchN, out uint Patches, out uint nPatches)
 {
     First = 0u; Count = 0u; PatchN = N; Patches = 0u; nPatches = 0u;
@@ -103,7 +122,8 @@ bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count
         const uint e = GIMesh[2] + 4u * h;
         if (GIMesh[e + 1u] == 0xFFFFFFFFu) return false;
         if (GIMesh[e] != KeyLo || GIMesh[e + 1u] != KeyHi) continue;
-        // the cell's patch that matches the point best (facing its way, nearest its plane; surfel_mesh::ReadCellList): its list
+        // the cell's patch that matches the point best (surfel_mesh::ReadCellList): the one whose sub-cells hold it first (a wall across
+        // the cell splits its floor in two: the point's own side), then facing its way, then nearest its plane. Word 3: count | mask << 16
         Patches = GIMesh[5] + GIMesh[e + 2u]; nPatches = GIMesh[e + 3u];
         float Best = -1e30;
         for (uint p = 0u; p < GIMesh[e + 3u]; ++p)
@@ -112,8 +132,9 @@ bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count
             const vec3  Np = GIOctDecode(unpackSnorm2x16(GIMesh[a]));
             const float c  = dot(Np, N);
             if (c < 0.5) continue;
-            const float Score = c - abs(dot(P, Np) - uintBitsToFloat(GIMesh[a + 1u])) / Cell;
-            if (Score > Best) { Best = Score; First = GIMesh[a + 2u]; Count = GIMesh[a + 3u]; PatchN = Np; }
+            const uint  w3 = GIMesh[a + 3u];
+            const float Score = c - abs(dot(P, Np) - uintBitsToFloat(GIMesh[a + 1u])) / Cell + 2.0 - 2.0 * min(1.0, GIMaskDistance(P, N, Np, Cell, w3 >> 16u));
+            if (Score > Best) { Best = Score; First = GIMesh[a + 2u]; Count = w3 & 0xFFFFu; PatchN = Np; }
         }
         return Best > -1e29;
     }
@@ -153,6 +174,17 @@ uint SurfelGIDominant(in const vec3 P, in const vec3 N)
 }
 // The debug view of the surface colors (scene::gi_debug::SURFACE_COLOR): the captured color of the pixel's triangle, its cluster's first
 // triangle (the vertex shader passes the cluster in the GI reference's x) + gl_PrimitiveID; black: not captured yet
+// The COVERAGE view's why for a pixel no read supports (debug only): magenta no cell or no part facing it, purple its part lists nothing,
+// red its list has surfels but none weighs anything (out of reach, facing away, invalid, out of the corners' sight)
+vec3 SurfelGIWhyUnsupported(in const vec3 P, in const vec3 N, in const uint LightOffset, in const uint Level)
+{
+    uint First, Count, Patches, nPatches;
+    vec3 PatchN;
+    if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches)) return vec3(1.0, 0.0, 1.0);
+    if (Count == 0u) return vec3(0.45, 0.0, 0.75);
+    return vec3(0.9, 0.05, 0.05);
+}
+bool SurfelGIIsPatch(in const uint s) { return s != 0xFFFFFFFFu && (GIMesh[GIMesh[0] + 8u * s + 7u] >> 31u) != 0u; }     // (PatchDefects: COVERAGE's yellow)
 vec3 SurfelGITriangleColor(in const uint Cluster, in const uint Primitive)
 {
     const uint t = GIMesh[7];
@@ -168,9 +200,10 @@ vec3 SurfelDebugColor(in const uint s)
 // sum(w E), sum(w) of the level 0 surfels that reach a point (mesh space position and normal): its cell of the read grid lists them.
 // The weight of the vertex read (falloff over 2 radii squared, times the normal match, times the validity). 0: no grid, or off the
 // surface's cells (the caller falls back to the vertex read)
-vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level, in const uint First, in const uint Count, in const vec3 PatchN)
+vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level, in const uint First, in const uint Count, in const vec3 PatchN, out vec4 Relaxed)
 {
     vec4 Sum = vec4(0.0);
+    Relaxed = vec4(0.0);                                            // the same without the moments' test (SurfelGIQuery's second tier)
     for (uint i = 0u; i < Count; ++i)
     {
         const uint  e = GIMesh[GIMesh[5] + First + i], s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
@@ -182,11 +215,15 @@ vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const
         const float cn = smoothstep(0.5, 0.75, c);                  // fades in: a cut at 0.5 draws a line where smoothed normals sweep through it
         // Level 1 (far): the fine surfels still find what reaches the pixel, their parents give the light (the same coverage at both
         // levels: no pop at the switch)
-        const uint  sl = Level == 1u ? GIMesh[b + 7u] : s;
+        const uint  sl = Level == 1u ? (GIMesh[b + 7u] & 0xFFFFu) : s;      // (bit 31: a patch surfel)
         const uint  bl = Level == 1u ? GIMesh[1] + 8u * sl : b;
-        const float w = f * f * c * cn * GIReadWeight(e, P, N, PatchN) * GIValidity(LightOffset + sl) * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
+        const float w0 = f * f * c * cn * GIReadWeight(e, P, N, PatchN) * GIValidity(LightOffset + sl);
+        if (w0 <= 0.0) continue;
+        const vec3  B = GIBasisRead(LightOffset + sl, GISurfelNormal(bl), Nmap);           // the normal-mapped normal reads the basis
+        Relaxed += vec4(B * w0, w0);
+        const float w = w0 * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
         if (w <= 0.0) continue;
-        Sum += vec4(GIBasisRead(LightOffset + sl, GISurfelNormal(bl), Nmap) * w, w);       // the normal-mapped normal reads the basis
+        Sum += vec4(B * w, w);
     }
     return Sum;
 }
@@ -201,9 +238,35 @@ struct GIQueryResult
     float Confidence;
     bool  bSupported;
 };
-// An instance's mean light (the slot before its first surfel, the renderer's upload): what a point no read supports shows - not black,
-// the same as the solver's rays (gi::world::Unsupported)
+// An instance's mean light (the slot before its first surfel, the renderer's upload)
 vec3 SurfelGIMean(in const uint LightOffset) { return GILight[3u * (LightOffset - 1u)].rgb; }
+
+// What a point no read supports shows (the last of the policy; gi::world::Unsupported the same): the mean light of the valid surfels its
+// cell lists (every patch: by their reach and validity only - no sight, no facing), else the instance's mean. Not black, and local: the
+// whole building's mean was a grey square in a dark room. Only the pixels that come to it pay for it
+vec3 SurfelGILocalMean(in const vec3 P, in const vec3 N, in const uint LightOffset, in const uint Level)
+{
+    uint First, Count, Patches, nPatches;
+    vec3 PatchN;
+    GIReadCell(P, N, First, Count, PatchN, Patches, nPatches);
+    vec4 Sum = vec4(0.0);
+    for (uint p = 0u; p < nPatches; ++p)
+    {
+        const uint a = Patches + 4u * p, n = GIMesh[a + 3u] & 0xFFFFu;
+        for (uint i = 0u; i < n; ++i)
+        {
+            const uint  s  = GIMesh[GIMesh[5] + GIMesh[a + 2u] + i] & 0xFFFFu;
+            const uint  b  = GIMesh[0] + 8u * s;
+            const float f  = max(0.0, 1.0 - length(P - GISurfelCenter(b)) / (2.0 * uintBitsToFloat(GIMesh[b + 3u])));
+            const uint  sl = Level == 1u ? (GIMesh[b + 7u] & 0xFFFFu) : s;
+            const float w  = f * GIValidity(LightOffset + sl);
+            if (w <= 0.0) continue;
+            const uint  l  = 3u * (LightOffset + sl);
+            Sum += vec4((GILight[l].rgb + GILight[l + 1u].rgb + GILight[l + 2u].rgb) * (w / 3.0), w);
+        }
+    }
+    return Sum.w > 1e-6 ? Sum.rgb / Sum.w : SurfelGIMean(LightOffset);
+}
 
 // The per-pixel read: the surfels of the cell's patch the point matches (GIReadCell), nothing else - no other patch's surfels, no surfels
 // out of the patch's sight (those were the fail-open fallbacks: plausible light, from the wrong surface)
@@ -213,7 +276,12 @@ GIQueryResult SurfelGIQuery(in const vec3 P, in const vec3 N, in const vec3 Nmap
     vec3 PatchN;
     GIQueryResult R = GIQueryResult(vec3(0.0), 0.0, false);
     if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches)) return R;
-    const vec4 Sum = SurfelGIList(P, N, Nmap, LightOffset, Level, First, Count, PatchN);
+    vec4 Relaxed;
+    vec4 Sum = SurfelGIList(P, N, Nmap, LightOffset, Level, First, Count, PatchN, Relaxed);
+    // The moments' test rejects every surfel (next to a wall's foot: their rays met the wall just past the point): its own surfels without
+    // it - the corner weights (the bake's line of sight, the patch split at walls) still keep the other side out. Not the mean light: a
+    // whole building's in a dark closet was a bright patch
+    if (Sum.w <= 1e-6) Sum = Relaxed;
     if (Sum.w <= 1e-6) return R;
     R.Irradiance = Sum.rgb / Sum.w; R.Confidence = Sum.w; R.bSupported = true;
     return R;

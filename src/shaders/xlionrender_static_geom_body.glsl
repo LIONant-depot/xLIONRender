@@ -52,7 +52,7 @@ vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4
         uint s = Idx[k];
         if (Level == 1u)
         {
-            s = GIMesh[GIMesh[0] + 8u * s + 7u];            // the parent
+            s = GIMesh[GIMesh[0] + 8u * s + 7u] & 0xFFFFu;  // the parent (bit 31: a patch surfel)
             bool bSeen = false;
             for (int j = 0; j < k; ++j) bSeen = bSeen || Seen[j] == s;
             if (bSeen) continue;                            // two children of one parent

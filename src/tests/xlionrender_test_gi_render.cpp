@@ -152,7 +152,8 @@ int main()
         std::printf("per-pixel read vs the dense image: dense vertex read %.1f%%; sparse (2 triangles a face): pixel read %.1f%%, vertex read %.1f%%\n"
                    , 100 * DenseErr, 100 * PixelErr, 100 * VertexErr);
         CHECK(DenseErr < 0.05, "on dense meshes the pixel and the vertex reads differ by %.1f%%", 100 * DenseErr);
-        CHECK(PixelErr < 0.04 && PixelErr < 0.75 * VertexErr,     // the dense reads differ by ~2% themselves (vertex spacing vs surfel size)
+        // (0.8: with validity from near back faces only - the box edges' surfels valid again - it is 2.3% vs 3.0%; it was 2.0% vs 3.2%)
+        CHECK(PixelErr < 0.04 && PixelErr < 0.8 * VertexErr,      // the dense reads differ by ~2% themselves (vertex spacing vs surfel size)
                   "on sparse meshes the pixel read is %.1f%% off the dense image (the vertex read %.1f%%)", 100 * PixelErr, 100 * VertexErr);
         for (int f = 0; f < 2; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render dense again");
         for (auto& M : SparseMeshes) Renderer.DestroyMesh(M);

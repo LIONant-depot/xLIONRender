@@ -543,6 +543,14 @@ namespace xlionrender::gi
         std::vector<std::uint32_t>                  m_ReadList;
         std::uint32_t                               m_ReadMaxProbe = 0;     // the longest probe of the table (the GPU's lookups go that far, no further)
         std::uint32_t                               m_ReadUnsupported = 0;  // patches whose list is empty (none of their surfels in sight: their reads are unsupported)
+        // Leak protection (the GeomStatic descriptor's GI LeakProtection): the read grid's patches split where the surface is cut (a wall
+        // across a cell: BuildReadGrid), and the solver's rays read through it (world::ReadPoint), not the hit triangle's vertices
+        bool                                        m_bLeakProtection = true;
+        // Defects (geometry the GI cannot serve: a thin face beside other geometry - a strip of ceiling between a beam and a wall - that no
+        // surfel serves). BuildReadGrid lists the seen pieces of surface whose read lists nothing (a point and its normal each); the compiler
+        // can bake a surfel for each (Bake's Forced: PatchDefects). The fine surfels from m_FirstPatch on are those (0xFFFFFFFF: none)
+        std::vector<std::pair<v3, v3>>              m_EmptyParts;
+        std::uint32_t                               m_FirstPatch = 0xFFFFFFFFu;
 
         static std::array<int, 3> ReadCellOf(const v3& P, float Cell) noexcept { return { int(std::floor(P.m_X / Cell)), int(std::floor(P.m_Y / Cell)), int(std::floor(P.m_Z / Cell)) }; }
         static std::array<std::uint32_t, 2> ReadKey(const std::array<int, 3>& C) noexcept
@@ -577,7 +585,7 @@ namespace xlionrender::gi
 
         // The fine surfels listed for the surface point P (normal N): its cell's patch that matches it best (facing its way, nearest its
         // plane; as GIReadCell); empty: P is off the surface's cells
-        std::span<const std::uint32_t> ReadCellList(const v3& P, const v3& N) const noexcept
+        std::span<const std::uint32_t> ReadCellList(const v3& P, const v3& N, v3* pPatchN = nullptr) const noexcept
         {
             if (m_ReadTable.empty()) return {};
             const auto C = ReadCellAt(P, N, m_ReadCell);
@@ -588,26 +596,56 @@ namespace xlionrender::gi
                 const auto& E = m_ReadTable[h];
                 if (E[1] == 0xFFFFFFFFu) return {};
                 if (E[0] != K[0] || E[1] != K[1]) continue;
+                // The part whose sub-cells hold the point first (a wall across the cell: the point's own side), then facing, then nearest.
+                // Every ray's hit: plain floats (UnpackOct, CellUV and MaskDistance inline; a Debug build calls every v3 operator)
                 float Best = -1e30f; std::uint32_t Bp = 0xFFFFFFFFu;
+                const float iCell = 1.0f / m_ReadCell, Nx = N.m_X, Ny = N.m_Y, Nz = N.m_Z;
+                const float Lp[3] = { (P.m_X + Nx * (read_lift_v * m_ReadCell)) * iCell, (P.m_Y + Ny * (read_lift_v * m_ReadCell)) * iCell, (P.m_Z + Nz * (read_lift_v * m_ReadCell)) * iCell };
+                const float Fr[3] = { Lp[0] - std::floor(Lp[0]), Lp[1] - std::floor(Lp[1]), Lp[2] - std::floor(Lp[2]) };
+                const std::uint32_t* pList = m_ReadList.data() + E[2];
                 for (std::uint32_t p = 0; p < E[3]; ++p)
                 {
-                    const std::uint32_t* Pa = &m_ReadList[E[2] + 4 * p];
-                    const v3 Np = UnpackOct(Pa[0]);
-                    const float c = Np.Dot(N);
+                    const std::uint32_t* Pa = pList + 4 * p;
+                    float x = std::max(float(std::int16_t(Pa[0] & 0xFFFF)) / 32767.0f, -1.0f), y = std::max(float(std::int16_t(Pa[0] >> 16)) / 32767.0f, -1.0f);
+                    float z = 1 - std::abs(x) - std::abs(y);
+                    if (z < 0) { const float ox = x; x = (1 - std::abs(y)) * (ox >= 0 ? 1.0f : -1.0f); y = (1 - std::abs(ox)) * (y >= 0 ? 1.0f : -1.0f); }
+                    const float il = 1.0f / std::sqrt(x * x + y * y + z * z); x *= il; y *= il; z *= il;
+                    const float c = x * Nx + y * Ny + z * Nz;
                     if (c < 0.5f) continue;
-                    const float Score = c - std::abs(P.Dot(Np) - std::bit_cast<float>(Pa[1])) / m_ReadCell;
+                    const float ax = std::abs(x), ay = std::abs(y), az = std::abs(z);
+                    const int   Au = ax >= ay && ax >= az ? 1 : 0, Av = ax >= ay && ax >= az ? 2 : ay >= az ? 2 : 1;      // ReadAxes
+                    const float uv[2] = { Fr[Au], Fr[Av] };
+                    const std::uint32_t Msk = Pa[3] >> 16;
+                    const int su = std::min(int(uv[0] * sub_v), sub_v - 1), sv = std::min(int(uv[1] * sub_v), sub_v - 1);
+                    const float D = (Msk >> (sv * sub_v + su)) & 1u ? 0.0f : MaskDistance(Msk, { uv[0], uv[1] });
+                    const float Score = c - std::abs(P.m_X * x + P.m_Y * y + P.m_Z * z - std::bit_cast<float>(Pa[1])) * iCell + 2.0f - 2.0f * std::min(1.0f, D);
                     if (Score > Best) { Best = Score; Bp = p; }
                 }
                 if (Bp == 0xFFFFFFFFu) return {};
                 const std::uint32_t* Pa = &m_ReadList[E[2] + 4 * Bp];
-                return { m_ReadList.data() + Pa[2], Pa[3] };
+                if (pPatchN) *pPatchN = UnpackOct(Pa[0]);
+                return { m_ReadList.data() + Pa[2], Pa[3] & 0xFFFFu };
             }
             return {};
         }
 
-        // A surface point with something just in front of it (within a quarter of a read cell along its normal: a wall under a door
-        // frame): never seen (BuildReadGrid's points, Coverage)
-        bool CoveredAt(const v3& P, const v3& N) const noexcept { return Occluded(P + N * (0.02f * m_ReadCell), N, 0.25f * m_ReadCell); }
+        // A surface point never seen (BuildReadGrid's points, Coverage): something just in front of it (within a quarter of a read cell
+        // along its normal: a wall under a door frame), or enclosed - inside a hollow wall (two faces, no bottom: the floor runs on inside
+        // it). Inside, a short ray along the surface meets a face from behind; outside it never does (a wall's foot is met from the front)
+        bool CoveredAt(const v3& P, const v3& N) const noexcept
+        {
+            const v3 O = P + N * (0.02f * m_ReadCell);
+            if (Occluded(O, N, 0.25f * m_ReadCell)) return true;
+            const v3 T = (std::abs(N.m_X) < 0.9f ? v3{ 1, 0, 0 } : v3{ 0, 1, 0 }).Cross(N).NormalizeCopy(), B = N.Cross(T);
+            for (const v3& D : { T, T * -1.0f, B, B * -1.0f })
+            {
+                float Len = 0.25f * m_ReadCell, U, V; int Tri;
+                if (!Cast(O, D, Len, Tri, U, V)) continue;
+                const auto& Tr = m_Tris[Tri];
+                if ((m_Pos[Tr[1]] - m_Pos[Tr[0]]).Cross(m_Pos[Tr[2]] - m_Pos[Tr[0]]).Dot(D) > 0) return true;     // a back face: inside
+            }
+            return false;
+        }
 
         // How much of the surface the per-pixel read covers: random points of every triangle, by its area (the interpolated vertex normal, a hair off
         // the surface as the GPU's interpolation is), each read through its cell: uncovered when no listed surfel reaches it with a
@@ -616,6 +654,7 @@ namespace xlionrender::gi
         {
             struct example { v3 m_P, m_N; int m_nList; float m_NearestCompatible, m_NearestAny; };
             int                     m_nPoints = 0, m_nUncovered = 0, m_nHidden = 0;    // m_nHidden: covered (CoveredAt), never seen: not counted
+            double                  m_ListSum = 0;  int m_ListMax = 0;                  // the lists' lengths (each read's cost: the solver reads one per ray hit)
             std::vector<example>    m_Examples;
         };
         coverage Coverage(int PerTriangle, int nExamples = 8) const noexcept
@@ -636,6 +675,7 @@ namespace xlionrender::gi
                     const v3 P = A + (B - A) * u + (C - A) * v + v3{ 1e-6f, -1e-6f, 1e-6f } * float((k % 3) - 1);
                     if (CoveredAt(P, N)) { ++Out.m_nHidden; --Out.m_nPoints; continue; }
                     const auto List = ReadCellList(P, N);
+                    Out.m_ListSum += double(List.size()); Out.m_ListMax = std::max(Out.m_ListMax, int(List.size()));
                     bool bCovered = false;
                     for (auto e : List)
                     {
@@ -653,6 +693,38 @@ namespace xlionrender::gi
             return Out;
         }
 
+        // A patch's sub-cells (sub_v x sub_v across the cell, in the patch's plane: ReadAxes) and the one a surface point (its normal, as
+        // the reads lift it) falls in: its bit in a patch's mask (shaders/xlionrender_surfel_gi.glsl GIReadCell)
+        static constexpr int sub_v = 4;
+        static std::array<float, 2> CellUV(const v3& P, const v3& N, const v3& PatchN, float Cell) noexcept     // where in its cell, 0..1
+        {
+            const v3 Lp = (P + N * (read_lift_v * Cell)) * (1.0f / Cell);
+            const auto [Au, Av, Aa] = ReadAxes(PatchN);
+            const float* pL = &Lp.m_X;
+            return { pL[Au] - std::floor(pL[Au]), pL[Av] - std::floor(pL[Av]) };
+        }
+        static int SubCell(const v3& P, const v3& N, const v3& PatchN, float Cell) noexcept
+        {
+            const auto uv = CellUV(P, N, PatchN, Cell);
+            return std::clamp(int(uv[1] * sub_v), 0, sub_v - 1) * sub_v + std::clamp(int(uv[0] * sub_v), 0, sub_v - 1);
+        }
+        // How far (sub-cells) a point (CellUV) is from a part's sub-cells (its mask): 0 inside one. The part a point reads is the nearest
+        // one: where no part holds its sub-cell (the strip by a wall's foot no sample fell in) its own side is still the nearer
+        static float MaskDistance(std::uint32_t Mask, const std::array<float, 2>& uv) noexcept
+        {
+            const int su = std::clamp(int(uv[0] * sub_v), 0, sub_v - 1), sv = std::clamp(int(uv[1] * sub_v), 0, sub_v - 1);
+            if (Mask & (1u << (sv * sub_v + su))) return 0;             // inside one (the usual case)
+            float Best = 1e30f;
+            for (int b = 0; b < sub_v * sub_v; ++b)
+            {
+                if (!(Mask & (1u << b))) continue;
+                const float u0 = float(b % sub_v) / sub_v, v0 = float(b / sub_v) / sub_v, e = 1.0f / sub_v;
+                const float du = std::max({ u0 - uv[0], uv[0] - (u0 + e), 0.0f }), dv = std::max({ v0 - uv[1], uv[1] - (v0 + e), 0.0f });
+                Best = std::min(Best, std::max(du, dv) * sub_v);
+            }
+            return Best;
+        }
+
         void BuildReadGrid() noexcept
         {
             m_ReadTable.clear(); m_ReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
@@ -661,40 +733,66 @@ namespace xlionrender::gi
             m_ReadCell = L[0].m_Radius;
             const float Cell = m_ReadCell, Reach = 2 * L[0].m_Radius;
 
-            // The cells the surface crosses (points on every triangle no further apart than half a cell), and per cell its patches: the
-            // pieces of surface in it that face one way in one plane (the blinds and the window frame 10 cm behind them are two patches,
-            // whichever way they face), each with up to 4 of its points (the visibility test below)
-            struct patch { v3 m_N; float m_D; std::vector<v3> m_Pts, m_Hidden; };     // its points in sight, its covered ones
-            struct cell  { std::array<int, 3> m_C; std::vector<patch> m_Patches; };
+            // The cells the surface crosses (points on every triangle an eighth of a cell apart), and per cell its patches: the pieces of
+            // surface in it that face one way in one plane (the blinds and the window frame 10 cm behind them are two patches, whichever
+            // way they face). Per patch, per sub-cell, a point of it in sight - or a covered one (CoveredAt: under a door frame, never seen)
+            // where none is: a face covered all over (sealed in) still has points
+            struct patch
+            {
+                v3 m_N; float m_D;
+                std::array<v3, sub_v * sub_v> m_Vis{}, m_Hid{};
+                std::uint16_t m_VisMask = 0, m_HidMask = 0;
+            };
+            // A patch's connected piece: its sub-cells joined where the surface between them is not cut (a wall across the cell cuts the
+            // floor in two: each side reads only what it sees; one list for both was the light of one room on the other's floor)
+            struct part  { v3 m_N; float m_D; std::uint16_t m_Mask; std::vector<v3> m_Pts; bool m_bSeen = true; };
+            struct cell  { std::array<int, 3> m_C; std::vector<patch> m_Patches; std::vector<part> m_Parts; };
             std::unordered_map<std::uint64_t, cell> Cells;
             const float PlaneTol = 0.1f * Cell;
-            // A point covered by something just in front of it (a wall under a door frame) is never seen: it votes on what the surface sees
-            // only where no point in sight is near (it filled a patch's points under the frame: the visible strip beside it saw nothing, an
-            // empty list, a black bar). A face covered all over (sealed in) still has its covered points
-            const auto Covered = [&](const v3& P, const v3& N) { return CoveredAt(P, N); };
-            const auto Room = [&](const std::vector<v3>& Pts, const v3& P)       // up to 4, apart
+            // A point in sight also stands for the cells next to its own when it is within a sample's spacing of their edge (their sub-cell at
+            // that edge): a cell the surface only grazes - a strip of floor at a wall's foot thinner than the spacing, the rest of the cell
+            // under the wall - has no sample of its own in sight, and its patch was covered all over (an empty list: a purple line at the seam)
+            const float Edge = 1.0f / (2 * sub_v);                         // the samples' spacing, in cells
+            const auto PatchIn = [&](const std::array<int, 3>& C, const v3& P, const v3& N) -> patch&
             {
-                if (Pts.size() >= 4) return false;
-                for (const auto& Q : Pts) if ((Q - P).Length() < 0.3f * Cell) return false;
-                return true;
+                auto& Ce = Cells.try_emplace(surfel_grid::Key(C[0], C[1], C[2]), cell{ C, {}, {} }).first->second;
+                for (auto& Pa : Ce.m_Patches) if (Pa.m_N.Dot(N) > 0.97f && std::abs(P.Dot(Pa.m_N) - Pa.m_D) < PlaneTol) return Pa;
+                Ce.m_Patches.push_back({});
+                auto& Pa = Ce.m_Patches.back(); Pa.m_N = N; Pa.m_D = P.Dot(N);
+                return Pa;
             };
             const auto Touch = [&](const v3& P, const v3& N)
             {
                 const auto C  = ReadCellAt(P, N, Cell);
-                auto&      Ce = Cells.try_emplace(surfel_grid::Key(C[0], C[1], C[2]), cell{ C, {} }).first->second;
-                patch* pPa = nullptr;
-                for (auto& Pa : Ce.m_Patches) if (Pa.m_N.Dot(N) > 0.97f && std::abs(P.Dot(Pa.m_N) - Pa.m_D) < PlaneTol) { pPa = &Pa; break; }
-                if (pPa == nullptr) { Ce.m_Patches.push_back({ N, P.Dot(N), {}, {} }); pPa = &Ce.m_Patches.back(); }
-                const bool bVis = Room(pPa->m_Pts, P), bHid = pPa->m_Pts.empty() && Room(pPa->m_Hidden, P);     // (no ray when it is kept by neither)
-                if (!bVis && !bHid) return;
-                if (!Covered(P, N)) { if (bVis) pPa->m_Pts.push_back(P); }
-                else if (bHid) pPa->m_Hidden.push_back(P);
+                patch& Pa = PatchIn(C, P, N);
+                const int b = SubCell(P, N, Pa.m_N, Cell);
+                const auto Bit = std::uint16_t(1u << b);
+                if (Pa.m_VisMask & Bit) return;                            // (no ray: it has its point in sight)
+                if (CoveredAt(P, N)) { if (!(Pa.m_HidMask & Bit)) { Pa.m_HidMask |= Bit; Pa.m_Hid[b] = P; } return; }
+                Pa.m_VisMask |= Bit; Pa.m_Vis[b] = P;
+                // ... and the neighbor cells across the edges it is near (in the patch's plane: ReadAxes)
+                const auto [Au, Av, Aa] = ReadAxes(Pa.m_N);
+                const v3 Lp = (P + N * (read_lift_v * Cell)) * (1.0f / Cell);
+                const float* pL = &Lp.m_X;
+                const float fu = pL[Au] - std::floor(pL[Au]), fv = pL[Av] - std::floor(pL[Av]);
+                const int du = fu < Edge ? -1 : fu > 1 - Edge ? 1 : 0, dv = fv < Edge ? -1 : fv > 1 - Edge ? 1 : 0;
+                for (int k = 1; k < 4; ++k)
+                {
+                    const int ou = (k & 1) ? du : 0, ov = (k & 2) ? dv : 0;
+                    if ((k & 1 && !du) || (k & 2 && !dv)) continue;
+                    auto Cn = C; Cn[Au] += ou; Cn[Av] += ov;
+                    patch& Pn = PatchIn(Cn, P, N);
+                    const int su = ou < 0 ? sub_v - 1 : ou > 0 ? 0 : std::clamp(int(fu * sub_v), 0, sub_v - 1);
+                    const int sv = ov < 0 ? sub_v - 1 : ov > 0 ? 0 : std::clamp(int(fv * sub_v), 0, sub_v - 1);
+                    const int bn = sv * sub_v + su;
+                    if (!(Pn.m_VisMask & (1u << bn))) { Pn.m_VisMask |= std::uint16_t(1u << bn); Pn.m_Vis[bn] = P; }
+                }
             };
             for (const auto& T : m_Tris)
             {
                 const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], Cc = m_Pos[T[2]];
                 const float Longest = std::max({ (B - A).Length(), (Cc - B).Length(), (A - Cc).Length() });
-                const int   k       = std::min(4096, std::max(1, int(std::ceil(Longest / (0.5f * Cell)))));     // every cell it crosses (a 60 m floor: 240)
+                const int   k       = std::min(4096, std::max(1, int(std::ceil(Longest / (Cell / (2 * sub_v))))));     // every sub-cell it crosses
                 for (int i = 0; i <= k; ++i) for (int j = 0; i + j <= k; ++j)
                 {
                     const float u = float(i) / k, w = float(j) / k;
@@ -704,47 +802,88 @@ namespace xlionrender::gi
                 }
             }
 
-            // Per patch the surfels whose reach touches its cell's box, facing its way, weighted by how much of it sees them: its points and
-            // the same patch's in the 6 neighbor cells (Sees: the bake's test). Without it a pixel of blinds read the surfels of the window frame
-            // behind them (dark blotches): the depth moments alone did not stop them (seen from behind, the pixel lies sideways, along the
-            // gap). Per patch, not per cell: from the frame's points the frame's surfels are in plain sight. The neighbors' points make the
-            // test generous and shared: a surfel leaves a list where the surface around no longer sees it, not at a cell's edge (squares)
+            // Two points of one surface are joined when the line between them, lifted by a layer (SameLayer's: a tenth of a cell), is clear
+            const float Lift = 0.1f * Cell;
+            const auto Linked = [&](const v3& P, const v3& Q, const v3& N)
+            {
+                const v3 A = P + N * Lift, D = (Q + N * Lift) - A;
+                const float Len = D.Length();
+                return Len < 1e-6f || !Occluded(A, D * (1.0f / Len), Len);
+            };
+            std::vector<cell*> Order;
+            for (auto& [Key, Ce] : Cells) Order.push_back(&Ce);
+            ParallelFor(int(Order.size()), [&](int c)
+            {
+                auto& Ce = *Order[c];
+                for (const auto& Pa : Ce.m_Patches)
+                {
+                    const auto PartOf = [&](std::uint16_t Mask, const std::array<v3, sub_v * sub_v>& Pts)
+                    {
+                        part R{ Pa.m_N, Pa.m_D, Mask, {} };
+                        for (int b = 0; b < sub_v * sub_v; ++b) if (Mask & (1u << b)) R.m_Pts.push_back(Pts[b]);
+                        return R;
+                    };
+                    if (Pa.m_VisMask == 0) { Ce.m_Parts.push_back(PartOf(Pa.m_HidMask, Pa.m_Hid)); Ce.m_Parts.back().m_bSeen = false; continue; }      // covered all over
+                    if (!m_bLeakProtection) { auto R = PartOf(Pa.m_VisMask, Pa.m_Vis); R.m_Mask = 0xFFFF; Ce.m_Parts.push_back(std::move(R)); continue; }
+                    std::uint16_t Left = Pa.m_VisMask;
+                    while (Left)
+                    {
+                        std::uint16_t Mask = 0;
+                        int Stack[sub_v * sub_v], n = 0;
+                        const int b0 = std::countr_zero(unsigned(Left));
+                        Stack[n++] = b0; Left &= std::uint16_t(~(1u << b0)); Mask |= std::uint16_t(1u << b0);
+                        while (n)
+                        {
+                            const int b = Stack[--n], su = b % sub_v, sv = b / sub_v;
+                            const int Next[4][2] = { { su - 1, sv }, { su + 1, sv }, { su, sv - 1 }, { su, sv + 1 } };
+                            for (const auto& Nx : Next)
+                            {
+                                if (Nx[0] < 0 || Nx[0] >= sub_v || Nx[1] < 0 || Nx[1] >= sub_v) continue;
+                                const int nb = Nx[1] * sub_v + Nx[0];
+                                if (!(Left & (1u << nb)) || !Linked(Pa.m_Vis[b], Pa.m_Vis[nb], Pa.m_N)) continue;
+                                Left &= std::uint16_t(~(1u << nb)); Mask |= std::uint16_t(1u << nb); Stack[n++] = nb;
+                            }
+                        }
+                        Ce.m_Parts.push_back(PartOf(Mask, Pa.m_Vis));
+                    }
+                }
+            });
+
+            // Per part the surfels whose reach touches its cell's box, facing its way, weighted by how much of it sees them: its points and
+            // the points of the same surface around it (the 26 neighbor cells' parts in its plane that it is joined to: their nearest points
+            // Linked). Without it a pixel of blinds read the surfels of the window frame behind them (dark blotches). The neighbors' points
+            // make the test generous and shared: a surfel leaves a list where the surface around no longer sees it, not at a cell's edge
             surfel_grid G{ Cell, {} };
             for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
             const int Ring = int(std::ceil(Reach / Cell));
-            std::vector<const cell*> Order;
-            for (const auto& [Key, Ce] : Cells) Order.push_back(&Ce);
             std::vector<std::vector<std::vector<std::uint32_t>>> Lists(Order.size());
             std::atomic<std::uint32_t> Unsupported{ 0 };
             ParallelFor(int(Order.size()), [&](int c)
             {
                 const auto& Ce = *Order[c];
-                Lists[c].resize(Ce.m_Patches.size());
+                Lists[c].resize(Ce.m_Parts.size());
                 const v3 Lo{ Ce.m_C[0] * Cell, Ce.m_C[1] * Cell, Ce.m_C[2] * Cell }, Hi = Lo + v3{ Cell, Cell, Cell };
                 std::vector<int> Near;
                 G.Near((Lo + Hi) * 0.5f, Ring, [&](int s) { const v3 Q = v3::Max(Lo, v3::Min(Hi, L[s].m_Center)); if ((Q - L[s].m_Center).Length() < Reach) Near.push_back(s); });
-                static constexpr int Around[7][3] = { { 0, 0, 0 }, { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
-                for (std::size_t p = 0; p < Ce.m_Patches.size(); ++p)
+                for (std::size_t p = 0; p < Ce.m_Parts.size(); ++p)
                 {
-                    const auto& Pa = Ce.m_Patches[p];
-                    std::vector<const v3*> Pts;                                 // the same patch's points around (the 26 neighbor cells too)
+                    const auto& Pa = Ce.m_Parts[p];
+                    std::vector<const v3*> Pts;
+                    for (const auto& Q : Pa.m_Pts) Pts.push_back(&Q);
                     for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
                     {
                         const auto It = Cells.find(surfel_grid::Key(Ce.m_C[0] + dx, Ce.m_C[1] + dy, Ce.m_C[2] + dz));
                         if (It == Cells.end()) continue;
-                        for (const auto& Pb : It->second.m_Patches)
-                            if (Pb.m_N.Dot(Pa.m_N) > 0.97f && std::abs(Pb.m_D - Pa.m_D) < PlaneTol) for (const auto& Q : Pb.m_Pts) Pts.push_back(&Q);
-                    }
-                    if (Pts.empty())                                            // no point of it in sight around: its covered ones (a sealed face)
-                        for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+                        for (const auto& Pb : It->second.m_Parts)
                         {
-                            const auto It = Cells.find(surfel_grid::Key(Ce.m_C[0] + dx, Ce.m_C[1] + dy, Ce.m_C[2] + dz));
-                            if (It == Cells.end()) continue;
-                            for (const auto& Pb : It->second.m_Patches)
-                                if (Pb.m_N.Dot(Pa.m_N) > 0.97f && std::abs(Pb.m_D - Pa.m_D) < PlaneTol) for (const auto& Q : Pb.m_Hidden) Pts.push_back(&Q);
+                            if (&Pb == &Pa || Pb.m_N.Dot(Pa.m_N) <= 0.97f || std::abs(Pb.m_D - Pa.m_D) >= PlaneTol || Pb.m_Pts.empty()) continue;
+                            const v3* pA = nullptr; const v3* pB = nullptr; float Best = 1e30f;
+                            for (const auto& A : Pa.m_Pts) for (const auto& B : Pb.m_Pts) { const float d = (A - B).Length(); if (d < Best) { Best = d; pA = &A; pB = &B; } }
+                            if (!m_bLeakProtection || Linked(*pA, *pB, Pa.m_N)) for (const auto& Q : Pb.m_Pts) Pts.push_back(&Q);
                         }
-                    // The cell's 4 corners in the patch's plane (ReadAxes: the 2 axes across it), and per corner the patch's points nearest it
-                    // (up to 4, within 3/4 of a cell): the same points whichever cell asks, so neighboring cells agree on their shared corners
+                    }
+                    // The cell's 4 corners in the patch's plane (ReadAxes: the 2 axes across it), and per corner the points nearest it (up to 4,
+                    // within 3/4 of a cell): the same points whichever cell asks, so neighboring cells agree on their shared corners
                     const auto [Au, Av, Aa] = ReadAxes(Pa.m_N);
                     std::array<std::vector<const v3*>, 4> CornerPts;
                     for (int k = 0; k < 4; ++k)
@@ -786,14 +925,15 @@ namespace xlionrender::gi
                         Lists[c][p].push_back(E);
                     }
                     // Out of sight everywhere: not listed. None in sight (a face tucked in, or all in reach behind something): an empty list - the
-                    // read there is unsupported (GIQueryResult: the vertex read, else no GI), not filled from surfels it does not see
+                    // read there is unsupported (GIQueryResult: the vertex read, else the mean light), not filled from surfels it does not see
                     std::erase_if(Lists[c][p], [](std::uint32_t E) { return (E >> 16) == 0; });
                     if (Lists[c][p].empty()) Unsupported.fetch_add(1, std::memory_order_relaxed);
                 }
             });
 
-            // The table: per cell { key, key, its patches' first word in m_ReadList, how many }; a patch is 4 words { its normal (octahedral,
-            // 2 x snorm 16), its plane (float bits), its list's first word, its count }, its list after the cell's patches
+            // The table: per cell { key, key, its patches' first word in m_ReadList, how many }; a patch (a part) is 4 words { its normal
+            // (octahedral, 2 x snorm 16), its plane (float bits), its list's first word, its count | its sub-cells' mask << 16 }, its list
+            // after the cell's patches
             std::uint32_t Size = 1;
             while (Size < 2 * Cells.size()) Size <<= 1;
             m_ReadTable.assign(Size, { 0, 0xFFFFFFFFu, 0, 0 });
@@ -801,17 +941,17 @@ namespace xlionrender::gi
             {
                 const auto& Ce = *Order[c];
                 const auto First = std::uint32_t(m_ReadList.size());
-                const auto n = std::uint32_t(Ce.m_Patches.size());
+                const auto n = std::uint32_t(Ce.m_Parts.size());
                 m_ReadList.resize(m_ReadList.size() + 4 * n);
                 for (std::uint32_t p = 0; p < n; ++p)
                 {
-                    const auto& Pa = Ce.m_Patches[p];
+                    const auto& Pa = Ce.m_Parts[p];
                     const std::uint32_t L0 = std::uint32_t(m_ReadList.size());
                     m_ReadList.insert(m_ReadList.end(), Lists[c][p].begin(), Lists[c][p].end());
                     m_ReadList[First + 4 * p + 0] = PackOct(Pa.m_N);
                     m_ReadList[First + 4 * p + 1] = std::bit_cast<std::uint32_t>(Pa.m_D);
                     m_ReadList[First + 4 * p + 2] = L0;
-                    m_ReadList[First + 4 * p + 3] = std::uint32_t(Lists[c][p].size());
+                    m_ReadList[First + 4 * p + 3] = std::min<std::uint32_t>(std::uint32_t(Lists[c][p].size()), 0xFFFFu) | (std::uint32_t(Pa.m_Mask) << 16);
                 }
                 const auto K = ReadKey(Ce.m_C);
                 std::uint32_t h = ReadHash(Ce.m_C) & (Size - 1), nProbe = 0;
@@ -820,6 +960,13 @@ namespace xlionrender::gi
                 m_ReadTable[h] = { K[0], K[1], First, n };
             }
             m_ReadUnsupported = Unsupported.load();
+            m_EmptyParts.clear();
+            for (std::size_t c = 0; c < Order.size(); ++c)
+                for (std::size_t p = 0; p < Order[c]->m_Parts.size(); ++p)
+                {
+                    const auto& Pa = Order[c]->m_Parts[p];
+                    if (Lists[c][p].empty() && Pa.m_bSeen && !Pa.m_Pts.empty()) m_EmptyParts.push_back({ Pa.m_Pts[Pa.m_Pts.size() / 2], Pa.m_N });
+                }
         }
 
         // A unit normal as 2 x snorm 16 octahedral (GLSL unpackSnorm2x16 + GIOctDecode)
@@ -866,7 +1013,7 @@ namespace xlionrender::gi
         //  - the parents: the same over the surfels' centers with ParentRadius; each surfel's parent is its nearest compatible one
         //  - the BVH and the 4-triangle rows for the rays
         // Deterministic (fixed seeds): the same mesh bakes the same surfels.
-        void Bake(float Radius, float ParentRadius) noexcept
+        void Bake(float Radius, float ParentRadius, std::span<const std::pair<v3, v3>> Forced = {}) noexcept
         {
             BuildRays();                                            // the vertices' visibility tests cast against the mesh
 
@@ -946,6 +1093,27 @@ namespace xlionrender::gi
             surfel_grid G0, G1;
             std::vector<int> From;
             Poisson(CP, CN, Radius, m_Levels[0], G0, &From);
+            // The patches (PatchDefects: Forced, from BuildReadGrid's m_EmptyParts): a surfel at each, after the others (one where one already
+            // stands for it: the same rule as the darts'), its material where it lies (the triangle under it)
+            m_FirstPatch = 0xFFFFFFFFu;
+            const std::size_t FirstPatch = m_Levels[0].size();
+            for (const auto& [P, N] : Forced)
+            {
+                bool bTaken = false;
+                for (std::size_t s = FirstPatch; s < m_Levels[0].size() && !bTaken; ++s)
+                {
+                    const auto& S = m_Levels[0][s];
+                    bTaken = (S.m_Center - P).Length() < Radius && S.m_Normal.Dot(N) > 0.8f && std::abs((S.m_Center - P).Dot(N)) < 0.1f * Radius && Sees(P, N, S);
+                }
+                if (bTaken) continue;
+                float T = 0.04f * Radius, U = 0, V = 0; int Tri = 0;
+                if (!Cast(P + N * (0.02f * Radius), N * -1.0f, T, Tri, U, V)) { Tri = 0; U = V = 0; }
+                CP.push_back(P); CN.push_back(N); CT.push_back({ float(Tri), U, V });
+                From.push_back(int(CP.size() - 1));
+                G0.Add(P, int(m_Levels[0].size()));
+                m_Levels[0].push_back({ P, N, Radius });
+            }
+            if (m_Levels[0].size() > FirstPatch) m_FirstPatch = std::uint32_t(FirstPatch);
 
             // Each surfel's material sample: its triangle's slot, the UV at its center, its radius in UV units (the triangle's UV area
             // over its area, square-rooted: how much texture a mesh unit covers there)
@@ -1061,10 +1229,10 @@ namespace xlionrender::gi
         // GeomStatic compiler packs it into the resource, the renderer unpacks it at load instead of building it (seconds in Release, half
         // a minute in Debug for the Police Station). Only what the surfels and the geometry decide: the same in both. Unpack checks the
         // block's tag and sizes (false: build them)
-        static constexpr std::uint32_t derived_tag_v = 0x31444947u;    // "GID1": a change to the layout below is a new tag
+        static constexpr std::uint32_t derived_tag_v = 0x33444947u;    // "GID3" (GID2: no first patch; GID1: no sub-cell masks, no flags): a change to the layout below is a new tag
         std::vector<std::uint32_t> PackDerived() const noexcept
         {
-            std::vector<std::uint32_t> W{ derived_tag_v, std::bit_cast<std::uint32_t>(m_ReadCell), m_ReadMaxProbe, m_ReadUnsupported
+            std::vector<std::uint32_t> W{ derived_tag_v, std::uint32_t(m_bLeakProtection), m_FirstPatch, std::bit_cast<std::uint32_t>(m_ReadCell), m_ReadMaxProbe, m_ReadUnsupported
                                         , std::uint32_t(m_ReadTable.size()), std::uint32_t(m_ReadList.size()) };
             for (const auto& E : m_ReadTable) W.insert(W.end(), E.begin(), E.end());
             W.insert(W.end(), m_ReadList.begin(), m_ReadList.end());
@@ -1084,10 +1252,12 @@ namespace xlionrender::gi
         {
             std::size_t i = 0;
             const auto Take = [&](std::size_t n) { const bool b = i + n <= W.size(); const std::size_t at = i; i += n; return b ? W.data() + at : nullptr; };
-            const std::uint32_t* p = Take(6);
+            const std::uint32_t* p = Take(8);
             if (p == nullptr || p[0] != derived_tag_v) return false;
-            const float Cell = std::bit_cast<float>(p[1]);
-            const std::uint32_t MaxProbe = p[2], Unsupported = p[3], nTable = p[4], nList = p[5];
+            const bool bLeak = (p[1] & 1u) != 0;
+            const std::uint32_t FirstPatch = p[2];
+            const float Cell = std::bit_cast<float>(p[3]);
+            const std::uint32_t MaxProbe = p[4], Unsupported = p[5], nTable = p[6], nList = p[7];
             const std::uint32_t* pTable = Take(4 * std::size_t(nTable));
             const std::uint32_t* pList  = Take(nList);
             if (!pTable || !pList) return false;
@@ -1110,7 +1280,7 @@ namespace xlionrender::gi
             if (!pOF || !pOP || !pON || i != W.size()) return false;
             if (Nbs[0].m_First.size() != 0 && Nbs[0].m_First.size() != m_Levels[0].size() + 1) return false;       // made for other surfels
             if (nOFirst != 0 && nOFirst != m_Levels[0].size() + 1) return false;
-            m_ReadCell = Cell; m_ReadMaxProbe = MaxProbe; m_ReadUnsupported = Unsupported;
+            m_ReadCell = Cell; m_ReadMaxProbe = MaxProbe; m_ReadUnsupported = Unsupported; m_bLeakProtection = bLeak; m_FirstPatch = FirstPatch;
             m_ReadTable.resize(nTable);
             for (std::uint32_t k = 0; k < nTable; ++k) m_ReadTable[k] = { pTable[4 * k], pTable[4 * k + 1], pTable[4 * k + 2], pTable[4 * k + 3] };
             m_ReadList.assign(pList, pList + nList);
@@ -1570,26 +1740,35 @@ namespace xlionrender::gi
         // depth moments' Chebyshev term (the CPU twin of GIVisibility in shaders/xlionrender_surfel_gi.glsl)
         float Visibility( int Id, int s, const v3& P ) const noexcept
         {
+            // (every hit of every ray reads it: plain floats, a Debug build calls every v3 operator)
             const auto& I = m_Instances[Id];
             const auto& S = I.m_pMesh->m_Levels[I.m_Level][s];
-            const v3    D = P - S.m_Center;
+            const float Nx = S.m_Normal.m_X, Ny = S.m_Normal.m_Y, Nz = S.m_Normal.m_Z;
+            const float Dx = P.m_X - S.m_Center.m_X, Dy = P.m_Y - S.m_Center.m_Y, Dz = P.m_Z - S.m_Center.m_Z;
             const float Reach = 2 * S.m_Radius;
-            float w = std::clamp(1.0f - std::abs(D.Dot(S.m_Normal)) / (0.7f * Reach), 0.0f, 1.0f);
+            float w = std::clamp(1.0f - std::abs(Dx * Nx + Dy * Ny + Dz * Nz) / (0.7f * Reach), 0.0f, 1.0f);
             if (w <= 0) return w;
-            const v3    Dq = D + S.m_Normal * (0.15f * Reach);          // lifted off the surface, as the shaders (GIVisibility)
-            const float d  = Dq.Length();
-            const auto& M  = I.m_Moments[s];
-            const v3    Dd = Dq * (1.0f / d);
-            const v3    T  = (std::abs(S.m_Normal.m_X) < 0.9f ? v3{ 1, 0, 0 } : v3{ 0, 1, 0 }).Cross(S.m_Normal).NormalizeCopy(), B = S.m_Normal.Cross(T);
-            const float x  = Dd.Dot(T), y = Dd.Dot(B), z = std::max(Dd.Dot(S.m_Normal), 0.0f), k = 1.0f / std::max(std::abs(x) + std::abs(y) + z, 1e-6f);
+            const float Qx = Dx + Nx * (0.15f * Reach), Qy = Dy + Ny * (0.15f * Reach), Qz = Dz + Nz * (0.15f * Reach);   // lifted off the surface, as the shaders (GIVisibility)
+            const float d  = std::sqrt(Qx * Qx + Qy * Qy + Qz * Qz), id = 1.0f / d;
+            const float Ux = Qx * id, Uy = Qy * id, Uz = Qz * id;
+            // T = (|Nx| < 0.9 ? X : Y) x N, normalized; B = N x T
+            float Tx, Ty, Tz;
+            if (std::abs(Nx) < 0.9f) { Tx = 0; Ty = -Nz; Tz = Ny; } else { Tx = Nz; Ty = 0; Tz = -Nx; }
+            const float it = 1.0f / std::sqrt(Tx * Tx + Ty * Ty + Tz * Tz); Tx *= it; Ty *= it; Tz *= it;
+            const float Bx = Ny * Tz - Nz * Ty, By = Nz * Tx - Nx * Tz, Bz = Nx * Ty - Ny * Tx;
+            const float x  = Ux * Tx + Uy * Ty + Uz * Tz, y = Ux * Bx + Uy * By + Uz * Bz, z = std::max(Ux * Nx + Uy * Ny + Uz * Nz, 0.0f);
+            const float k  = 1.0f / std::max(std::abs(x) + std::abs(y) + z, 1e-6f);
             const float u  = std::clamp(((x + y) * k * 0.5f + 0.5f) * moment_res_v - 0.5f, 0.0f, float(moment_res_v - 1));
             const float vv = std::clamp(((x - y) * k * 0.5f + 0.5f) * moment_res_v - 0.5f, 0.0f, float(moment_res_v - 1));
             const int   u0 = int(u), v0 = int(vv), u1 = std::min(u0 + 1, moment_res_v - 1), v1 = std::min(v0 + 1, moment_res_v - 1);
             const float fu = u - float(u0), fv = vv - float(v0);
-            const auto  At = [&](int tu, int tv, int c) { return M[2 * (tv * moment_res_v + tu) + c]; };
-            const auto  Bil = [&](int c) { return (At(u0, v0, c) * (1 - fu) + At(u1, v0, c) * fu) * (1 - fv) + (At(u0, v1, c) * (1 - fu) + At(u1, v1, c) * fu) * fv; };
-            const float Mean = Bil(0), Var = std::max(std::abs(Mean * Mean - Bil(1)), 0.0025f * Reach * Reach);     // bilinear, a variance floor: as the shaders
-            if (d > Mean) w *= std::pow(Var / (Var + (d - Mean) * (d - Mean) + 1e-12f), 3.0f);
+            const float* M = I.m_Moments[s].data();
+            const float a00 = (1 - fu) * (1 - fv), a10 = fu * (1 - fv), a01 = (1 - fu) * fv, a11 = fu * fv;
+            const int   t00 = 2 * (v0 * moment_res_v + u0), t10 = 2 * (v0 * moment_res_v + u1), t01 = 2 * (v1 * moment_res_v + u0), t11 = 2 * (v1 * moment_res_v + u1);
+            const float Mean = M[t00] * a00 + M[t10] * a10 + M[t01] * a01 + M[t11] * a11;
+            const float M2   = M[t00 + 1] * a00 + M[t10 + 1] * a10 + M[t01 + 1] * a01 + M[t11 + 1] * a11;
+            const float Var  = std::max(std::abs(Mean * Mean - M2), 0.0025f * Reach * Reach);     // bilinear, a variance floor: as the shaders
+            if (d > Mean) { const float r = Var / (Var + (d - Mean) * (d - Mean) + 1e-12f); w *= r * r * r; }
             return w;
         }
 
@@ -1672,6 +1851,8 @@ namespace xlionrender::gi
         {
             const auto& I = m_Instances[H.m_Inst]; const auto& M = *I.m_pMesh; const auto& T = M.m_Tris[H.m_Tri];
             const float B[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
+            if (M.m_bLeakProtection && !M.m_ReadTable.empty()) return ReadPoint(H.m_Inst, M.m_Pos[T[0]] * B[0] + M.m_Pos[T[1]] * B[1] + M.m_Pos[T[2]] * B[2]
+                                                       , (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy());
             v3 Sum{ 0, 0, 0 }; float W = 0;
             for (int k = 0; k < 3; ++k)
             {
@@ -1683,9 +1864,98 @@ namespace xlionrender::gi
             if (W <= 0) return {};
             return { Sum * (1.0f / W), W, true };
         }
+        // The surfels a point of an instance's surface (mesh space, its face's normal) reads: the read grid's patch for it and the weights of
+        // the GPU's per-pixel read (shaders/xlionrender_surfel_gi.glsl SurfelGIList: falloff, normal, corner weights, validity, depth
+        // moments) - the one support the solver's rays and the pixels share. The solver reads the unfiltered light (the pixels the filtered)
+        query ReadPoint(int Id, const v3& P, const v3& N) const noexcept
+        {
+            // Every ray's hit: plain floats and raw pointers (a Debug build calls every v3 operator), the cheap terms first, the corner blend
+            // once (it is the same for every entry: ReadEntryWeight's), the moments' test last and only for what is still in
+            const auto& I = m_Instances[Id]; const auto& M = *I.m_pMesh;
+            v3 PatchN = N;
+            const auto List = M.ReadCellList(P, N, &PatchN);
+            if (List.empty()) return {};
+            const float Cell = M.m_ReadCell;
+            const float Lp[3] = { (P.m_X + N.m_X * (surfel_mesh::read_lift_v * Cell)) / Cell, (P.m_Y + N.m_Y * (surfel_mesh::read_lift_v * Cell)) / Cell, (P.m_Z + N.m_Z * (surfel_mesh::read_lift_v * Cell)) / Cell };
+            const auto [Au, Av, Aa] = surfel_mesh::ReadAxes(PatchN);
+            const float fu = Lp[Au] - std::floor(Lp[Au]), fv = Lp[Av] - std::floor(Lp[Av]);
+            const float k0 = (1 - fu) * (1 - fv) / 15.0f, k1 = fu * (1 - fv) / 15.0f, k2 = (1 - fu) * fv / 15.0f, k3 = fu * fv / 15.0f;
+            const surfel* pL = M.m_Levels[0].data();
+            const int*    pParent = M.m_ParentOf.data();
+            const float*  pValid  = I.m_Valid.data();
+            const v3*     pE      = I.m_E.data();
+            const int     nLight  = int(I.m_E.size());
+            const bool    bParent = I.m_Level == 1;
+            const float   Px = P.m_X, Py = P.m_Y, Pz = P.m_Z, Nx = N.m_X, Ny = N.m_Y, Nz = N.m_Z;
+            float Sx = 0, Sy = 0, Sz = 0, W = 0, Rx = 0, Ry = 0, Rz = 0, RW = 0;     // R: without the moments' test (the second tier)
+            for (const std::uint32_t e : List)
+            {
+                const int s = int(e & 0xFFFFu);
+                const surfel& S = pL[s];
+                const float c = S.m_Normal.m_X * Nx + S.m_Normal.m_Y * Ny + S.m_Normal.m_Z * Nz;
+                if (c < 0.5f) continue;
+                const float dx = Px - S.m_Center.m_X, dy = Py - S.m_Center.m_Y, dz = Pz - S.m_Center.m_Z;
+                const float f = 1.0f - std::sqrt(dx * dx + dy * dy + dz * dz) / (2 * S.m_Radius);
+                if (f <= 0) continue;
+                const int sl = bParent ? pParent[s] : s;
+                if (sl >= nLight) continue;
+                const float t  = std::min((c - 0.5f) * 4.0f, 1.0f), cn = t * t * (3 - 2 * t);     // smoothstep(0.5, 0.75, c)
+                const float Corner = float((e >> 16) & 15u) * k0 + float((e >> 20) & 15u) * k1 + float((e >> 24) & 15u) * k2 + float((e >> 28) & 15u) * k3;
+                const float w0 = f * f * c * cn * Corner * pValid[sl];
+                if (w0 <= 0) continue;
+                Rx += pE[sl].m_X * w0; Ry += pE[sl].m_Y * w0; Rz += pE[sl].m_Z * w0; RW += w0;
+                const float w = w0 * Visibility(Id, sl, P);
+                if (w <= 0) continue;
+                Sx += pE[sl].m_X * w; Sy += pE[sl].m_Y * w; Sz += pE[sl].m_Z * w; W += w;
+            }
+            // The moments' test rejects every surfel (next to a wall's foot: their rays met the wall just past the point): its own surfels
+            // without it (SurfelGIQuery's second tier) - the corner weights still keep the other side of a wall out
+            if (W <= 1e-6f) { Sx = Rx; Sy = Ry; Sz = Rz; W = RW; }
+            if (W <= 1e-6f) return {};
+            const float r = 1.0f / W;
+            return { v3{ Sx * r, Sy * r, Sz * r }, W, true };
+        }
+
         // The policy for an unsupported query: the hit instance's mean light (its valid surfels', weighted by validity; MeanLight), not black and
         // not dropped - the ray still counts as one of the surfel's rays, the same denominator. Counted, the first places kept (UnsupportedAt)
-        v3 Unsupported(const hit& H) const noexcept { return m_Instances[H.m_Inst].m_MeanE; }
+        v3 Unsupported(const hit& H) const noexcept
+        {
+            // Local first (SurfelGILocalMean's twin): the valid surfels its cell lists, by reach and validity; else the instance's mean
+            const auto& I = m_Instances[H.m_Inst]; const auto& M = *I.m_pMesh;
+            if (M.m_ReadTable.empty()) return I.m_MeanE;
+            const auto& T = M.m_Tris[H.m_Tri];
+            const float B[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
+            const v3 P = M.m_Pos[T[0]] * B[0] + M.m_Pos[T[1]] * B[1] + M.m_Pos[T[2]] * B[2];
+            const v3 N = (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy();
+            const auto C = surfel_mesh::ReadCellAt(P, N, M.m_ReadCell);
+            const auto K = surfel_mesh::ReadKey(C);
+            const std::uint32_t Mask = std::uint32_t(M.m_ReadTable.size() - 1);
+            for (std::uint32_t h = surfel_mesh::ReadHash(C) & Mask, n = 0; n <= Mask; h = (h + 1) & Mask, ++n)
+            {
+                const auto& E = M.m_ReadTable[h];
+                if (E[1] == 0xFFFFFFFFu) break;
+                if (E[0] != K[0] || E[1] != K[1]) continue;
+                float Sx = 0, Sy = 0, Sz = 0, W = 0;
+                for (std::uint32_t p = 0; p < E[3]; ++p)
+                {
+                    const std::uint32_t* Pa = &M.m_ReadList[E[2] + 4 * p];
+                    for (std::uint32_t i = 0; i < (Pa[3] & 0xFFFFu); ++i)
+                    {
+                        const int s = int(M.m_ReadList[Pa[2] + i] & 0xFFFFu);
+                        const auto& S = M.m_Levels[0][s];
+                        const float f = std::max(0.0f, 1.0f - (P - S.m_Center).Length() / (2 * S.m_Radius));
+                        const int sl = I.m_Level == 1 ? M.m_ParentOf[s] : s;
+                        if (std::size_t(sl) >= I.m_E.size()) continue;
+                        const float w = f * I.m_Valid[sl];
+                        if (w <= 0) continue;
+                        Sx += I.m_E[sl].m_X * w; Sy += I.m_E[sl].m_Y * w; Sz += I.m_E[sl].m_Z * w; W += w;
+                    }
+                }
+                if (W > 1e-6f) return v3{ Sx / W, Sy / W, Sz / W };
+                break;
+            }
+            return I.m_MeanE;
+        }
         const v3& MeanLight(int Id) const noexcept { return m_Instances[Id].m_MeanE; }      // the same for the GPU's reads (the renderer uploads it)
         const std::vector<v3>& UnsupportedAt() const noexcept { return m_UnsupportedAt; }
 
@@ -1790,7 +2060,7 @@ namespace xlionrender::gi
                 const v3 C = I.m_L2W * S.m_Center, N = NormalToWorld(I, S.m_Normal);
                 rng Rng(Seed * 2654435761u + unsigned(w) * 7919u);
                 v3 Sum{ 0, 0, 0 };
-                int nBack = 0, nUnsupported = 0;
+                int nBack = 0, nBackAll = 0, nUnsupported = 0;      // back faces within its reach, at any distance
                 const int R = m_Setup.m_RaysPerSurfel;
                 auto& MA = I.m_MomAcc[s];
                 MA.fill(0);
@@ -1824,7 +2094,9 @@ namespace xlionrender::gi
                     }
                     if (H.m_Inst < 0) { Sum = Sum + L.m_Sky; for (int i = 0; i < 3; ++i) BA[i] = BA[i] + L.m_Sky * Bw[i]; continue; }
                     const v3 Nh = HitNormal(H);
-                    if (Nh.Dot(D) > 0) { ++nBack; continue; }               // a back face: no light, and maybe buried
+                    // A back face: no light. Within the surfel's reach it says the surfel may be buried (inside a wall or a frame, back faces are
+                    // centimeters away); farther it is single-sided geometry seen from behind (a ceiling made to face out, metres up): not buried
+                    if (Nh.Dot(D) > 0) { nBack += H.m_T < Reach * I.m_MeanScale; ++nBackAll; continue; }
                     v3 Albedo, Emission;
                     SurfaceAt(H, Albedo, Emission);
                     const query Q  = Indirect(H);
@@ -1837,7 +2109,13 @@ namespace xlionrender::gi
                 if (s < I.m_EmitB.size())                                   // the emitters it sees (the links): deterministic, no rays
                     for (int i = 0; i < 3; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance
                 I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
-                I.m_AccValid[s] = std::clamp(1.0f - (float(nBack) / float(R) - 0.1f) / 0.15f, 0.0f, 1.0f);
+                // Buried -> validity 0, by either sign: back faces near it (within its reach: inside a wall or a frame they are centimeters
+                // away; full validity up to 20% of its rays, none from 50%), or back faces all around at any distance (inside a solid object;
+                // full up to 80%, none from 95%). A floor under a ceiling made to face out sees back faces metres away, in some directions
+                // only: it keeps its light (it was: any back face, 10%..25% - 2 rays of 8 - and 28% of the Police Station read nothing)
+                const float Near = std::clamp(1.0f - (float(nBack) / float(R) - 0.2f) / 0.3f, 0.0f, 1.0f);
+                const float All  = std::clamp(1.0f - (float(nBackAll) / float(R) - 0.8f) / 0.15f, 0.0f, 1.0f);
+                I.m_AccValid[s] = std::min(Near, All);
                 m_WorkUnsupported[w] = nUnsupported;
             });
             m_UnsupportedAt.clear();

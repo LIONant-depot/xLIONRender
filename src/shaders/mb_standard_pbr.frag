@@ -258,7 +258,9 @@ vec3 PBRLighting
 	// The face's normal (mesh space, to the smoothed normal's side): the GI's geometry tests use the surface as it is - smoothed corner
 	// normals step along the triangles (a sawtooth); the normal map still reads the basis (GNmap)
 	const vec3 GFaceD = cross(dFdx(InGIPos), dFdy(InGIPos));
-	const vec3 GFace  = dot(GFaceD, GFaceD) > 1e-24 ? normalize(dot(GFaceD, InGINormal) < 0.0 ? -GFaceD : GFaceD) : normalize(InGINormal);
+	const vec3 GN0    = normalize(InGINormal);
+	vec3       GFace  = dot(GFaceD, GFaceD) > 1e-24 ? normalize(dot(GFaceD, GN0) < 0.0 ? -GFaceD : GFaceD) : GN0;
+	if (dot(GFace, GN0) < 0.7) GFace = GN0;          // a pixel quad across a crease (a floor's edge at a wall's foot): its derivatives mix both faces
 	if (InGIRef.y != gi_none_v && (InGIRef.y & gi_per_pixel_v) != 0u)     // the pixel reads the surfels itself (far: through their parents)
 	{
 		const vec3 GN = normalize(InGINormal), GT = normalize(InGITangent.xyz);
@@ -269,14 +271,14 @@ vec3 PBRLighting
 		const GIQueryResult Q = SurfelGIQuery(InGIPos, GFace, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
 		if (Q.bSupported) { g_GI = vec4(g_GI.w > 0.5 ? mix(g_GI.rgb, Q.Irradiance, smoothstep(0.0, 0.25, Q.Confidence)) : Q.Irradiance, 1.0); g_GISource = 2u; }
 	}
-	// Neither read supported (no surfel reaches the point: a thin face edge-on): the instance's mean light, not the no-GI ambient (a scene
-	// lit by its GI is black without it). COVERAGE still shows it magenta
-	if (InGIRef.y != gi_none_v && g_GISource == 0u) g_GI = vec4(SurfelGIMean(InGIRef.x), 1.0);
+	// Neither read supported (no surfel reaches the point, or only invalid ones): its cell's mean light (SurfelGILocalMean), not the no-GI
+	// ambient (a scene lit by its GI is black without it). COVERAGE still shows it unsupported
+	if (InGIRef.y != gi_none_v && g_GISource == 0u) g_GI = vec4(SurfelGILocalMean(InGIPos, GFace, InGIRef.x, InGIRef.y & 0xFFu), 1.0);
 	const uint GIDebug = GIDebugCode(InGIRef.y);
 	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, GFace); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
 	if (GIDebug == 2u) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0);
 	if (GIDebug == 3u) g_GIDebug = vec4((InGIRef.y & gi_capture_emission_v) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);
-	if (GIDebug == 5u) g_GIDebug = vec4(g_GISource == 2u ? vec3(0.0, 0.6, 0.0) : g_GISource == 1u ? vec3(0.0, 0.0, 0.8) : vec3(1.0, 0.0, 1.0), 1.0);     // COVERAGE: green the pixel read, blue the vertex read, magenta unsupported (the mean light)
+	if (GIDebug == 5u) g_GIDebug = vec4(g_GISource == 2u ? (SurfelGIIsPatch(SurfelGIDominant(InGIPos, GFace)) ? vec3(1.0, 0.85, 0.0) : vec3(0.0, 0.6, 0.0)) : g_GISource == 1u ? vec3(0.0, 0.0, 0.8) : (InGIRef.y & gi_per_pixel_v) != 0u ? SurfelGIWhyUnsupported(InGIPos, GFace, InGIRef.x, InGIRef.y & 0xFFu) : vec3(1.0, 0.0, 1.0), 1.0);     // yellow: a patch surfel (PatchDefects: a defect of the model); unsupported: why (SurfelGIWhyUnsupported)     // COVERAGE: green the pixel read, blue the vertex read, magenta unsupported (the mean light)
 	if (GIDebug == 4u) g_GIDebug = vec4(SurfelGITriangleColor(InGIRef.x, uint(gl_PrimitiveID)), 1.0);        // the pixel's triangle's captured color     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
 #endif
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe

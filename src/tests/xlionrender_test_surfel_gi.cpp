@@ -602,6 +602,27 @@ int main()
                 nRead += Wsum > 0.05f;
             }
         std::printf("beside a door frame: %d of %d wall points read the wall's surfels\n", nRead, nBeside);
+
+        // Defects (PatchDefects): a strip of floor between a wall and a beam lying on the floor, its surfels taken away (a strip no surfel
+        // serves): BuildReadGrid lists it; baked again with it, it gets a patch surfel (after the others: m_FirstPatch) and reads it
+        surfel_mesh Strip;
+        AddQuad(Strip, { -2, 0, -2 }, { 0, 0, 4 }, { 2, 0, 0 }, 0.5f);                                     // the floor, up to the wall
+        AddQuad(Strip, { 0, 0, -2 }, { 0, 0, 4 }, { 0, 2, 0 }, 0.5f);                                      // a wall at x = 0, facing -x
+        const v3 BLo{ -0.5f, 0.001f, -2 }, BS{ 0.4f, 0.3f, 4 };                                            // a beam on the floor, 10 cm from the wall
+        const v3 BX{ BS.m_X, 0, 0 }, BY{ 0, BS.m_Y, 0 }, BZ{ 0, 0, BS.m_Z };
+        AddQuad(Strip, BLo + BY, BZ, BX, 1); AddQuad(Strip, BLo, BZ, BY, 1); AddQuad(Strip, BLo + BX, BY, BZ, 1);
+        Strip.Bake(0.5f, 1.5f);
+        std::erase_if(Strip.m_Levels[0], [](const surfel& S) { return S.m_Normal.m_Y > 0.9f && S.m_Center.m_X > -0.1f && S.m_Center.m_X < 0 && S.m_Center.m_Y < 0.01f; });
+        Strip.BuildReadGrid();
+        const std::size_t nEmpty = Strip.m_EmptyParts.size();
+        const auto Forced = Strip.m_EmptyParts;
+        Strip.Bake(0.5f, 1.5f, Forced);
+        Strip.BuildReadGrid();
+        const auto StripList = Strip.ReadCellList({ -0.05f, 0, 0.3f }, { 0, 1, 0 });
+        bool bReadsPatch = false;
+        for (auto e : StripList) bReadsPatch = bReadsPatch || (e & 0xFFFFu) >= Strip.m_FirstPatch;
+        std::printf("defects: %zu empty pieces; patched with %d surfels; the strip reads a patch: %d\n", nEmpty, Strip.m_FirstPatch == 0xFFFFFFFFu ? 0 : int(Strip.m_Levels[0].size() - Strip.m_FirstPatch), int(bReadsPatch));
+        CHECK(nEmpty > 0 && Strip.m_FirstPatch != 0xFFFFFFFFu && bReadsPatch, "a strip no surfel serves is not patched");
         CHECK(nRead == nBeside, "the wall beside a door frame reads no surfel at %d of %d points", nBeside - nRead, nBeside);
     }
 
@@ -975,6 +996,74 @@ int main()
         CHECK(std::abs(Pol.m_Floor - Ref.m_Floor) < 0.05 * Ref.m_Floor, "an unsupported query changes the light: %.3f vs %.3f", Pol.m_Floor, Ref.m_Floor);
     }
 
+    // 9. Light leaks through bad topology (the benchmark of the leak work): two sealed rooms whose floor and ceiling are each ONE quad (two
+    //    big triangles) running under the wall between them; a point light in room A, nothing in room B. Physically room B is black: every
+    //    bit of light there is a leak. Measured: the solver's light of room B's surfels, what a ray hitting room B's floor reads (the hit
+    //    triangle's vertex surfels: the solver's Indirect, the GPU's vertex read), and how much of the per-pixel read's weight on room B's
+    //    floor comes from room A's surfels
+    {
+        constexpr float half_v = 0.05f;                                           // the wall: 10 cm thick at x = 0
+        surfel_mesh Rooms;
+        for (float x0 : { -4.0f, -2.0f, 2.0f })                                   // the floor and the ceiling: the middle piece, x -2..2, is one quad
+        {                                                                         // (2 triangles) under the wall, its vertices 2 m into each room
+            const float w = x0 == -2.0f ? 4.0f : 2.0f;
+            AddQuad(Rooms, { x0, 0, -2 }, { 0, 0, 4 }, { w, 0, 0 }, 100);
+            AddQuad(Rooms, { x0, 3, -2 }, { w, 0, 0 }, { 0, 0, 4 }, 100);
+        }
+        for (float s : { -1.0f, 1.0f })                                           // each room's other walls (facing in)
+        {
+            const float x0 = s < 0 ? -4.0f : half_v, x1 = s < 0 ? -half_v : 4.0f;
+            AddQuad(Rooms, { x0, 0, -2 }, { x1 - x0, 0, 0 }, { 0, 3, 0 }, 0.5f);    // z = -2, facing +z
+            AddQuad(Rooms, { x0, 0, 2 }, { 0, 3, 0 }, { x1 - x0, 0, 0 }, 0.5f);     // z = +2, facing -z
+        }
+        AddQuad(Rooms, { -4, 0, -2 }, { 0, 3, 0 }, { 0, 0, 4 }, 0.5f);              // x = -4, facing +x
+        AddQuad(Rooms, { 4, 0, -2 }, { 0, 0, 4 }, { 0, 3, 0 }, 0.5f);               // x = +4, facing -x
+        AddQuad(Rooms, { -half_v, 0, -2 }, { 0, 0, 4 }, { 0, 3, 0 }, 0.5f);         // the wall's room A side, facing -x
+        AddQuad(Rooms, { half_v, 0, -2 }, { 0, 3, 0 }, { 0, 0, 4 }, 0.5f);          // its room B side, facing +x
+        constexpr float shift_v = 0.25f;                                          // the wall in the middle of a read cell (0.5 m), not on its edge:
+        for (auto& P : Rooms.m_Pos) P.m_X += shift_v;                             // the floor on both sides of it in one cell (the Police closet)
+        Rooms.Bake(0.5f, 1.5f);
+        Rooms.BuildReadGrid();                                                    // as the renderer has it (the compiler packs it)
+        world W;
+        const int iRooms = W.Add(Rooms, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f });
+        lights L; L.m_Points.push_back({ { -2 + shift_v, 1.5f, 0 }, { 20, 20, 20 }, 12 });
+        for (int f = 0; f < 200; ++f) W.Update(L, { -2, 1.5f, 0 }, 1 << 30, 30000 + f);
+        const auto& L0 = Rooms.m_Levels[0];
+        const auto& E  = W.InstanceLight(iRooms);
+        double SumA = 0, SumB = 0, SumBNear = 0; int nA = 0, nB = 0, nBNear = 0;
+        for (std::size_t s = 0; s < L0.size(); ++s)
+        {
+            const float x = L0[s].m_Center.m_X - shift_v;
+            if (x < -half_v) { SumA += Lum(E[s]); ++nA; }
+            else if (x > half_v) { SumB += Lum(E[s]); ++nB; if (x < 1) { SumBNear += Lum(E[s]); ++nBNear; } }
+        }
+        const double MeanA = SumA / std::max(nA, 1), MeanB = SumB / std::max(nB, 1), MeanBNear = SumBNear / std::max(nBNear, 1);
+        // what a ray hitting room B's floor reads, and the per-pixel read's weight from room A there (its listed surfels, the corner weights)
+        double HitB = 0, WFromA = 0, WAll = 0; int nHit = 0;
+        for (float x = half_v + 0.002f; x < 4; x += x < 0.1f ? 0.01f : x < 1 ? 0.05f : 0.25f)     // (finely by the wall: its foot, 2 mm on)
+            for (float z = -1.75f; z < 2; z += 0.5f)
+            {
+                const v3 P{ x + shift_v, 0, z }, N{ 0, 1, 0 };
+                HitB += Lum(CacheAt(W, P, N)); ++nHit;
+                for (auto e : Rooms.ReadCellList(P, N))
+                {
+                    const float w = Rooms.ReadEntryWeight(e, P, N, N);
+                    WAll += w;
+                    if (L0[surfel_mesh::ReadEntrySurfel(e)].m_Center.m_X - shift_v < -half_v) WFromA += w;
+                }
+            }
+        HitB /= std::max(nHit, 1);
+        std::printf("leaks (room B should be black): room A's light %.3f; room B's surfels %.4f (%.1f%% of A; within 1 m of the wall %.1f%%); a ray hitting B's floor reads %.4f (%.1f%% of A); B's floor per-pixel read weight from room A %.1f%%\n"
+                   , MeanA, MeanB, 100 * MeanB / MeanA, 100 * MeanBNear / MeanA, HitB, 100 * HitB / MeanA, 100 * WFromA / std::max(WAll, 1e-9));
+        CHECK(MeanA > 0.1, "room A is not lit (%.3f)", MeanA);
+        // (before the solver read through the read grid, world::ReadPoint: 5.2% in room B's surfels, 15.2% at a ray's hit on its floor; with
+        // the wall across a read cell, before its patches were split there (BuildReadGrid's parts): 2.1% of the per-pixel read's weight)
+        CHECK(MeanB < 0.005 * MeanA, "room A's light leaks into room B's surfels: %.2f%%", 100 * MeanB / MeanA);
+        CHECK(HitB < 0.005 * MeanA, "a ray hitting room B's floor reads room A's light: %.2f%%", 100 * HitB / MeanA);
+        CHECK(WFromA < 0.005 * WAll, "room B's floor reads room A's surfels per pixel (%.2f%% of its weight)", 100 * WFromA / std::max(WAll, 1e-9));
+    }
+
+    if (g_nErrors) { std::printf("%d checks failed\n", g_nErrors); return 1; }      // (CHECK counts and goes on: every failure is printed)
     std::printf("PASS\n");
     return 0;
 }

@@ -628,7 +628,7 @@ namespace xlionrender
                 const auto& S = Level[s];
                 const float F[7] = { S.m_Center.m_X, S.m_Center.m_Y, S.m_Center.m_Z, S.m_Radius, S.m_Normal.m_X, S.m_Normal.m_Y, S.m_Normal.m_Z };
                 for( float f : F ) Data.push_back(std::bit_cast<std::uint32_t>(f));
-                Data.push_back(L == 0 ? std::uint32_t(Surfels.m_ParentOf[s]) : 0u);
+                Data.push_back(L == 0 ? std::uint32_t(Surfels.m_ParentOf[s]) | (s >= Surfels.m_FirstPatch ? 0x80000000u : 0u) : 0u);      // bit 31: a patch (the COVERAGE view's yellow)
             }
         }
         if( !Surfels.m_ReadTable.empty() )
