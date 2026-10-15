@@ -145,6 +145,7 @@ namespace xlionrender
             std::unique_ptr<gi::surfel_mesh> m_pGI;                     // SetMeshGI: the surfels (CPU) ...
             xgpu::buffer            m_GIBuffer;                         // ... and the vertex shader's copy (xlionrender_static_geom_body.glsl GIMesh)
             bool                    m_bTriColors = false;               // m_GIBuffer has its triangles' captured colors (the SURFACE_COLOR view)
+            std::uint64_t           m_GIStamp    = 0;                   // which SetMeshGI made m_pGI (a new one can land at the old one's address)
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             bool                    m_bCluster      = false;
@@ -232,6 +233,7 @@ namespace xlionrender
         {
             xmath::fmat4            m_L2W;
             const gi::surfel_mesh*  m_pMesh     = nullptr;
+            std::uint64_t           m_GIStamp   = 0;                    // mesh_slot::m_GIStamp of the surfels it was added with
             std::uint64_t           m_Render    = 0;                    // the last render that drew it
             std::vector<material_id> m_Materials;                       // what its colors are captured from (a change: captured again)
             std::vector<std::uint32_t> m_Moments;                       // its moments packed for the GPU (the last update's surfels repacked)

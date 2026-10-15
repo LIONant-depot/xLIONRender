@@ -601,6 +601,8 @@ namespace xlionrender
         // surfels, the grid
         if( Surfels.m_ReadTable.empty() ) Surfels.BuildReadGrid();
         M.m_pGI = std::make_unique<gi::surfel_mesh>(std::move(Surfels));
+        static std::uint64_t s_GIStamp = 0;
+        M.m_GIStamp = ++s_GIStamp;
         return buildMeshGI(M, {});
     }
 

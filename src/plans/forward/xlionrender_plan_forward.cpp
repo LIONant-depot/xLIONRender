@@ -96,7 +96,8 @@ namespace xlionrender
             const auto*         pM = findMesh(D.m_Mesh);
             if( ID == 0 || pM == nullptr || !pM->m_pGI ) continue;
             auto [It, bNew] = m_GIIds.try_emplace(ID, -1);
-            if( It->second >= 0 && m_GITrack[It->second].m_pMesh != pM->m_pGI.get() ) { W.Remove(It->second); It->second = -1; }
+            // New surfels (a recompile): by the stamp, not the address - the new ones can be allocated where the old ones were
+            if( It->second >= 0 && m_GITrack[It->second].m_GIStamp != pM->m_GIStamp ) { W.Remove(It->second); It->second = -1; }
             // What the GI takes from the draw's materials: which slots it sees through (transparent ones), and its colors (captured)
             const auto TakeMaterials = [&](int Id)
             {
@@ -119,7 +120,7 @@ namespace xlionrender
                 const auto& Mat = D.m_Material;
                 It->second = W.Add(*pM->m_pGI, D.m_L2W, Mat.m_BaseColor * (1 - Mat.m_Metallic));
                 m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), It->second + 1));
-                m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), 0, D.m_Materials };
+                m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), pM->m_GIStamp, 0, D.m_Materials };
                 TakeMaterials(It->second);
             }
             else

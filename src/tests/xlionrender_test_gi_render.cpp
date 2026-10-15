@@ -317,6 +317,20 @@ int main()
         std::printf("unsupported everywhere: LIGHT middle %.3f (supported %.3f), coverage %.2f %.2f %.2f (magenta)\n", u[0], c[0], k[0], k[1], k[2]);
         CHECK(u[0] > 0.02f, "a point no read supports is black (%.3f)", u[0]);
         CHECK(k[0] > 0.5f && k[2] > 0.5f && k[1] < 0.1f, "the coverage view does not say unsupported");
+
+        // The mesh made again with other surfels (a GeomStatic compiled again: its mesh destroyed and made again): the world adds the
+        // instance again with the new surfels - also when they land at the old ones' address, which the world used to take for the same
+        // ones (it then read past the new surfels with the old count)
+        {
+            Lone.m_GI.m_Debug = xlionrender::gi_debug::LIGHT;
+            const int Before = Renderer.getGIId(900);
+            Renderer.DestroyMesh(M2);
+            CHECK(!Renderer.CreateClusterGeom(M2, B.Geom()), "remade geom");
+            CHECK(!Renderer.SetMeshGI(M2, MakeSurfels(Prim, 0.8f, 2.4f)), "remade surfels");
+            Lone.m_Draws[0].m_Mesh = M2;
+            for (int f = 0; f < 10; ++f) CHECK(App.RenderFrame(Lone, View, Cam), "Render the remade mesh");
+            CHECK(Renderer.getGIId(900) != Before, "the world kept the instance of the old surfels");
+        }
         Renderer.DestroyMesh(M2);
         Renderer.DestroyMesh(M);
     }
