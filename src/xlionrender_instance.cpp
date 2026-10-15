@@ -262,8 +262,10 @@ namespace xlionrender
         // The GI's material capture: its target, pass, the quads (4 corners a surfel, twice: albedo and emission) and their indices
         if( auto Err = Device.Create(m_GICaptureTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = gi_capture_w_v, .m_Height = gi_capture_h_v, .m_isGamma = false }); Err ) return Err;
         {
+            // Cleared to 0: a texel a cut out (alpha tested) material discards reads back as no albedo and no emission - the pass's default
+            // clear (0.45 gray) made every cut out surfel emit 0.45, a light at EmissiveScale
             auto A = std::array{ xgpu::renderpass::attachment{ m_GICaptureTex } };
-            if( auto Err = Device.Create(m_GICapturePass, { .m_Attachments = A }); Err ) return Err;
+            if( auto Err = Device.Create(m_GICapturePass, { .m_Attachments = A, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
         if( auto Err = Device.Create(m_GICaptureVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 8 * gi_capture_max_v }); Err ) return Err;
         if( auto Err = Device.Create(m_GICaptureIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6 * gi_capture_max_v }); Err ) return Err;

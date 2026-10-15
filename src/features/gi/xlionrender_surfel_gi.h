@@ -1687,7 +1687,7 @@ namespace xlionrender::gi
             if (f == nullptr) return -1;
             std::fprintf(f, "# RaysPerSurfel=%d FilterPasses=%d EmissiveScale=%g SpreadOrigins=%d LodDistance=%g\n"
                         , m_Setup.m_RaysPerSurfel, m_Setup.m_FilterPasses, m_Setup.m_EmissiveScale, int(m_Setup.m_bSpreadOrigins), m_Setup.m_LodDistance);
-            std::fprintf(f, "inst,level,surfel,px,py,pz,nx,ny,nz,radius,er,eg,eb,fr,fg,fb,valid,ar,ag,ab\n");
+            std::fprintf(f, "inst,level,surfel,px,py,pz,nx,ny,nz,radius,er,eg,eb,fr,fg,fb,valid,ar,ag,ab,xr,xg,xb\n");      // x: the captured emission (before EmissiveScale)
             int n = 0;
             for (int Id = 0; Id < InstanceCount(); ++Id)
             {
@@ -1700,10 +1700,11 @@ namespace xlionrender::gi
                     const v3 P = I.m_L2W * L[s].m_Center, N = I.m_L2W.TransformDirection(L[s].m_Normal).NormalizeCopy();
                     const v3 A = I.m_Level == 0 && s < I.m_SurfAlbedo.size() ? I.m_SurfAlbedo[s] : I.m_Albedo;
                     const v3 Fs = s < F.size() ? F[s] : v3{ 0, 0, 0 };
-                    std::fprintf(f, "%d,%d,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f\n"
+                    const v3 X  = I.m_Level == 0 && s < I.m_SurfEmission.size() ? I.m_SurfEmission[s] : v3{ 0, 0, 0 };
+                    std::fprintf(f, "%d,%d,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g\n"
                                 , Id, I.m_Level, s, P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z, L[s].m_Radius * I.m_MeanScale
                                 , I.m_E[s].m_X, I.m_E[s].m_Y, I.m_E[s].m_Z, Fs.m_X, Fs.m_Y, Fs.m_Z
-                                , s < I.m_Valid.size() ? I.m_Valid[s] : 0.0f, A.m_X, A.m_Y, A.m_Z);
+                                , s < I.m_Valid.size() ? I.m_Valid[s] : 0.0f, A.m_X, A.m_Y, A.m_Z, X.m_X, X.m_Y, X.m_Z);
                 }
             }
             std::fclose(f);

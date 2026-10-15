@@ -177,6 +177,35 @@ int main()
         CHECK(!Tri.empty() && std::abs(TRed.m_X - 0.8f) < 0.05f && TRed.m_Y < 0.1f, "the triangles' captured albedo is wrong");
     }
 
+    // A cut out material (alpha tested: its fragments discarded where the texture's alpha is 0 - here everywhere): what the capture reads
+    // there is no albedo and no emission. The capture's pass once cleared to the renderer pass default gray (0.45): every cut out surfel
+    // then emitted 0.45, a bright light at the GI's EmissiveScale (Sponza's plants lit the courtyard)
+    {
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_cutout_frag.h"
+        };
+        xgpu::shader Frag;
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "cut out shader");
+        xlionrender::material_id Cutout;
+        const auto Slots = std::array<xgpu::texture*, 1>{ nullptr };
+        CHECK(!Renderer.CreateMaterial(Cutout, Frag, Slots, true), "cut out material");
+
+        Scene.m_Draws[3].m_Materials = { Cutout };
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the cut out wall");
+        for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing the cut out wall");
+        const auto* pW = Renderer.getGIWorld();
+        const auto Sum = [](const std::vector<xmath::fvec3>& V) { float s = 0; for (const auto& v : V) s += v.m_X + v.m_Y + v.m_Z; return s; };
+        const float Albedo = Sum(pW->SurfelAlbedo(Renderer.getGIId(4))), Glow = Sum(pW->SurfelEmission(Renderer.getGIId(4)));
+        std::printf("captured, cut out wall: albedo %.3f, emission %.3f (both 0)\n", Albedo, Glow);
+        CHECK(!pW->SurfelEmission(Renderer.getGIId(4)).empty() && Glow < 0.001f, "a cut out material's discarded texels emit (%.3f)", Glow);
+        CHECK(Albedo < 0.001f, "a cut out material's discarded texels have an albedo (%.3f)", Albedo);
+
+        Scene.m_Draws[3].m_Materials = {};
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the wall again");
+        for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing the wall again");
+        Renderer.DestroyMaterial(Cutout);
+    }
+
     // The red wall's material changes (a material compiled again makes a new material_id): its surfels and triangles are captured again.
     // Changed twice in a row (the first capture still in flight): only the last one's colors stay
     {
