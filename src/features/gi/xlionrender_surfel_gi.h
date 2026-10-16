@@ -2333,7 +2333,7 @@ namespace xlionrender::gi
             }
 
             Lap(St.m_LevelsMs);
-            // Pick: dirty first, then a pass in progress, then age over distance, until the budget is spent. An instance is updated in
+            // Pick: by Priority (dirty first, then a pass in progress, then age over distance), until the budget is spent. An instance is updated in
             // slices (a cursor over its surfels): a pass over a big mesh spans several updates and the budget holds whatever one mesh
             // has. A pass starts with the blend of its own (1 / n after a change); a change in the middle of a pass starts it again.
             // Items picked by an earlier update and not finished keep going; one whose instance was removed or changed level (its arrays were
@@ -2349,8 +2349,7 @@ namespace xlionrender::gi
                     if (!I.m_bAlive || I.m_E.empty()) continue;
                     St.m_Dirty += I.m_bDirty;
                     if (I.m_bDirty && I.m_Cursor != 0) I.m_Cursor = 0;
-                    const float Score = (I.m_bDirty ? 1e6f : 0.0f) + (I.m_Cursor ? 5e5f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
-                    m_Order.push_back({ Score, i });
+                    m_Order.push_back({ Priority(I, Eye), i });
                 }
                 std::sort(m_Order.begin(), m_Order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
                 m_Work.clear();
@@ -2377,25 +2376,14 @@ namespace xlionrender::gi
                         if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; for (auto& Es : I.m_Est) Es.Restart(); }
                         I.m_PassAlpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
                     }
-                    // A buried surfel (validity 0: inside a solid, on a see-through material) is traced one pass in dead_retrace_v, not every one:
-                    // the reads give it no weight, and its validity is geometry (a change dirties the instance: every pass again, and it comes back)
-                    const bool  bSettled = I.m_History > warmup_passes_v;
-                    const auto& Lv     = I.m_pMesh->m_Levels[I.m_Level];
-                    const float Scale  = std::max(I.m_MeanScale, 1e-9f);
+                    const bool bSettled = I.m_History > warmup_passes_v;
                     int Took = 0;
                     for (; I.m_Cursor < n && Took < Cap; ++I.m_Cursor)
                     {
                         const int Surf = I.m_bCube ? I.m_CubeSet[I.m_Cursor] : I.m_Cursor;
                         if (bSettled)
                         {
-                            int Period = 1;
-                            if (I.m_Valid[Surf] < 0.01f) Period = dead_retrace_v;
-                            else if (m_Setup.m_bDistanceTiers)
-                            {
-                                const surfel& S = Lv[Surf];
-                                const float   d = (I.m_L2W * S.m_Center - Eye).Length() / (S.m_Radius * Scale);
-                                Period = d < far_tier_radii_v[0] ? 1 : d < far_tier_radii_v[1] ? 2 : d < far_tier_radii_v[2] ? 4 : 8;
-                            }
+                            const int Period = TracePeriod(I, Surf, Eye);
                             if (Period > 1 && ((I.m_History + Surf) % Period) != 0) continue;     // staggered: a period's passes together trace every one
                         }
                         m_Work.push_back({ i, Surf });
@@ -2776,6 +2764,28 @@ namespace xlionrender::gi
             return v3{ W(0, 0) * N.m_X + W(1, 0) * N.m_Y + W(2, 0) * N.m_Z
                      , W(0, 1) * N.m_X + W(1, 1) * N.m_Y + W(2, 1) * N.m_Z
                      , W(0, 2) * N.m_X + W(1, 2) * N.m_Y + W(2, 2) * N.m_Z }.NormalizeCopy();
+        }
+
+        // The one priority (documentation/gi_dynamic_master_plan.md, Phase 2b): which instance is served first, from one queue under the
+        // one allowance. Its terms: a change (dirty) first, then a pass in progress (finish what was started), then age over distance
+        // (m_LodDistance: the distance at which it counts half). Later terms (Phase 5's transport roles, Phase 6's relighting) are added
+        // here, never as a pass or a queue of their own. Fairness stays outside it (Update: the oldest instance's share, whatever this says)
+        float Priority(const instance& I, const v3& Eye) const noexcept
+        {
+            return (I.m_bDirty ? 1e6f : 0.0f) + (I.m_Cursor ? 5e5f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
+        }
+
+        // Within a settled instance's pass, how often a surfel is served (1: every pass, n: one pass in n, staggered). A buried surfel
+        // (validity 0: inside a solid, on a see-through material) one pass in dead_retrace_v: the reads give it no weight, and its validity
+        // is geometry (a change dirties the instance: every pass again, and it comes back). A far one by its distance in its radii (its
+        // footprint on the screen; m_bDistanceTiers): every 2nd, 4th, 8th pass, never dropped
+        int TracePeriod(const instance& I, int Surf, const v3& Eye) const noexcept
+        {
+            if (I.m_Valid[Surf] < 0.01f) return dead_retrace_v;
+            if (!m_Setup.m_bDistanceTiers) return 1;
+            const surfel& S = I.m_pMesh->m_Levels[I.m_Level][Surf];
+            const float   d = (I.m_L2W * S.m_Center - Eye).Length() / (S.m_Radius * std::max(I.m_MeanScale, 1e-9f));
+            return d < far_tier_radii_v[0] ? 1 : d < far_tier_radii_v[1] ? 2 : d < far_tier_radii_v[2] ? 4 : 8;
         }
 
         static float BoxDistance(const instance& I, const v3& P) noexcept

@@ -291,6 +291,35 @@ looks worse in the capture is not kept until the cause is understood. More code 
   captures at equal time are no worse, and the per-frame bookkeeping is measured again for Phase 3. Removing the filter
   alone would take 3.5 ms off the 9 ms.
 
+**Phase 2b results** (2026-10-17; Police, a fresh Debug editor, 60 s from one view, the shown light and its flicker over 3 s from
+two DumpGI files, `b2cap.py`/`b2cmp.py`):
+
+1. **One estimator: kept.**
+   - The warm-up (an exact 1/n average after a change) moved into the estimator, per surfel (`m_N`, `Restart`). The call site
+     has one path.
+   - Result: shown light 0.0151 against 0.0149, flicker 2.7 % against 3.0 %. The GI tests changed by less than 2 %.
+   - The multiscale blend still starts from no variance. A variance measured from the warm-up's 8-ray samples would make it
+     slow to follow the light while it builds up.
+   - Lesson: the first comparison was against an editor that had had the level open for minutes, and it looked like a 50 %
+     loss. Comparisons are made from a fresh editor only.
+2. **One sharing mechanism: the display filter.**
+   - Neighbours as an estimator sample (1/(1+n) while warming up, 0.04 settled, untraced neighbours weighted out) was worse at
+     equal trace time: light 0.0143 against 0.0151, flicker 3.7 % against 2.7 %.
+   - It is not adopted, and neither is 5c's separate sharing by confidence. The filter's 3.5 ms is Phase 3's to make
+     incremental.
+3. **One level rule: kept.**
+   - A level's surfels must each cover `m_PixelsPerSurfel` pixels where the instance is nearest the eye, else the next coarser
+     level; the ambient cube is the last.
+   - Removed: the distance threshold for levels, the small-on-screen gate (`m_SmallFraction`, `m_ViewPixels`) and the view-pixel
+     plumbing. `m_LodDistance` remains as the priority's distance scale.
+   - Police: the building is unchanged (the eye is inside it). The statue 6 m away is at its fine surfels, where the gate held
+     it as a 6-sample cube.
+   - Tests: 6j7 and 6j7b follow the rule (26 m away: the parents, never a cube); three tests now set a screen scale.
+4. **One priority function: kept.**
+   - `Priority` (dirty, a pass in progress, age over distance) and `TracePeriod` (buried surfels, the distance tiers) are the
+     only places that decide who is served and how often. Fairness stays outside them.
+   - Later phases add terms there. There was no behaviour change; the test output is identical.
+
 ### Phase 3: Publication on the GPU side
 
 - Persistent per-instance GI storage on the GPU in place of copying every instance's full payload into the frame's ring.
