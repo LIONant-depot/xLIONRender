@@ -931,6 +931,35 @@ int main()
         CHECK(std::abs(D.InstanceLight(iGround)[s0].m_X - Solved.m_X) < 1e-9f, "the saturation reached the solver's light");
     }
 
+    // 6j5. Buried surfels are traced one pass in dead_retrace_v: a sheet inside a closed box (15 cm under its top, the box's back faces over
+    //      it) gets validity 0 and stops taking rays, the box's faces keep theirs; every dead_retrace_v-th pass traces all of them again (it can come back)
+    {
+        surfel_mesh M;
+        AddQuad(M, { -0.5f, 0.5f, -0.5f }, { 0, 0, 1 }, { 1, 0, 0 }, 0.5f);       // top (up)
+        AddQuad(M, { -0.5f, -0.5f, -0.5f }, { 1, 0, 0 }, { 0, 0, 1 }, 0.5f);      // bottom (down)
+        AddQuad(M, { -0.5f, -0.5f, -0.5f }, { 0, 1, 0 }, { 0, 0, 1 }, 0.5f);      // -x
+        AddQuad(M, { 0.5f, -0.5f, -0.5f }, { 0, 0, 1 }, { 0, 1, 0 }, 0.5f);       // +x
+        AddQuad(M, { -0.5f, -0.5f, -0.5f }, { 1, 0, 0 }, { 0, 1, 0 }, 0.5f);      // -z
+        AddQuad(M, { -0.5f, -0.5f, 0.5f }, { 0, 1, 0 }, { 1, 0, 0 }, 0.5f);       // +z
+        AddQuad(M, { -0.3f, 0.35f, -0.3f }, { 0, 0, 0.6f }, { 0.6f, 0, 0 }, 0.3f);      // the sheet, facing up
+        M.Bake(0.3f, 0.9f);
+        world W;
+        const int i = W.Add(M, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        lights L;
+        L.m_Sky = v3{ 1, 1, 1 };
+        for (int f = 0; f < 100; ++f) W.Update(L, { 0, 3, 0 }, 1 << 30, 18000 + f);       // settled: the warm-up passes are over, the sheet's validity has gone
+        std::size_t Min = 1u << 30, Max = 0;
+        for (int f = 0; f < 16; ++f)
+        {
+            W.Update(L, { 0, 3, 0 }, 1 << 30, 18100 + f);
+            Min = std::min(Min, W.LastUpdated().size()); Max = std::max(Max, W.LastUpdated().size());
+        }
+        std::printf("dead surfels: a pass traces %zu surfels, all of them (%zu) one in %d\n", Min, Max, dead_retrace_v);
+        CHECK(Min < Max, "buried surfels are traced every pass (%zu of %zu)", Min, Max);
+        CHECK(Max == M.m_Levels[0].size(), "a full pass does not trace every surfel (%zu of %zu)", Max, M.m_Levels[0].size());
+        CHECK(Min >= M.m_Levels[0].size() / 2, "more than half the surfels were skipped as dead (%zu of %zu)", Min, M.m_Levels[0].size());
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {

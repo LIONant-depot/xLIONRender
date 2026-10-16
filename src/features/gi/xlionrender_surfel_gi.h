@@ -481,6 +481,7 @@ namespace xlionrender::gi
             m_Mean = m_Mean + (y - m_Mean) * std::clamp(CatchUp, 0.0f, 1.0f);
         }
     };
+    constexpr int dead_retrace_v  = 8;      // a buried surfel (validity 0) is traced one pass in this many (Update)
     constexpr int warmup_passes_v = 16;     // after a change: a running average (1 / n) for this many passes, the estimator after
 
     struct surfel
@@ -2118,16 +2119,23 @@ namespace xlionrender::gi
                 if (SurfelsLeft <= 0) break;
                 auto& I = m_Instances[i];
                 const int n    = int(I.m_E.size());
-                const int Take = std::min(n - I.m_Cursor, SurfelsLeft);
                 if (I.m_Cursor == 0)
                 {
                     if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; }
                     I.m_PassAlpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
                 }
-                for (int k = 0; k < Take; ++k) m_Work.push_back({ i, I.m_Cursor + k });
-                I.m_Cursor += Take;
+                // A buried surfel (validity 0: inside a solid, on a see-through material) is traced one pass in dead_retrace_v, not every one:
+                // the reads give it no weight, and its validity is geometry (a change dirties the instance: every pass again, and it comes back)
+                const bool bSkipDead = I.m_History > warmup_passes_v && (I.m_History % dead_retrace_v) != 0;
+                int Took = 0;
+                for (; I.m_Cursor < n && Took < SurfelsLeft; ++I.m_Cursor)
+                {
+                    if (bSkipDead && I.m_Valid[I.m_Cursor] < 0.01f) continue;
+                    m_Work.push_back({ i, I.m_Cursor });
+                    ++Took;
+                }
                 if (I.m_Cursor >= n) { I.m_Cursor = 0; I.m_Age = 0; }
-                SurfelsLeft -= Take;
+                SurfelsLeft -= Took;
                 ++St.m_Updated;
                 I.m_bPicked = true;
             }
