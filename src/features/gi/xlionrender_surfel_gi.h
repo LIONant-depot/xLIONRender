@@ -1507,6 +1507,9 @@ namespace xlionrender::gi
         {
             int     m_RaysPerSurfel = 8;
             float   m_MinBlend      = 0;        // the warm-up's blend (1 / n after a change) never below this (1: every pass replaces)
+            float   m_TraceAllowanceMs = 0;     // Phase 1 (gi_dynamic_master_plan.md): the trace's main-thread time an update may use (0: no limit, every picked surfel is traced in full this update, as before)
+            float   m_UnitTargetUs  = 250;      // the size of a unit of the trace (rule 4): a surfel's rays are traced in chunks of about this many microseconds
+            float   m_FairShare     = 0.2f;     // the share of an update's surfels kept for the instance waiting longest (fairness: whatever its score)
             bool    m_bDistanceTiers = true;    // a surfel far from the eye (in its radii) is traced every 2nd, 4th, 8th pass (Update)
             float   m_Saturation    = 1;        // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
             float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
@@ -1555,6 +1558,15 @@ namespace xlionrender::gi
             long long m_Hits        = 0;        // rays that hit a lit surface: each one evaluates the direct light (the sun's shadow ray, the point lights in reach)
             int     m_nLinkRebuilds = 0;        // RebuildEmitterLinks calls this update
             int     m_nEmitters     = 0;
+            int     m_Pending       = 0;        // Phase 1: surfels picked and not finished (their rays continue next update)
+            int     m_PendingRays   = 0;        // their rays still to trace
+            int     m_ChunkRays     = 0;        // the rays of a unit this update (the time governor's choice)
+            float   m_RayUsEst      = 0;        // the governor's conservative estimate of a ray's cost (us)
+            int     m_Rounds        = 0;        // chunk rounds this update
+            double  m_CastMs        = 0;        // the trace's worker time split (summed over the workers): casting the rays,
+            double  m_DirectMs      = 0;        //   the direct light at the hits (shadow rays),
+            double  m_ReadMs        = 0;        //   and the reads of the hit's light (Indirect, Unsupported)
+            int     m_FairSurfels   = 0;        // surfels picked by the fairness share
             int     m_nCubes        = 0;        // instances held as an ambient cube, and their parents blended this update (ExpandCube)
             int     m_CubeParents   = 0;
             int     m_nMoves        = 0;        // SetTransform calls since the last update
@@ -2173,6 +2185,108 @@ namespace xlionrender::gi
             return m_Setup.m_ViewPixels > 0 ? Pixels < m_Setup.m_SmallFraction * k * m_Setup.m_ViewPixels : Ratio < 0.1f * std::sqrt(k);
         }
 
+        // A pending surfel (Phase 1): its pass, traced in chunks across updates. The pass' random offsets are drawn when it is picked; its
+        // sums live here until all its rays are in
+        struct work_item
+        {
+            int     m_Inst = 0, m_Surf = 0, m_Level = 0;
+            int     m_Rays = 0, m_RaysDone = 0;
+            float   m_Off1 = 0, m_Off2 = 0;
+            int     m_Shift = 0;
+            v3      m_Sum{ 0, 0, 0 };
+            int     m_nBack = 0, m_nBackAll = 0, m_nUnsupported = 0, m_nHits = 0;
+            v3      m_UnsupportedAt{ 0, 0, 0 };
+            float   m_UnitUs = 0;   int m_UnitRays = 0;           // this update's unit (instrumentation, the governor)
+            float   m_CastUs = 0, m_DirectUs = 0, m_ReadUs = 0;
+        };
+
+        // Rays [r0, r1) of a pending surfel's pass (the first chunk clears its accumulators, the last one finishes the pass: the emitted light
+        // from its links, the irradiance E = pi mean(L), its validity). The rays are the same whatever the chunks: ray r of R of the pass
+        void TraceChunk(work_item& W, int r0, int r1, const lights& L) noexcept
+        {
+            using clock = std::chrono::steady_clock;
+            const auto Us = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<float, std::micro>(B - A).count(); };
+            const auto Tw = clock::now();
+            const int s = W.m_Surf;
+            auto& I = m_Instances[W.m_Inst];
+            const auto& S = I.m_pMesh->m_Levels[I.m_Level][s];
+            const v3 C = I.m_L2W * S.m_Center, N = NormalToWorld(I, S.m_Normal);
+            const int R = W.m_Rays;
+            auto& MA = I.m_MomAcc[s];
+            auto& BA = I.m_BasisAcc[s];
+            if (r0 == 0) { MA.fill(0); BA.fill(v3{ 0, 0, 0 }); W.m_Sum = v3{ 0, 0, 0 }; W.m_nBack = W.m_nBackAll = W.m_nUnsupported = W.m_nHits = 0; }
+            const basis Dirs = BasisDirs(S.m_Normal);
+            std::array<float, 3> Bw{};
+            const float Reach = 2 * S.m_Radius;                         // mesh units
+            const float Off1 = W.m_Off1, Off2 = W.m_Off2;               // this pass' rotation of the stratified set
+            const auto& Mo = *I.m_pMesh;
+            const bool  bSpread = m_Setup.m_bSpreadOrigins && I.m_Level == 0 && Mo.m_OriginFirst.size() == Mo.m_Levels[0].size() + 1;
+            const std::uint32_t o0 = bSpread ? Mo.m_OriginFirst[s] : 0, nO = bSpread ? Mo.m_OriginFirst[s + 1] - o0 : 0;
+            const int   Shift = W.m_Shift;                              // the pass' pairing of origins and direction strata
+            v3 Sum = W.m_Sum;
+            int nBack = W.m_nBack, nBackAll = W.m_nBackAll, nUnsupported = W.m_nUnsupported, nHits = W.m_nHits;
+            for (int r = r0; r < r1; ++r)
+            {
+                v3 Cr = C, Nr = N;                                      // the ray's origin: across the surfel's patch (BuildOrigins)
+                if (nO > 1) { const std::uint32_t k = o0 + std::uint32_t(r + Shift) % nO; Cr = I.m_L2W * Mo.m_OriginPos[k]; Nr = NormalToWorld(I, Mo.m_OriginNrm[k]); }
+                const v3 D = StratifiedCosineDir(Nr, r, R, Off1, Off2);
+                const auto Tc = clock::now();
+                const hit H = Cast(Cr + Nr * 1e-3f, D);
+                W.m_CastUs += Us(Tc, clock::now());
+                {
+                    v3 Dm = I.m_W2L.TransformDirection(D);              // mesh space: the reads compare in mesh units
+                    const float Lm = Dm.Length();
+                    Dm = Dm * (1.0f / Lm);
+                    // the depth moments are of the surfel's center (the reads compare a point with it): where the ray ends, seen from it
+                    const v3    Pe = I.m_W2L * (Cr + D * (H.m_Inst < 0 ? Reach / Lm : H.m_T)) - S.m_Center;
+                    const float Le = Pe.Length();
+                    const float d  = std::min(Le, Reach);
+                    const int   t  = MomentTexel(S.m_Normal, Le > 1e-6f ? Pe * (1.0f / Le) : Dm);
+                    MA[3 * t] += d; MA[3 * t + 1] += d * d; MA[3 * t + 2] += 1;
+                    Bw = BasisWeights(Dirs, Dm);                        // the ray's share of each basis direction
+                }
+                if (H.m_Inst < 0) { const v3 Sky = L.SkyAt(D); Sum = Sum + Sky; for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Sky * Bw[i]; continue; }
+                const v3 Nh = HitNormal(H);
+                // A back face: no light. Within the surfel's reach it says the surfel may be buried (inside a wall or a frame, back faces are
+                // centimeters away); farther it is single-sided geometry seen from behind (a ceiling made to face out, metres up): not buried
+                if (Nh.Dot(D) > 0) { nBack += H.m_T < Reach * I.m_MeanScale; ++nBackAll; continue; }
+                v3 Albedo, Emission;
+                SurfaceAt(H, Albedo, Emission);
+                const auto Tr = clock::now();
+                const query Q  = Indirect(H);
+                W.m_ReadUs += Us(Tr, clock::now());
+                if (!Q.m_bSupported) { if (nUnsupported++ == 0) W.m_UnsupportedAt = HitPosition(H); }
+                ++nHits;
+                const auto Td = clock::now();
+                const v3 Dl = Direct(HitPosition(H), Nh, L);
+                W.m_DirectUs += Us(Td, clock::now());
+                const auto Tu = clock::now();
+                const v3 In = Dl + (Q.m_bSupported ? Q.m_E : Unsupported(H));
+                W.m_ReadUs += Us(Tu, clock::now());
+                const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (m_Emitters.empty() ? Emission : v3{ 0, 0, 0 });     // with emitters the links bring their light
+                Sum = Sum + Lr;
+                for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Lr * Bw[i];
+            }
+            W.m_Sum = Sum; W.m_nBack = nBack; W.m_nBackAll = nBackAll; W.m_nUnsupported = nUnsupported; W.m_nHits = nHits;
+            W.m_RaysDone = r1;
+            if (r1 >= R)
+            {
+                if (s < I.m_EmitB.size())                                   // the emitters it sees (the links): deterministic, no rays
+                    for (int i = 0; i < 3; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance
+                I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
+                // Buried -> validity 0, by either sign: back faces near it (within its reach: inside a wall or a frame they are centimeters
+                // away; full validity up to 20% of its rays, none from 50%), or back faces all around at any distance (inside a solid object;
+                // full up to 80%, none from 95%). A floor under a ceiling made to face out sees back faces metres away, in some directions
+                // only: it keeps its light (it was: any back face, 10%..25% - 2 rays of 8 - and 28% of the Police Station read nothing)
+                const float Near = std::clamp(1.0f - (float(nBack) / float(R) - 0.2f) / 0.3f, 0.0f, 1.0f);
+                const float All  = std::clamp(1.0f - (float(nBackAll) / float(R) - 0.8f) / 0.15f, 0.0f, 1.0f);
+                I.m_AccValid[s] = std::min(Near, All);
+            }
+            const float u = Us(Tw, clock::now());
+            W.m_UnitUs = std::max(W.m_UnitUs, u);
+            W.m_UnitRays = r1 - r0;
+        }
+
         // One update: the light changes, the levels, then the ray budget over the instances that need it most
         stats Update(const lights& L, const v3& Eye, int RayBudget, unsigned Seed) noexcept
         {
@@ -2234,60 +2348,88 @@ namespace xlionrender::gi
             // Pick: dirty first, then a pass in progress, then age over distance, until the budget is spent. An instance is updated in
             // slices (a cursor over its surfels): a pass over a big mesh spans several updates and the budget holds whatever one mesh
             // has. A pass starts with the blend of its own (1 / n after a change); a change in the middle of a pass starts it again.
-            m_Order.clear();
-            for (int i = 0; i < int(m_Instances.size()); ++i)
-            {
-                auto& I = m_Instances[i];
-                if (!I.m_bAlive || I.m_E.empty()) continue;
-                St.m_Dirty += I.m_bDirty;
-                if (I.m_bDirty && I.m_Cursor != 0) I.m_Cursor = 0;
-                const float Score = (I.m_bDirty ? 1e6f : 0.0f) + (I.m_Cursor ? 5e5f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
-                m_Order.push_back({ Score, i });
-            }
-            std::sort(m_Order.begin(), m_Order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            // Items picked by an earlier update and not finished keep going; one whose instance was removed or changed level (its arrays were
+            // made again) is dropped. A pick is made only when nothing is pending: one surfel is never in flight twice
+            std::erase_if(m_Pending, [&](const work_item& W) { const auto& I = m_Instances[W.m_Inst]; return !I.m_bAlive || I.m_Level != W.m_Level || std::size_t(W.m_Surf) >= I.m_E.size(); });
             m_Work.clear();
-            int SurfelsLeft = std::max(RayBudget / std::max(m_Setup.m_RaysPerSurfel, 1), 1);
-            for (const auto& [Score, i] : m_Order)
+            if (m_Pending.empty())
             {
-                if (SurfelsLeft <= 0) break;
-                auto& I = m_Instances[i];
-                const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
-                if (I.m_Cursor == 0)
+                m_Order.clear();
+                for (int i = 0; i < int(m_Instances.size()); ++i)
                 {
-                    if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; }
-                    I.m_PassAlpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
+                    auto& I = m_Instances[i];
+                    if (!I.m_bAlive || I.m_E.empty()) continue;
+                    St.m_Dirty += I.m_bDirty;
+                    if (I.m_bDirty && I.m_Cursor != 0) I.m_Cursor = 0;
+                    const float Score = (I.m_bDirty ? 1e6f : 0.0f) + (I.m_Cursor ? 5e5f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
+                    m_Order.push_back({ Score, i });
                 }
-                // A buried surfel (validity 0: inside a solid, on a see-through material) is traced one pass in dead_retrace_v, not every one:
-                // the reads give it no weight, and its validity is geometry (a change dirties the instance: every pass again, and it comes back)
-                const bool  bSettled = I.m_History > warmup_passes_v;
-                const auto& Lv     = I.m_pMesh->m_Levels[I.m_Level];
-                const float Scale  = std::max(I.m_MeanScale, 1e-9f);
-                int Took = 0;
-                for (; I.m_Cursor < n && Took < SurfelsLeft; ++I.m_Cursor)
+                std::sort(m_Order.begin(), m_Order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                m_Work.clear();
+                int SurfelsLeft = std::max(RayBudget / std::max(m_Setup.m_RaysPerSurfel, 1), 1);
+                // Fairness (Phase 1): the instance that has waited longest gets m_FairShare of the update first, whatever its score; the rest
+                // goes by score. An instance is visited once per pick (two visits would trace a surfel twice in one pass)
+                int Fair = -1, FairAge = -1;
+                if (m_Order.size() > 1 && m_Setup.m_FairShare > 0)
+                    for (const auto& [Score, i] : m_Order) if (m_Instances[i].m_Age > FairAge) { FairAge = m_Instances[i].m_Age; Fair = i; }
+                if (Fair >= 0 && Fair != m_Order.front().second)
                 {
-                    const int Surf = I.m_bCube ? I.m_CubeSet[I.m_Cursor] : I.m_Cursor;
-                    if (bSettled)
+                    auto It = std::find_if(m_Order.begin(), m_Order.end(), [&](const auto& o) { return o.second == Fair; });
+                    std::rotate(m_Order.begin(), It, It + 1);
+                }
+                else Fair = -1;
+                for (const auto& [Score, i] : m_Order)
+                {
+                    if (SurfelsLeft <= 0) break;
+                    auto& I = m_Instances[i];
+                    const int Cap = i == Fair ? std::max(1, int(float(SurfelsLeft) * m_Setup.m_FairShare)) : SurfelsLeft;
+                    const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
+                    if (I.m_Cursor == 0)
                     {
-                        int Period = 1;
-                        if (I.m_Valid[Surf] < 0.01f) Period = dead_retrace_v;
-                        else if (m_Setup.m_bDistanceTiers)
-                        {
-                            const surfel& S = Lv[Surf];
-                            const float   d = (I.m_L2W * S.m_Center - Eye).Length() / (S.m_Radius * Scale);
-                            Period = d < far_tier_radii_v[0] ? 1 : d < far_tier_radii_v[1] ? 2 : d < far_tier_radii_v[2] ? 4 : 8;
-                        }
-                        if (Period > 1 && ((I.m_History + Surf) % Period) != 0) continue;     // staggered: a period's passes together trace every one
+                        if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; }
+                        I.m_PassAlpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
                     }
-                    m_Work.push_back({ i, Surf });
-                    ++Took;
+                    // A buried surfel (validity 0: inside a solid, on a see-through material) is traced one pass in dead_retrace_v, not every one:
+                    // the reads give it no weight, and its validity is geometry (a change dirties the instance: every pass again, and it comes back)
+                    const bool  bSettled = I.m_History > warmup_passes_v;
+                    const auto& Lv     = I.m_pMesh->m_Levels[I.m_Level];
+                    const float Scale  = std::max(I.m_MeanScale, 1e-9f);
+                    int Took = 0;
+                    for (; I.m_Cursor < n && Took < Cap; ++I.m_Cursor)
+                    {
+                        const int Surf = I.m_bCube ? I.m_CubeSet[I.m_Cursor] : I.m_Cursor;
+                        if (bSettled)
+                        {
+                            int Period = 1;
+                            if (I.m_Valid[Surf] < 0.01f) Period = dead_retrace_v;
+                            else if (m_Setup.m_bDistanceTiers)
+                            {
+                                const surfel& S = Lv[Surf];
+                                const float   d = (I.m_L2W * S.m_Center - Eye).Length() / (S.m_Radius * Scale);
+                                Period = d < far_tier_radii_v[0] ? 1 : d < far_tier_radii_v[1] ? 2 : d < far_tier_radii_v[2] ? 4 : 8;
+                            }
+                            if (Period > 1 && ((I.m_History + Surf) % Period) != 0) continue;     // staggered: a period's passes together trace every one
+                        }
+                        m_Work.push_back({ i, Surf });
+                        ++Took;
+                    }
+                    if (I.m_Cursor >= n) { I.m_Cursor = 0; I.m_Age = 0; }
+                    SurfelsLeft -= Took;
+                    if (i == Fair) St.m_FairSurfels = Took;
+                    ++St.m_Updated;
+                    I.m_bPicked = true;
                 }
-                if (I.m_Cursor >= n) { I.m_Cursor = 0; I.m_Age = 0; }
-                SurfelsLeft -= Took;
-                ++St.m_Updated;
-                I.m_bPicked = true;
+                for (std::size_t w = 0; w < m_Work.size(); ++w)
+                {
+                    const auto [pi, ps] = m_Work[w];
+                    rng Rng(Seed * 2654435761u + unsigned(w) * 7919u);       // the pass' random offsets, as the trace drew them in one go
+                    work_item W;
+                    W.m_Inst = pi; W.m_Surf = ps; W.m_Level = m_Instances[pi].m_Level; W.m_Rays = m_Setup.m_RaysPerSurfel;
+                    W.m_Off1 = Rng.Next(); W.m_Off2 = Rng.Next(); W.m_Shift = int(Rng.Next() * 64.0f);
+                    m_Pending.push_back(W);
+                }
+                m_Work.clear();             // from here m_Work lists the surfels finished this update (LastUpdated)
             }
-            St.m_Surfels = int(m_Work.size());
-            St.m_Rays    = St.m_Surfels * m_Setup.m_RaysPerSurfel;
             Lap(St.m_PickMs);
 
             ++m_nUpdates;
@@ -2312,95 +2454,72 @@ namespace xlionrender::gi
                 const v3 World = WW > 0 ? WSum * (1.0f / WW) : v3{ 0, 0, 0 };
                 for (auto& I : m_Instances) if (I.m_MeanE.m_X < 0) I.m_MeanE = World;
             }
-            m_WorkUnsupported.assign(m_Work.size(), 0);
-            m_WorkUnsupportedAt.resize(m_Work.size());
-            m_WorkUs.assign(m_Work.size(), 0.0f);
-            m_WorkHits.assign(m_Work.size(), 0);
             Lap(St.m_MeanMs);
 
-            const auto T1 = std::chrono::steady_clock::now();
-            m_Pool.Run(int(m_Work.size()), [&](int w)
+            // The trace (Phase 1): the pending surfels' rays in chunks (units of about m_UnitTargetUs), round after round, until every one is
+            // finished or the allowance is spent. A unit is not started when the conservative estimate says it would not fit; one that is
+            // started finishes: the overshoot is one unit. Without an allowance a chunk is all of a surfel's rays and one round traces them all
+            // (the solver as it was: the same rays, the same seeds). A surfel is committed when all its rays are in; until then it is pending
+            const auto T1      = std::chrono::steady_clock::now();
+            const double Allow = double(m_Setup.m_TraceAllowanceMs);
+            const auto Deadline = T1 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(Allow));
+            // conservative: the slowest ray cost seen lately (it decays), at least the mean plus twice the mean deviation. The cost of a ray
+            // has a long tail (a ray into dense geometry): sized by the mean, units of 8 rays reached 1.1 ms in the Police level
+            const float RayUs  = std::max(m_RayUsHi, m_RayUsMean + 2.0f * m_RayUsDev);
+            const int   Chunk  = Allow > 0 ? std::clamp(int(m_Setup.m_UnitTargetUs / std::max(RayUs, 1.0f)), 1, std::max(m_Setup.m_RaysPerSurfel, 1)) : std::max(m_Setup.m_RaysPerSurfel, 1);
+            St.m_ChunkRays = Chunk; St.m_RayUsEst = RayUs;
+            std::vector<int> Live;
+            std::atomic<int> RaysDone{ 0 };
+            for (;;)
             {
-                const auto Tw = std::chrono::steady_clock::now();
-                const auto [i, s] = m_Work[w];
-                auto& I = m_Instances[i];
-                const auto& S = I.m_pMesh->m_Levels[I.m_Level][s];
-                const v3 C = I.m_L2W * S.m_Center, N = NormalToWorld(I, S.m_Normal);
-                rng Rng(Seed * 2654435761u + unsigned(w) * 7919u);
-                v3 Sum{ 0, 0, 0 };
-                int nBack = 0, nBackAll = 0, nUnsupported = 0, nHits = 0;      // back faces within its reach, at any distance
-                const int R = m_Setup.m_RaysPerSurfel;
-                auto& MA = I.m_MomAcc[s];
-                MA.fill(0);
-                auto& BA = I.m_BasisAcc[s];
-                BA.fill(v3{ 0, 0, 0 });
-                const basis Dirs = BasisDirs(S.m_Normal);
-                std::array<float, 3> Bw{};
-                const float Reach = 2 * S.m_Radius;                         // mesh units
-                const float Off1 = Rng.Next(), Off2 = Rng.Next();         // this pass' rotation of the stratified set
-                const auto& Mo = *I.m_pMesh;
-                const bool  bSpread = m_Setup.m_bSpreadOrigins && I.m_Level == 0 && Mo.m_OriginFirst.size() == Mo.m_Levels[0].size() + 1;
-                const std::uint32_t o0 = bSpread ? Mo.m_OriginFirst[s] : 0, nO = bSpread ? Mo.m_OriginFirst[s + 1] - o0 : 0;
-                const int   Shift = int(Rng.Next() * 64.0f);               // the pass' pairing of origins and direction strata
-                for (int r = 0; r < R; ++r)
+                Live.clear();
+                for (int k = 0; k < int(m_Pending.size()); ++k) if (m_Pending[k].m_RaysDone < m_Pending[k].m_Rays) Live.push_back(k);
+                if (Live.empty()) break;
+                if (Allow > 0 && std::chrono::steady_clock::now() >= Deadline) break;
+                const int Before = RaysDone.load();
+                ++St.m_Rounds;
+                m_Pool.Run(int(Live.size()), [&](int k)
                 {
-                    v3 Cr = C, Nr = N;                                      // the ray's origin: across the surfel's patch (BuildOrigins)
-                    if (nO > 1) { const std::uint32_t k = o0 + std::uint32_t(r + Shift) % nO; Cr = I.m_L2W * Mo.m_OriginPos[k]; Nr = NormalToWorld(I, Mo.m_OriginNrm[k]); }
-                    const v3 D = StratifiedCosineDir(Nr, r, R, Off1, Off2);
-                    const hit H = Cast(Cr + Nr * 1e-3f, D);
-                    {
-                        v3 Dm = I.m_W2L.TransformDirection(D);              // mesh space: the reads compare in mesh units
-                        const float Lm = Dm.Length();
-                        Dm = Dm * (1.0f / Lm);
-                        // the depth moments are of the surfel's center (the reads compare a point with it): where the ray ends, seen from it
-                        const v3    Pe = I.m_W2L * (Cr + D * (H.m_Inst < 0 ? Reach / Lm : H.m_T)) - S.m_Center;
-                        const float Le = Pe.Length();
-                        const float d  = std::min(Le, Reach);
-                        const int   t  = MomentTexel(S.m_Normal, Le > 1e-6f ? Pe * (1.0f / Le) : Dm);
-                        MA[3 * t] += d; MA[3 * t + 1] += d * d; MA[3 * t + 2] += 1;
-                        Bw = BasisWeights(Dirs, Dm);                        // the ray's share of each basis direction
-                    }
-                    if (H.m_Inst < 0) { const v3 Sky = L.SkyAt(D); Sum = Sum + Sky; for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Sky * Bw[i]; continue; }
-                    const v3 Nh = HitNormal(H);
-                    // A back face: no light. Within the surfel's reach it says the surfel may be buried (inside a wall or a frame, back faces are
-                    // centimeters away); farther it is single-sided geometry seen from behind (a ceiling made to face out, metres up): not buried
-                    if (Nh.Dot(D) > 0) { nBack += H.m_T < Reach * I.m_MeanScale; ++nBackAll; continue; }
-                    v3 Albedo, Emission;
-                    SurfaceAt(H, Albedo, Emission);
-                    const query Q  = Indirect(H);
-                    if (!Q.m_bSupported) { if (nUnsupported++ == 0) m_WorkUnsupportedAt[w] = HitPosition(H); }
-                    ++nHits;
-                    const v3 In = Direct(HitPosition(H), Nh, L) + (Q.m_bSupported ? Q.m_E : Unsupported(H));
-                    const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (m_Emitters.empty() ? Emission : v3{ 0, 0, 0 });     // with emitters the links bring their light
-                    Sum = Sum + Lr;
-                    for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Lr * Bw[i];
-                }
-                if (s < I.m_EmitB.size())                                   // the emitters it sees (the links): deterministic, no rays
-                    for (int i = 0; i < 3; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance
-                I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
-                // Buried -> validity 0, by either sign: back faces near it (within its reach: inside a wall or a frame they are centimeters
-                // away; full validity up to 20% of its rays, none from 50%), or back faces all around at any distance (inside a solid object;
-                // full up to 80%, none from 95%). A floor under a ceiling made to face out sees back faces metres away, in some directions
-                // only: it keeps its light (it was: any back face, 10%..25% - 2 rays of 8 - and 28% of the Police Station read nothing)
-                const float Near = std::clamp(1.0f - (float(nBack) / float(R) - 0.2f) / 0.3f, 0.0f, 1.0f);
-                const float All  = std::clamp(1.0f - (float(nBackAll) / float(R) - 0.8f) / 0.15f, 0.0f, 1.0f);
-                I.m_AccValid[s] = std::min(Near, All);
-                m_WorkUnsupported[w] = nUnsupported;
-                m_WorkHits[w] = nHits;
-                m_WorkUs[w] = std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - Tw).count();
-            });
-            m_UnsupportedAt.clear();
-            for (std::size_t w = 0; w < m_Work.size(); ++w)
-            {
-                St.m_nUnsupported += m_WorkUnsupported[w];
-                if (m_WorkUnsupported[w] && m_UnsupportedAt.size() < 4096) m_UnsupportedAt.push_back(m_WorkUnsupportedAt[w]);
-                St.m_Hits += m_WorkHits[w];
-                St.m_LongestSurfelUs = std::max(St.m_LongestSurfelUs, double(m_WorkUs[w]));
+                    auto& W = m_Pending[Live[k]];
+                    const int r0 = W.m_RaysDone, r1 = std::min(W.m_Rays, r0 + Chunk);
+                    if (Allow > 0 && std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::micro>(double(RayUs) * (r1 - r0))) > Deadline) return;
+                    TraceChunk(W, r0, r1, L);
+                    RaysDone += r1 - r0;
+                });
+                if (Allow <= 0 || RaysDone.load() == Before) break;      // one round traces everything without an allowance; no unit fits any more
             }
+            St.m_Rays = RaysDone.load();
+            m_UnsupportedAt.clear();
+            // the governor's estimate of a ray's cost, from this update's units (the mean and the mean deviation, slowly)
+            m_RayUsHi *= 0.98f;
+            for (const auto& W : m_Pending)
+                if (W.m_UnitRays > 0)
+                {
+                    const float u = W.m_UnitUs / float(W.m_UnitRays);
+                    m_RayUsHi = std::max(m_RayUsHi, u);
+                    m_RayUsDev  += (std::abs(u - m_RayUsMean) - m_RayUsDev) * 0.05f;
+                    m_RayUsMean += (u - m_RayUsMean) * 0.05f;
+                    St.m_LongestSurfelUs = std::max(St.m_LongestSurfelUs, double(W.m_UnitUs));
+                }
+            // the finished surfels: their results into the solver's state
+            for (const auto& W : m_Pending)
+            {
+                St.m_CastMs += W.m_CastUs * 1e-3; St.m_DirectMs += W.m_DirectUs * 1e-3; St.m_ReadMs += W.m_ReadUs * 1e-3;
+                if (W.m_RaysDone < W.m_Rays) continue;
+                m_Work.push_back({ W.m_Inst, W.m_Surf });
+                St.m_nUnsupported += W.m_nUnsupported;
+                if (W.m_nUnsupported && m_UnsupportedAt.size() < 4096) m_UnsupportedAt.push_back(W.m_UnsupportedAt);
+                St.m_Hits += W.m_nHits;
+            }
+            for (auto& W : m_Pending) { W.m_UnitUs = 0; W.m_UnitRays = 0; W.m_CastUs = W.m_DirectUs = W.m_ReadUs = 0; }
+            std::erase_if(m_Pending, [](const work_item& W) { return W.m_RaysDone >= W.m_Rays; });
+            St.m_Surfels = int(m_Work.size());
+            St.m_Pending = int(m_Pending.size());
+            for (const auto& W : m_Pending) St.m_PendingRays += W.m_Rays - W.m_RaysDone;
 
             St.m_TraceMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
             TPrev = std::chrono::steady_clock::now();
-            for (const auto& [i, s] : m_Work)
+            for (const auto& [i, s] : m_Work)       // the surfels finished this update
             {
                 auto& I = m_Instances[i];
                 // The light: a running average while warming up (after a change), then the estimator (it settles, and still follows a
@@ -2442,7 +2561,7 @@ namespace xlionrender::gi
                 }
                 if (I.m_Valid[s] < 1e-6f) I.m_Valid[s] = 0;         // buried: 0, not a decay into denormals (the reads divide by sums of these weights)
             }
-            Lap(St.m_CommitMs);
+
             for (int i = 0; i < int(m_Instances.size()); ++i)
                 if (m_Instances[i].m_bAlive && m_Instances[i].m_bCube)
                 {
@@ -2835,8 +2954,8 @@ namespace xlionrender::gi
         bool                                    m_bLinksDirty = false;
         int                                     m_nMovesAcc = 0, m_MoveMarked = 0;     // (instrumentation) SetTransform since the last update
         double                                  m_MovesMsAcc = 0;
-        std::vector<float>                      m_WorkUs;               // (instrumentation) per work item: its trace time
-        std::vector<int>                        m_WorkHits;             // per work item: its rays that hit a lit surface
+        std::vector<work_item>                  m_Pending;              // Phase 1: the surfels picked and not finished
+        float                                   m_RayUsMean = 50, m_RayUsDev = 50, m_RayUsHi = 0;     // the governor's running cost of a ray (us), and the slowest seen lately
         int                                     m_nEmitters = 0;
         bool                                    m_bLinksMoved = false;      // an instance moved: m_bLinksDirty links_settle_v updates after the last move
         unsigned                                m_nUpdates = 0, m_LinksMovedAt = 0;
@@ -2855,8 +2974,6 @@ namespace xlionrender::gi
         std::vector<std::array<float, 7>>       m_PrevPoints;
         std::vector<std::pair<float, int>>      m_Order;
         std::vector<std::pair<int, int>>        m_Work;
-        std::vector<int>                        m_WorkUnsupported;      // per work item: its unsupported queries this update
-        std::vector<v3>                         m_WorkUnsupportedAt;    // per work item: the first one's hit point
         std::vector<v3>                         m_UnsupportedAt;        // the last update's (UnsupportedAt)
     };
 }

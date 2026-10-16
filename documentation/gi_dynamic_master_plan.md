@@ -144,6 +144,30 @@ What it shows:
   every frame within allowance plus one unit, the queue and its memory stay bounded, aged work is still served, and the work
   converges after the changes stop.
 
+**Phase 1 results so far (2026-10-17, Debug, the Police level, the same drag).** Built: picked surfels stay pending across
+updates and are traced in units of rays (`work_item`, `TraceChunk`), round after round within `setup::m_TraceAllowanceMs`
+(scene default 1 ms; 0 keeps the old one-update behaviour, with the same rays and seeds); a unit is started only if the
+governor's conservative estimate (the slowest recent ray, decaying, at least the mean plus twice the deviation) fits; the
+fairness share (20 %) for the instance waiting longest; the trace's worker time split into casting, direct light and reads.
+Test 6j11 (a wall moving every update, a tight allowance) passes: within the allowance plus one unit, pending never above one
+pick, the far box served, and the floor converges to the scene without an allowance (0.914 against 0.914).
+
+| | Before (Phase 0) | Now |
+|---|---|---|
+| Trace time per frame | 6.6 ms mean | 0.91 ms mean, 1.20 ms p99, 1.65 ms max (allowance 1 ms) |
+| Unit | one surfel, up to 4.3 ms | one ray; 135 us mean, 508 us p99, 672 us max |
+| Rays per frame | about 16000 | about 1000 (convergence is that much slower: the contract's trade) |
+| Pending | none | up to one pick (2048 surfels) |
+
+- **Casting dominates the trace, not shadow rays**: over the workers, casting 7.8 ms, reads of the hit's light 3.9 ms, direct
+  light 1.3 ms. The bounded light sampling of section 5c is not needed for now; faster casting (the rays' BVH in Debug) would be.
+- **A single ray is now the indivisible unit**, and its tail (672 us in Debug) is above the 0.5 ms declared maximum. Splitting
+  a ray is not possible; what would cut the tail is cheaper casting and reads.
+- **The estimator is conservative by design**: it sizes by the slowest recent ray (about 340 us against a 13 us mean), so the
+  allowance is used safely but not fully. A high quantile instead of the maximum would recover rays; to tune after Phase 3.
+- **Not done yet in Phase 1:** the host's per-frame allowance shared by every renderer (each renderer has its own 1 ms today),
+  and the other per-surfel stages (filter, ring copy, statistics, mean light: about 9 ms a frame) which are Phase 3's.
+
 ### Phase 2: Bounded, incremental emitter links
 
 - A dependency index: per emitter, the receivers that link to it; per link, its segment's bounds.

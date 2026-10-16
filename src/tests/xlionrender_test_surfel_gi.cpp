@@ -1162,6 +1162,56 @@ int main()
         CHECK(MaxUnit > 0 && Hits > 0 && LinkBytes > 0 && LightBytes > 0, "a counter stayed at 0");
     }
 
+    // 6j11. Phase 1: the trace under a time allowance, in units of rays. A wall moves on every update (a change faster than the allowance can
+    //       follow), a box far away waits with a low score. Each update's trace stays within the allowance plus one unit, the pending work
+    //       stays bounded by one pick, the far box is still served (fairness), and after the moving stops the light converges to the same
+    //       scene traced without an allowance
+    {
+        surfel_mesh Floor, Wall, Box;
+        AddQuad(Floor, { -3, 0, -3 }, { 0, 0, 6 }, { 6, 0, 0 }, 0.5f);
+        AddQuad(Wall,  { -1, 0, 0 }, { 0, 1.5f, 0 }, { 2, 0, 0 }, 0.5f);
+        AddQuad(Box,   { 40, 0, 40 }, { 0, 0, 1 }, { 1, 0, 0 }, 0.5f);
+        Floor.Bake(0.15f, 0.45f); Wall.Bake(0.15f, 0.45f); Box.Bake(0.15f, 0.45f);
+        lights L; L.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = v3{ 2, 2, 2 }; L.m_Sky = v3{ 0.3f, 0.3f, 0.3f };
+        const v3 Eye{ 0, 1, 4 };
+        const auto Make = [&](world& W, int& iFloor, int& iWall, int& iBox)
+        {
+            iFloor = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+            iWall  = W.Add(Wall,  xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+            iBox   = W.Add(Box,   xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        };
+        world W; int iF, iW, iB; Make(W, iF, iW, iB);
+        W.m_Setup.m_TraceAllowanceMs = 1.0f;
+        W.m_Setup.m_UnitTargetUs     = 60.0f;          // small units: a surfel's rays in several chunks
+        const int Budget = 1 << 12;
+        double WorstOver = -1e9; int MaxPending = 0, MinChunk = 1 << 30, BoxServed = 0, MaxRounds = 0; double LongestUnit = 0;
+        for (int f = 0; f < 60; ++f)
+        {
+            W.SetTransform(iW, xmath::fmat4::fromTranslation({ 0.03f * float(f % 20), 0, 0 }));
+            const auto St = W.Update(L, Eye, Budget, 25000 + f);
+            WorstOver   = std::max(WorstOver, St.m_TraceMs - (1.0 + St.m_LongestSurfelUs * 1e-3));
+            LongestUnit = std::max(LongestUnit, St.m_LongestSurfelUs);
+            MaxPending  = std::max(MaxPending, St.m_Pending);
+            MinChunk    = std::min(MinChunk, St.m_ChunkRays);
+            MaxRounds   = std::max(MaxRounds, St.m_Rounds);
+            for (const auto& [inst, sf] : W.LastUpdated()) BoxServed += inst == iB;
+        }
+        for (int f = 0; f < 400; ++f) W.Update(L, Eye, Budget, 25100 + f);          // still: it converges
+        world Ref; int rF, rW, rB; Make(Ref, rF, rW, rB);                          // the same final scene without an allowance
+        Ref.SetTransform(rW, xmath::fmat4::fromTranslation({ 0.03f * float(59 % 20), 0, 0 }));
+        for (int f = 0; f < 200; ++f) Ref.Update(L, Eye, Budget, 25600 + f);
+        const auto Mean = [](const world& Wd, int Id) { double m = 0; const auto& E = Wd.InstanceLight(Id); for (const auto& e : E) m += e.m_X; return m / double(std::max<std::size_t>(E.size(), 1)); };
+        const double Floor1 = Mean(W, iF), Floor0 = Mean(Ref, rF);
+        std::printf("trace allowance 1 ms, units of %d rays (%.0f us at most): worst trace %.2f ms over the allowance + one unit, %d pending at most (a pick is %d), "
+                    "%d rounds at most, the far box served %d times while the wall moved; floor light %.3f vs %.3f without an allowance\n",
+                    MinChunk, LongestUnit, WorstOver, MaxPending, Budget / W.m_Setup.m_RaysPerSurfel, MaxRounds, BoxServed, Floor1, Floor0);
+        CHECK(MinChunk < W.m_Setup.m_RaysPerSurfel, "a surfel's rays were never split into units (%d rays a unit)", MinChunk);
+        CHECK(WorstOver < 1.0, "an update's trace took %.2f ms more than the allowance plus one unit", WorstOver);     // (1 ms: the workers' wake-up in Debug)
+        CHECK(MaxPending <= Budget / W.m_Setup.m_RaysPerSurfel, "pending work grew past one pick (%d)", MaxPending);
+        CHECK(BoxServed > 0, "the far box was never served while the wall moved (fairness)");
+        CHECK(std::abs(Floor1 - Floor0) < 0.1 * std::max(Floor0, 1e-3), "the floor did not converge to the scene without an allowance (%.3f vs %.3f)", Floor1, Floor0);
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {
