@@ -152,10 +152,16 @@ namespace xlionrender
         L.m_Sky          = Scene.m_Sky.m_Intensity <= 0 ? Scene.m_Ambient * (1.0f / gi::pi_v)
                          : Scene.m_Sky.m_pCubemap      ? m_EnvMean * Scene.m_Sky.m_Intensity                                  // (updateEnvironment)
                          :                               (Scene.m_Sky.m_Zenith + Scene.m_Sky.m_Horizon) * (0.5f * Scene.m_Sky.m_Intensity);
+        if( Scene.m_Sky.m_Intensity > 0 && Scene.m_Sky.m_pCubemap && m_bEnvOct )
+        {
+            for( std::size_t k = 0; k < L.m_SkyOct.size(); ++k ) L.m_SkyOct[k] = m_EnvOct[k] * Scene.m_Sky.m_Intensity;
+            L.m_bSkyOct = true;
+        }
         L.m_Points.reserve(Scene.m_LocalLights.size());
         for( const auto& LL : Scene.m_LocalLights ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });
         W.m_Setup.m_FilterPasses  = std::clamp(Scene.m_GI.m_FilterPasses, 0, 16);   // what is shown only: no re-solve
         W.m_Setup.m_RaysPerSurfel = std::clamp(Scene.m_GI.m_RaysPerSurfel, 1, 256);
+        W.m_Setup.m_Saturation    = std::clamp(Scene.m_GI.m_Saturation, 0.0f, 4.0f);     // what is shown only: no re-solve
         if( W.m_Setup.m_EmissiveScale != Scene.m_GI.m_EmissiveScale )          // a new scale: every instance re-solves
         {
             W.m_Setup.m_EmissiveScale = Scene.m_GI.m_EmissiveScale;
@@ -364,6 +370,12 @@ namespace xlionrender
                     S = S + xmath::fvec3(details::HalfToFloat(t[0]), details::HalfToFloat(t[1]), details::HalfToFloat(t[2]));
                 }
                 m_EnvMean = S * (1.0f / 64.0f);
+                for( int j = 0; j < 4; ++j ) for( int i = 0; i < 4; ++i )              // the level's inner texels (kEnvBorder 2 of its 8)
+                {
+                    const auto* t = P + 4 * (std::size_t(130 + j) * W + 370 + i);
+                    m_EnvOct[std::size_t(j * 4 + i)] = xmath::fvec3(details::HalfToFloat(t[0]), details::HalfToFloat(t[1]), details::HalfToFloat(t[2]));
+                }
+                m_bEnvOct = true;
             }
         }
         if( !m_bEnvOn && m_bEnvDFGReady ) return;        // (the first render builds everything once: bound textures must have been rendered)
@@ -973,6 +985,25 @@ namespace xlionrender
                 }
             }
 
+            // The sky as the background: the cubemap seen from inside, behind everything that was drawn
+            if( bMain && Scene.m_Sky.m_bVisible && Scene.m_Sky.m_pCubemap && Scene.m_Sky.m_Intensity > 0 )
+            {
+                if( m_pSkyBackground != Scene.m_Sky.m_pCubemap )       // its instance binds the texture
+                {
+                    m_Device.Destroy(std::move(m_SkyBackgroundInstance));
+                    auto Bind = std::array{ xgpu::pipeline_instance::sampler_binding{ *const_cast<xgpu::texture*>(Scene.m_Sky.m_pCubemap) } };
+                    m_pSkyBackground = m_Device.Create(m_SkyBackgroundInstance, { .m_PipeLine = m_SkyBackgroundPipeline, .m_SamplersBindings = Bind }) == nullptr ? Scene.m_Sky.m_pCubemap : nullptr;
+                }
+                if( m_pSkyBackground )
+                {
+                    Cmd.setPipelineInstance(m_SkyBackgroundInstance);
+                    Cmd.setPushConstants(details::push_sky_background{ W2C.Inverse(), xmath::fvec4(Scene.m_Sky.m_Intensity, float(View.m_Width), float(View.m_Height), 0) });
+                    Cmd.setBuffer(m_FullscreenVB);
+                    Cmd.setBuffer(m_FullscreenIB);
+                    Cmd.Draw(3);
+                }
+            }
+
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 2);
         }
     }
@@ -1103,6 +1134,7 @@ namespace xlionrender
             else if( bCurrent )
             {
                 m_pGIWorld->SetTriangleAlbedo(J.m_GIId, J.m_First, Albedo);
+                m_pGIWorld->SetTriangleEmission(J.m_GIId, J.m_First, Emission);
                 if( J.m_First + std::size_t(n) >= G.m_Tris.size() )         // its last batch: the SURFACE_COLOR view's table (the mesh's first instance)
                 {
                     const auto& All = m_pGIWorld->TriangleAlbedo(J.m_GIId);

@@ -325,8 +325,13 @@ namespace xlionrender
         std::uint64_t               m_EnvKey                = 0;            // the sky the atlas holds (0: none yet)
         xgpu::pipeline              m_EnvCubemapPipeline;                   // a cubemap texture (scene::sky::m_pCubemap) into the source
         xgpu::pipeline_instance     m_EnvCubemapInstance;
+        xgpu::pipeline              m_SkyBackgroundPipeline;                // the cubemap as the background (scene::sky::m_bVisible)
+        xgpu::pipeline_instance     m_SkyBackgroundInstance;
+        const xgpu::texture*        m_pSkyBackground        = nullptr;      // the cubemap m_SkyBackgroundInstance binds
         const xgpu::texture*        m_pEnvCubemap           = nullptr;      // the cubemap m_EnvCubemapInstance binds
         xmath::fvec3                m_EnvMean               { 0, 0, 0 };    // the cubemap's mean color (the GI's sky)
+        std::array<xmath::fvec3, 16> m_EnvOct               {};             // and its coarsest prefiltered level, 4 x 4 (gi::lights::m_SkyOct)
+        bool                        m_bEnvOct               = false;
         std::uint64_t               m_EnvMeanFrame          = 0;            // the frame it was prefiltered in (0: read)
         bool                        m_bEnvDFGReady          = false;
         bool                        m_bEnvOn                = false;

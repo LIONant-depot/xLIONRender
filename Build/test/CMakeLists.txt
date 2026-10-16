@@ -21,7 +21,7 @@ set(SHADER_DIR "${XLIONRENDER_DIR}/src/shaders")
 set(SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/sprv_shaders_h")
 set(SHADER_HEADERS)
 foreach(PAIR xlionrender_forward_vert:vertex xlionrender_forward_standard_frag:fragment xlionrender_fullscreen_vert:vertex
-             xlionrender_tonemap_frag:fragment xlionrender_blit_frag:fragment xlionrender_default_material_frag:fragment xlionrender_depth_frag:fragment xlionrender_clear_depth_vert:vertex xlionrender_shadow_remap_frag:fragment xlionrender_geom_standard_frag:fragment xlionrender_env_sky_frag:fragment xlionrender_env_prefilter_frag:fragment xlionrender_env_dfg_frag:fragment xlionrender_env_downsample_frag:fragment xlionrender_env_cube_to_oct_frag:fragment xlionrender_env_cubemap_frag:fragment xlionrender_static_geom_vert:vertex xlionrender_static_geom_gi_vert:vertex xlionrender_skin_geom_vert:vertex xlionrender_gi_capture_vert:vertex)
+             xlionrender_tonemap_frag:fragment xlionrender_blit_frag:fragment xlionrender_default_material_frag:fragment xlionrender_depth_frag:fragment xlionrender_clear_depth_vert:vertex xlionrender_shadow_remap_frag:fragment xlionrender_geom_standard_frag:fragment xlionrender_env_sky_frag:fragment xlionrender_env_prefilter_frag:fragment xlionrender_env_dfg_frag:fragment xlionrender_env_downsample_frag:fragment xlionrender_env_cube_to_oct_frag:fragment xlionrender_env_cubemap_frag:fragment xlionrender_sky_background_frag:fragment xlionrender_static_geom_vert:vertex xlionrender_static_geom_gi_vert:vertex xlionrender_skin_geom_vert:vertex xlionrender_gi_capture_vert:vertex)
   string(REPLACE ":" ";" PAIR ${PAIR})
   list(GET PAIR 0 NAME)
   list(GET PAIR 1 STAGE)

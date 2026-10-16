@@ -857,6 +857,80 @@ int main()
         CHECK(SLinks < 0.5 * SHits, "the emitter lists are no less noisy than the hits (%.0f%% vs %.0f%%)", 100 * SLinks, 100 * SHits);
     }
 
+    // 6j2. A light smaller than its surfels (SetTriangleEmission): a surfel's emission is the mean over its patch, so the emitted power
+    //      (the emission times the surfels' area, 1.47 r^2) is the light's at any surfel size - a point sample read 0 or the full emission
+    {
+        for (const float Rad : { 0.3f, 0.7f })
+        {
+            surfel_mesh M;
+            AddQuad(M, { -2, 1, -2 }, { 4, 0, 0 }, { 0, 0, 4 }, 0.5f);                    // the ceiling (facing down)
+            const std::size_t nCeiling = M.m_Tris.size();
+            AddQuad(M, { -0.1f, 0.99f, -0.1f }, { 0.2f, 0, 0 }, { 0, 0, 0.2f }, 0.2f);    // the light: 20 cm square, 1 cm below it
+            M.Bake(Rad, 3 * Rad);
+            world W;
+            const int i = W.Add(M, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            W.SetSurfelMaterial(i, {}, std::vector<v3>(M.m_Levels[0].size(), v3{ 0, 0, 0 }));
+            std::vector<v3> Tri(M.m_Tris.size(), v3{ 0, 0, 0 });
+            for (std::size_t t = nCeiling; t < Tri.size(); ++t) Tri[t] = v3{ 10, 10, 10 };
+            W.SetTriangleEmission(i, 0, Tri);
+            const auto& E = W.SurfaceEmission(i);
+            double Power = 0; int nEmitting = 0;
+            for (std::size_t s = 0; s < E.size(); ++s)
+            {
+                const float r = M.m_Levels[0][s].m_Radius;
+                Power += E[s].m_X * 1.47f * r * r;
+                nEmitting += E[s].m_X > 0;
+            }
+            const double Want = 10.0 * 0.2 * 0.2;
+            std::printf("a 20 cm light, surfels of %.1f m: %d surfels emit, power %.3f (the light's %.3f)\n", Rad, nEmitting, Power, Want);
+            CHECK(nEmitting > 0, "the light has no surfel to emit it (surfels of %.1f m)", Rad);
+            CHECK(std::abs(Power - Want) < 0.35 * Want, "the emitted power is off: %.3f vs the light's %.3f (surfels of %.1f m)", Power, Want, Rad);
+        }
+    }
+
+    // 6j3. The sky by direction (lights::SkyAt): a 4 x 4 octahedral map with down (-Y) at the center and the seams up (the renderer's
+    //      coarsest prefiltered level): a ray leaving downward reads the center texels, one leaving upward the corners
+    {
+        lights L;
+        L.m_Sky = v3{ 0.5f, 0.5f, 0.5f };
+        CHECK(std::abs(L.SkyAt({ 0, 1, 0 }).m_X - 0.5f) < 1e-6f, "without a map the sky is its mean");
+        L.m_bSkyOct = true;
+        for (auto& T : L.m_SkyOct) T = v3{ 1, 1, 1 };                          // the border texels: the sky above
+        for (int j = 1; j <= 2; ++j) for (int i = 1; i <= 2; ++i) L.m_SkyOct[std::size_t(j * 4 + i)] = v3{ 0.1f, 0.1f, 0.1f };   // the center: the ground below
+        const float Down = L.SkyAt({ 0, -1, 0 }).m_X, Up = L.SkyAt({ 0, 1, 0 }).m_X, Side = L.SkyAt({ 1, 0, 0 }).m_X;
+        std::printf("sky by direction: down %.2f, up %.2f, sideways %.2f\n", Down, Up, Side);
+        CHECK(std::abs(Down - 0.1f) < 0.05f, "a ray leaving down does not read the center of the map (%.2f)", Down);
+        CHECK(std::abs(Up - 1.0f) < 0.05f, "a ray leaving up does not read the map's border (%.2f)", Up);
+        CHECK(Side > Down && Side < Up + 1e-3f, "the horizon is not between the ground and the sky (%.2f)", Side);
+    }
+
+    // 6j4. The shown light's saturation (setup::m_Saturation, after the filter): the colors move away from their luminance, which is kept; the
+    //      solver's light is not touched (its bounces would compound it)
+    {
+        surfel_mesh Ground, Panel;
+        AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
+        AddQuad(Panel,  { -0.5f, 1, -0.5f }, { 1, 0, 0 }, { 0, 0, 1 }, 0.25f);    // facing down
+        Ground.Bake(0.3f, 0.9f); Panel.Bake(0.3f, 0.9f);
+        world D;
+        const int iGround = D.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iPanel  = D.Add(Panel, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        D.SetSurfelMaterial(iPanel, {}, std::vector<v3>(Panel.m_Levels[0].size(), v3{ 2, 1, 0.5f }));
+        lights Dark;
+        for (int f = 0; f < 60; ++f) D.Update(Dark, { 0, 1, 0 }, 1 << 30, 17000 + f);
+        std::size_t s0 = 0; float Best = 1e30f;
+        for (std::size_t s = 0; s < Ground.m_Levels[0].size(); ++s) { const float d = Ground.m_Levels[0][s].m_Center.Length(); if (d < Best) { Best = d; s0 = s; } }
+        const auto Lum = [](const v3& c) { return 0.2126f * c.m_X + 0.7152f * c.m_Y + 0.0722f * c.m_Z; };
+        const v3   Plain = D.BasisLight(iGround)[s0][0];
+        const v3   Solved = D.InstanceLight(iGround)[s0];
+        D.m_Setup.m_Saturation = 2;
+        const v3   Sat = D.BasisLight(iGround)[s0][0];
+        const float ChromaPlain = Plain.m_X - Lum(Plain), ChromaSat = Sat.m_X - Lum(Sat);
+        std::printf("saturation 1 -> 2 under the panel: luminance %.3f -> %.3f, red above its luminance %.3f -> %.3f\n", Lum(Plain), Lum(Sat), ChromaPlain, ChromaSat);
+        CHECK(std::abs(Lum(Sat) - Lum(Plain)) < 0.02f * std::max(Lum(Plain), 1e-3f), "the saturation changed the luminance (%.3f -> %.3f)", Lum(Plain), Lum(Sat));
+        CHECK(ChromaPlain > 0 && std::abs(ChromaSat - 2 * ChromaPlain) < 0.05f * ChromaPlain, "the saturation did not double the color (%.3f -> %.3f)", ChromaPlain, ChromaSat);
+        CHECK(std::abs(D.InstanceLight(iGround)[s0].m_X - Solved.m_X) < 1e-9f, "the saturation reached the solver's light");
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {

@@ -159,6 +159,13 @@ namespace xlionrender::details
         xmath::fvec4    m_Params;           // the table's size, samples
     };
 
+    // xlionrender_sky_background_frag.glsl
+    struct push_sky_background
+    {
+        xmath::fmat4    m_InvW2C;           // clip -> the camera-centered world
+        xmath::fvec4    m_Params;           // x: the intensity, yz: the size of the view
+    };
+
     // xlionrender_tonemap_frag.glsl
     struct push_tonemap
     {

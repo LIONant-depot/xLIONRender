@@ -1470,8 +1470,27 @@ namespace xlionrender::gi
         };
         v3                  m_SunDirection{ 0, -1, 0 };     // the direction the light travels
         v3                  m_SunColor{ 0, 0, 0 };
-        v3                  m_Sky{ 0, 0, 0 };               // the radiance of rays that leave the scene
+        v3                  m_Sky{ 0, 0, 0 };               // the radiance of rays that leave the scene (its mean)
+        std::array<v3, 16>  m_SkyOct{};                     // or by direction (m_bSkyOct): a 4 x 4 octahedral map of the sky's coarsest prefiltered level (xlionrender_octahedral.glsl)
+        bool                m_bSkyOct = false;
         std::vector<point>  m_Points;
+
+        // The radiance of a ray that leaves the scene along D: the sky above is not the ground below (a uniform mean lit the shade of an
+        // arcade with the average of a bright sky and a dark ground)
+        v3 SkyAt(const v3& D) const noexcept
+        {
+            if (!m_bSkyOct) return m_Sky;
+            const float x0 = D.m_X, y0 = D.m_Z, z0 = -D.m_Y;                    // OctEncode: -Y is the center
+            const float k  = 1.0f / std::max(std::abs(x0) + std::abs(y0) + std::abs(z0), 1e-12f);
+            const float x = x0 * k, y = y0 * k, z = z0 * k;
+            const float u = z >= 0 ? x : (1 - std::abs(y)) * (x >= 0 ? 1.0f : -1.0f);
+            const float v = z >= 0 ? y : (1 - std::abs(x)) * (y >= 0 ? 1.0f : -1.0f);
+            const float fx = std::clamp((u * 0.5f + 0.5f) * 4 - 0.5f, 0.0f, 3.0f), fy = std::clamp((v * 0.5f + 0.5f) * 4 - 0.5f, 0.0f, 3.0f);
+            const int   ix = std::min(int(fx), 2), iy = std::min(int(fy), 2);
+            const float tx = fx - float(ix), ty = fy - float(iy);
+            const auto  T  = [&](int i, int j) { return m_SkyOct[std::size_t(j * 4 + i)]; };
+            return (T(ix, iy) * (1 - tx) + T(ix + 1, iy) * tx) * (1 - ty) + (T(ix, iy + 1) * (1 - tx) + T(ix + 1, iy + 1) * tx) * ty;
+        }
     };
 
     class world
@@ -1482,6 +1501,7 @@ namespace xlionrender::gi
         {
             int     m_RaysPerSurfel = 8;
             float   m_MinBlend      = 0;        // the warm-up's blend (1 / n after a change) never below this (1: every pass replaces)
+            float   m_Saturation    = 1;        // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
             float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
             int     m_FilterPasses  = 4;        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
             bool    m_bSpreadOrigins = true;    // the fine surfels' rays start across their patch (surfel_mesh::BuildOrigins), not at their center
@@ -1537,9 +1557,75 @@ namespace xlionrender::gi
             auto& I = m_Instances[Id];
             const std::size_t n = I.m_pMesh->m_Levels[0].size();
             I.m_SurfAlbedo   = Albedo.size() == n ? std::move(Albedo) : std::vector<v3>{};
-            I.m_SurfEmission = Emission.size() == n ? std::move(Emission) : std::vector<v3>{};
+            I.m_SurfEmissionPoint = Emission.size() == n ? std::move(Emission) : std::vector<v3>{};
+            ResolveSurfEmission(Id);
             m_bLinksDirty = true;
             DirtyNear(I.m_Lo, I.m_Hi);
+        }
+
+        // An instance's triangles' emission (the material capture, triangle First on). A surfel's emission is the mean over its patch, so
+        // the solver's area factor (1.47 r^2) gives the patch's power: a light smaller than a surfel is not lost (a point sample reads
+        // 0 or the full emission) and a surfel is not over-lit by it
+        void SetTriangleEmission(int Id, std::size_t First, const std::vector<v3>& Emission) noexcept
+        {
+            auto& I = m_Instances[Id];
+            const std::size_t n = I.m_pMesh->m_Tris.size();
+            if (I.m_TriEmission.size() != n) { I.m_TriEmission.assign(n, v3{ 0, 0, 0 }); I.m_bTriEmission = false; }
+            for (std::size_t k = 0; k < Emission.size() && First + k < n; ++k) I.m_TriEmission[First + k] = Emission[k];
+            if (First + Emission.size() < n) return;                // not the last batch
+            I.m_bTriEmission = true;
+            ResolveSurfEmission(Id);
+            m_bLinksDirty = true;
+            DirtyNear(I.m_Lo, I.m_Hi);
+        }
+
+        // The surfels' emission: the radiance whose power over the surfel's nominal area (1.47 r^2, RebuildEmitterLinks) is the emitted power
+        // of the triangles it is nearest to (sample points over each emissive triangle, each to its nearest surfel facing the same way).
+        // Without the triangles' emission (or the surfels' own capture): the surfels' sample at their center
+        void ResolveSurfEmission(int Id) noexcept
+        {
+            auto& I = m_Instances[Id];
+            I.m_SurfEmission = I.m_SurfEmissionPoint;
+            const auto& M = *I.m_pMesh;
+            const auto& L = M.m_Levels[0];
+            if (!I.m_bTriEmission || L.empty() || I.m_SurfEmissionPoint.size() != L.size() || I.m_TriEmission.size() != M.m_Tris.size()) return;
+
+            float Rmin = L[0].m_Radius, Rmax = L[0].m_Radius;
+            for (const auto& S : L) { Rmin = std::min(Rmin, S.m_Radius); Rmax = std::max(Rmax, S.m_Radius); }
+            surfel_grid G{ 2 * Rmax, {} };
+            for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
+
+            std::vector<v3> Acc(L.size(), v3{ 0, 0, 0 });
+            for (std::size_t t = 0; t < M.m_Tris.size(); ++t)
+            {
+                const v3& Le = I.m_TriEmission[t];
+                if (Le.m_X + Le.m_Y + Le.m_Z <= 1e-6f) continue;
+                const auto& T = M.m_Tris[t];
+                const v3    A = M.m_Pos[T[0]], B = M.m_Pos[T[1]], C = M.m_Pos[T[2]];
+                const v3    F = (B - A).Cross(C - A);
+                const float Area = 0.5f * F.Length();
+                if (Area < 1e-12f) continue;
+                const v3  N = F * (1.0f / F.Length());
+                const int n = std::clamp(int(std::ceil(Area * 4.0f / (Rmin * Rmin))), 1, 4096);
+                const float w = Area / float(n);
+                for (int j = 0; j < n; ++j)
+                {
+                    const auto Frac = [](float x) { return x - std::floor(x); };
+                    float u = Frac((float(j) + 0.5f) * 0.7548776662f), v = Frac((float(j) + 0.5f) * 0.5698402910f);
+                    if (u + v > 1) { u = 1 - u; v = 1 - v; }
+                    const v3 P = A + (B - A) * u + (C - A) * v;
+                    float Best = 1e30f; int iBest = -1;
+                    for (int Ring = 1; Ring <= 3 && iBest < 0; ++Ring)
+                        G.Near(P, Ring, [&](int s)
+                        {
+                            if (L[s].m_Normal.Dot(N) < 0.5f) return;
+                            const float d = (P - L[s].m_Center).Length();
+                            if (d < Best) { Best = d; iBest = s; }
+                        });
+                    if (iBest >= 0) Acc[iBest] = Acc[iBest] + Le * w;
+                }
+            }
+            for (std::size_t s = 0; s < L.size(); ++s) I.m_SurfEmission[s] = Acc[s] * (1.0f / (1.47f * L[s].m_Radius * L[s].m_Radius));
         }
 
         // An instance's triangles' colors (the material capture, triangle First on): a ray hit takes its triangle's (SurfaceAt), so a
@@ -1553,6 +1639,7 @@ namespace xlionrender::gi
             DirtyNear(I.m_Lo, I.m_Hi);
         }
         const std::vector<v3>& TriangleAlbedo( int Id ) const noexcept { return m_Instances[Id].m_TriAlbedo; }
+        const std::vector<v3>& SurfaceEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }       // per fine surfel (tests)
 
         // An instance's transparent material slots (SlotSeeThrough[slot]: its material has alpha). The GI leaves them out, as the references
         // do (Lumen, DDGI, Wicked: translucent surfaces neither block nor bounce): rays pass through their triangles, their surfels go dark
@@ -1626,7 +1713,7 @@ namespace xlionrender::gi
                         pF[s][i].m_X = pE[s].m_X * f.m_X * 3.0f; pF[s][i].m_Y = pE[s].m_Y * f.m_Y * 3.0f; pF[s][i].m_Z = pE[s].m_Z * f.m_Z * 3.0f;
                     }
             }
-            if (Nb.m_First.size() != std::size_t(n) + 1 || m_Setup.m_FilterPasses <= 0) return F;
+            if (Nb.m_First.size() != std::size_t(n) + 1 || m_Setup.m_FilterPasses <= 0) { Saturate(F); return F; }
             auto& In = I.m_FilterIn;
             In.resize(n);
             const std::uint32_t* pFirst = Nb.m_First.data(); const std::uint32_t* pIdx = Nb.m_Index.data();
@@ -1661,7 +1748,23 @@ namespace xlionrender::gi
                     }
                 });
             }
+            Saturate(F);
             return F;
+        }
+
+        // The shown light's saturation: each color of the basis moved from its luminance by m_Setup.m_Saturation (the luminance kept; what
+        // the filter and the surfels' size average away). Only what is shown (the solver's light is not touched: its bounces would compound it)
+        void Saturate(std::vector<basis>& F) const noexcept
+        {
+            const float Sa = m_Setup.m_Saturation;
+            if (Sa == 1.0f) return;
+            for (auto& B : F)
+                for (int i = 0; i < 3; ++i)
+                {
+                    v3& C = B[i];
+                    const float Y = 0.2126f * C.m_X + 0.7152f * C.m_Y + 0.0722f * C.m_Z;
+                    C.m_X = std::max(Y + (C.m_X - Y) * Sa, 0.0f); C.m_Y = std::max(Y + (C.m_Y - Y) * Sa, 0.0f); C.m_Z = std::max(Y + (C.m_Z - Y) * Sa, 0.0f);
+                }
         }
 
         // The mean of the shown basis (what a surfel's own normal reads)
@@ -2093,7 +2196,7 @@ namespace xlionrender::gi
                         MA[3 * t] += d; MA[3 * t + 1] += d * d; MA[3 * t + 2] += 1;
                         Bw = BasisWeights(Dirs, Dm);                        // the ray's share of each basis direction
                     }
-                    if (H.m_Inst < 0) { Sum = Sum + L.m_Sky; for (int i = 0; i < 3; ++i) BA[i] = BA[i] + L.m_Sky * Bw[i]; continue; }
+                    if (H.m_Inst < 0) { const v3 Sky = L.SkyAt(D); Sum = Sum + Sky; for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Sky * Bw[i]; continue; }
                     const v3 Nh = HitNormal(H);
                     // A back face: no light. Within the surfel's reach it says the surfel may be buried (inside a wall or a frame, back faces are
                     // centimeters away); farther it is single-sided geometry seen from behind (a ceiling made to face out, metres up): not buried
@@ -2239,6 +2342,8 @@ namespace xlionrender::gi
             std::vector<moments>    m_Moments;                  // per surfel of the active level (MomentTexel)
             std::vector<v3>         m_SurfAlbedo, m_SurfEmission;     // per fine surfel (SetSurfelMaterial; empty: m_Albedo, none)
             std::vector<v3>         m_TriAlbedo;                      // per triangle (SetTriangleAlbedo; empty: the surfels')
+            std::vector<v3>         m_TriEmission, m_SurfEmissionPoint;   // per triangle (SetTriangleEmission), and the surfels' emission sampled at their center (SetSurfelMaterial)
+            bool                    m_bTriEmission = false;           // m_TriEmission is complete: m_SurfEmission is made from it (ResolveSurfEmission)
             std::vector<std::uint8_t> m_SeeThrough, m_SurfSeeThrough;   // per triangle, per fine surfel: transparent (SetSeeThrough; empty: none)
             std::vector<std::uint32_t> m_LinkFirst;              // per fine surfel + 1: its emitter links (RebuildEmitterLinks)
             std::vector<emit_link>  m_Links;

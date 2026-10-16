@@ -103,6 +103,7 @@ namespace xlionrender
         xmath::fvec3    m_Horizon       { 0.70f, 0.78f, 0.90f };
         xmath::fvec3    m_Ground        { 0.22f, 0.20f, 0.18f };
         float           m_Intensity     = 0.0f;
+        bool            m_bVisible      = false;        // the cubemap is also drawn as the background: seen from inside an infinitely far sphere, behind everything (m_Intensity times its colors)
         const xgpu::texture* m_pCubemap = nullptr;      // a cubemap texture lights instead of the gradient (its colors times m_Intensity; HDR or not)
     };
 
@@ -132,6 +133,7 @@ namespace xlionrender
         int             m_RaysPerSurfel = 8;        // rays a surfel casts per update (stratified over its hemisphere): more is less noise, fewer surfels per frame
         int             m_FilterPasses  = 4;        // the shown GI light's spatial filter: each pass blends every surfel with its neighbors (0: none)
         bool            m_bMoments      = true;     // the reads' depth-moment test (a surfel hidden from the point is faded); off: only the plane test
+        float           m_Saturation    = 1;        // the shown GI light's saturation (1: as solved; luminance kept): the filter and the coarse surfels average its colors toward grey
         float           m_EmissiveScale = 100;      // self-illuminated materials are lights with no light entity, their emission a texture color (0..1): the GI takes it this many times brighter (their look on screen stays)
     };
 

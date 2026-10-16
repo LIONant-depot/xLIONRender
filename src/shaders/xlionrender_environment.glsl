@@ -102,7 +102,17 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         }
     }
 
-    if (g_GI.w > 0.5) Diff = g_GI.rgb / 3.14159265359;            // irradiance -> the diffuse term's radiance
+    if (g_GI.w > 0.5)
+    {
+        // The GI knows how much light reaches this point: where it gets a small part of what the sky alone would give (an arcade, a corner) the
+        // sky and probe reflection (Spec) is mostly occluded too. Without this, the Fresnel bias of the split-sum (large at grazing angles) times an
+        // unoccluded sky is a veil that washes out a wall the GI shows as dark (specular occlusion, from the ratio of the GI light to the open sky's)
+        const vec3  GIDiff = g_GI.rgb / 3.14159265359;            // irradiance -> the diffuse term's radiance
+        const float SkyLum = dot(Diff, vec3(0.2126, 0.7152, 0.0722));
+        const float GILum  = dot(GIDiff, vec3(0.2126, 0.7152, 0.0722));
+        Spec *= SkyLum > 1e-4 ? clamp(GILum / SkyLum, 0.0, 1.0) : 1.0;
+        Diff  = GIDiff;
+    }
     const vec2 DFG = textureLod(SamplerEnvDFG, vec2(NdotV, PerceptualRoughness), 0.0).rg;
     return (Diff * Albedo * (1.0 - Metallic) + Spec * (F0 * DFG.x + DFG.y)) * AO;
 }

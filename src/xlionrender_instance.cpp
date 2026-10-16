@@ -39,6 +39,9 @@ namespace xlionrender
         constexpr std::uint32_t s_EnvDownsampleFrag[] = {
             #include "xlionrender_env_downsample_frag.h"
         };
+        constexpr std::uint32_t s_SkyBackgroundFrag[] = {
+            #include "xlionrender_sky_background_frag.h"
+        };
         constexpr std::uint32_t s_EnvCubemapFrag[] = {
             #include "xlionrender_env_cubemap_frag.h"
         };
@@ -155,7 +158,8 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_WhiteTexture));
         ReleaseBuffer(m_LightUBO);
         ReleaseBuffer(m_LightRing);
-        for( auto* p : { &m_EnvSkyInstance, &m_EnvPrefilterInstance, &m_EnvDFGInstance, &m_EnvCubemapInstance } ) m_Device.Destroy(std::move(*p));
+        for( auto* p : { &m_EnvSkyInstance, &m_EnvPrefilterInstance, &m_EnvDFGInstance, &m_EnvCubemapInstance, &m_SkyBackgroundInstance } ) m_Device.Destroy(std::move(*p));
+        m_Device.Destroy(std::move(m_SkyBackgroundPipeline));
         for( auto& I : m_EnvDownsampleInstance ) m_Device.Destroy(std::move(I));
         for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline, &m_EnvDownsamplePipeline, &m_EnvCubemapPipeline } ) m_Device.Destroy(std::move(*p));
         for( auto* p : { &m_EnvAtlasPass, &m_EnvDFGPass } )                                 m_Device.Destroy(std::move(*p));
@@ -496,6 +500,18 @@ namespace xlionrender
             if( auto Err = MakePipe(m_EnvDFGPipeline,        DFG,        sizeof(details::push_env_dfg),        0); Err ) return Err;
             if( auto Err = MakePipe(m_EnvDownsamplePipeline, Downsample, sizeof(details::push_env_downsample), 1); Err ) return Err;
             if( auto Err = MakePipe(m_EnvCubemapPipeline,    Cubemap,    sizeof(details::push_env_cube_to_oct), 1); Err ) return Err;
+            // The sky as a background: depth-tested against the scene at the far plane, nothing written to the depth
+            {
+                xgpu::shader SkyBackground;
+                if( auto Err = Device.Create(SkyBackground, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_SkyBackgroundFrag) }); Err ) return Err;
+                auto Shaders  = std::array<const xgpu::shader*, 2>{ &SkyBackground, &ClearVert2 };
+                auto Samplers = std::array{ Clamp };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_sky_background), .m_Samplers = Samplers };
+                Setup.m_Primitive.m_Cull                 = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_DepthCompare      = xgpu::pipeline::depth_stencil::depth_compare::LESS_OR_EQUAL;
+                Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+                if( auto Err = Device.Create(m_SkyBackgroundPipeline, Setup); Err ) return Err;
+            }
             if( auto Err = Device.Create(m_EnvSkyInstance, { .m_PipeLine = m_EnvSkyPipeline }); Err ) return Err;
             if( auto Err = Device.Create(m_EnvDFGInstance, { .m_PipeLine = m_EnvDFGPipeline }); Err ) return Err;
             {
