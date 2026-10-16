@@ -1385,6 +1385,61 @@ int main()
         CHECK(Off0 != Off0b && Off0 != Off1, "the ray offsets did not advance, or two surfels share them");
     }
 
+    // 6j14. Phase 5, test A of the plan: a receiver-only instance moves. A floor and a wall in the sun, a sign (an emitter) over the floor,
+    //       and a 40 cm box dragged from the sun into the wall's shadow. As RECEIVER: rays pass through it, no floor surfel is lowered or
+    //       queued, no link work is scheduled for anyone but itself, and its own light follows it into the shadow. As FULL (the same drag):
+    //       the floor near it is affected
+    {
+        surfel_mesh Floor, Wall, Box, Sign;
+        AddQuad(Floor, { -8, 0, -8 }, { 0, 0, 16 }, { 16, 0, 0 }, 0.5f);
+        AddQuad(Wall,  { -2, 0, 0 }, { 0, 3, 0 }, { 4, 0, 0 }, 0.5f);                       // z = 0, facing -z
+        AddQuad(Sign,  { 3, 2, 3 }, { 0.4f, 0, 0 }, { 0, 0, 0.4f }, 0.2f);                  // facing down
+        const v3 Lo{ -0.2f, 0, -0.2f }, Hi{ 0.2f, 0.4f, 0.2f };
+        AddQuad(Box, { Lo.m_X, Hi.m_Y, Lo.m_Z }, { 0, 0, 0.4f }, { 0.4f, 0, 0 }, 0.1f);
+        AddQuad(Box, { Lo.m_X, Lo.m_Y, Lo.m_Z }, { 0, 0.4f, 0 }, { 0, 0, 0.4f }, 0.1f);
+        AddQuad(Box, { Hi.m_X, Lo.m_Y, Lo.m_Z }, { 0, 0, 0.4f }, { 0, 0.4f, 0 }, 0.1f);
+        AddQuad(Box, { Lo.m_X, Lo.m_Y, Lo.m_Z }, { 0.4f, 0, 0 }, { 0, 0.4f, 0 }, 0.1f);
+        AddQuad(Box, { Lo.m_X, Lo.m_Y, Hi.m_Z }, { 0, 0.4f, 0 }, { 0.4f, 0, 0 }, 0.1f);
+        Floor.Bake(0.25f, 0.75f); Wall.Bake(0.25f, 0.75f); Box.Bake(0.05f, 0.15f); Sign.Bake(0.1f, 0.3f);
+        lights L; L.m_SunDirection = v3{ 0, -1, 1 }.NormalizeCopy(); L.m_SunColor = v3{ 3, 3, 3 }; L.m_Sky = v3{ 0.1f, 0.1f, 0.1f };   // the sun toward +z: the wall shades z > 0
+        const v3 Eye{ 0, 2, -6 };
+        struct result { int Lowered = 0, Queued = 0, OtherLinks = 0; double SunLight = 0, ShadeLight = 0; bool bRayHits = false; };
+        const auto Run = [&](role Role)
+        {
+            result R;
+            world W;
+            const int iF = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            W.Add(Wall, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            const int iS = W.Add(Sign, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            W.SetSurfelMaterial(iS, {}, std::vector<v3>(Sign.m_Levels[0].size(), v3{ 10, 10, 10 }));
+            const int iB = W.Add(Box, xmath::fmat4::fromTranslation({ 0, 0, -3 }), { 0.6f, 0.6f, 0.6f });
+            W.SetRole(iB, Role);
+            const auto Mean = [&] { double m = 0; for (const auto& e : W.InstanceLight(iB)) m += e.m_X; return m / double(W.InstanceLight(iB).size()); };
+            for (int f = 0; f < 200; ++f) W.Update(L, Eye, 1 << 14, 29000 + f);
+            R.SunLight = Mean();
+            R.bRayHits = W.Cast({ 0, 0.2f, -5 }, { 0, 0, 1 }, 4.0f).m_Inst == iB;
+            for (int f = 0; f < 60; ++f)                                                   // dragged to z = +1.5 (behind the wall: in its shadow, 3 m long)
+            {
+                W.SetTransform(iB, xmath::fmat4::fromTranslation({ 0, 0, -3 + 0.075f * float(f + 1) }));
+                for (int k = 0; k < int(W.InstanceLight(iF).size()); ++k) R.Lowered += W.Confidence(iF, k) < 16;
+                R.Queued += W.UrgentCount(iF);
+                const auto St = W.Update(L, Eye, 1 << 14, 29200 + f);
+                R.OtherLinks += St.m_LinkPending > 1 ? 1 : 0;
+            }
+            for (int f = 0; f < 200; ++f) W.Update(L, Eye, 1 << 14, 29300 + f);
+            R.ShadeLight = Mean();
+            return R;
+        };
+        const result Rec = Run(role::RECEIVER), Full = Run(role::FULL);
+        std::printf("a receiver dragged into a shadow: %d floor surfels lowered, %d queued, %d updates with others' link work, the rays %s it; its light %.3f -> %.3f; "
+                    "the same drag as FULL: %d lowered, the rays %s it, its light %.3f -> %.3f\n",
+                    Rec.Lowered, Rec.Queued, Rec.OtherLinks, Rec.bRayHits ? "hit" : "pass", Rec.SunLight, Rec.ShadeLight,
+                    Full.Lowered, Full.bRayHits ? "hit" : "pass", Full.SunLight, Full.ShadeLight);
+        CHECK(Rec.Lowered == 0 && Rec.Queued == 0 && Rec.OtherLinks == 0 && !Rec.bRayHits, "a receiver changed the others (%d lowered, %d queued, %d link updates, rays hit %d)", Rec.Lowered, Rec.Queued, Rec.OtherLinks, int(Rec.bRayHits));
+        CHECK(Rec.ShadeLight < 0.5 * Rec.SunLight, "the receiver's light did not follow it into the shadow (%.3f -> %.3f)", Rec.SunLight, Rec.ShadeLight);
+        CHECK(Full.Lowered > 0 && Full.bRayHits, "a full-transport box changed nothing around it (%d lowered, rays hit %d)", Full.Lowered, int(Full.bRayHits));
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {

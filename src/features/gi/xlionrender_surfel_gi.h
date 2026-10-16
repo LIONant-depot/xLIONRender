@@ -407,6 +407,7 @@ namespace xlionrender::gi
     // around it; the long mean follows the samples at a rate that falls as low as 1/256 while they agree with it (within their own
     // noise: the light settles, no swimming) and rises toward 1 when they move away from it beyond that noise (a light changed: it
     // catches up). Samples far above the noise are clipped (fireflies).
+    enum class role : std::uint8_t { ASSET = 0, RECEIVER = 1, FULL = 2 };     // Phase 5: scene::gi_role (an instance's transport, over its mesh's m_bBounce)
     constexpr int warmup_passes_v = 16;     // after a change: the estimator's first samples are averaged (1 / n), its multiscale blend after
 
     // A surfel's light over time: one estimator for both regimes (documentation/gi_dynamic_master_plan.md, Phase 2b). After a change
@@ -1747,15 +1748,32 @@ namespace xlionrender::gi
             auto& I = m_Instances[Id];
             if (!I.m_bAlive) return;
             I.m_bAlive = false;
-            AffectNear(I.m_Lo, I.m_Hi);
+            if (Transports(I)) AffectNear(I.m_Lo, I.m_Hi);
             I.m_E.clear(); I.m_Acc.clear(); I.m_Valid.clear(); I.m_AccValid.clear();
             I.m_Links.clear(); I.m_LinkFirst.clear(); I.m_EmitB.clear(); I.m_bLinkHull = false; I.m_SurfLinkLo.clear(); I.m_SurfLinkHi.clear();
             m_bTlasDirty = true;
-            if (!I.m_EmitSurfs.empty()) { I.m_EmitSurfs.clear(); m_bEmittersDirty = true; MarkAllLinks(); }   // its light is gone for everyone
+            if (!Transports(I)) I.m_EmitSurfs.clear();                                                      // (it was in nobody's light)
+            else if (!I.m_EmitSurfs.empty()) { I.m_EmitSurfs.clear(); m_bEmittersDirty = true; MarkAllLinks(); }   // its light is gone for everyone
             else MarkLinksCrossing(I.m_Lo, I.m_Hi);                                                          // what it hid is seen again
         }
 
         bool IsAlive(int Id) const noexcept { return m_Instances[Id].m_bAlive; }
+
+        // Phase 5: an instance's transport role, over its mesh's (ASSET: the mesh's m_bBounce). A change of what it does for the others
+        // (blocking, bouncing, emitting) is a change for them: the rays' scene, the surfels near it, the links and the emitters
+        void SetRole(int Id, role Role) noexcept
+        {
+            auto& I = m_Instances[Id];
+            if (I.m_Role == Role) return;
+            const bool bWas = Transports(I);
+            I.m_Role = Role;
+            if (!I.m_bAlive || bWas == Transports(I)) return;
+            m_bTlasDirty = true;
+            AffectNear(I.m_Lo, I.m_Hi, Id);
+            MarkLinksCrossing(I.m_Lo, I.m_Hi);
+            if (!I.m_EmitSurfs.empty()) { m_bEmittersDirty = true; MarkAllLinks(); }
+        }
+        role GetRole(int Id) const noexcept { return m_Instances[Id].m_Role; }
 
         void SetTransform(int Id, const xmath::fmat4& L2W) noexcept
         {
@@ -1767,12 +1785,17 @@ namespace xlionrender::gi
             // Phase 4: it keeps its layout and starts from its light, its confidence lowered by half for a move, more by its rotation (the
             // basis turns with it: its directions are no longer what they saw; the angle weighs it, a heuristic, not an error bound)
             const float SelfA = std::max(0.5f, std::clamp(RotationAngle(Old, L2W) / (0.5f * pi_v), 0.0f, 1.0f));
-            m_MoveMarked += AffectNear(OldLo, OldHi, Id, SelfA);
-            m_MoveMarked += AffectNear(I.m_Lo, I.m_Hi, Id, SelfA);
-            m_bTlasDirty = true;
+            if (Transports(I))
+            {
+                m_MoveMarked += AffectNear(OldLo, OldHi, Id, SelfA);
+                m_MoveMarked += AffectNear(I.m_Lo, I.m_Hi, Id, SelfA);
+                m_bTlasDirty = true;
+            }
+            else MarkDirty(I, SelfA);                       // a receiver (Phase 5): only its own light; the others' and the rays' scene are as they were
             // The links (Phase 2): an emitter that moves changes what everyone sees of it; an occluder, only the links whose segments
             // cross its old or new box; a receiver, its own. They are rebuilt in bounded chunks (PumpLinks), the published ones stay in use
-            if (!I.m_EmitSurfs.empty()) { m_bEmittersDirty = true; MarkAllLinks(); }
+            if (!Transports(I)) MarkLinks(Id);                                         // its own links only
+            else if (!I.m_EmitSurfs.empty()) { m_bEmittersDirty = true; MarkAllLinks(); }
             else { MarkLinks(Id); MarkLinksCrossing(OldLo, OldHi); MarkLinksCrossing(I.m_Lo, I.m_Hi); }
             ++m_nMovesAcc;
             m_MovesMsAcc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
@@ -2810,6 +2833,7 @@ namespace xlionrender::gi
             int                     m_History   = 0;
             int                     m_Cursor    = 0;            // the next surfel of the pass in progress (0: none)
             float                   m_DirtyA    = 1;            // MarkDirty: how much the change affects it (estimator::Lower at its next pass)
+            role                    m_Role      = role::ASSET;  // Phase 5: its transport (SetRole, Transports)
             std::vector<int>        m_Urgent;                   // Phase 4: surfels a change affected, traced first (AffectNear)
             mutable bool            m_bBuckets = false;         // BuildBuckets: its surfels in world cells (what a change near it looks at)
             mutable float           m_BucketCell = 1;
@@ -2998,7 +3022,7 @@ namespace xlionrender::gi
         {
             if (!m_bTlasDirty) return;
             m_TlasIds.clear();
-            for (int i = 0; i < int(m_Instances.size()); ++i) if (m_Instances[i].m_bAlive && m_Instances[i].m_pMesh->m_bBounce) m_TlasIds.push_back(i);
+            for (int i = 0; i < int(m_Instances.size()); ++i) if (m_Instances[i].m_bAlive && Transports(m_Instances[i])) m_TlasIds.push_back(i);
             m_Tlas.Build(int(m_TlasIds.size()), [&](int t, v3& Lo, v3& Hi) { Lo = m_Instances[m_TlasIds[t]].m_Lo; Hi = m_Instances[m_TlasIds[t]].m_Hi; });
             m_bTlasDirty = false;
         }
@@ -3033,6 +3057,11 @@ namespace xlionrender::gi
             const surfel& S = I.m_pMesh->m_Levels[I.m_Level][Surf];
             const float   d = (I.m_L2W * S.m_Center - Eye).Length() / (S.m_Radius * std::max(I.m_MeanScale, 1e-9f));
             return d < far_tier_radii_v[0] ? 1 : d < far_tier_radii_v[1] ? 2 : d < far_tier_radii_v[2] ? 4 : 8;
+        }
+
+        static bool Transports(const instance& I) noexcept           // it blocks, bounces and emits for the others
+        {
+            return I.m_Role == role::FULL || (I.m_Role == role::ASSET && I.m_pMesh->m_bBounce);
         }
 
         static int BadSurfel(const v3& E, float Valid) noexcept      // not a light: not finite, or negative
@@ -3138,7 +3167,7 @@ namespace xlionrender::gi
             for (int i = 0; i < int(m_Instances.size()); ++i)
             {
                 const auto& I = m_Instances[i];
-                if (!I.m_bAlive) continue;
+                if (!I.m_bAlive || !Transports(I)) continue;
                 for (const int e : I.m_EmitSurfs)
                 {
                     const auto& S = I.m_pMesh->m_Levels[0][e];

@@ -117,10 +117,12 @@ namespace xlionrender
                                                , .m_bTriangles = true, .m_First = std::uint32_t(t) });
                 }
             };
+            const auto Role = gi::role((D.m_Instance >> draw_gi_role_shift_v) & 3u);
             if( It->second < 0 )
             {
                 const auto& Mat = D.m_Material;
                 It->second = W.Add(*pM->m_pGI, D.m_L2W, Mat.m_BaseColor * (1 - Mat.m_Metallic));
+                W.SetRole(It->second, Role);
                 m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), It->second + 1));
                 m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), pM->m_GIStamp, 0, D.m_Materials };
                 TakeMaterials(It->second);
@@ -132,6 +134,7 @@ namespace xlionrender
                     m_GITrack[It->second].m_Materials = D.m_Materials;
                     TakeMaterials(It->second);
                 }
+                W.SetRole(It->second, Role);                                   // (nothing when it is the same)
                 if( std::memcmp(&m_GITrack[It->second].m_L2W, &D.m_L2W, sizeof(xmath::fmat4)) != 0 )
                 {
                     W.SetTransform(It->second, D.m_L2W);

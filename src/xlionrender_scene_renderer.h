@@ -142,7 +142,8 @@ namespace xlionrender
                 (void)m_Renderer.SetOutlineProxy(*pMesh, PosNrm, Idx, Center, Half);
             }
 #endif
-            draw D{ .m_Mesh = *pMesh, .m_L2W = L2W, .m_UserID = Entity, .m_Instance = std::uint64_t(std::uint32_t(Entity ^ (Entity >> 32)) | 1u) };
+            draw D{ .m_Mesh = *pMesh, .m_L2W = L2W, .m_UserID = Entity
+                  , .m_Instance = std::uint64_t(std::uint32_t(Entity ^ (Entity >> 32)) | 1u) | (std::uint64_t(Mesh.m_GIRole) << draw_gi_role_shift_v) };
             const auto Defaults = pGeom->getDefaultMaterialInstances();
             D.m_Materials.resize(Defaults.size());
             for (std::size_t i = 0; i < Defaults.size(); ++i)

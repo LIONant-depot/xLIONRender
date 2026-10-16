@@ -62,9 +62,14 @@ namespace xlionrender
         std::uint64_t               m_UserID        = 0;    // e.g. the entity; what editor pick/ID passes write
         // Low 32 bits: the caller's instance id - its data stays in the renderer's instance buffer across frames and is
         // written only when it changes (0: none, written every frame). The caller owns the ids (unique among its draws).
-        // High 32 bits: flags (none defined yet).
+        // High 32 bits: flags. Bits 32-33: its gi_role (draw_gi_role_shift_v).
         std::uint64_t               m_Instance      = 0;
     };
+
+    // What an instance does in the GI's transport (documentation/gi_dynamic_master_plan.md, Phase 5), overriding its geometry's GI mode:
+    // RECEIVER is lit by the GI but neither occludes its rays nor bounces or emits into it (a prop, a character); FULL does all of it
+    enum class gi_role : std::uint8_t { ASSET = 0, RECEIVER = 1, FULL = 2 };
+    constexpr int draw_gi_role_shift_v = 32;
 
     // The directional light (the sun): shades everything, shadowed by the shadow clipmap
     struct sun_light

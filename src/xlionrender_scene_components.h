@@ -28,6 +28,12 @@ namespace xlionrender
     using geom_static_ref       = xresource::def_guid<geom_static_type_guid_v>;
     using material_instance_ref = xresource::def_guid<material_instance_type_guid_v>;
 
+    static constexpr auto gi_role_v = std::array
+    { xproperty::settings::enum_item("ASSET",    gi_role::ASSET)
+    , xproperty::settings::enum_item("RECEIVER", gi_role::RECEIVER)
+    , xproperty::settings::enum_item("FULL",     gi_role::FULL)
+    };
+
     // A static geometry drawn with its materials
     struct mesh
     {
@@ -35,11 +41,13 @@ namespace xlionrender
 
         geom_static_ref                     m_Geom;
         std::vector<material_instance_ref>  m_Materials;    // per material slot of the geometry; an empty entry (or a missing slot): the geometry's own
+        gi_role                             m_GIRole = gi_role::ASSET;
 
         XPROPERTY_DEF
         ( "Mesh", mesh
         , obj_member<"Geom",      &mesh::m_Geom,      member_help<"The GeomStatic resource to draw">>
         , obj_member<"Materials", &mesh::m_Materials, member_help<"Material instances per material slot of the geometry, replacing the geometry's own (leave an entry empty to keep it)">>
+        , obj_member<"GIRole",    &mesh::m_GIRole,    member_enum_span<gi_role_v>, member_help<"What it does in the GI: ASSET as its geometry says; RECEIVER lit by it but neither blocking nor bouncing light (a prop, a character: moving it costs the GI nothing elsewhere); FULL blocks, bounces and emits">>
         )
     };
 

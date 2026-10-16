@@ -453,6 +453,28 @@ Separate what one dirty flag does today:
   only if the receiver-only result shows a measurable need.
 - Direct shadows are a separate system and are not affected by any of this.
 
+**Phase 5 results** (2026-10-17):
+- **The role.**
+  - The Mesh component has `GIRole`: ASSET (as the geometry's GI mode says), RECEIVER or FULL. It is shown in the inspector
+    and serialized, and the default keeps existing levels as they were.
+  - It reaches the renderer in the draw's instance flags (bits 32–33, `draw_gi_role_shift_v`) and the solver through
+    `world::SetRole`.
+- **What a receiver is.** It is out of the rays' scene and out of the emitter list. Moving or removing it affects no other
+  surfel, marks no other link and changes no scene for the rays: only its own light and its own links.
+- **A role change is a change for the others.** It updates the rays' scene, `AffectNear` around it, the links crossing it
+  and, if it emits, the emitters.
+- **Test 6j14 (test A).** A 40 cm box is dragged from the sun into a wall's shadow.
+  - As RECEIVER: 0 floor surfels lowered or queued, 0 updates with link work for others, rays pass through it, and its
+    light follows it (0.746 → 0.241).
+  - As FULL: 4580 lowered, rays hit it.
+  - A receiver is brighter than the same full box (0.746 against 0.125 in the sun): it casts no GI shadow on the floor next
+    to it, so it does not see one. This is the role's intended approximation.
+- **Police, Debug.** The statue set to RECEIVER and dragged: a move costs 0.01 ms (1.5 ms as full transport), 0 instances
+  affected, no link work. The worst GI frame was 5.8 ms.
+- **The frame log** gains LinkPending, LinkSurfels and UrgentSurfels. They showed that the 1.2 ms of link work in the first
+  minute after loading is the level's first link build, which is Phase 7's to schedule.
+- **Proxy occluders are not built.** Nothing measured needs them yet, per the plan.
+
 ### Phase 6: Prioritised relighting
 
 - A changed light raises the importance of the surfels it reaches (by transport relevance and visible impact); a sun or sky
