@@ -996,6 +996,30 @@ int main()
         CHECK(Zero == 0, "%d surfels were never traced in 8 passes", Zero);
     }
 
+    // 6j7. The level by the size on the screen (setup::m_LodScreen): a small box far off (within m_LodDistance) holds its parent level, the same box
+    //      near holds the fine one, and it comes back finer at 1.25 times the distance it left at (no flicker)
+    {
+        surfel_mesh Box;
+        AddQuad(Box, { -0.1f, 0.2f, -0.1f }, { 0, 0, 0.2f }, { 0.2f, 0, 0 }, 0.1f);       // a 20 cm box, six faces
+        AddQuad(Box, { -0.1f, 0, -0.1f }, { 0.2f, 0, 0 }, { 0, 0, 0.2f }, 0.1f);
+        AddQuad(Box, { -0.1f, 0, -0.1f }, { 0, 0.2f, 0 }, { 0, 0, 0.2f }, 0.1f);
+        AddQuad(Box, { 0.1f, 0, -0.1f }, { 0, 0, 0.2f }, { 0, 0.2f, 0 }, 0.1f);
+        AddQuad(Box, { -0.1f, 0, -0.1f }, { 0.2f, 0, 0 }, { 0, 0.2f, 0 }, 0.1f);
+        AddQuad(Box, { -0.1f, 0, 0.1f }, { 0, 0.2f, 0 }, { 0.2f, 0, 0 }, 0.1f);
+        Box.Bake(0.05f, 0.15f);
+        world W;
+        const int i = W.Add(Box, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        lights L;
+        L.m_Sky = v3{ 1, 1, 1 };
+        const auto LevelAt = [&](float Dist) { W.Update(L, { 0, 0.1f, Dist }, 1 << 20, 20000); return W.Level(i); };
+        const int Near = LevelAt(0.5f), Far = LevelAt(12.0f), Between = LevelAt(7.5f), Back = LevelAt(3.0f);
+        std::printf("surfel level by screen size: 0.5 m -> %d, 12 m -> %d, then 7.5 m (inside the hysteresis) -> %d, 3 m -> %d\n", Near, Far, Between, Back);
+        CHECK(Near == 0, "a near small box is not at the fine level (%d)", Near);
+        CHECK(Far == 1, "a far small box is not at the parent level (%d)", Far);
+        CHECK(Between == 1, "the level flickered back inside the hysteresis (%d)", Between);
+        CHECK(Back == 0, "the box did not come back to the fine level when near (%d)", Back);
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {
