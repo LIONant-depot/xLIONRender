@@ -1291,7 +1291,9 @@ int main()
             if (f < 30) W.SetTransform(iW, xmath::fmat4::fromTranslation({ 0.03f * float(f), 0, 0 }));
             W.Update(L, { 0, 1, 4 }, f < 30 ? 1 << 10 : 64, 26000 + f);
             if (f >= 40) MaxChanged = std::max(MaxChanged, W.ShownChanged(iF).size());
-            if (f % 10 != 9 || f < 139) continue;                               // (the backlog drained: the shown stage gets the token when it waits)
+            if (f % 10 != 9 || f < 139) continue;
+            W.m_Setup.m_TraceAllowanceMs = 0; W.Update(L, { 0, 1, 4 }, 8, 26500 + f);     // drained without a limit (under 0.05 ms how far it got is timing): then compared
+            W.m_Setup.m_TraceAllowanceMs = 0.05f;
             const std::vector<basis> Inc = W.BasisLight(iF);
             W.ShowAllAgain();
             const auto& Full = W.BasisLight(iF);

@@ -611,6 +611,31 @@ What was built:
 - Until an instance's GI is ready it draws with a declared fallback (its mean light or the scene's ambient). A blocking loading
   screen is a separate, explicit mode.
 
+**Phase 7 results** (2026-10-17, Police, Debug, a fresh editor opening the level):
+
+| A GI mesh's first use (both meshes) | Before | Phase 7 |
+|---|---|---|
+| Main thread, in one frame | 639 ms (decode 26, surfels and rays' BVH 562, renderer 51) | 15 ms (copy 5, GPU buffer 5) |
+| On a worker | – | 705 ms (decode, surfels, BVH, read grid, the GPU buffer's data) |
+
+- **The split (`scene_renderer::MeshOf`).** The main thread copies the geometry's arrays (`gi::geom_gi_copy`: the same accessors
+  as the geometry, so a geometry released mid-job cannot be read). An xscheduler job decodes it, makes its surfels, the rays'
+  BVH and the read grid if the compiler did not pack one, and packs the GPU buffer's data (`PackMeshGI`, now pure). When the
+  job is done, the main thread creates the buffer and the mesh joins the GI.
+- **The declared fallback.** Until then the mesh has no surfels and draws with the scene's ambient, as a mesh without GI does.
+  No loading screen.
+- **Compiler precomputation of the BVH is not needed for the main thread.** The worker absorbs it. It would still shorten the
+  time until GI appears (0.7 s in Debug) and is left for when that matters.
+- **The first link build** is scheduled by Phase 6b's ledger. It was the 1.2 ms of link work seen for the first minute after a
+  load, and now progresses within the allowance.
+- **Two timing-dependent tests, found and fixed.** The GPU render test (`xlionrender_test_gi_render`, sparse-mesh reads) and 6j12
+  depended on how much the allowance let through in a given run. The GPU test now runs with no allowance (as its comment
+  intends). 6j12 works under its tiny allowance and drains without a limit before comparing. Both now pass repeatedly.
+- **Remaining.**
+  - The main thread's 5 ms copy and 5 ms buffer creation are one-time costs, outside the per-frame allowance.
+  - A Release editor run.
+  - The allocator's compaction is still not sliced (Phase 6b).
+
 ### Held from earlier work (not part of this plan's critical path)
 
 - The dark shade in Sponza at `SurfelSize` 1 (little light reaches it; not a solver defect so far).

@@ -285,9 +285,9 @@ namespace xlionrender
             if (!m_pScene) return "DescribeScene: not rendered yet";
             const auto& S  = m_pScene->m_Stats;
             const auto& GI = m_pScene->m_Renderer.getGIStats();
-            return std::format("DescribeScene: ok\nMeshes={}\nDrawn={}\nWaiting={}\nConstantSlots={}\nMaterials={}\nSun={}\nLights={}\nDrawsRendered={}\nGIMeshes={}\nGIUpdated={}\nGIRays={}\nGIMs={:.2f}\nGILoadMs={:.0f}\nGIBad={}\nGICaptured={}\nGIEmissive={}\nGIAlbedo={:.3f},{:.3f},{:.3f}\nGILinks={}\nGIMaxEmitted={:.4f}\nGIMaxEmitter={:.3f},{:.3f},{:.3f}\nGICapturing={}\nGIUnsupported={}\nGITraceMs={:.2f}\nGIUploadMs={:.2f}"
+            return std::format("DescribeScene: ok\nMeshes={}\nDrawn={}\nWaiting={}\nConstantSlots={}\nMaterials={}\nSun={}\nLights={}\nDrawsRendered={}\nGIMeshes={}\nGIUpdated={}\nGIRays={}\nGIMs={:.2f}\nGILoadMs={:.0f}\nGILoadParts={:.0f}/{:.0f}/{:.0f}\nGIBad={}\nGICaptured={}\nGIEmissive={}\nGIAlbedo={:.3f},{:.3f},{:.3f}\nGILinks={}\nGIMaxEmitted={:.4f}\nGIMaxEmitter={:.3f},{:.3f},{:.3f}\nGICapturing={}\nGIUnsupported={}\nGITraceMs={:.2f}\nGIUploadMs={:.2f}"
                               , S.m_Meshes, S.m_Drawn, S.m_Waiting, S.m_ConstantSlots, S.m_Materials, S.m_bSun, S.m_Lights, m_pScene->m_Renderer.getDrawsRendered()
-                              , S.m_GIMeshes, GI.m_Updated, GI.m_Rays, GI.m_Ms, m_pScene->m_TotalGILoadMs, GI.m_nBad, GI.m_nColored, GI.m_nEmissive, GI.m_MeanAlbedo.m_X, GI.m_MeanAlbedo.m_Y, GI.m_MeanAlbedo.m_Z, GI.m_nLinks, GI.m_MaxEmitted, GI.m_MaxEmitter.m_X, GI.m_MaxEmitter.m_Y, GI.m_MaxEmitter.m_Z, int(m_pScene->m_Renderer.isGICapturingAny()), GI.m_nUnsupported, GI.m_TraceMs, GI.m_UploadMs);
+                              , S.m_GIMeshes, GI.m_Updated, GI.m_Rays, GI.m_Ms, m_pScene->m_TotalGILoadMs, m_pScene->m_GILoadPartMs[0], m_pScene->m_GILoadPartMs[1], m_pScene->m_GILoadPartMs[2], GI.m_nBad, GI.m_nColored, GI.m_nEmissive, GI.m_MeanAlbedo.m_X, GI.m_MeanAlbedo.m_Y, GI.m_MeanAlbedo.m_Z, GI.m_nLinks, GI.m_MaxEmitted, GI.m_MaxEmitter.m_X, GI.m_MaxEmitter.m_Y, GI.m_MaxEmitter.m_Z, int(m_pScene->m_Renderer.isGICapturingAny()), GI.m_nUnsupported, GI.m_TraceMs, GI.m_UploadMs);
         }
 
         // The GI's main-thread time in the last RenderScene, all of it (the update and the upload: what the host's shared allowance is charged)

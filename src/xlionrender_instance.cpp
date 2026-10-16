@@ -695,26 +695,25 @@ namespace xlionrender
         return nullptr;
     }
 
-    xgpu::device::error* instance::SetMeshGI( mesh_id Id, gi::surfel_mesh&& Surfels ) noexcept
+    xgpu::device::error* instance::SetMeshGI( mesh_id Id, gi::surfel_mesh&& Surfels, std::vector<std::uint32_t>&& Packed ) noexcept
     {
         if( findMesh(Id) == nullptr ) return nullptr;
         auto& M = m_Meshes[Id.m_Index];
         assert(M.m_bCluster && M.m_Geom.m_Kind == geom_kind::RIGID && Surfels.m_Levels[0].size() < 0xFFFF);
-        // The layout of shaders/xlionrender_surfel_gi.glsl: a header of 8 uints ([0] level 0 surfels, [1] level 1 surfels, [2] the read
-        // grid's table, [3] its mask (0: none), [4] its cell (float bits), [5] its lists, [6] its longest probe), per vertex 2 uints, the
-        // surfels, the grid
         if( Surfels.m_ReadTable.empty() ) Surfels.BuildReadGrid();
         M.m_pGI = std::make_unique<gi::surfel_mesh>(std::move(Surfels));
         static std::uint64_t s_GIStamp = 0;
         M.m_GIStamp = ++s_GIStamp;
-        return buildMeshGI(M, {});
+        if( Packed.empty() ) return buildMeshGI(M, {});
+        return createMeshGI(M, Packed);                                       // (Phase 7: packed on a worker: PackMeshGI)
     }
 
-    // [7]: the triangles' colors (0: none), the SURFACE_COLOR view's: the clusters' count, each cluster's first triangle, a color per
-    // triangle (unorm 4x8) - a pixel's triangle is its cluster's first + gl_PrimitiveID
-    xgpu::device::error* instance::buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept
+    // The layout of shaders/xlionrender_surfel_gi.glsl: a header of 8 uints ([0] level 0 surfels, [1] level 1 surfels, [2] the read grid's
+    // table, [3] its mask (0: none), [4] its cell (float bits), [5] its lists, [6] its longest probe), per vertex 2 uints, the surfels, the
+    // grid. [7]: the triangles' colors (0: none), the SURFACE_COLOR view's: the clusters' count, each cluster's first triangle, a color
+    // per triangle (unorm 4x8) - a pixel's triangle is its cluster's first + gl_PrimitiveID. Pure: a worker can pack it (no colors)
+    std::vector<std::uint32_t> PackMeshGI( const gi::surfel_mesh& Surfels, std::span<const std::uint32_t> ClusterFirstTri, std::span<const xmath::fvec3> TriColors ) noexcept
     {
-        const auto& Surfels = *M.m_pGI;
         const std::uint32_t nVerts = std::uint32_t(Surfels.m_Pos.size());
         std::vector<std::uint32_t> Data(8 + 2 * nVerts);
         Data[0] = std::uint32_t(Data.size());
@@ -750,13 +749,25 @@ namespace xlionrender
         if( !TriColors.empty() )
         {
             Data[7] = std::uint32_t(Data.size());
-            Data.push_back(std::uint32_t(M.m_Geom.m_Clusters.size()));
-            for( const auto& C : M.m_Geom.m_Clusters ) Data.push_back(C.m_iIndex / 3);
+            Data.push_back(std::uint32_t(ClusterFirstTri.size()));
+            Data.insert(Data.end(), ClusterFirstTri.begin(), ClusterFirstTri.end());
             const auto U8 = [](float f) { return std::uint32_t(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f); };
             for( const auto& c : TriColors ) Data.push_back(U8(c.m_X) | (U8(c.m_Y) << 8) | (U8(c.m_Z) << 16) | (255u << 24));
         }
+        return Data;
+    }
+
+    xgpu::device::error* instance::buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept
+    {
+        std::vector<std::uint32_t> First;
+        if( !TriColors.empty() ) for( const auto& C : M.m_Geom.m_Clusters ) First.push_back(C.m_iIndex / 3);
+        return createMeshGI(M, PackMeshGI(*M.m_pGI, First, TriColors));
+    }
+
+    xgpu::device::error* instance::createMeshGI( mesh_slot& M, std::span<const std::uint32_t> Data ) noexcept
+    {
         if( M.m_GIBuffer.m_Private ) ReleaseBuffer(M.m_GIBuffer);
-        return m_Device.Create(M.m_GIBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Data.size()), .m_pData = Data.data() });
+        return m_Device.Create(M.m_GIBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Data.size()), .m_pData = const_cast<std::uint32_t*>(Data.data()) });
     }
 
     //------------------------------------------------------------------------------------------------

@@ -1445,6 +1445,51 @@ namespace xlionrender::gi
 
     // A compiled xgeom_static's baked surfels (its GeomStatic compiler ran Bake) into a surfel_mesh already filled by FromXGeomStatic, then the
     // rays' structures. False: the geometry has none (compiled with the GI off)
+    // Phase 7: a geometry's arrays copied (what FromXGeomStatic and SurfelsFromXGeomStatic read), so its surfels can be made on a worker
+    // while the geometry itself may be released: the same accessors as the geometry
+    template <class T_GEOM> struct geom_gi_copy
+    {
+        template <class T_SPAN> using elem_t = std::remove_cvref_t<decltype(std::declval<T_SPAN>()[0])>;
+        using surfel_t   = std::remove_cvref_t<decltype(std::declval<const T_GEOM&>().getGISurfels()[0])>;
+        using material_t = std::remove_cvref_t<decltype(std::declval<const T_GEOM&>().getGISurfelMaterials()[0])>;
+        using vertex_t   = elem_t<decltype(std::declval<const T_GEOM&>().getVertices())>;
+        using extra_t    = elem_t<decltype(std::declval<const T_GEOM&>().getVertexExtras())>;
+        using index_t    = elem_t<decltype(std::declval<const T_GEOM&>().getIndices())>;
+        using cluster_t  = elem_t<decltype(std::declval<const T_GEOM&>().getClusters())>;
+        using cdata_t    = elem_t<decltype(std::declval<const T_GEOM&>().getClusterData())>;
+        using submesh_t  = elem_t<decltype(std::declval<const T_GEOM&>().getSubmeshes())>;
+        template <class T> static std::vector<std::remove_cvref_t<decltype(*std::declval<T>().begin())>> Copy(const T& S) { return { S.begin(), S.end() }; }
+        explicit geom_gi_copy(const T_GEOM& G) noexcept
+            : m_Vertices(Copy(G.getVertices())), m_Extras(Copy(G.getVertexExtras())), m_Indices(Copy(G.getIndices()))
+            , m_Clusters(Copy(G.getClusters())), m_ClusterData(Copy(G.getClusterData())), m_Submeshes(Copy(G.getSubmeshes()))
+            , m_Fine(G.getGISurfels().begin(), G.getGISurfels().end()), m_Parents(G.getGIParents().begin(), G.getGIParents().end())
+            , m_VS(G.getGIVertexSurfels().begin(), G.getGIVertexSurfels().end())
+            , m_Materials(G.getGISurfelMaterials().begin(), G.getGISurfelMaterials().end())
+            , m_Derived(G.getGIDerived().begin(), G.getGIDerived().end()), m_GIMode(G.m_GIMode) {}
+        std::vector<vertex_t>       m_Vertices;
+        std::vector<extra_t>        m_Extras;
+        std::vector<index_t>        m_Indices;
+        std::vector<cluster_t>      m_Clusters;
+        std::vector<cdata_t>        m_ClusterData;
+        std::vector<submesh_t>      m_Submeshes;
+        std::vector<surfel_t>       m_Fine, m_Parents;
+        std::vector<std::uint16_t>  m_VS;
+        std::vector<material_t>     m_Materials;
+        std::vector<std::uint32_t>  m_Derived;
+        decltype(T_GEOM::m_GIMode)  m_GIMode;
+        std::span<const vertex_t>      getVertices         () const noexcept { return m_Vertices; }
+        std::span<const extra_t>       getVertexExtras     () const noexcept { return m_Extras; }
+        std::span<const index_t>       getIndices          () const noexcept { return m_Indices; }
+        std::span<const cluster_t>     getClusters         () const noexcept { return m_Clusters; }
+        std::span<const cdata_t>       getClusterData      () const noexcept { return m_ClusterData; }
+        std::span<const submesh_t>     getSubmeshes        () const noexcept { return m_Submeshes; }
+        std::span<const surfel_t>      getGISurfels        () const noexcept { return m_Fine; }
+        std::span<const surfel_t>      getGIParents        () const noexcept { return m_Parents; }
+        std::span<const std::uint16_t> getGIVertexSurfels  () const noexcept { return m_VS; }
+        std::span<const material_t>    getGISurfelMaterials() const noexcept { return m_Materials; }
+        std::span<const std::uint32_t> getGIDerived        () const noexcept { return m_Derived; }
+    };
+
     template <class T_GEOM> bool SurfelsFromXGeomStatic(surfel_mesh& M, const T_GEOM& Geom) noexcept
     {
         const auto Fine = Geom.getGISurfels(), Parents = Geom.getGIParents();

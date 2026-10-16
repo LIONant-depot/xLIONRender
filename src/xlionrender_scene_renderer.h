@@ -43,6 +43,9 @@ namespace xlionrender
         {
             int m_Meshes = 0, m_Drawn = 0, m_Waiting = 0, m_Lights = 0, m_bSun = 0, m_Materials = 0, m_ConstantSlots = 0, m_GIMeshes = 0;
         };
+        double                                          m_GILoadPartMs[3] = { 0, 0, 0 };   // the first uses: decode (main), surfels (worker), renderer (main) (Phase 7)
+        struct gi_load { std::atomic<bool> m_bDone{ false }; bool m_bOk = false; double m_WorkerMs = 0; gi::surfel_mesh m_Surfels; std::vector<std::uint32_t> m_Packed; };
+        std::unordered_map<const void*, std::shared_ptr<gi_load>>  m_GILoads;      // Phase 7: the surfels being made on a worker, per geometry
         double                                          m_TotalGILoadMs = 0;           // every geometry's surfels made ready so far (DescribeScene)
         std::unordered_map<const void*, int>            m_GIBaked;
         std::unordered_set<const void*>                 m_OutlineMade;  // per geometry: its outline mesh given to the renderer (made the first time it is the selected one)      // per geometry: its surfels given to the renderer (1), or it has none (0)
@@ -64,15 +67,41 @@ namespace xlionrender
             if (!pGeom) return nullptr;
             auto [It, bNew] = m_Meshes.try_emplace(pGeom);
             if (bNew && m_Renderer.CreateClusterGeom(It->second, MakeClusterGeom(*pGeom))) { m_Meshes.erase(It); return nullptr; }
-            // GI on: the surfels the GeomStatic compiler baked, with the rays' structures built from the geometry's CPU copy, the first time
+            // GI on: the surfels the GeomStatic compiler baked, with the rays' structures built from the geometry's CPU copy, the first time.
+            // Phase 7: the geometry's arrays are copied here; it is decoded, and its surfels, the rays' BVH, the read grid and the GPU
+            // buffer's data are made on a worker (0.6 s for the Police building, all of it on the main thread before); when they are
+            // ready the buffer is made here and they go to the renderer. Until then the
+            // mesh has no surfels: it draws with the declared fallback (the scene's ambient)
             if (m_Scene.m_GI.m_bEnable && !m_GIBaked.contains(pGeom))
             {
+                const auto Ms = [](std::chrono::steady_clock::time_point A) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - A).count(); };
+                auto& P = m_GILoads[pGeom];
                 const auto T0 = std::chrono::steady_clock::now();
-                gi::surfel_mesh Surfels;
-                gi::FromXGeomStatic(Surfels, *pGeom);
-                const bool bGI = gi::SurfelsFromXGeomStatic(Surfels, *pGeom) && Surfels.m_Levels[0].size() < 0xFFFF && !m_Renderer.SetMeshGI(It->second, std::move(Surfels));
-                m_GIBaked[pGeom] = bGI;
-                const double LoadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+                if (!P)
+                {
+                    P = std::make_shared<gi_load>();
+                    auto Copy = std::make_shared<gi::geom_gi_copy<xgeom_static::xgpu::geom>>(*pGeom);
+                    m_GILoadPartMs[0] += Ms(T0);                               // (where a first use goes) the geometry's arrays copied, here
+                    gi::Scheduler().SubmitLambda(xscheduler::str_v<"GI mesh">, [P, Copy]() noexcept
+                    {
+                        const auto T1 = std::chrono::steady_clock::now();
+                        gi::FromXGeomStatic(P->m_Surfels, *Copy);              // decoded on the worker too
+                        P->m_bOk = gi::SurfelsFromXGeomStatic(P->m_Surfels, *Copy) && P->m_Surfels.m_Levels[0].size() < 0xFFFF;
+                        if (P->m_bOk && P->m_Surfels.m_ReadTable.empty()) P->m_Surfels.BuildReadGrid();
+                        if (P->m_bOk) P->m_Packed = PackMeshGI(P->m_Surfels, {}, {});             // the GPU buffer's data too
+                        P->m_WorkerMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
+                        P->m_bDone.store(true, std::memory_order_release);
+                    });
+                }
+                else if (P->m_bDone.load(std::memory_order_acquire))
+                {
+                    m_GILoadPartMs[1] += P->m_WorkerMs;                        // the surfels and the rays' structures, on the worker
+                    const bool bGI = P->m_bOk && !m_Renderer.SetMeshGI(It->second, std::move(P->m_Surfels), std::move(P->m_Packed));
+                    m_GILoadPartMs[2] += Ms(T0);                               // handed to the renderer (its GPU buffers), here
+                    m_GIBaked[pGeom] = bGI;
+                    m_GILoads.erase(pGeom);
+                }
+                const double LoadMs = Ms(T0);                                  // the main thread's part
                 m_TotalGILoadMs += LoadMs;
                 m_Renderer.NoteGILoad(LoadMs);
             }

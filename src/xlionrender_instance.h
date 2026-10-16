@@ -27,6 +27,9 @@ namespace xlionrender
 {
     namespace details { struct ubo_lighting; }     // plans/forward/xlionrender_plan_forward.h
 
+    // The GPU layout of a mesh's surfels (xlionrender_instance.cpp): pure, so a worker can pack it (Phase 7)
+    std::vector<std::uint32_t> PackMeshGI( const gi::surfel_mesh& Surfels, std::span<const std::uint32_t> ClusterFirstTri, std::span<const xmath::fvec3> TriColors ) noexcept;
+
     class instance
     {
     public:
@@ -63,7 +66,7 @@ namespace xlionrender
                       void                 DestroyMesh  ( mesh_id Id )                                          noexcept;
         // Surfel GI for a cluster mesh (CreateClusterGeom, rigid): its baked surfels (gi::surfel_mesh::Bake) in the mesh's vertex
         // order - the resource pipeline's product (the xgeom GI options); kept by the renderer. scene::m_GI turns GI on.
-        [[nodiscard]] xgpu::device::error* SetMeshGI    ( mesh_id Id, gi::surfel_mesh&& Surfels )             noexcept;
+        [[nodiscard]] xgpu::device::error* SetMeshGI    ( mesh_id Id, gi::surfel_mesh&& Surfels, std::vector<std::uint32_t>&& Packed = {} ) noexcept;     // Packed: PackMeshGI's data made on a worker (empty: packed here)
         // The mesh the selection's outline is made from (the editor's outline shader draws it expanded in screen space): per vertex position and
         // normal (6 floats), the triangles, the local box (its center and half extents) the shader's cage is made from. Once per mesh.
         [[nodiscard]] xgpu::device::error* SetOutlineProxy( mesh_id Id, std::span<const float> PosNrm, std::span<const std::uint32_t> Indices, const xmath::fvec3& Center, const xmath::fvec3& Half ) noexcept;
@@ -213,7 +216,8 @@ namespace xlionrender
             std::uint64_t               m_Frame = 0;
             bool                        m_bRecorded = false;
         };
-        xgpu::device::error*        buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept;     // M.m_GIBuffer from M.m_pGI (+ its triangles' colors)
+        xgpu::device::error*        buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept;
+        xgpu::device::error*        createMeshGI( mesh_slot& M, std::span<const std::uint32_t> Data ) noexcept;      // the GPU buffer of PackMeshGI's data     // M.m_GIBuffer from M.m_pGI (+ its triangles' colors)
         static constexpr int        gi_capture_w_v = 1024, gi_capture_h_v = 512, gi_capture_max_v = (gi_capture_w_v / 2) * (gi_capture_h_v / 4);   // 65536 surfels
         std::deque<gi_capture_job>  m_GICaptures;
         xgpu::texture               m_GICaptureTex;
