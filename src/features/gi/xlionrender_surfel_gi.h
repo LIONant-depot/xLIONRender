@@ -407,16 +407,36 @@ namespace xlionrender::gi
     // around it; the long mean follows the samples at a rate that falls as low as 1/256 while they agree with it (within their own
     // noise: the light settles, no swimming) and rises toward 1 when they move away from it beyond that noise (a light changed: it
     // catches up). Samples far above the noise are clipped (fireflies).
+    constexpr int warmup_passes_v = 16;     // after a change: the estimator's first samples are averaged (1 / n), its multiscale blend after
+
+    // A surfel's light over time: one estimator for both regimes (documentation/gi_dynamic_master_plan.md, Phase 2b). After a change
+    // (Restart) the first warmup_passes_v samples are averaged exactly (1 / n: the fastest unbiased start), then the multiscale blend
+    // (GIBS's MultiscaleMeanEstimator) takes over from that mean
     struct estimator
     {
-        v3      m_Mean{ 0, 0, 0 }, m_Short{ 0, 0, 0 }, m_Variance{ 0, 0, 0 };
-        float   m_Vbbr          = 1;        // the variance-based blend reduction
-        float   m_Inconsistency = 0;
+        v3              m_Mean{ 0, 0, 0 }, m_Short{ 0, 0, 0 }, m_Variance{ 0, 0, 0 };
+        float           m_Vbbr          = 1;        // the variance-based blend reduction
+        float           m_Inconsistency = 0;
+        std::uint16_t   m_N             = 0;        // samples since the last Restart (counts to warmup_passes_v)
 
-        void Seed(const v3& E) noexcept { m_Mean = m_Short = E; m_Variance = { 0, 0, 0 }; m_Vbbr = 1; m_Inconsistency = 0; }
+        // A value carried over (a level switch, a new layout): it continues as settled light
+        void Seed(const v3& E) noexcept { m_Mean = m_Short = E; m_Variance = { 0, 0, 0 }; m_Vbbr = 1; m_Inconsistency = 0; m_N = warmup_passes_v; }
+        void Restart() noexcept { m_N = 0; }        // what it saw is out of date: the next sample replaces it
 
-        void Add(v3 y, float ShortBlend = 0.08f) noexcept
+        // MinBlend: the warm-up's blend never below it (1: every sample replaces, no history)
+        void Add(v3 y, float MinBlend = 0, float ShortBlend = 0.08f) noexcept
         {
+            if (MinBlend >= 1) { Seed(y); return; }
+            if (m_N < warmup_passes_v)
+            {
+                ++m_N;
+                const float a = std::max(1.0f / float(m_N), MinBlend);
+                m_Mean = m_Mean + (y - m_Mean) * a;
+                // the multiscale blend starts from no variance (as before the merge): the light is still building up (each bounce
+                // lights the next), and a large variance measured from 8-ray samples would make it slow to follow
+                m_Short = m_Mean; m_Variance = { 0, 0, 0 }; m_Vbbr = 1; m_Inconsistency = 0;
+                return;
+            }
             const auto Luma = [](const v3& c) { return 0.299f * c.m_X + 0.587f * c.m_Y + 0.114f * c.m_Z; };
             const auto Dev  = [&] { return v3{ std::sqrt(std::max(1e-5f, m_Variance.m_X)), std::sqrt(std::max(1e-5f, m_Variance.m_Y)), std::sqrt(std::max(1e-5f, m_Variance.m_Z)) }; };
             {
@@ -443,7 +463,6 @@ namespace xlionrender::gi
     // is a few pixels and a near one is many. The period by distance in radii; off screen or behind the eye it still bounces light onto what is seen, so it is only
     // slower, never dropped: every surfel is traced at least once in dead_retrace_v passes
     constexpr float far_tier_radii_v[3] = { 12.0f, 24.0f, 48.0f };      // beyond each: the period doubles (1, 2, 4, 8)
-    constexpr int warmup_passes_v = 16;     // after a change: a running average (1 / n) for this many passes, the estimator after
 
     struct surfel
     {
@@ -2365,7 +2384,7 @@ namespace xlionrender::gi
                     const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
                     if (I.m_Cursor == 0)
                     {
-                        if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; }
+                        if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; for (auto& Es : I.m_Est) Es.Restart(); }
                         I.m_PassAlpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
                     }
                     // A buried surfel (validity 0: inside a solid, on a see-through material) is traced one pass in dead_retrace_v, not every one:
@@ -2501,19 +2520,11 @@ namespace xlionrender::gi
             for (const auto& [i, s] : m_Work)       // the surfels finished this update
             {
                 auto& I = m_Instances[i];
-                // The light: a running average while warming up (after a change), then the estimator (it settles, and still follows a
-                // change). The validity and the depth moments: their own slow blends (they weigh the reads: noise there swims too)
+                // The light: the estimator (it warms up after a change, settles, and still follows one). The validity and the depth
+                // moments: their own slow blends (they weigh the reads: noise there swims too)
                 auto& Es = I.m_Est[s];
-                if (I.m_History <= warmup_passes_v || I.m_PassAlpha >= 1)
-                {
-                    I.m_E[s] = I.m_E[s] * (1 - I.m_PassAlpha) + I.m_Acc[s] * I.m_PassAlpha;
-                    Es.Seed(I.m_E[s]);
-                }
-                else
-                {
-                    Es.Add(I.m_Acc[s]);
-                    I.m_E[s] = Es.m_Mean;
-                }
+                Es.Add(I.m_Acc[s], m_Setup.m_MinBlend);
+                I.m_E[s] = Es.m_Mean;
                 const float av = std::max(I.m_PassAlpha, 0.05f);
                 I.m_Valid[s] = I.m_Valid[s] * (1 - av) + I.m_AccValid[s] * av;
                 if (I.m_Level == 0 && s < I.m_SurfSeeThrough.size() && I.m_SurfSeeThrough[s]) I.m_Valid[s] = 0;     // on a transparent material
