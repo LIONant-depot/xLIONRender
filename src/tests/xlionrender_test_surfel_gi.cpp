@@ -1440,6 +1440,56 @@ int main()
         CHECK(Full.Lowered > 0 && Full.bRayHits, "a full-transport box changed nothing around it (%d lowered, rays hit %d)", Full.Lowered, int(Full.bRayHits));
     }
 
+    // 6j15. Phase 6: rays requested by uncertainty (setup::m_bAdaptiveRays) against a fixed count, at the same ray budget: a room (a floor
+    //       and two walls under a dim sky) settles, then a point light turns on; the recovery error is the mean relative difference of the
+    //       floor's light to the same scene solved long with the light on, summed over the first 60 updates. And RelightAll: at most once
+    //       a period (a call too soon is done later), traced under the budget (sliced), not at once
+    {
+        surfel_mesh Floor, WallA, WallB;
+        AddQuad(Floor, { -4, 0, -4 }, { 0, 0, 8 }, { 8, 0, 0 }, 0.5f);
+        AddQuad(WallA, { -4, 0, -4 }, { 0, 3, 0 }, { 0, 0, 8 }, 0.5f);           // x = -4, facing +x
+        AddQuad(WallB, { -4, 0, -4 }, { 8, 0, 0 }, { 0, 3, 0 }, 0.5f);           // z = -4, facing +z
+        Floor.Bake(0.2f, 0.6f); WallA.Bake(0.2f, 0.6f); WallB.Bake(0.2f, 0.6f);
+        lights Off; Off.m_Sky = v3{ 0.05f, 0.05f, 0.05f };
+        lights On = Off; On.m_Points.push_back({ v3{ -2.5f, 2.0f, -2.5f }, v3{ 30, 30, 30 }, 12.0f });
+        const v3 Eye{ 2, 1.6f, 2 };
+        const auto Make = [&](world& W) { const int f = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f }); W.Add(WallA, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f }); W.Add(WallB, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f }); return f; };
+        world Ref; const int rF = Make(Ref);
+        for (int f = 0; f < 600; ++f) Ref.Update(On, Eye, 1 << 16, 30000 + f);
+        const auto Error = [&](const world& W, int iF)
+        {
+            double e = 0, n = 0;
+            const auto& A = W.InstanceLight(iF); const auto& B = Ref.InstanceLight(rF);
+            for (std::size_t k = 0; k < A.size() && k < B.size(); ++k) { e += std::abs(A[k].m_X - B[k].m_X); n += B[k].m_X; }
+            return e / std::max(n, 1e-9);
+        };
+        const auto Run = [&](bool bAdaptive, double& SettledErr, int& Rays)
+        {
+            world W; const int iF = Make(W);
+            W.m_Setup.m_bAdaptiveRays = bAdaptive;
+            for (int f = 0; f < 300; ++f) W.Update(Off, Eye, 1 << 11, 31000 + f);
+            double Sum = 0; Rays = 0;
+            for (int f = 0; f < 60; ++f) { const auto St = W.Update(On, Eye, 1 << 11, 31300 + f); Sum += Error(W, iF); Rays += St.m_Rays; }
+            for (int f = 0; f < 240; ++f) W.Update(On, Eye, 1 << 11, 31400 + f);
+            SettledErr = Error(W, iF);
+            return Sum / 60;
+        };
+        double SetFixed, SetAdapt; int RaysFixed, RaysAdapt;
+        const double Fixed = Run(false, SetFixed, RaysFixed), Adapt = Run(true, SetAdapt, RaysAdapt);
+        // RelightAll
+        world W; Make(W);
+        for (int f = 0; f < 300; ++f) W.Update(On, Eye, 1 << 11, 32000 + f);
+        const bool bFirst = W.RelightAll(), bSoon = W.RelightAll();
+        int MaxRays = 0, Dirty0 = 0;
+        for (int f = 0; f < 10; ++f) { const auto St = W.Update(On, Eye, 1 << 11, 32300 + f); MaxRays = std::max(MaxRays, St.m_Rays); if (f == 0) Dirty0 = St.m_Dirty; }
+        for (int f = 0; f < 130; ++f) W.Update(On, Eye, 1 << 11, 32400 + f);
+        std::printf("a light turned on, the recovery error over 60 updates: fixed rays %.3f (%d rays), adaptive %.3f (%d rays); settled %.3f vs %.3f; "
+                    "RelightAll: %d, again at once %d (deferred), %d instances dirty, at most %d rays an update (budget %d)\n",
+                    Fixed, RaysFixed, Adapt, RaysAdapt, SetFixed, SetAdapt, int(bFirst), int(bSoon), Dirty0, MaxRays, 1 << 11);
+        CHECK(Adapt <= Fixed * 1.05 && SetAdapt <= SetFixed * 1.1 + 0.01, "the adaptive rays recover worse (%.3f vs %.3f; settled %.3f vs %.3f)", Adapt, Fixed, SetAdapt, SetFixed);
+        CHECK(bFirst && !bSoon && Dirty0 == 3 && MaxRays <= (1 << 11), "RelightAll is not rate-limited or not sliced (%d %d, %d dirty, %d rays)", int(bFirst), int(bSoon), Dirty0, MaxRays);
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {

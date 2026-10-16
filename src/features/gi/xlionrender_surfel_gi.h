@@ -1514,6 +1514,8 @@ namespace xlionrender::gi
             float   m_TraceAllowanceMs = 0;     // Phase 1 (gi_dynamic_master_plan.md): the trace's main-thread time an update may use (0: no limit, every picked surfel is traced in full this update, as before)
             float   m_UnitTargetUs  = 250;      // the size of a unit of the trace (rule 4): a surfel's rays are traced in chunks of about this many microseconds
             float   m_FairShare     = 0.2f;
+            bool    m_bAdaptiveRays = true;     // Phase 6: a settled surfel asks for rays by its uncertainty (RequestedRays); false: m_RaysPerSurfel each
+            float   m_RayUncertainty = 3.0f;    // RequestedRays: the rays = m_RaysPerSurfel x relative deviation x this (a quarter to all of them)
             float   m_LinkShare     = 0.3f;     // Phase 2: the part of the allowance the emitter links may use while the trace has work too     // the share of an update's surfels kept for the instance waiting longest (fairness: whatever its score)
             bool    m_bDistanceTiers = true;    // a surfel far from the eye (in its radii) is traced every 2nd, 4th, 8th pass (Update)
             float   m_Saturation    = 1;        // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
@@ -1525,6 +1527,7 @@ namespace xlionrender::gi
             float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
             bool    m_bCube         = true;     // an instance that covers few pixels for its parents traces 6 of them, one per axis direction, and blends the others from them (an ambient cube)
             float   m_PixelsPerSurfel = 256;    // the level rule: a level's surfels must each cover this many pixels where the instance is nearest the eye (about 16 x 16), else coarser
+            int     m_RelightPeriod = 120;      // Phase 6: RelightAll at most once in this many updates
             float   m_ChangeMargin  = 4;        // a moved instance dirties the instances within this distance of its bounds
         };
 
@@ -1729,6 +1732,17 @@ namespace xlionrender::gi
         const std::vector<v3>& SurfelEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }
 
         void DirtyAll() noexcept { for (auto& I : m_Instances) if (I.m_bAlive) MarkDirty(I, 1.0f); }
+
+        // Phase 6: the explicit "relight everything" (a command): every instance traced again under the allowance (sliced, never at once),
+        // each surfel's light the warm start (estimator::Lower). At most once in m_RelightPeriod updates: a call sooner is kept and done
+        // when the period has passed (false: deferred)
+        bool RelightAll() noexcept
+        {
+            if (m_nUpdates < m_RelightAt) { m_bRelightDeferred = true; return false; }
+            DirtyAll();
+            m_RelightAt = m_nUpdates + m_Setup.m_RelightPeriod; m_bRelightDeferred = false;
+            return true;
+        }
 
         // The angle between two placements' rotations (radians; their scale left out)
         static float RotationAngle(const xmath::fmat4& A, const xmath::fmat4& B) noexcept
@@ -2488,7 +2502,7 @@ namespace xlionrender::gi
                 }
                 std::sort(m_Order.begin(), m_Order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
                 m_Work.clear();
-                int SurfelsLeft = std::max(RayBudget / std::max(m_Setup.m_RaysPerSurfel, 1), 1);
+                int RaysLeft = std::max(RayBudget, 1);          // (Phase 6: in rays, each surfel what it asks for: RequestedRays)
                 // Fairness (Phase 1): the instance that has waited longest gets m_FairShare of the update first, whatever its score; the rest
                 // goes by score. An instance is visited once per pick (two visits would trace a surfel twice in one pass)
                 int Fair = -1, FairAge = -1;
@@ -2502,9 +2516,9 @@ namespace xlionrender::gi
                 else Fair = -1;
                 for (const auto& [Score, i] : m_Order)
                 {
-                    if (SurfelsLeft <= 0) break;
+                    if (RaysLeft <= 0) break;
                     auto& I = m_Instances[i];
-                    const int Cap = i == Fair ? std::max(1, int(float(SurfelsLeft) * m_Setup.m_FairShare)) : SurfelsLeft;
+                    const int Cap = i == Fair ? std::max(1, int(float(RaysLeft) * m_Setup.m_FairShare)) : RaysLeft;
                     const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
                     if (I.m_Cursor == 0)
                     {
@@ -2512,18 +2526,18 @@ namespace xlionrender::gi
                         ++I.m_History;
                     }
                     const bool bSettled = I.m_History > warmup_passes_v;
-                    int Took = 0;
+                    int Took = 0, TookRays = 0;
                     // Phase 4: the surfels a change affected first (its urgent list), then the pass (which skips them this pick)
                     const std::size_t UrgentAt = m_Work.size();
-                    while (!I.m_Urgent.empty() && Took < Cap)
+                    while (!I.m_Urgent.empty() && TookRays < Cap)
                     {
                         const int Surf = I.m_Urgent.back(); I.m_Urgent.pop_back();
                         if (std::size_t(Surf) >= I.m_E.size()) continue;
                         I.m_UrgentMark[Surf] = 2;
-                        m_Work.push_back({ i, Surf }); ++Took; ++St.m_UrgentSurfels;
+                        m_Work.push_back({ i, Surf }); ++Took; TookRays += RequestedRays(I, Surf); ++St.m_UrgentSurfels;
                     }
                     const std::size_t UrgentEnd = m_Work.size();
-                    for (; I.m_Cursor < n && Took < Cap; ++I.m_Cursor)
+                    for (; I.m_Cursor < n && TookRays < Cap; ++I.m_Cursor)
                     {
                         const int Surf = I.m_bCube ? I.m_CubeSet[I.m_Cursor] : I.m_Cursor;
                         if (I.m_UrgentMark[Surf] == 2) continue;
@@ -2533,11 +2547,11 @@ namespace xlionrender::gi
                             if (Period > 1 && ((I.m_History + Surf) % Period) != 0) continue;     // staggered: a period's passes together trace every one
                         }
                         m_Work.push_back({ i, Surf });
-                        ++Took;
+                        ++Took; TookRays += RequestedRays(I, Surf);
                     }
                     for (std::size_t w = UrgentAt; w < UrgentEnd; ++w) I.m_UrgentMark[m_Work[w].second] = 0;
                     if (I.m_Cursor >= n) { I.m_Cursor = 0; I.m_Age = 0; }
-                    SurfelsLeft -= Took;
+                    RaysLeft -= TookRays;
                     if (i == Fair) St.m_FairSurfels = Took;
                     ++St.m_Updated;
                     I.m_bPicked = true;
@@ -2547,7 +2561,7 @@ namespace xlionrender::gi
                     const auto [pi, ps] = m_Work[w];
                     rng Rng(Seed * 2654435761u + unsigned(w) * 7919u);       // the pass' random offsets, as the trace drew them in one go
                     work_item W;
-                    W.m_Inst = pi; W.m_Surf = ps; W.m_Level = m_Instances[pi].m_Level; W.m_Rays = m_Setup.m_RaysPerSurfel;
+                    W.m_Inst = pi; W.m_Surf = ps; W.m_Level = m_Instances[pi].m_Level; W.m_Rays = RequestedRays(m_Instances[pi], ps);
                     W.m_Off1 = Rng.Next(); W.m_Off2 = Rng.Next(); W.m_Shift = int(Rng.Next() * 64.0f);
                     if (auto& PI = m_Instances[pi]; std::size_t(ps) < PI.m_LastOff.size()) PI.m_LastOff[ps] = { W.m_Off1, W.m_Off2 };
                     m_Pending.push_back(W);
@@ -2557,6 +2571,7 @@ namespace xlionrender::gi
             Lap(St.m_PickMs);
 
             ++m_nUpdates;
+            if (m_bRelightDeferred && m_nUpdates >= m_RelightAt) RelightAll();
             const double LinkUsedMs = PumpLinks(double(m_Setup.m_TraceAllowanceMs) * (m_Pending.empty() ? 1.0 : double(m_Setup.m_LinkShare)), St);   // the trace waits for nothing: all of it
             Lap(St.m_LinksMs);
             // The emitters' light: made of the links, the emissions (SetSurfelMaterial: the links again) and the scale; a level switch
@@ -2590,7 +2605,8 @@ namespace xlionrender::gi
             // started finishes: the overshoot is one unit. Without an allowance a chunk is all of a surfel's rays and one round traces them all
             // (the solver as it was: the same rays, the same seeds). A surfel is committed when all its rays are in; until then it is pending
             const auto T1      = std::chrono::steady_clock::now();
-            const double Allow = m_Setup.m_TraceAllowanceMs > 0 ? std::max(double(m_Setup.m_TraceAllowanceMs) - LinkUsedMs, 0.001) : 0.0;     // what the links left
+            // what the links left, and its own share at least: a link unit that overran (the one-unit overshoot) does not starve the trace
+            const double Allow = m_Setup.m_TraceAllowanceMs > 0 ? std::max({ double(m_Setup.m_TraceAllowanceMs) - LinkUsedMs, double(m_Setup.m_TraceAllowanceMs) * (1.0 - double(m_Setup.m_LinkShare)), 0.001 }) : 0.0;
             const auto Deadline = T1 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(Allow));
             // conservative: the slowest ray cost seen lately (it decays), at least the mean plus twice the mean deviation. The cost of a ray
             // has a long tail (a ray into dense geometry): sized by the mean, units of 8 rays reached 1.1 ms in the Police level
@@ -3044,6 +3060,22 @@ namespace xlionrender::gi
         float Priority(const instance& I, const v3& Eye) const noexcept
         {
             return (I.m_bDirty ? 1e6f : 0.0f) + (I.m_Urgent.empty() ? 0.0f : 7e5f) + (I.m_Cursor ? 5e5f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
+        }
+
+        // Phase 6 (section 5d: rays requested, the allowance granting): how many rays a surfel asks for. All of them while it warms up
+        // or watches a change (estimator::Lower); settled, by its uncertainty (the relative deviation of its samples: a quiet surfel needs
+        // fewer), a quarter at least. The samples' deviation shrinks with their ray count, so fewer rays raise it again: the loop settles
+        // instead of starving a surfel. m_bAdaptiveRays false: always m_RaysPerSurfel
+        int RequestedRays(const instance& I, int Surf) const noexcept
+        {
+            const int R = std::max(m_Setup.m_RaysPerSurfel, 1);
+            if (!m_Setup.m_bAdaptiveRays || std::size_t(Surf) >= I.m_Est.size()) return R;
+            const auto& Es = I.m_Est[Surf];
+            if (Es.m_N < warmup_passes_v || Es.m_bWatch) return R;
+            const float Mean = 0.299f * Es.m_Mean.m_X + 0.587f * Es.m_Mean.m_Y + 0.114f * Es.m_Mean.m_Z;
+            const float Dev  = std::sqrt(std::max(0.299f * Es.m_Variance.m_X + 0.587f * Es.m_Variance.m_Y + 0.114f * Es.m_Variance.m_Z, 0.0f));
+            const float u    = Mean > 1e-4f ? Dev / Mean : 1.0f;
+            return std::clamp(int(std::ceil(float(R) * u * m_Setup.m_RayUncertainty)), std::max(1, R / 4), R);
         }
 
         // Within a settled instance's pass, how often a surfel is served (1: every pass, n: one pass in n, staggered). A buried surfel
@@ -3512,6 +3544,8 @@ namespace xlionrender::gi
         int                                     m_nEmitters = 0;
         unsigned                                m_nUpdates = 0;
         int                                     m_nLinkRebuilds = 0;        // (tests)
+        unsigned                                m_RelightAt = 0;            // RelightAll: the update from which it may run again
+        bool                                    m_bRelightDeferred = false; // a RelightAll that came too soon (Update runs it when it may)
         mutable int                             m_ShownPasses = -1;         // the settings the shown light was made with (ShownSettings)
         mutable float                           m_ShownSat    = -1;
         bool                                    m_bEmitDirty = true;        // UpdateEmittedLight's inputs changed (Update)

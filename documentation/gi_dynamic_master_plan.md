@@ -481,6 +481,47 @@ Separate what one dirty flag does today:
   change is a sliced relight, never a synchronous one. An explicit "relight everything" exists, rate-limited and still sliced.
 - Fairness is the scheduler's (Phase 1), not a term of this score.
 
+**Phase 6 results** (2026-10-17):
+- **What earlier phases already gave.** A changed point light lowers and queues the surfels in its reach (Phase 4,
+  `AffectNear`). A sun or sky change marks every instance dirty: its surfels keep their light as the warm start, it is traced
+  under the allowance nearest first (`Priority`), and it is never synchronous.
+- **Rays requested by uncertainty (`RequestedRays`, section 5d).**
+  - A warming or watched surfel asks for all `m_RaysPerSurfel`. A settled one asks for `m_RaysPerSurfel × relative deviation
+    × m_RayUncertainty` (3), a quarter to all of them.
+  - The pick counts its budget in rays. This is on by default (`m_bAdaptiveRays`).
+  - Test 6j15, a point light turned on in a room at the same 2048-ray budget: the recovery error over 60 updates is equal
+    (0.278 both: during recovery every surfel is warming or watched and gets all its rays). The settled error is lower (0.135
+    against 0.150). The Cornell comparison to the path tracer improves (5.5 % mean against 5.7 %).
+- **`RelightAll`.** Every instance traced again under the allowance, at most once in `m_RelightPeriod` (120) updates; a call
+  that comes too soon is deferred, not dropped. Test 6j15: deferred at once, 3 instances dirty, at most the budget per update.
+- **Found while measuring: the first link build starved the trace.** After a load, a link chunk overran the allowance (one
+  surfel per worker, 1.2 ms in Debug), and the trace was left 0.001 ms: 99 rays a frame instead of about 700. The trace now
+  keeps its own share, `(1 − m_LinkShare)` of the allowance, at least.
+  - Police, a fresh editor, 60 s: shown light 0.0159 against the Phase 2b build's 0.0146, flicker 3.8 % against 3.9 %.
+  - **This means the frame can exceed the allowance by that link chunk.** Phase 6b closes it.
+
+### Phase 6b: Budget closure (before Phase 7)
+
+From a review of these results: the stalls are much smaller, but the 2 ms contract is not yet true end to end. Before more GI
+features:
+
+1. **One allowance for every stage.** Events (moves, materials), links, trace, the shown light and the upload preparation all
+   draw from the same frame allowance. A stage's own ceiling may remain, but not as spending outside it.
+2. **No unbudgeted fallbacks.**
+   - The whole-filter shortcut becomes a resumable cursor.
+   - "Progress" is one unit, never one per worker.
+   - The first bucket build and the allocator's compaction are sliced.
+3. **Batch accounting.** Per batch: main-thread elapsed time, workers, aggregate worker CPU, the longest task, and units
+   admitted after the allowance was spent.
+4. **Publication semantics, stated and tested** while the light keeps changing, not only once it settles.
+5. **Localized recovery.** The affected region's mean absolute error and a high percentile, the error over time, and the time
+   to reach and stay below a threshold, in updates and ms. Four events: a bright light off, a door closing across an emitter
+   link, a receiver moving from a bright room to a dark one, and a directional change at similar energy.
+6. **The change detector defined and tested.** High variance at constant light, near black, rapid on/off, coloured light, a
+   moving bright source, repeated lowerings.
+7. **A closure run.** GI main-thread median, p95, p99 and maximum; the longest unit by type; worker CPU; memory; the oldest
+   work; the time since a useful publication. Several renderers open, sustained overload.
+
 ### Phase 7: First use is bounded too
 
 - Separate compiler work, runtime loading and runtime GI initialisation. Precompute in the compiler what can be (the rays'
