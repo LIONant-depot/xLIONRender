@@ -327,6 +327,43 @@ Not taken (GPU or screen-space specific): screen-space spawning and recycling (o
 and its binning, ray sorting, the gather skip, cascade dithering. Wicked picks one light per ray uniformly; our explicit emitter
 links stay.
 
+## 5c. What GIBS (EA SEED, SIGGRAPH 2021) adds
+
+From a review of the presentation (`seed-siggraph21-surfel-gi.pdf`; only its opening was read directly here). GIBS is GPU-driven
+with hardware ray tracing and spawns surfels at runtime; its performance numbers say nothing about a CPU solver under 2 ms.
+
+Taken into the phases:
+- **Rays requested, budget granted** (Phase 1, then 6). Three separate questions: does a surfel need service (change events,
+  age, transport relevance), how many samples would help (uncertainty from the estimator's inconsistency, recent change,
+  initialisation), and how much can be afforded (the scheduler's measured allowance, which stays the final authority). Settled
+  surfels go almost dormant (a minimum sampling rate that still discovers changes); fairness stays independent. This also
+  solves Phase 0's oversized unit: rays are granted in chunks, so a surfel's 8+ rays are no longer one indivisible unit.
+  Test: at equal maintenance time, fixed versus adaptive allocation on a settled interior, a light toggle, an opening door and
+  a moving full-transport object, judged by recovery error over time.
+- **Sharing by confidence** (Phase 3). The display blends raw and neighbourhood light by each surfel's uncertainty and support:
+  a settled, well-supported surfel shares little, a new or noisy one more, never across an incompatible layer (the same
+  neighbour rules as today). One pass with a configurable strength first, after the whole-instance resumable filter is correct.
+  It should also cut the 4.0 ms filter cost.
+- **Bounded light sampling at the hits** (after a measurement). Each hit evaluates the direct light of every light in reach with
+  a shadow ray each; if that dominates the trace, small light sets stay exact and larger ones pick one or a few lights from cheap
+  candidate weights (a reservoir), with correctly derived weights, tracing only the chosen shadow rays. Visible surfaces keep
+  their direct lighting unchanged. First, Phase 1 splits the trace's time into casting, direct light and reads, to know.
+- **Directional guiding** (after the above are stable). A small per-surfel directional map of incoming radiance (GIBS: 6 x 6)
+  and a mixture of it with cosine sampling, so window-lit rooms and bright walls get the rays. The estimator must change with
+  the distribution: E = (1/N) sum L cos / q, not pi x mean(L); the basis accumulation likewise; the distribution is frozen for a
+  batch; the depth moments keep their own unguided rays. Compared with cosine sampling at equal cost before it is kept.
+- **Resident-cache accounting** (rule 5, now). Mesh assets (surfels, read grid, BVH) versus resident instance GI (light,
+  moments, confidence, guiding data, pending work, published GPU storage): the second has limits and a retention rule, and a
+  useful result survives temporary invisibility while memory allows.
+
+Later or not at all:
+- Ray binning by position and direction: only if traversal dominates, measured end to end (generation, sorting, tracing,
+  shading), and itself resumable.
+- A world-space receiver cache (GIBS's probes for transparent surfaces), reusing the tracer, the query, the scheduler and the
+  estimator, if test A shows unacceptable receiver latency or skinned meshes need GI.
+- Not adopted: screen-space spawning (surfels are baked), the first-N reads with a cell-average fallback (it reopens the
+  fail-open reads removed earlier), single-bone attachment for skinned surfels, the nonlinear grid, blue-noise LOD selection.
+
 ## 6. Order and dependencies
 
 ```
