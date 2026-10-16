@@ -2177,6 +2177,59 @@ namespace xlionrender::gi
             return w;
         }
 
+        // Part II, G1 (documentation/gi_dynamic_master_plan.md): the rays' structures for the GPU (shaders/xlionrender_gi_bvh.glsl, the same
+        // walk as Cast). Every mesh's BVH4 nodes and the TLAS's in one array, their child codes global (>= 0 a node, < 0 ~ a leaf: for a mesh
+        // its 4-triangle row in m_Tri4, for the TLAS its entry in m_TlasLeaves); per TLAS primitive its instance (the world-to-mesh rows,
+        // its mesh's root code, its world id). The node and row layouts are bvh::node and tri4 as they are (std430: 112 and 160 bytes).
+        // ponytail: see-through triangles are not left out yet (G2)
+        struct gpu_scene
+        {
+            struct instance { float m_W2L[3][4]; int m_Root = 0, m_Inst = -1, m_Pad0 = 0, m_Pad1 = 0; };
+            std::vector<bvh::node>  m_Nodes;
+            std::vector<tri4>       m_Tri4;
+            std::vector<instance>   m_Instances;
+            std::vector<int>        m_TlasLeaves;       // per TLAS leaf its first and count in the primitives after them (m_PrimOffset on)
+            int                     m_TlasRoot   = 0;
+            int                     m_PrimOffset = 0;
+            bool                    m_bEmpty     = true;
+        };
+        void PackGPU(gpu_scene& Out) const noexcept
+        {
+            BuildTlas();
+            Out = {};
+            Out.m_bEmpty = m_Tlas.m_bEmpty;
+            if (Out.m_bEmpty) return;
+            const auto Copy = [&](const bvh& B, int NodeBase, int LeafBase)        // its nodes, the child codes made global
+            {
+                for (auto N : B.m_Nodes)
+                {
+                    for (int k = 0; k < 4; ++k) N.m_Child[k] = N.m_Child[k] >= 0 ? N.m_Child[k] + NodeBase : ~(~N.m_Child[k] + LeafBase);
+                    Out.m_Nodes.push_back(N);
+                }
+                return B.m_Root >= 0 ? B.m_Root + NodeBase : ~(~B.m_Root + LeafBase);
+            };
+            Out.m_TlasRoot = Copy(m_Tlas, 0, 0);
+            std::unordered_map<const surfel_mesh*, int> Roots;
+            for (const int i : m_TlasIds)
+            {
+                const auto& I = m_Instances[i];
+                auto [It, bNew] = Roots.try_emplace(I.m_pMesh, 0);
+                if (bNew)
+                {
+                    const int NodeBase = int(Out.m_Nodes.size()), LeafBase = int(Out.m_Tri4.size());
+                    It->second = Copy(I.m_pMesh->m_Bvh, NodeBase, LeafBase);
+                    Out.m_Tri4.insert(Out.m_Tri4.end(), I.m_pMesh->m_Tri4.begin(), I.m_pMesh->m_Tri4.end());
+                }
+                gpu_scene::instance G;
+                for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) G.m_W2L[r][c] = I.m_W2L(r, c);
+                G.m_Root = It->second; G.m_Inst = i;
+                Out.m_Instances.push_back(G);
+            }
+            for (const auto& L : m_Tlas.m_Leaves) { Out.m_TlasLeaves.push_back(L.m_First); Out.m_TlasLeaves.push_back(L.m_Count); }
+            Out.m_PrimOffset = int(Out.m_TlasLeaves.size());
+            Out.m_TlasLeaves.insert(Out.m_TlasLeaves.end(), m_Tlas.m_Prims.begin(), m_Tlas.m_Prims.end());
+        }
+
         // The nearest hit before TMax (the instances as they are now: the TLAS is rebuilt after Add / SetTransform; not
         // thread safe across that rebuild - Update rebuilds before its parallel part)
         hit Cast(const v3& O, const v3& D, float TMax = 1e30f) const noexcept

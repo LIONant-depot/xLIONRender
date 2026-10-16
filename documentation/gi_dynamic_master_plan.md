@@ -636,6 +636,73 @@ What was built:
   - A Release editor run.
   - The allocator's compaction is still not sliced (Phase 6b).
 
+### Part II: the trace on the GPU (decided 2026-10-17)
+
+**Why.** Phases 1–7 made the per-frame cost bounded: Police in Debug runs at a 1.84 ms median and a 3.56 ms maximum. But the
+time until the light is resolved grew to a minute or more, where the target is 1 s, on PC first and on mobile too.
+
+The cause is that the trace runs synchronously inside the main thread's allowance: 250–700 rays a frame in Police (Debug).
+Converging the building needs about 8M rays (63k surfels × 8 rays × a 16-sample warm-up). Meanwhile the workers are about 99 %
+idle.
+
+A background CPU trace would reach about 1 s on a many-core PC, but not on mobile. So the decision is to go to the GPU directly,
+with software BVH traversal in compute shaders: no hardware ray tracing required (as the WebGPU surfel GI of Juretriglav and
+three-mesh-bvh do). The background CPU trace is not built.
+
+**What stays.** The CPU keeps the policy:
+- what to trace: priority, fairness, urgency, roles, confidence;
+- the emitter links;
+- the change events;
+- the ledger, now for the CPU's part, with a GPU time budget beside it.
+
+The CPU solver stays as the reference that every GPU step is compared against, and the unit tests stay on it.
+
+**What moves.** The rays (`TraceChunk`), the light at the hits, the reads of other surfels' light, the estimator, the moments,
+the basis fractions, and probably the display filter. The light then stays on the GPU: no upload ring for it.
+
+**Steps.** Each is compared numerically with the CPU before the next:
+
+| Step | What | Done when |
+|---|---|---|
+| G1 | Compute pipelines and dispatch in xGPU, with storage buffers and a readback. The CPU's BVHs (each mesh's BLAS, the TLAS) packed into GPU buffers. A traversal compute shader | For thousands of random rays over a real mesh and a scene of instances, the GPU's nearest hit (instance, triangle, distance) equals the CPU's `Cast`, distance within 1e-4 relative (1 m at least: 0.1 mm on short hits, the float rounding of the instance transform); the rays per ms are measured |
+| G2 | A whole surfel pass on the GPU: the picked surfels' rays, the light at each hit (sun with a shadow ray through the same BVH, point lights, the sky's octahedral map, the hit triangle's albedo and emission), the reads of the hit's surfels, the accumulation | On the unit-test scenes (Cornell, rooms, blinds), the GPU's per-surfel results equal the CPU's for the same rays within a stated tolerance |
+| G3 | The light resident on the GPU: the estimator, the moments and the basis fractions updated there. The renderer reads it directly. The CPU picks the work and uploads only the list | Police converges in about 1 s on PC; the CPU's per-frame GI time is the list and the events |
+| G4 | The display filter on the GPU, the CPU's per-frame GI work removed, mobile measured | Per-frame CPU cost near zero; a mobile GPU budget declared and measured |
+
+**G1 results** (2026-10-17, RTX 4070 Ti SUPER, Release; `xlionrender_test_gi_gpu`):
+
+| | Rays | Differ from the CPU | Worst distance | CPU (one thread) | GPU |
+|---|---|---|---|---|---|
+| One mesh (a sphere, 18,624 triangles) | 65,536 | 0 | 8e-7 | 7k rays/ms | 146k rays/ms |
+| 400 instances of three meshes, rotated, non-uniformly scaled | 65,536 | 1 | 2e-4 | 276 rays/ms | 20.8k rays/ms |
+
+The worst distance is relative, with a 1 m floor. On hits a few millimetres away the two differ by 1e-5 m: the instance
+transform's float rounding.
+
+- **xGPU.**
+  - `xgpu::compute` (a compute shader, up to 8 storage buffers at set 0, push constants) is created with `device::Create`.
+  - `window::Dispatch` records it in the frame's command buffer between render passes, like `CopyBuffer`, with barriers
+    before and after (draws, copies, host writes, other dispatches; later shaders and a readback after the frame). Its
+    descriptor set comes from the frame's ring.
+  - The shader stage gained COMPUTE. Readback uses `CPU_WRITE_GPU_READ` storage buffers (host-visible), so no new buffer
+    usage was needed.
+- **The rays' structures (`gi::world::PackGPU`).** Every mesh's BVH4 nodes and the TLAS's go in one array, with global child
+  codes. The nodes and the 4-triangle rows are copied as they are, since `bvh::node` and `tri4` already have the std430
+  layout. Per TLAS primitive it writes the world-to-mesh rows, the root code and the world id.
+- **The walk (`shaders/xlionrender_gi_bvh.glsl`).** It is `Cast`'s, mirrored: the same 4-wide box test with the near plane per
+  axis, nearest children first, a stack of 64, Möller–Trumbore per row, and the same `SafeInverse`. A mesh is walked with the
+  ray in its space, at the same parameter t.
+  - Not handled yet: see-through triangles (needed in G2) and the any-hit shadow query.
+- **What it means for the target.** About 0.4 ms of GPU time per million rays in a dense instanced scene. Police's roughly 8M
+  rays to converge are about 0.4 s of GPU time in all, so 1 s is within reach once G2 and G3 move the rest of the surfel pass
+  to the GPU.
+
+**Risks.**
+- xGPU has no compute path yet. It declares a compute stage, but nothing creates a compute pipeline or dispatches one.
+- Debugging on the GPU means readbacks.
+- Divergent traversal performance on mobile GPUs.
+- Synchronising the CPU's policy with GPU-resident state, especially the change events against work in flight.
+
 ### Held from earlier work (not part of this plan's critical path)
 
 - The dark shade in Sponza at `SurfelSize` 1 (little light reaches it; not a solver defect so far).
