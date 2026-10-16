@@ -39,6 +39,20 @@ namespace xlionrender
         constexpr std::uint32_t s_EnvDownsampleFrag[] = {
             #include "xlionrender_env_downsample_frag.h"
         };
+        constexpr std::uint32_t s_OutlineMaskFrag[] = {
+            #include "xlionrender_outline_mask_frag.h"
+        };
+        constexpr std::uint32_t s_OutlineCompositeFrag[] = {
+            #include "xlionrender_outline_composite_frag.h"
+        };
+#if 0       // The first attempt (the primitives' OBB outline shader over the scene): not used
+        constexpr std::uint32_t s_OutlineObbVert[] = {
+            #include "xlionrender_outline_obb_vert.h"
+        };
+        constexpr std::uint32_t s_OutlineObbFrag[] = {
+            #include "xlionrender_outline_obb_frag.h"
+        };
+#endif
         constexpr std::uint32_t s_SkyBackgroundFrag[] = {
             #include "xlionrender_sky_background_frag.h"
         };
@@ -160,6 +174,10 @@ namespace xlionrender
         ReleaseBuffer(m_LightRing);
         for( auto* p : { &m_EnvSkyInstance, &m_EnvPrefilterInstance, &m_EnvDFGInstance, &m_EnvCubemapInstance, &m_SkyBackgroundInstance } ) m_Device.Destroy(std::move(*p));
         m_Device.Destroy(std::move(m_SkyBackgroundPipeline));
+        m_Device.Destroy(std::move(m_OutlineInstance));
+        m_Device.Destroy(std::move(m_OutlinePipeline));
+        for( auto& P : m_MaskPipeline ) m_Device.Destroy(std::move(P));
+        m_Device.Destroy(std::move(m_OutlineCompositePipeline));
         for( auto& I : m_EnvDownsampleInstance ) m_Device.Destroy(std::move(I));
         for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline, &m_EnvDownsamplePipeline, &m_EnvCubemapPipeline } ) m_Device.Destroy(std::move(*p));
         for( auto* p : { &m_EnvAtlasPass, &m_EnvDFGPass } )                                 m_Device.Destroy(std::move(*p));
@@ -463,6 +481,24 @@ namespace xlionrender
             if( auto Err = MakeCaster(0, m_MeshVD,       ForwardVert, sizeof(details::push_forward),     0); Err ) return Err;     // CreateMesh meshes
             if( auto Err = MakeCaster(1, m_StaticGeomVD, RigidVert,   sizeof(details::push_static_geom), 3); Err ) return Err;     // RIGID
             if( auto Err = MakeCaster(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   4); Err ) return Err;     // SKIN
+
+            // The selection's mask: the same vertex paths, the mask's fragment (it samples the scene's depth), no bias, the depth test and write of its own
+            {
+                xgpu::shader MaskFrag;
+                if( auto Err = Device.Create(MaskFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_OutlineMaskFrag) }); Err ) return Err;
+                const auto MakeMask = [&](int k, xgpu::vertex_descriptor& VD, const xgpu::shader& Vert, std::size_t PushSize, std::size_t nBinds) -> xgpu::device::error*
+                {
+                    auto Shaders  = std::array<const xgpu::shader*, 2>{ &MaskFrag, &Vert };
+                    auto Samplers = std::array{ xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true } };
+                    xgpu::pipeline::setup Setup{ .m_VertexDescriptor = VD, .m_Shaders = Shaders, .m_PushConstantsSize = PushSize, .m_UniformBinds = std::span{ Binds.data(), nBinds }, .m_Samplers = Samplers };
+                    Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+                    return Device.Create(m_MaskPipeline[k], Setup);
+                };
+                if( auto Err = MakeMask(0, m_MeshVD,       ForwardVert, sizeof(details::push_forward),     0); Err ) return Err;
+                if( auto Err = MakeMask(1, m_StaticGeomVD, RigidVert,   sizeof(details::push_static_geom), 3); Err ) return Err;
+                if( auto Err = MakeMask(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   4); Err ) return Err;
+                m_bOutlineReady = true;
+            }
         }
 
         // The environment probe's passes and pipelines (fullscreen triangles; the sky and the prefilter rebuild only on a sky change)
@@ -511,6 +547,41 @@ namespace xlionrender
                 Setup.m_DepthStencil.m_DepthCompare      = xgpu::pipeline::depth_stencil::depth_compare::LESS_OR_EQUAL;
                 Setup.m_DepthStencil.m_bDepthWriteEnable = false;
                 if( auto Err = Device.Create(m_SkyBackgroundPipeline, Setup); Err ) return Err;
+            }
+#if 0       // The first attempt: the primitives' OBB outline shader over the scene (it needs a mesh that is box-like): replaced by the mask and the composite below
+            // The selection's outline: the editor's outline shader (the primitives' selection outline), here over the scene: cull none, the depth bias
+            // away from the eye (the object's own pixels, at the same depth, fail the test: only the ring around its silhouette shows), nothing written
+            {
+                xgpu::shader Vert, Frag;
+                if( auto Err = Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (std::int32_t*)s_OutlineObbVert, std::size(s_OutlineObbVert) } } }); Err ) return Err;
+                if( auto Err = Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (std::int32_t*)s_OutlineObbFrag, std::size(s_OutlineObbFrag) } } }); Err ) return Err;
+                auto Attributes = std::array
+                { xgpu::vertex_descriptor::attribute{ .m_Offset = 0,                  .m_Format = xgpu::vertex_descriptor::format::FLOAT_3D }
+                , xgpu::vertex_descriptor::attribute{ .m_Offset = 3 * sizeof(float),  .m_Format = xgpu::vertex_descriptor::format::FLOAT_3D }
+                };
+                if( auto Err = Device.Create(m_OutlineVD, xgpu::vertex_descriptor::setup{ .m_Topology = xgpu::vertex_descriptor::topology::TRIANGLE_LIST, .m_VertexSize = 6 * sizeof(float), .m_Attributes = Attributes }); Err ) return Err;
+                auto Shaders = std::array<const xgpu::shader*, 2>{ &Frag, &Vert };
+                if( auto Err = Device.Create(m_OutlinePipeline, xgpu::pipeline::setup{ .m_VertexDescriptor = m_OutlineVD, .m_Shaders = Shaders
+                    , .m_PushConstantsSize = sizeof(details::push_outline_obb)
+                    , .m_Primitive    = { .m_Cull = xgpu::pipeline::primitive::cull::NONE }
+                    , .m_DepthStencil = { .m_DepthBiasConstantFactor = 1.25f, .m_DepthBiasSlopeFactor = 1.75f, .m_bDepthWriteEnable = false, .m_bDepthBiasEnable = true } }); Err ) return Err;
+                if( auto Err = Device.Create(m_OutlineInstance, { .m_PipeLine = m_OutlinePipeline }); Err ) return Err;
+            }
+#endif
+            // The selection's outline composite: over the tone-mapped image, alpha blended (the alpha channel as coverage: a over what is there), no depth
+            {
+                xgpu::shader Frag;
+                if( auto Err = Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_OutlineCompositeFrag) }); Err ) return Err;
+                auto Shaders  = std::array<const xgpu::shader*, 2>{ &Frag, &ClearVert2 };
+                auto Samplers = std::array{ xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true } };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_outline_composite), .m_Samplers = Samplers };
+                Setup.m_Primitive.m_Cull                 = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_bDepthTestEnable  = false;
+                Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+                Setup.m_Blend.m_bEnable = true;
+                Setup.m_Blend.m_ColorSrcFactor = xgpu::pipeline::blend::factor::SRC_ALPHA; Setup.m_Blend.m_ColorDstFactor = xgpu::pipeline::blend::factor::ONE_MINUS_SRC_ALPHA;
+                Setup.m_Blend.m_AlphaSrcFactor = xgpu::pipeline::blend::factor::ONE;       Setup.m_Blend.m_AlphaDstFactor = xgpu::pipeline::blend::factor::ONE_MINUS_SRC_ALPHA;
+                if( auto Err = Device.Create(m_OutlineCompositePipeline, Setup); Err ) return Err;
             }
             if( auto Err = Device.Create(m_EnvSkyInstance, { .m_PipeLine = m_EnvSkyPipeline }); Err ) return Err;
             if( auto Err = Device.Create(m_EnvDFGInstance, { .m_PipeLine = m_EnvDFGPipeline }); Err ) return Err;
@@ -601,6 +672,7 @@ namespace xlionrender
             ReleaseBuffer(M.m_IndexBuffer);
         }
         if( M.m_pGI ) { ReleaseBuffer(M.m_GIBuffer); M.m_pGI.reset(); }
+        if( M.m_nOutlineIndices > 0 ) { ReleaseBuffer(M.m_OutlineVB); ReleaseBuffer(M.m_OutlineIB); M.m_nOutlineIndices = 0; }
         M.m_Geom = {};
         M.m_bAlive     = false;
     }
@@ -609,6 +681,20 @@ namespace xlionrender
 
     // The vertex shader's GIMesh (xlionrender_static_geom_body.glsl): [0] level 0's first uint, [1] level 1's; per vertex 2 uints
     // (4 x 16-bit surfel indices, 0xFFFF none); per surfel 8: center xyz, radius, normal xyz, parent (uint bits)
+    xgpu::device::error* instance::SetOutlineProxy( mesh_id Id, std::span<const float> PosNrm, std::span<const std::uint32_t> Indices, const xmath::fvec3& Center, const xmath::fvec3& Half ) noexcept
+    {
+        if( findMesh(Id) == nullptr || PosNrm.empty() || Indices.empty() ) return nullptr;
+        auto& M = m_Meshes[Id.m_Index];
+        if( M.m_nOutlineIndices > 0 ) return nullptr;
+        if( auto Err = m_Device.Create(M.m_OutlineVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 6 * sizeof(float), .m_EntryCount = int(PosNrm.size() / 6) }); Err ) return Err;
+        (void)M.m_OutlineVB.MemoryMap(0, int(PosNrm.size() / 6), [&](void* p) { std::memcpy(p, PosNrm.data(), PosNrm.size() * sizeof(float)); });
+        if( auto Err = m_Device.Create(M.m_OutlineIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Indices.size()) }); Err ) return Err;
+        (void)M.m_OutlineIB.MemoryMap(0, int(Indices.size()), [&](void* p) { std::memcpy(p, Indices.data(), Indices.size() * sizeof(std::uint32_t)); });
+        M.m_OutlineCenter = Center; M.m_OutlineHalf = Half;
+        M.m_nOutlineIndices = int(Indices.size());
+        return nullptr;
+    }
+
     xgpu::device::error* instance::SetMeshGI( mesh_id Id, gi::surfel_mesh&& Surfels ) noexcept
     {
         if( findMesh(Id) == nullptr ) return nullptr;
@@ -846,8 +932,43 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    xgpu::device::error* instance::createOutlineTargets( render_view& View ) noexcept
+    {
+        if( View.m_Mask.m_Private && View.m_MaskWidth == View.m_Width && View.m_MaskHeight == View.m_Height ) return nullptr;
+        destroyOutlineTargets(View);
+        if( auto Err = m_Device.Create(View.m_Mask,      { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_MaskDepth, { .m_Format = xgpu::texture::format::DEPTH_F32,     .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
+        {
+            auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_Mask }, xgpu::renderpass::attachment{ View.m_MaskDepth } };
+            if( auto Err = m_Device.Create(View.m_MaskPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
+        }
+        {
+            auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_Output } };
+            if( auto Err = m_Device.Create(View.m_OutlinePass, { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
+        }
+        auto DepthBinding = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_Depth } };
+        for( int k = 0; k < 3; ++k )
+            if( auto Err = m_Device.Create(View.m_MaskInstance[k], { .m_PipeLine = m_MaskPipeline[k], .m_SamplersBindings = DepthBinding }); Err ) return Err;
+        auto MaskBinding = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_Mask } };
+        if( auto Err = m_Device.Create(View.m_OutlineInstance, { .m_PipeLine = m_OutlineCompositePipeline, .m_SamplersBindings = MaskBinding }); Err ) return Err;
+        View.m_MaskWidth = View.m_Width; View.m_MaskHeight = View.m_Height;
+        return nullptr;
+    }
+
+    void instance::destroyOutlineTargets( render_view& View ) noexcept
+    {
+        for( auto& I : View.m_MaskInstance ) if( I.m_Private ) m_Device.Destroy(std::move(I));
+        if( View.m_OutlineInstance.m_Private ) m_Device.Destroy(std::move(View.m_OutlineInstance));
+        if( View.m_MaskPass.m_Private )        m_Device.Destroy(std::move(View.m_MaskPass));
+        if( View.m_OutlinePass.m_Private )     m_Device.Destroy(std::move(View.m_OutlinePass));
+        if( View.m_Mask.m_Private )            m_Device.Destroy(std::move(View.m_Mask));
+        if( View.m_MaskDepth.m_Private )       m_Device.Destroy(std::move(View.m_MaskDepth));
+        View.m_MaskWidth = View.m_MaskHeight = 0;
+    }
+
     void instance::DestroyView( render_view& View ) noexcept
     {
+        destroyOutlineTargets(View);
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));

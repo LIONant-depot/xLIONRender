@@ -234,6 +234,7 @@ namespace xlionrender
 
             xlioncore::PropagateHierarchy(*this);
             R.Begin();
+            R.m_Scene.m_SelectedUser = GetSelectedInternal();
             const auto Interpolate = xlioncore::FixedInterpolateOf(getGameMgr());
             const auto L2WOf = [&](const xlioncore::transform& Local, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender, xmath::fmat4& L2W) noexcept
             {
@@ -294,6 +295,40 @@ namespace xlionrender
         // Ray-vs-OBB: Transform Position/Rotation + half-extents 0.5*Scale (matches Collect L2W).
         // Closest hit wins. MaxT caps the ray (e.g. ground-plane hit) so empty floor clears
         // selection instead of selecting through distant AABBs.
+        // The box of an entity (what Pick tests): its center, rotation and half extents in the world. False: none (a light, a text, not there)
+        bool EntityBox(std::uint64_t Entity, xmath::fvec3& Center, xmath::fquat& Rotation, xmath::fvec3& Half) noexcept
+        {
+            bool bFound = false;
+            xecs::query::instance MeshQuery;
+            MeshQuery.m_Must.AddFromComponents<xlioncore::transform, mesh>();
+            auto MS = Search(MeshQuery);
+            Foreach(MS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const mesh& M, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+            {
+                if (bFound || Ent.m_Value != Entity || M.m_Geom.empty()) return;
+                auto* pGeom = static_cast<xgeom_static::xgpu::geom*>(xlioncore::resources::GetResource(geom_static_type_guid_v.m_Value, M.m_Geom.m_Instance.m_Value));
+                if (!pGeom) return;
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender, xlioncore::FixedInterpolateOf(getGameMgr()));
+                if (!T.m_Scale.isFinite()) return;
+                const xmath::fvec3 LocalCenter = (pGeom->m_BBox.m_Min + pGeom->m_BBox.m_Max) * 0.5f;
+                Half     = ((pGeom->m_BBox.m_Max - pGeom->m_BBox.m_Min) * 0.5f * T.m_Scale).AbsCopy();
+                Center   = T.m_Position + T.m_Rotation.RotateVector(LocalCenter * T.m_Scale);
+                Rotation = T.m_Rotation;
+                bFound   = true;
+            });
+            if (bFound) return true;
+            xecs::query::instance Query;
+            Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
+            auto S = Search(Query);
+            Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive&, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+            {
+                if (bFound || Ent.m_Value != Entity) return;
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender, xlioncore::FixedInterpolateOf(getGameMgr()));
+                if (!T.m_Scale.isFinite()) return;
+                Center = T.m_Position; Rotation = T.m_Rotation; Half = (T.m_Scale * 0.5f).AbsCopy(); bFound = true;
+            });
+            return bFound;
+        }
+
         std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max(), view View = view::SCENE, const roles* pRoles = nullptr) noexcept
         {
             xecs::query::instance Query;

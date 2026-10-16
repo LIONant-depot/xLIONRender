@@ -64,6 +64,10 @@ namespace xlionrender
         // Surfel GI for a cluster mesh (CreateClusterGeom, rigid): its baked surfels (gi::surfel_mesh::Bake) in the mesh's vertex
         // order - the resource pipeline's product (the xgeom GI options); kept by the renderer. scene::m_GI turns GI on.
         [[nodiscard]] xgpu::device::error* SetMeshGI    ( mesh_id Id, gi::surfel_mesh&& Surfels )             noexcept;
+        // The mesh the selection's outline is made from (the editor's outline shader draws it expanded in screen space): per vertex position and
+        // normal (6 floats), the triangles, the local box (its center and half extents) the shader's cage is made from. Once per mesh.
+        [[nodiscard]] xgpu::device::error* SetOutlineProxy( mesh_id Id, std::span<const float> PosNrm, std::span<const std::uint32_t> Indices, const xmath::fvec3& Center, const xmath::fvec3& Half ) noexcept;
+                      bool                 HasOutlineProxy( mesh_id Id ) const                                  noexcept { const auto* p = findMesh(Id); return p && p->m_nOutlineIndices > 0; }
         // The last render's GI update (instances, rays, CPU ms)
                       const gi::world::stats& getGIStats( void ) const                                      noexcept { return m_GIStats; }
                       const gi::world*        getGIWorld( void ) const                                      noexcept { return m_pGIWorld.get(); }      // tests, tools
@@ -149,6 +153,9 @@ namespace xlionrender
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             bool                    m_bCluster      = false;
+            xgpu::buffer            m_OutlineVB, m_OutlineIB;           // SetOutlineProxy: the selection's outline mesh (position, normal) and its triangles
+            int                     m_nOutlineIndices = 0;
+            xmath::fvec3            m_OutlineCenter{ 0, 0, 0 }, m_OutlineHalf{ 0, 0, 0 };
         };
 
         static constexpr std::size_t capture_path_v = std::size_t(geom_kind::COUNT);      // the GI material capture's pipelines (getCaptureInstance)
@@ -174,6 +181,10 @@ namespace xlionrender
         void                        writeLocalLights( const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept;
         void                        updateEnvironment( xgpu::window& Window, const scene& Scene )               noexcept;
         void                        renderScenePass ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept;
+        // The selection's outline (Scene.m_SelectedUser's draw): its triangles into the view's mask, then the outline over m_Output (before the overlays)
+        void                        renderOutline   ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
+        xgpu::device::error*        createOutlineTargets( render_view& View ) noexcept;
+        void                        destroyOutlineTargets( render_view& View ) noexcept;
         void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        prefilterInto   ( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept;
         std::vector<xgpu::pipeline::sampler>                    LitSamplers ( void ) const                     noexcept;
@@ -325,6 +336,12 @@ namespace xlionrender
         std::uint64_t               m_EnvKey                = 0;            // the sky the atlas holds (0: none yet)
         xgpu::pipeline              m_EnvCubemapPipeline;                   // a cubemap texture (scene::sky::m_pCubemap) into the source
         xgpu::pipeline_instance     m_EnvCubemapInstance;
+        xgpu::pipeline              m_MaskPipeline[3];                      // the selection's mask: the casters' vertex paths with the mask's fragment (renderOutline)
+        xgpu::pipeline              m_OutlineCompositePipeline;             // the outline over the tone-mapped image
+        bool                        m_bOutlineReady = false;
+        xgpu::vertex_descriptor     m_OutlineVD;                            // the outline mesh: position and normal
+        xgpu::pipeline              m_OutlinePipeline;                      // the editor's outline shader (xlionrender_outline_obb_*), drawn over the scene after it
+        xgpu::pipeline_instance     m_OutlineInstance;
         xgpu::pipeline              m_SkyBackgroundPipeline;                // the cubemap as the background (scene::sky::m_bVisible)
         xgpu::pipeline_instance     m_SkyBackgroundInstance;
         const xgpu::texture*        m_pSkyBackground        = nullptr;      // the cubemap m_SkyBackgroundInstance binds

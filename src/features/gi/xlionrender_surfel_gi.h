@@ -481,6 +481,7 @@ namespace xlionrender::gi
             m_Mean = m_Mean + (y - m_Mean) * std::clamp(CatchUp, 0.0f, 1.0f);
         }
     };
+    constexpr int links_settle_v  = 8;      // updates without a SetTransform before the emitters' links are rebuilt (the links of a whole level cost seconds in Debug: not on every frame of a drag)
     constexpr int dead_retrace_v  = 8;      // a buried surfel (validity 0) is traced one pass in this many (Update)
     // A surfel far from the eye is traced less often: its footprint on the screen is about (radius / distance)^2 pixels, so a far one
     // is a few pixels and a near one is many. The period by distance in radii; off screen or behind the eye it still bounces light onto what is seen, so it is only
@@ -1691,13 +1692,15 @@ namespace xlionrender::gi
             Place(I, L2W);
             DirtyNear(I.m_Lo, I.m_Hi);
             m_bTlasDirty = true;
-            m_bLinksDirty = true;           // ponytail: every link is rebuilt when anything moves (scenes with emitters and moving meshes: per instance)
+            m_bLinksMoved = true;           // the links are rebuilt when the moving stops (links_settle_v updates later): while it goes on they keep the last place's visibility
+            m_LinksMovedAt = m_nUpdates;    // ponytail: every link at once, not per instance; per instance (the moved one's, and those whose segments cross its box) when a scene needs it
         }
 
         int             InstanceCount  ( void ) const noexcept { return int(m_Instances.size()); }
         int             Level          ( int Id ) const noexcept { return m_Instances[Id].m_Level; }
         bool            IsCube         ( int Id ) const noexcept { return m_Instances[Id].m_bCube; }
         const std::vector<int>& CubeSet( int Id ) const noexcept { return m_Instances[Id].m_CubeSet; }
+        int             LinkRebuilds   ( void ) const noexcept { return m_nLinkRebuilds; }
         const v3&       Albedo         ( int Id ) const noexcept { return m_Instances[Id].m_Albedo; }
         // What the GPU buffer would hold for an instance: its active level's irradiance and validity per surfel
         const std::vector<v3>&    InstanceLight( int Id ) const noexcept { return m_Instances[Id].m_E; }
@@ -2227,7 +2230,9 @@ namespace xlionrender::gi
             St.m_Surfels = int(m_Work.size());
             St.m_Rays    = St.m_Surfels * m_Setup.m_RaysPerSurfel;
 
-            if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; m_bEmitDirty = true; }
+            ++m_nUpdates;
+            if (m_bLinksMoved && m_nUpdates - m_LinksMovedAt >= links_settle_v) { m_bLinksMoved = false; m_bLinksDirty = true; }
+            if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; m_bEmitDirty = true; ++m_nLinkRebuilds; }
             // The emitters' light: made of the links, the emissions (SetSurfelMaterial: the links again) and the scale; a level switch
             // changes its layout. Nothing else: not every update
             if (m_bEmitDirty || m_EmitScale != m_Setup.m_EmissiveScale) { UpdateEmittedLight(); m_bEmitDirty = false; m_EmitScale = m_Setup.m_EmissiveScale; }
@@ -2733,6 +2738,9 @@ namespace xlionrender::gi
         }
 
         bool                                    m_bLinksDirty = false;
+        bool                                    m_bLinksMoved = false;      // an instance moved: m_bLinksDirty links_settle_v updates after the last move
+        unsigned                                m_nUpdates = 0, m_LinksMovedAt = 0;
+        int                                     m_nLinkRebuilds = 0;        // (tests)
         bool                                    m_bEmitDirty = true;        // UpdateEmittedLight's inputs changed (Update)
         float                                   m_EmitScale = -1;           // the scale it was made with
         std::vector<std::pair<int, int>>        m_Emitters;         // (instance, fine surfel) of every surfel that emits

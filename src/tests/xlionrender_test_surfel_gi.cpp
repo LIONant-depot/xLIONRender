@@ -1076,6 +1076,29 @@ int main()
         CHECK(TopCube > 2 * BotCube, "the top is not lit over the bottom (%.3f vs %.3f)", TopCube, BotCube);
     }
 
+    // 6j9. The emitters' links are rebuilt when the moving stops (links_settle_v updates after the last SetTransform), not on every frame of a drag:
+    //      a level's links cost seconds in Debug. A sign (an emitter) over a floor; the floor moves every update for 30 updates: no rebuild; then one
+    {
+        surfel_mesh Ground, Sign;
+        AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
+        AddQuad(Sign,   { -0.1f, 1, -0.1f }, { 0.2f, 0, 0 }, { 0, 0, 0.2f }, 0.1f);       // facing down
+        Ground.Bake(0.3f, 0.9f); Sign.Bake(0.1f, 0.3f);
+        world W;
+        const int iGround = W.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iSign   = W.Add(Sign,   xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        W.SetSurfelMaterial(iSign, {}, std::vector<v3>(Sign.m_Levels[0].size(), v3{ 20, 20, 20 }));
+        lights Dark;
+        for (int f = 0; f < 20; ++f) W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22000 + f);
+        const int Before = W.LinkRebuilds();
+        for (int f = 0; f < 30; ++f) { W.SetTransform(iGround, xmath::fmat4::fromTranslation({ 0.01f * float(f), 0, 0 })); W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22100 + f); }
+        const int During = W.LinkRebuilds() - Before;
+        for (int f = 0; f < 20; ++f) W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22200 + f);
+        const int After = W.LinkRebuilds() - Before;
+        std::printf("links while the floor moves for 30 updates: %d rebuilds; %d after it stops\n", During, After);
+        CHECK(During == 0, "the links were rebuilt %d times during the move", During);
+        CHECK(After == 1, "the links were rebuilt %d times by the end (one when it stops)", After);
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {

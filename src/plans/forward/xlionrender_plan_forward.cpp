@@ -1006,6 +1006,35 @@ namespace xlionrender
                 }
             }
 
+#if 0       // The first attempt: the primitives' OBB outline shader over the scene (it needs a mesh that is box-like): replaced by renderOutline
+            // The selection's outline, with the editor's outline shader: the selected draw's mesh expanded in screen space, over what was drawn
+            // (the depth bias puts it behind the object's own pixels: only the ring around the silhouette shows, and what is in front of it hides it)
+            if( bMain && Scene.m_SelectedUser != ~0ull )
+                for( const auto& D : Scene.m_Draws )
+                {
+                    if( D.m_UserID != Scene.m_SelectedUser ) continue;
+                    const auto* pMesh = findMesh(D.m_Mesh);
+                    if( pMesh && pMesh->m_nOutlineIndices > 0 )
+                    {
+                        constexpr float kTwoPi = 6.28318530717958647692f;
+                        static const auto s_Start = std::chrono::steady_clock::now();
+                        const float Pulse = 0.975f + 0.125f * std::sin(std::chrono::duration<float>(std::chrono::steady_clock::now() - s_Start).count() * kTwoPi);     // the primitives' outline's: 1 Hz
+                        const float Growth = 0.3f * std::max({ pMesh->m_OutlineHalf.m_X, pMesh->m_OutlineHalf.m_Y, pMesh->m_OutlineHalf.m_Z });                   // the primitives': 0.15 on a half of 0.5
+                        Cmd.setPipelineInstance(m_OutlineInstance);
+                        Cmd.setPushConstants(details::push_outline_obb
+                            { W2C * (ToEye * D.m_L2W)
+                            , xmath::fvec4(float(View.m_Width), float(View.m_Height), 6.0f, 0.08f)
+                            , xmath::fvec4(std::min(1.0f, Pulse), std::min(1.0f, Pulse * 0.65f), std::min(1.0f, Pulse * 0.15f), 1.0f)
+                            , xmath::fvec4(pMesh->m_OutlineCenter.m_X, pMesh->m_OutlineCenter.m_Y, pMesh->m_OutlineCenter.m_Z, Growth)
+                            , xmath::fvec4(pMesh->m_OutlineHalf.m_X, pMesh->m_OutlineHalf.m_Y, pMesh->m_OutlineHalf.m_Z, 32.0f) });
+                        Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_OutlineVB));
+                        Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_OutlineIB));
+                        Cmd.Draw(pMesh->m_nOutlineIndices);
+                    }
+                    break;
+                }
+#endif
+
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 2);
         }
     }
@@ -1154,10 +1183,100 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& Camera, const overlay_fn& Overlay ) noexcept
+    // The selection's outline (Scene.m_SelectedUser's draw), made of two passes. The mask: the object's own triangles through the casters' vertex
+    // paths (rigid, skin, plain meshes) into a target of the view's size with a depth buffer of its own (the nearest fragment stays); the fragment
+    // writes R 1 (covered) and G (that fragment is not behind what the scene drew: the scene's depth sampled). The composite: a fullscreen triangle
+    // over the tone-mapped image, scissored to the object's projected bounds (and the outline's reach): the edge from the fraction of a ring of
+    // taps that is selection (xlionrender_outline_composite_frag.glsl). Nothing is selected: nothing runs.
+    void instance::renderOutline( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept
+    {
+        if( Scene.m_SelectedUser == ~0ull || !m_bOutlineReady ) return;
+        std::size_t iDraw = Scene.m_Draws.size();
+        for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i ) if( Scene.m_Draws[i].m_UserID == Scene.m_SelectedUser ) { iDraw = i; break; }
+        if( iDraw >= Scene.m_Draws.size() || iDraw >= m_DrawSlot.size() || iDraw >= m_DrawWorld.size() ) return;
+        const auto& D     = Scene.m_Draws[iDraw];
+        const auto* pMesh = findMesh(D.m_Mesh);
+        if( pMesh == nullptr || (pMesh->m_bCluster && m_DrawSlot[iDraw] == instance_slots::none_v) ) return;
+        if( createOutlineTargets(View) ) return;
+
+        // The object's bounds on the screen (the world box's 8 corners): where the composite has anything to do. A corner behind the eye: the whole view
+        constexpr float kRadius = 3.0f;
+        const xmath::fbbox& B = m_DrawWorld[iDraw];
+        float MinX = 1e30f, MinY = 1e30f, MaxX = -1e30f, MaxY = -1e30f;
+        bool  bWhole = false;
+        for( int i = 0; i < 8; ++i )
+        {
+            const xmath::fvec3 P{ (i & 1 ? B.m_Max.m_X : B.m_Min.m_X) - Eye.m_X, (i & 2 ? B.m_Max.m_Y : B.m_Min.m_Y) - Eye.m_Y, (i & 4 ? B.m_Max.m_Z : B.m_Min.m_Z) - Eye.m_Z };
+            const xmath::fvec4 C = W2C * xmath::fvec4(P, 1.0f);
+            if( C.m_W <= 1.0e-4f ) { bWhole = true; break; }
+            const float X = (C.m_X / C.m_W * 0.5f + 0.5f) * float(View.m_Width), Y = (C.m_Y / C.m_W * 0.5f + 0.5f) * float(View.m_Height);
+            MinX = std::min(MinX, X); MaxX = std::max(MaxX, X); MinY = std::min(MinY, Y); MaxY = std::max(MaxY, Y);
+        }
+        int X0 = 0, Y0 = 0, X1 = View.m_Width, Y1 = View.m_Height;
+        if( !bWhole )
+        {
+            const float Pad = kRadius + 3.0f;
+            X0 = std::clamp(int(std::floor(MinX - Pad)), 0, View.m_Width);  X1 = std::clamp(int(std::ceil(MaxX + Pad)), 0, View.m_Width);
+            Y0 = std::clamp(int(std::floor(MinY - Pad)), 0, View.m_Height); Y1 = std::clamp(int(std::ceil(MaxY + Pad)), 0, View.m_Height);
+            if( X1 <= X0 || Y1 <= Y0 ) return;       // off the screen
+        }
+
+        {
+            auto Cmd = Window.StartRenderPass(View.m_MaskPass);
+            const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
+            auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();       // camera-centered, as the scene pass's
+            ViewBlock.m_w2C         = W2C;
+            ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin - Eye, 0);
+            if( pMesh->m_bCluster == false )
+            {
+                Cmd.setPipelineInstance(View.m_MaskInstance[0]);
+                Cmd.setPushConstants(details::push_forward{ ToEye * D.m_L2W, W2C });
+                Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_VertexBuffer));
+                Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_IndexBuffer));
+                Cmd.Draw(pMesh->m_nIndices);
+            }
+            else
+            {
+                const auto& G     = pMesh->m_Geom;
+                const bool  bSkin = G.m_Kind == geom_kind::SKIN;
+                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer };
+                Cmd.setPipelineInstance(View.m_MaskInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} });
+                Cmd.setDynamicUBO(m_ShadowUBO, 0);
+                Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
+                const std::uint32_t Slot = m_DrawSlot[iDraw];
+                for( const auto& Sub : G.m_Submeshes )
+                    for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                    {
+                        const auto& C = G.m_Clusters[c];
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot });
+                        else        Cmd.setPushConstants(details::push_static_geom{ c, Slot });
+                        Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
+                    }
+            }
+        }
+        {
+            auto Cmd = Window.StartRenderPass(View.m_OutlinePass);
+            constexpr float kTwoPi = 6.28318530717958647692f;
+            static const auto s_Start = std::chrono::steady_clock::now();
+            const float Pulse = 0.975f + 0.125f * std::sin(std::chrono::duration<float>(std::chrono::steady_clock::now() - s_Start).count() * kTwoPi);       // the primitives' outline's: 1 Hz
+            Cmd.setScissor(X0, Y0, X1 - X0, Y1 - Y0);
+            Cmd.setPipelineInstance(View.m_OutlineInstance);
+            Cmd.setPushConstants(details::push_outline_composite{ xmath::fvec4(std::min(1.0f, Pulse), std::min(1.0f, Pulse * 0.65f), std::min(1.0f, Pulse * 0.15f), 1.0f), xmath::fvec4(kRadius, 0.35f, 0.12f, 0.0f) });
+            Cmd.setBuffer(m_FullscreenVB);
+            Cmd.setBuffer(m_FullscreenIB);
+            Cmd.Draw(3);
+        }
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& CameraIn, const overlay_fn& Overlay ) noexcept
     {
         assert(m_bReady && View.m_Width > 0);
 
+        // The render target's viewport is for this render: on a copy. The host's own view keeps the viewport it has (the editor's panel, in screen
+        // coordinates): its click-pick of the same frame builds its ray from it (it used to get the target's: every click missed)
+        xgpu::tools::view Camera = CameraIn;
         Camera.setViewport({ 0, 0, View.m_Width, View.m_Height });
 
         // Camera-centered world (same as the editors): precision stays near the eye in large worlds
@@ -1194,6 +1313,8 @@ namespace xlionrender
             Cmd.Draw(3);
             Cmd.WriteTimestamp(m_Timestamps, 3);
         }
+
+        renderOutline(Window, Scene, View, W2C, Eye);           // the selection's outline, over the tone-mapped image
 
         // Editor overlays over the tone-mapped image, depth-tested against the scene
         if( Overlay )

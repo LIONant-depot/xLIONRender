@@ -159,6 +159,23 @@ namespace xlionrender::details
         xmath::fvec4    m_Params;           // the table's size, samples
     };
 
+    // xlionrender_outline_composite_frag.glsl
+    struct push_outline_composite
+    {
+        xmath::fvec4    m_Color;        // rgb the outline's color, a its opacity
+        xmath::fvec4    m_Params;       // x radius (px), y the hidden part's opacity, z the hidden fill's opacity
+    };
+
+    // xlionrender_outline_obb_vert.glsl (the editor's selection outline: the first attempt, not used)
+    struct push_outline_obb
+    {
+        xmath::fmat4    m_L2C;
+        xmath::fvec4    m_ViewportAndRadius;    // xy viewport px, z radius px, w max fractional expand
+        xmath::fvec4    m_Color;
+        xmath::fvec4    m_Bounds;               // xyz local box center, w cage growth
+        xmath::fvec4    m_Axis;                 // xyz local box half extents, w near-parallel rejection angle (degrees)
+    };
+
     // xlionrender_sky_background_frag.glsl
     struct push_sky_background
     {

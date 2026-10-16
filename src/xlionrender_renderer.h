@@ -32,6 +32,7 @@ namespace xlionrender
 
         // The one entity (if any) to outline this frame - xlionrender::SetSelectedEntity forwards here.
         void SetSelected(std::uint64_t EntityValue) noexcept { m_SelectedEntity = EntityValue; }
+        std::uint64_t getSelected(void) const noexcept { return m_SelectedEntity; }
 
         // Called once per frame by the exported xlionrender::Draw (xlionrender_api.h), from the host's
         // own render callback - issues the real draw calls for everything Submitted since the last

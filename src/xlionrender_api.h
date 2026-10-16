@@ -53,7 +53,7 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 7;                // 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
+        static constexpr std::uint32_t kVersion = 8;                // 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
@@ -69,6 +69,9 @@ namespace xlionrender
         // owns the arrays for the call. Draw and Pick above are these with no roles. Version 4.
         virtual void          DrawRoles(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View, const roles& Roles) noexcept = 0;
         virtual std::uint64_t PickRoles(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View, const roles& Roles) noexcept = 0;
+        // The box of an entity in the world (the box Pick tests): its center, its rotation and its half extents. A Mesh: its geometry's bounds placed by the entity; a primitive: its
+        // unit box scaled. False when it has none (a light, a text, an entity that is not there). Version 8.
+        virtual bool          EntityBox(const void* pWorld, std::uint64_t EntityValue, xmath::fvec3& Center, xmath::fquat& Rotation, xmath::fvec3& HalfExtents) noexcept = 0;
         // What the last draw did with the roles (items of the context, items of the document, whether the fade was drawn), written like DescribeTextDraw. Returns the length written. Version 4.
         virtual int           DescribeRoleDraw(char* pOut, int Capacity) noexcept = 0;
         // The world's Meshes, lights and Environment through the forward renderer (xlionrender::instance: shadows, probes, GI) into the world's own

@@ -22,6 +22,9 @@ namespace xlionrender
     // ignores it.
     void SubmitInternal(shape Shape, const xmath::fmat4& L2W, const xmath::fvec3& Scale, const xmath::fvec3& Color, std::uint64_t EntityValue) noexcept;
 
+    // The entity the editor has selected (what SetSelectedEntity gave), ~0 for none: the forward scene outlines its Mesh.
+    std::uint64_t GetSelectedInternal() noexcept;
+
     // The device the host gave Init (null before): what the resource system of the core makes textures on.
     xgpu::device* GetDeviceInternal() noexcept;
 

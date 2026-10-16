@@ -23,6 +23,7 @@
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_runtime.h"
 
 #include <unordered_map>
+#include <unordered_set>
 
 namespace xlionrender
 {
@@ -43,7 +44,8 @@ namespace xlionrender
             int m_Meshes = 0, m_Drawn = 0, m_Waiting = 0, m_Lights = 0, m_bSun = 0, m_Materials = 0, m_ConstantSlots = 0, m_GIMeshes = 0;
         };
         double                                          m_TotalGILoadMs = 0;           // every geometry's surfels made ready so far (DescribeScene)
-        std::unordered_map<const void*, int>            m_GIBaked;      // per geometry: its surfels given to the renderer (1), or it has none (0)
+        std::unordered_map<const void*, int>            m_GIBaked;
+        std::unordered_set<const void*>                 m_OutlineMade;  // per geometry: its outline mesh given to the renderer (made the first time it is the selected one)      // per geometry: its surfels given to the renderer (1), or it has none (0)
         stats                                           m_Stats;
 
         bool Init(xgpu::device& Device) noexcept
@@ -125,6 +127,19 @@ namespace xlionrender
             const mesh_id* pMesh = MeshOf(Mesh.m_Geom);
             if (!pMesh) { ++m_Stats.m_Waiting; return; }
             auto* pGeom = static_cast<xgeom_static::xgpu::geom*>(xlioncore::resources::GetResource(geom_static_type_guid_v.m_Value, Mesh.m_Geom.m_Instance.m_Value));
+#if 0       // The first attempt (the OBB outline shader over a proxy mesh): replaced by the mask and the composite (instance::renderOutline)
+            if( Entity == m_Scene.m_SelectedUser && m_OutlineMade.insert(pGeom).second )       // the selection's outline: the geometry's triangles in position and normal (the editor's outline shader draws it)
+            {
+                gi::surfel_mesh Decoded;
+                gi::FromXGeomStatic(Decoded, *pGeom);
+                std::vector<float> PosNrm; PosNrm.reserve(Decoded.m_Pos.size() * 6);
+                for( std::size_t v = 0; v < Decoded.m_Pos.size(); ++v ) { const auto& P = Decoded.m_Pos[v]; const auto& N = Decoded.m_Nrm[v]; PosNrm.insert(PosNrm.end(), { P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z }); }
+                std::vector<std::uint32_t> Idx; Idx.reserve(Decoded.m_Tris.size() * 3);
+                for( const auto& T : Decoded.m_Tris ) Idx.insert(Idx.end(), { std::uint32_t(T[0]), std::uint32_t(T[1]), std::uint32_t(T[2]) });
+                const xmath::fvec3 Center = (pGeom->m_BBox.m_Min + pGeom->m_BBox.m_Max) * 0.5f, Half = (pGeom->m_BBox.m_Max - pGeom->m_BBox.m_Min) * 0.5f;
+                (void)m_Renderer.SetOutlineProxy(*pMesh, PosNrm, Idx, Center, Half);
+            }
+#endif
             draw D{ .m_Mesh = *pMesh, .m_L2W = L2W, .m_UserID = Entity, .m_Instance = std::uint64_t(std::uint32_t(Entity ^ (Entity >> 32)) | 1u) };
             const auto Defaults = pGeom->getDefaultMaterialInstances();
             D.m_Materials.resize(Defaults.size());

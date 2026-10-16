@@ -36,6 +36,7 @@ namespace xlionrender
     }
 
     xgpu::device* GetDeviceInternal() noexcept { return g_pDevice; }
+    std::uint64_t GetSelectedInternal() noexcept { return g_Renderer.getSelected(); }
 
     void Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View, const roles* pRoles) noexcept
     {
@@ -48,6 +49,12 @@ namespace xlionrender
     {
         auto* pSystem = FindSystem(pWorld);
         return pSystem ? pSystem->Pick(Origin, Dir, MaxT, View, pRoles) : xecs::component::entity::invalid_entity_v;
+    }
+
+    bool EntityBox(const void* pWorld, std::uint64_t EntityValue, xmath::fvec3& Center, xmath::fquat& Rotation, xmath::fvec3& HalfExtents) noexcept
+    {
+        auto* pSystem = FindSystem(pWorld);
+        return pSystem && pSystem->EntityBox(EntityValue, Center, Rotation, HalfExtents);
     }
 
     void SetSelectedEntity(std::uint64_t EntityValue) noexcept
@@ -65,6 +72,7 @@ namespace xlionrender
             void          Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float W, float H, view View) noexcept override { xlionrender::Draw(pWorld, CmdBuffer, W2C, W, H, View); }
             std::uint64_t Pick(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View) noexcept override { return xlionrender::Pick(pWorld, Origin, Dir, MaxT, View); }
             void          SetSelectedEntity(std::uint64_t EntityValue) noexcept override { xlionrender::SetSelectedEntity(EntityValue); }
+            bool          EntityBox(const void* pWorld, std::uint64_t EntityValue, xmath::fvec3& Center, xmath::fquat& Rotation, xmath::fvec3& HalfExtents) noexcept override { return xlionrender::EntityBox(pWorld, EntityValue, Center, Rotation, HalfExtents); }
             void          DrawRoles(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float W, float H, view View, const roles& Roles) noexcept override { xlionrender::Draw(pWorld, CmdBuffer, W2C, W, H, View, &Roles); }
             std::uint64_t PickRoles(const void* pWorld, const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT, view View, const roles& Roles) noexcept override { return xlionrender::Pick(pWorld, Origin, Dir, MaxT, View, &Roles); }
             int           DescribeRoleDraw(char* pOut, int Capacity) noexcept override

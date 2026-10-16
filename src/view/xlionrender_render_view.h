@@ -32,6 +32,16 @@ namespace xlionrender
         xgpu::renderpass        m_OverlayPass;          // m_Output + m_Depth, loaded (not cleared): instance::Render's Overlay
         xgpu::pipeline_instance m_ToneMapInstance;      // samples m_HDR
         xgpu::pipeline_instance m_BlitInstance;         // samples m_Output, for instance::Blit
+        // The selection's outline (instance::renderOutline), made the first time something is selected: the mask (R: covered, G: in plain sight) with a
+        // depth of its own, its pass, the casters' pipelines with the mask's fragment (they sample m_Depth), and the composite over m_Output (it samples m_Mask)
+        xgpu::texture           m_Mask;                 // R8G8B8A8_UNORM
+        xgpu::texture           m_MaskDepth;            // DEPTH_F32
+        xgpu::renderpass        m_MaskPass;
+        xgpu::renderpass        m_OutlinePass;          // m_Output, loaded
+        xgpu::pipeline_instance m_MaskInstance[3];      // per geometry path: CreateMesh meshes, rigid, skin
+        xgpu::pipeline_instance m_OutlineInstance;
+        int                     m_MaskWidth  = 0;
+        int                     m_MaskHeight = 0;
         int                     m_Width     = 0;
         int                     m_Height    = 0;
     };
