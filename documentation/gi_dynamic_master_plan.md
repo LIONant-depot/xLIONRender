@@ -192,6 +192,105 @@ pick, the far box served, and the floor converges to the scene without an allowa
   links are published during sustained dragging, not only after it; after settling, the links equal a fresh deterministic
   build of the same final scene (a coherence check). Test C passes: no stale emitter connection survives a closed door.
 
+**Phase 2 results** (2026-10-17, Police level, Debug, the same wall drag as Phase 0):
+
+| | Phase 1 | Phase 2 |
+|---|---|---|
+| Worst GI main-thread frame after the release | 3157 ms (links 3131 ms) | 15.9 ms |
+| Worst frame during the drag | 15.6 ms | 16.0 ms |
+| Link work per frame | 0, then 3.1 s at once | 0.8 ms at most (its allowance) |
+
+What was built, in `gi::world`:
+- **Granularity: the receiver surfel, not the instance.**
+  - A receiver that moves marks all its surfels.
+  - An emitter that moves or appears, or a change of which surfels emit, marks every receiver.
+  - An occluder marks only the surfels whose box of examined segments (the surfel and the emitters it examined) crosses
+    its old or new box.
+  - A change of how much an emitter emits changes no link (a link's weight is geometric).
+- **The links store the emitter by (instance, surfel)**, so they stay valid while the emitter list is rebuilt.
+- **A queue of instances (`PumpLinks`)**:
+  - The marked surfels are built in chunks on the scheduler's workers.
+  - The links get `m_LinkShare` (0.3) of the allowance while the trace has pending work, and all of it otherwise.
+  - Every update makes progress: at least one surfel per worker, the one-unit overshoot.
+  - A unit is bounded: one receiver surfel casts at most 64 shadow rays (`max_examined_v`).
+- **Publication (`FlattenLinks`)**:
+  - The built links and the others' published links are copied into staging storage, 512 surfels a slice, within the
+    allowance. The emitted light per fine surfel is made in the same slices.
+  - It is swapped in at the end. A partial publication updates the parents' emitted light by deltas.
+  - Two Debug spikes (44 ms, then 32 ms) came from publishing and recomputing the Police building's 246k links in one
+    frame; slicing removed them.
+- **A mark while an instance is being built queues it again.** Repeated edits coalesce, and a drag still publishes as it
+  goes.
+- **The settle delay (`links_settle_v`) is gone.**
+- **The GI's own thread pool is gone too.** `ParallelFor` runs on xscheduler. LIONRender.dll starts its own copy of
+  `g_System` on first use, because xscheduler's globals and its `thread_local` worker ids are per module.
+
+Tests:
+- 6j9 (rewritten): the link work of an update stays within the allowance; links are published while the floor moves; once
+  it stops, the links equal a fresh build, compared by a digest.
+- 6j9b (new, test C): a door slides shut between a lamp and a floor, so its links and emitted light go to 0. It opens
+  again, and they come back equal to before. The partial-publication deltas are checked by the same comparison.
+- 6j10 now expects link rebuilds during the drag.
+
+Still open:
+- The initial build of a large level is spread over many frames, so emitter light appears progressively after a load.
+  This is Phase 7's question.
+- A receiver surfel loops over every emitter (O(emitters)). An emitter hierarchy would cut that if emitter counts grow.
+
+### Phase 2b: Consolidation (one mechanism per job)
+
+The solver grew several mechanisms for the same job, one per case found, and sections 5c and 5d would add more. Before Phase 3
+makes any of them bounded and resumable, each job keeps exactly one mechanism. Every merge stands alone: one change, the GI tests
+(6j*) plus a before/after capture of the Police and Sponza interiors at equal maintenance time, and a commit. A merge that
+looks worse in the capture is not kept until the cause is understood. More code and setup knobs are removed than added.
+
+- **One estimator.** Today a running average (`m_PassAlpha`) warms a surfel up after a change, and the multiscale estimator
+  takes over afterwards and is reseeded from it (`Update`, the finished surfels). The estimator was designed to do both jobs:
+  it catches up on a change and it settles. Seed it from the current light (as SurfelGI and SurfelPlus do) and let it follow
+  from the first pass. `m_PassAlpha`, the warm-up count and the reseed go away. The validity and the moments keep their own
+  slow blends, which are a separate quantity, not a second estimator. Its variance, normalised by the batch's ray count
+  (section 5d), is the uncertainty that the priority and the sharing read.
+- **One sharing mechanism.** There are three candidates for one job:
+  - the display filter (`m_FilterPasses`: 4 passes, 3.5 ms a frame, done after the solve);
+  - 5c's sharing by confidence;
+  - 5d's neighbours as one extra estimator sample.
+
+  Keep the last one. It runs inside the solver's own pass, over the surfels finished this update only, and its weight follows
+  the uncertainty, so sharing by confidence comes with it. It uses the same neighbour rules as the filter today: the same
+  layer, normal and distance, and backfaces rejected. Compare it against the filter at equal time on the settled interior and
+  a light toggle. If it holds, the filter is removed, and Phase 3's "the filter becomes a resumable job" becomes publishing
+  the solver's result. If it does not hold, the filter stays and the estimator sample is not added.
+- **One level-of-detail rule.** Today a mix of rules decides how many surfels an instance shows:
+  - distance tiers (`m_bDistanceTiers`, `m_LodDistance`);
+  - screen area (`m_PixelsPerSurfel`, `m_ProjScale`);
+  - the small-on-screen gate (`m_SmallFraction`);
+  - the ambient cube (`m_bCube`) and the cube parents;
+  - the fine and parent levels.
+
+  These become a single rule: the instance's projected pixels per surfel pick its level, with hysteresis, and the cube is the
+  coarsest level. The rule has one knob, the pixel target. The distance tiers and the small gate are removed if the pixel
+  rule reproduces them (a far instance and a small instance both have few pixels). The Phase 0 bug (large instances turned
+  into cubes) gets a test: a large near instance never takes the cube.
+- **One priority function.** Each of these becomes a term of one priority, served from one queue under the one allowance:
+  - the pick score;
+  - the age;
+  - the change marks (`m_ChangeMargin`);
+  - dormant sampling (5c);
+  - the requested rays (5c, 5d);
+  - not on screen this frame (5d: a quarter of the rays);
+  - and later, Phase 5's transport roles and Phase 6's relighting.
+
+  The fairness share stays outside the priority, as the guarantee that old work is still served. Nothing gets a pass or a
+  queue of its own. This item is mostly a rule for the later phases: today's code already has one queue (Phase 1).
+  Writing the function down here keeps it that way.
+- **Not merged, because the parts do different jobs:**
+  - the plane-distance and moment visibility tests (a different leak each);
+  - the emitter links and the rays (small emitters the rays miss);
+  - the host's allowance and the solver's governor (two levels of one budget).
+- **Done when:** each job above has one mechanism in the code, the setup has fewer knobs than before, the GI tests pass, the
+  captures at equal time are no worse, and the per-frame bookkeeping is measured again for Phase 3. Removing the filter
+  alone would take 3.5 ms off the 9 ms.
+
 ### Phase 3: Publication on the GPU side
 
 - Persistent per-instance GI storage on the GPU in place of copying every instance's full payload into the frame's ring.
@@ -393,12 +492,65 @@ Later or not at all:
 - Not adopted: screen-space spawning (surfels are baked), the first-N reads with a cell-average fallback (it reopens the
   fail-open reads removed earlier), single-bone attachment for skinned surfels, the nonlinear grid, blue-noise LOD selection.
 
+## 5d. What two open GIBS implementations add (SurfelGI on Falcor, SurfelPlus on Vulkan)
+
+From a read of their sources (`E:\source_code\surfles\SurfelGI`, `E:\source_code\surfles\SurfelPlus`; SurfelPlus is a SIGGRAPH 2025
+poster for low-end hardware). Both are GPU-driven, spawn surfels from the screen and cap their cost by a ray count only, never by
+time. Both have energy errors that make their images a poor reference. SurfelGI samples uniformly but shades as if cosine
+sampled, so it is 2x too dark per bounce. SurfelPlus drops the 1/pi, so it is pi too bright per bounce. Ours was checked and is
+right: cosine rays, E = pi x mean(L), and a hit's outgoing light is albedo x E / pi. We also already have three things that
+either one lacks, done more soundly:
+- a Chebyshev variance floor and bleeding reduction (the term cubed);
+- moments capped at the surfel's reach;
+- an estimator seeded from the current light.
+
+Taken into the phases:
+- **Concrete constants for "rays requested"** (Phase 6, inside Phase 1's allowance; it refines 5c's first item). Both use
+  rays = lerp(low, high, k x estimator variance): SurfelGI uses 16..64 rays, SurfelPlus 4..64. A surfel not seen this frame
+  gets a quarter of that, and a new surfel gets the full count for its first 20 updates. A change raises the variance on
+  purpose (SurfelPlus: variance x (1 + 10 x change)), so a moved surfel asks for more rays. For us, the change would be
+  SetTransform or a dirty mark.
+  - Guard the feedback loop. The estimator's variance is that of a batch mean, so more rays lower it, and the lower variance
+    then cuts the rays. Normalise it by the batch's ray count, or use the deviation relative to the luminance.
+  - Neither one is fair once over budget: they fill in index order and starve the higher indices. Our oldest-first share stays.
+- **Snapshot reads** (Phase 3). Each update starts by copying every surfel's mean into its published light, and every reader
+  uses only the published value: the pixels, the neighbour sharing and the hits of other surfels' rays. On the CPU this is the
+  publication double buffer of Phase 3, and it also lets the workers read other surfels without locks.
+- **Sharing as one estimator sample** (Phase 3; it refines 5c's "sharing by confidence").
+  - Today a separate display filter runs (3.5 ms). In SurfelPlus, the neighbours within two radii are instead fed into the
+    estimator as one extra sample with a small blend (0.04).
+  - Neighbour weights: normal times distance, times the neighbour's age (smoothstep over 10 updates). A neighbour is rejected
+    when either one faces the other's back (cos < -0.2).
+  - SurfelGI lerps toward the neighbour mean by saturate(40 x variance).
+  - The log of SurfelPlus says this sped up convergence "a lot". For us it can run over the fine siblings or the parent level,
+    in the solver's own pass, and may replace part of the filter and its cost. Test: equal time, against the current filter,
+    on the settled interior and a light toggle.
+- **The read grid built aside, then swapped** (Phase 2, as an alternative to incremental links). SurfelGI rebuilds its whole
+  surfel grid every frame as a counting sort: count, prefix, scatter. A rebuild that runs as a job into a second buffer, with
+  the buffers swapped when it is done, never stalls a release. Measure it against the bounded incremental links. It depends
+  on whether the emitter links can be rebuilt the same way, which needs one pass per emitter set.
+- **Fading in what is new** (Phase 3, at the level switch and when an instance is first lit). SurfelGI weighs each surfel in
+  the blend by its age (smoothstep over 240 frames), then normalises. A young surfel next to old ones gives way to them, and a
+  young one alone still shows at full strength. This keeps a parent-to-fine switch, or a new instance, from popping.
+- **A stochastic cache bypass at path ends** (later; it applies only if we trace more than one bounce per ray). SurfelGI skips
+  the surfel read 20 % of the time and keeps the path going instead. This lowers the feedback bias of reading the cache. We
+  trace one bounce and read the cache at every hit, so this has no use now.
+
+Not adopted:
+- Their ray guiding (both versions use the discrete texel probability as the pdf, which is biased; 5c's guiding stands).
+- Screen-space spawning, recycling and lifetimes (our surfels are baked).
+- SurfelPlus's denoise chain (it applies only to its reflections; the diffuse GI gets none).
+- Their compression (a stock 32-bit octahedral normal).
+- Reflections that end on the surfel cache, with 16 GGX candidates (SurfelPlus): a later option for rough specular, after
+  this plan.
+
 ## 6. Order and dependencies
 
 ```
 Phase 0 instrumentation
   -> Phase 1 scheduler (tracing scheduled, no synchronous worker wait)
        -> Phase 2 links          (bounded link maintenance; removes the release stall)
+       -> Phase 2b consolidation (one estimator, one sharing, one LOD rule, one priority)
        -> Phase 3 publication    (bounded filtering, upload, publication)
             -> Phase 4 state split
                  -> Phase 5 roles      (tests A, B, C)

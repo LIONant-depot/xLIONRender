@@ -1101,32 +1101,82 @@ int main()
         CHECK(TopCube > 2 * BotCube, "the top is not lit over the bottom (%.3f vs %.3f)", TopCube, BotCube);
     }
 
-    // 6j9. The emitters' links are rebuilt when the moving stops (links_settle_v updates after the last SetTransform), not on every frame of a drag:
-    //      a level's links cost seconds in Debug. A sign (an emitter) over a floor; the floor moves every update for 30 updates: no rebuild; then one
+    // 6j9. Phase 2: the emitters' links are maintained in bounded chunks. A sign (an emitter) over a floor; the floor moves every update for 30
+    //      updates under a 1 ms allowance: the link work of each update stays within its share plus one chunk, links are published while it
+    //      moves (not only after), and once it stops the links equal a fresh build of the final scene
     {
         surfel_mesh Ground, Sign;
         AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
         AddQuad(Sign,   { -0.1f, 1, -0.1f }, { 0.2f, 0, 0 }, { 0, 0, 0.2f }, 0.1f);       // facing down
-        Ground.Bake(0.3f, 0.9f); Sign.Bake(0.1f, 0.3f);
-        world W;
-        const int iGround = W.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
-        const int iSign   = W.Add(Sign,   xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
-        W.SetSurfelMaterial(iSign, {}, std::vector<v3>(Sign.m_Levels[0].size(), v3{ 20, 20, 20 }));
+        Ground.Bake(0.1f, 0.3f); Sign.Bake(0.05f, 0.15f);
+        const auto Make = [&](world& W, int& iG, int& iS)
+        {
+            iG = W.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            iS = W.Add(Sign,   xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            W.SetSurfelMaterial(iS, {}, std::vector<v3>(Sign.m_Levels[0].size(), v3{ 20, 20, 20 }));
+        };
+        world W; int iGround, iSign; Make(W, iGround, iSign);
+        W.m_Setup.m_TraceAllowanceMs = 1.0f;
         lights Dark;
-        for (int f = 0; f < 20; ++f) W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22000 + f);
+        for (int f = 0; f < 40; ++f) W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22000 + f);
         const int Before = W.LinkRebuilds();
-        for (int f = 0; f < 30; ++f) { W.SetTransform(iGround, xmath::fmat4::fromTranslation({ 0.01f * float(f), 0, 0 })); W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22100 + f); }
+        double WorstOver = -1e9; int MaxPending = 0;
+        for (int f = 0; f < 30; ++f)
+        {
+            W.SetTransform(iGround, xmath::fmat4::fromTranslation({ 0.01f * float(f), 0, 0 }));
+            const auto St = W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22100 + f);
+            WorstOver  = std::max(WorstOver, St.m_LinksMs - 1.0);         // its share, or all of it when the trace waits for nothing
+            MaxPending = std::max(MaxPending, St.m_LinkPending);
+        }
         const int During = W.LinkRebuilds() - Before;
-        for (int f = 0; f < 20; ++f) W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22200 + f);
-        const int After = W.LinkRebuilds() - Before;
-        std::printf("links while the floor moves for 30 updates: %d rebuilds; %d after it stops\n", During, After);
-        CHECK(During == 0, "the links were rebuilt %d times during the move", During);
-        CHECK(After == 1, "the links were rebuilt %d times by the end (one when it stops)", After);
+        for (int f = 0; f < 60; ++f) W.Update(Dark, { 0, 1, 0 }, 1 << 30, 22200 + f);
+        world Ref; int rG, rS; Make(Ref, rG, rS);
+        Ref.SetTransform(rG, xmath::fmat4::fromTranslation({ 0.01f * 29.0f, 0, 0 }));
+        Ref.Update(Dark, { 0, 1, 0 }, 1 << 30, 22300);                              // no allowance: every link now
+        std::printf("links while the floor moves for 30 updates: %d published, the link work at most %.2f ms over the allowance, %d receivers pending at most; "
+                    "after: %d links (a fresh build: %d)\n", During, WorstOver, MaxPending, W.LinkCount(iGround), Ref.LinkCount(rG));
+        CHECK(During > 0, "no links were published while the floor moved");
+        CHECK(WorstOver < 1.0, "an update's link work took %.2f ms more than the allowance", WorstOver);     // (one chunk, and the workers' wake-up in Debug)
+        CHECK(MaxPending <= 2, "%d receivers pending (2 instances)", MaxPending);
+        CHECK(W.LinkCount(iGround) > 0 && W.LinksDigest(iGround) == Ref.LinksDigest(rG), "the settled links differ from a fresh build (%d vs %d links)", W.LinkCount(iGround), Ref.LinkCount(rG));
+    }
+
+    // 6j9b. Phase 2, test C of the plan: no stale emitter connection survives a closed door. A lamp on one side of a doorway, a floor on the
+    //       other; the door (a wall that does not emit) slides shut: the floor's links to the lamp are gone and its emitted light is 0. It
+    //       opens again: they come back. The lamp and the floor never move; only the occluder's box marks them
+    {
+        surfel_mesh Floor, Lamp, Door;
+        AddQuad(Floor, { 1, 0, -1 }, { 0, 0, 2 }, { 2, 0, 0 }, 0.25f);                    // x 1..3, facing up
+        AddQuad(Lamp,  { -1, 0.5f, -0.5f }, { 0, 1, 0 }, { 0, 0, 1 }, 0.25f);              // x = -1, facing +x
+        AddQuad(Door,  { 0, -1, -3 }, { 0, 0, 6 }, { 0, 4, 0 }, 0.5f);                     // the plane x = 0, big enough to hide the lamp
+        Floor.Bake(0.15f, 0.45f); Lamp.Bake(0.15f, 0.45f); Door.Bake(0.3f, 0.9f);
+        world W;
+        const int iFloor = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iLamp  = W.Add(Lamp,  xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iDoor  = W.Add(Door,  xmath::fmat4::fromTranslation({ 0, 0, 10 }), { 0, 0, 0 });   // open: far to the side (black: no bounce)
+        W.SetSurfelMaterial(iLamp, {}, std::vector<v3>(Lamp.m_Levels[0].size(), v3{ 20, 20, 20 }));
+        W.m_Setup.m_TraceAllowanceMs = 1.0f;
+        lights Dark;
+        const auto Run = [&](int n, unsigned Seed) { for (int f = 0; f < n; ++f) W.Update(Dark, { 2, 1, 0 }, 1 << 30, Seed + f); };
+        const auto Emitted = [&] { return W.InstanceEmitted(iFloor); };
+        Run(60, 22400);
+        const int OpenLinks = W.LinkCount(iFloor); const double OpenLight = Emitted();
+        W.SetTransform(iDoor, xmath::fmat4::fromIdentity());                         // shut
+        Run(200, 22500);
+        const int ShutLinks = W.LinkCount(iFloor); const double ShutLight = Emitted();
+        W.SetTransform(iDoor, xmath::fmat4::fromTranslation({ 0, 0, 10 }));          // open again
+        Run(60, 22800);
+        const int ReopenLinks = W.LinkCount(iFloor); const double ReopenLight = Emitted();
+        std::printf("a door between a lamp and a floor: %d links open (emitted light %.3f), %d shut (%.4f), %d open again (%.3f)\n", OpenLinks, OpenLight, ShutLinks, ShutLight, ReopenLinks, ReopenLight);
+        CHECK(OpenLinks > 0, "the floor has no links to the lamp with the door open");
+        CHECK(ShutLinks == 0, "%d links survive the closed door", ShutLinks);
+        CHECK(OpenLight > 0 && ShutLight == 0, "the floor still gets the lamp's light through the closed door (%.4f; open %.3f)", ShutLight, OpenLight);
+        CHECK(ReopenLinks == OpenLinks && std::abs(ReopenLight - OpenLight) < 1e-3 * OpenLight, "the links did not come back when the door opened (%d vs %d)", ReopenLinks, OpenLinks);
     }
 
     // 6j10. Phase 0 instrumentation (documentation/gi_dynamic_master_plan.md): a wall dragged over a floor lit by a sign (an emitter) for 20
-    //       updates, then left still. The stage times add up to the update's total, the moves and what they mark are counted, the deferred
-    //       link rebuild shows up with its time, and the trace's longest unit is reported. Measuring only: the light is the same as before
+    //       updates, then left still. The stage times add up to the update's total, the moves and what they mark are counted, the link
+    //       rebuilds show up with their time, and the trace's longest unit is reported. Measuring only: the light is the same as before
     {
         surfel_mesh Floor, Wall, Sign;
         AddQuad(Floor, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
@@ -1158,7 +1208,7 @@ int main()
                     Moves, Marked, Resets, Rebuilds, MaxLinks, MaxUnit, Hits, MaxTotal, MaxGap, LinkBytes, LightBytes);
         CHECK(Moves == 20, "%d moves counted (20 were made)", Moves);
         CHECK(Marked > 0 && Resets > 0, "the moves marked nothing dirty (%d) or reset no history (%d)", Marked, Resets);
-        CHECK(Rebuilds == 1, "%d link rebuilds counted (one when the moving stops)", Rebuilds);
+        CHECK(Rebuilds > 0, "no link rebuild was counted (the moved wall's and the floor's links, Phase 2)");
         CHECK(MaxUnit > 0 && Hits > 0 && LinkBytes > 0 && LightBytes > 0, "a counter stayed at 0");
     }
 

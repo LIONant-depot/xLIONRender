@@ -24,6 +24,7 @@
 // convergence after a change - next).
 
 #include "dependencies/xmath/source/xmath.h"
+#include "dependencies/xscheduler/source/xscheduler.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -40,6 +41,7 @@
 #include <unordered_map>
 #include <span>
 #include <string>
+#include <deque>
 #include <vector>
 #if defined(_M_X64) || defined(_M_IX86) || defined(__SSE2__)
 #include <xmmintrin.h>
@@ -50,75 +52,29 @@ namespace xlionrender::gi
     using v3 = xmath::fvec3;
     constexpr float pi_v = 3.14159265f;
 
-    template <class F> void ParallelFor(int n, F&& Fn) noexcept
+    // The process' scheduler (xscheduler). A module that has not started its own (LIONRender.dll and its copies: xscheduler's globals and
+    // its thread_local worker ids are per module, so the exe's cannot be shared) starts it on first use, from the thread that updates the GI
+    inline xscheduler::system& Scheduler() noexcept
     {
-        const int nThreads = std::min<int>(std::max(1u, std::thread::hardware_concurrency()), std::max(n, 1));
-        std::atomic<int> Next{ 0 };
-        std::vector<std::thread> T;
-        for (int t = 1; t < nThreads; ++t) T.emplace_back([&] { for (int i; (i = Next++) < n;) Fn(i); });
-        for (int i; (i = Next++) < n;) Fn(i);
-        for (auto& t : T) t.join();
+        auto& S = xscheduler::g_System;
+        if (S.getWorkerCount() == 0) S.Init();
+        return S;
     }
 
-    // Persistent workers (spawning threads per update cost ~1 ms): Run(n, Fn) calls Fn(0..n-1) across them and the caller
-    class worker_pool
+    // Fn(0..n-1) across the scheduler's workers; the caller works too, and returns when all are done
+    template <class F> void ParallelFor(int n, F&& Fn) noexcept
     {
-    public:
-        explicit worker_pool(int nWorkers = int(std::max(1u, std::thread::hardware_concurrency())) - 1) noexcept
-        {
-            for (int t = 0; t < nWorkers; ++t) m_Threads.emplace_back([this] { Loop(); });
-        }
-        ~worker_pool() noexcept
-        {
-            { std::lock_guard Lk(m_Mutex); m_bQuit = true; }
-            m_Go.notify_all();
-            for (auto& t : m_Threads) t.join();
-        }
-        worker_pool(const worker_pool&) = delete;
-        worker_pool& operator=(const worker_pool&) = delete;
-
-        template <class F> void Run(int n, F&& Fn) noexcept
-        {
-            std::function<void(int)> Job = [&](int i) { Fn(i); };
-            {
-                std::lock_guard Lk(m_Mutex);
-                m_pJob = &Job; m_N = n; m_Next = 0; m_Busy = int(m_Threads.size()); ++m_Gen;
-            }
-            m_Go.notify_all();
-            for (int i; (i = m_Next++) < n;) Fn(i);
-            std::unique_lock Lk(m_Mutex);
-            m_Done.wait(Lk, [&] { return m_Busy == 0; });
-            m_pJob = nullptr;
-        }
-
-    private:
-        void Loop() noexcept
-        {
-            std::uint64_t Seen = 0;
-            for (;;)
-            {
-                std::function<void(int)>* pJob;
-                int n;
-                {
-                    std::unique_lock Lk(m_Mutex);
-                    m_Go.wait(Lk, [&] { return m_bQuit || m_Gen != Seen; });
-                    if (m_bQuit) return;
-                    Seen = m_Gen; pJob = m_pJob; n = m_N;
-                }
-                for (int i; (i = m_Next++) < n;) (*pJob)(i);
-                { std::lock_guard Lk(m_Mutex); if (--m_Busy == 0) m_Done.notify_one(); }
-            }
-        }
-
-        std::vector<std::thread>    m_Threads;
-        std::mutex                  m_Mutex;
-        std::condition_variable     m_Go, m_Done;
-        std::function<void(int)>*   m_pJob = nullptr;
-        std::atomic<int>            m_Next{ 0 };
-        int                         m_N = 0, m_Busy = 0;
-        std::uint64_t               m_Gen = 0;
-        bool                        m_bQuit = false;
-    };
+        if (n <= 0) return;
+        auto& S = Scheduler();
+        const int nJobs = std::min(n, std::max(S.getWorkerCount(), 1));
+        if (nJobs == 1) { for (int i = 0; i < n; ++i) Fn(i); return; }
+        std::atomic<int> Next{ 0 };
+        xscheduler::task_group G({ "GI" }, S);
+        for (int j = 1; j < nJobs; ++j) G.Submit([&] { for (int i; (i = Next++) < n;) Fn(i); });
+        for (int i; (i = Next++) < n;) Fn(i);
+        G.join();
+    }
+    inline int ParallelWidth() noexcept { return std::max(Scheduler().getWorkerCount(), 1); }     // the workers ParallelFor spreads over
 
     // PCG (O'Neill): cheap to seed per surfel, unlike std::mt19937's 5 KB state
     struct rng
@@ -481,7 +437,7 @@ namespace xlionrender::gi
             m_Mean = m_Mean + (y - m_Mean) * std::clamp(CatchUp, 0.0f, 1.0f);
         }
     };
-    constexpr int links_settle_v  = 8;      // updates without a SetTransform before the emitters' links are rebuilt (the links of a whole level cost seconds in Debug: not on every frame of a drag)
+    constexpr int link_unit_first_v = 16;   // the link build's first chunk of receiver surfels, before their cost is measured
     constexpr int dead_retrace_v  = 8;      // a buried surfel (validity 0) is traced one pass in this many (Update)
     // A surfel far from the eye is traced less often: its footprint on the screen is about (radius / distance)^2 pixels, so a far one
     // is a few pixels and a near one is many. The period by distance in radii; off screen or behind the eye it still bounces light onto what is seen, so it is only
@@ -1509,7 +1465,8 @@ namespace xlionrender::gi
             float   m_MinBlend      = 0;        // the warm-up's blend (1 / n after a change) never below this (1: every pass replaces)
             float   m_TraceAllowanceMs = 0;     // Phase 1 (gi_dynamic_master_plan.md): the trace's main-thread time an update may use (0: no limit, every picked surfel is traced in full this update, as before)
             float   m_UnitTargetUs  = 250;      // the size of a unit of the trace (rule 4): a surfel's rays are traced in chunks of about this many microseconds
-            float   m_FairShare     = 0.2f;     // the share of an update's surfels kept for the instance waiting longest (fairness: whatever its score)
+            float   m_FairShare     = 0.2f;
+            float   m_LinkShare     = 0.3f;     // Phase 2: the part of the allowance the emitter links may use while the trace has work too     // the share of an update's surfels kept for the instance waiting longest (fairness: whatever its score)
             bool    m_bDistanceTiers = true;    // a surfel far from the eye (in its radii) is traced every 2nd, 4th, 8th pass (Update)
             float   m_Saturation    = 1;        // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
             float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
@@ -1536,7 +1493,7 @@ namespace xlionrender::gi
             int     m_nColored  = 0;            // instances with their surfels' material colors (the GPU capture)
             int     m_nEmissive = 0;            // surfels that emit
             v3      m_MeanAlbedo{ 0, 0, 0 };    // over the colored surfels
-            int     m_nLinks    = 0;            // emitter links (RebuildEmitterLinks)
+            int     m_nLinks    = 0;            // emitter links (PumpLinks)
             float   m_MaxEmitted = 0;           // the most emitted light a surfel receives (its links' irradiance, luminance)
             v3      m_MaxEmitter{ 0, 0, 0 };    // the brightest emitter's radiance
             int     m_nUnsupported = 0;         // this update's rays whose hit read no surfel (Indirect unsupported: the policy's light, Unsupported)
@@ -1547,7 +1504,7 @@ namespace xlionrender::gi
             double  m_TlasLightsMs  = 0;        // the instances' TLAS and the light tracking (TrackLights)
             double  m_LevelsMs      = 0;        // the level / ambient cube switches
             double  m_PickMs        = 0;        // ordering the instances and picking this update's surfels
-            double  m_LinksMs       = 0;        // the emitters' links (RebuildEmitterLinks: the whole world in one call)
+            double  m_LinksMs       = 0;        // the emitters' links (PumpLinks: bounded by its share of the allowance)
             double  m_EmitMs        = 0;        // the emitted light from the links (UpdateEmittedLight)
             double  m_MeanMs        = 0;        // every instance's mean light (a pass over every surfel)
             double  m_CommitMs      = 0;        // the traced results into the estimators, validity, basis and moments
@@ -1556,7 +1513,9 @@ namespace xlionrender::gi
             double  m_TotalMs       = 0;        // the whole Update, the statistics included (m_Ms leaves them out)
             double  m_LongestSurfelUs = 0;      // the slowest surfel's trace (its rays and every hit's direct light and read): the longest unit of the trace
             long long m_Hits        = 0;        // rays that hit a lit surface: each one evaluates the direct light (the sun's shadow ray, the point lights in reach)
-            int     m_nLinkRebuilds = 0;        // RebuildEmitterLinks calls this update
+            int     m_nLinkRebuilds = 0;        // instances whose links were published this update (PumpLinks)
+            int     m_LinkPending   = 0;        // instances waiting for (or in) a link build after this update
+            int     m_LinkSurfels   = 0;        // receiver surfels whose links were built this update
             int     m_nEmitters     = 0;
             int     m_Pending       = 0;        // Phase 1: surfels picked and not finished (their rays continue next update)
             int     m_PendingRays   = 0;        // their rays still to trace
@@ -1603,8 +1562,10 @@ namespace xlionrender::gi
             Place(I, L2W);
             Resize(I);
             m_bTlasDirty = true;
-            m_bLinksDirty = true;
-            return int(m_Instances.size()) - 1;
+            const int Id = int(m_Instances.size()) - 1;
+            MarkLinks(Id);                                  // its own links
+            MarkLinksCrossing(m_Instances[Id].m_Lo, m_Instances[Id].m_Hi);      // it may hide emitters from others
+            return Id;
         }
 
         // The colors of an instance's surface, per fine surfel (its material sampled where the surfel is: albedo and emitted radiance).
@@ -1618,7 +1579,7 @@ namespace xlionrender::gi
             I.m_SurfAlbedo   = Albedo.size() == n ? std::move(Albedo) : std::vector<v3>{};
             I.m_SurfEmissionPoint = Emission.size() == n ? std::move(Emission) : std::vector<v3>{};
             ResolveSurfEmission(Id);
-            m_bLinksDirty = true;
+            EmittersChanged(Id);
             DirtyNear(I.m_Lo, I.m_Hi);
         }
 
@@ -1634,11 +1595,11 @@ namespace xlionrender::gi
             if (First + Emission.size() < n) return;                // not the last batch
             I.m_bTriEmission = true;
             ResolveSurfEmission(Id);
-            m_bLinksDirty = true;
+            EmittersChanged(Id);
             DirtyNear(I.m_Lo, I.m_Hi);
         }
 
-        // The surfels' emission: the radiance whose power over the surfel's nominal area (1.47 r^2, RebuildEmitterLinks) is the emitted power
+        // The surfels' emission: the radiance whose power over the surfel's nominal area (1.47 r^2, RebuildEmitterList) is the emitted power
         // of the triangles it is nearest to (sample points over each emissive triangle, each to its nearest surfel facing the same way).
         // Without the triangles' emission (or the surfels' own capture): the surfels' sample at their center
         void ResolveSurfEmission(int Id) noexcept
@@ -1729,7 +1690,10 @@ namespace xlionrender::gi
             DirtyNear(I.m_Lo, I.m_Hi);
             I.m_bAlive = false;
             I.m_E.clear(); I.m_Acc.clear(); I.m_Valid.clear(); I.m_AccValid.clear();
+            I.m_Links.clear(); I.m_LinkFirst.clear(); I.m_EmitB.clear(); I.m_bLinkHull = false; I.m_SurfLinkLo.clear(); I.m_SurfLinkHi.clear();
             m_bTlasDirty = true;
+            if (!I.m_EmitSurfs.empty()) { I.m_EmitSurfs.clear(); m_bEmittersDirty = true; MarkAllLinks(); }   // its light is gone for everyone
+            else MarkLinksCrossing(I.m_Lo, I.m_Hi);                                                          // what it hid is seen again
         }
 
         bool IsAlive(int Id) const noexcept { return m_Instances[Id].m_bAlive; }
@@ -1739,13 +1703,16 @@ namespace xlionrender::gi
             const auto T0 = std::chrono::steady_clock::now();
             auto& I = m_Instances[Id];
             m_MoveMarked += DirtyNear(I.m_Lo, I.m_Hi);
+            const v3 OldLo = I.m_Lo, OldHi = I.m_Hi;
             Place(I, L2W);
             m_MoveMarked += DirtyNear(I.m_Lo, I.m_Hi);
+            m_bTlasDirty = true;
+            // The links (Phase 2): an emitter that moves changes what everyone sees of it; an occluder, only the links whose segments
+            // cross its old or new box; a receiver, its own. They are rebuilt in bounded chunks (PumpLinks), the published ones stay in use
+            if (!I.m_EmitSurfs.empty()) { m_bEmittersDirty = true; MarkAllLinks(); }
+            else { MarkLinks(Id); MarkLinksCrossing(OldLo, OldHi); MarkLinksCrossing(I.m_Lo, I.m_Hi); }
             ++m_nMovesAcc;
             m_MovesMsAcc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
-            m_bTlasDirty = true;
-            m_bLinksMoved = true;           // the links are rebuilt when the moving stops (links_settle_v updates later): while it goes on they keep the last place's visibility
-            m_LinksMovedAt = m_nUpdates;    // ponytail: every link at once, not per instance; per instance (the moved one's, and those whose segments cross its box) when a scene needs it
         }
 
         int             InstanceCount  ( void ) const noexcept { return int(m_Instances.size()); }
@@ -1753,9 +1720,21 @@ namespace xlionrender::gi
         bool            IsCube         ( int Id ) const noexcept { return m_Instances[Id].m_bCube; }
         const std::vector<int>& CubeSet( int Id ) const noexcept { return m_Instances[Id].m_CubeSet; }
         int             LinkRebuilds   ( void ) const noexcept { return m_nLinkRebuilds; }
+        int             LinkCount      ( int Id ) const noexcept { return int(m_Instances[Id].m_Links.size()); }
+        // (tests) the published links of an instance as one number: two builds of the same scene give the same
+        std::uint64_t   LinksDigest    ( int Id ) const noexcept
+        {
+            std::uint64_t h = 1469598103934665603ull;
+            const auto Mix = [&](std::uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+            for (const auto f : m_Instances[Id].m_LinkFirst) Mix(f);
+            for (const auto& L : m_Instances[Id].m_Links) { Mix(L.m_EmInst); Mix(L.m_EmSurf); Mix(std::bit_cast<std::uint32_t>(L.m_W)); }
+            return h;
+        }
         const v3&       Albedo         ( int Id ) const noexcept { return m_Instances[Id].m_Albedo; }
         // What the GPU buffer would hold for an instance: its active level's irradiance and validity per surfel
         const std::vector<v3>&    InstanceLight( int Id ) const noexcept { return m_Instances[Id].m_E; }
+        // The emitters' light reaching an instance through its links this update (the sum over its surfels of the basis' mean, red)
+        double                    InstanceEmitted( int Id ) const noexcept { double e = 0; for (const auto& B : m_Instances[Id].m_EmitB) e += (B[0].m_X + B[1].m_X + B[2].m_X) / 3.0; return e; }
 
         // The light the reads show (the GPU's upload), per basis direction: 3 x the light times its fractions (their mean is the light),
         // blended with the neighbors' (the mesh's neighbor lists, their weights times their validity; itself at weight 1),
@@ -1789,7 +1768,7 @@ namespace xlionrender::gi
             {
                 In.swap(F);
                 const basis* pIn = In.data(); basis* pOut = F.data();
-                m_Pool.Run((n + block_v - 1) / block_v, [&](int b)
+                ParallelFor((n + block_v - 1) / block_v, [&](int b)
                 {
                     const int s1 = std::min(n, (b + 1) * block_v);
                     for (int s = b * block_v; s < s1; ++s)
@@ -2331,7 +2310,7 @@ namespace xlionrender::gi
                     for (std::size_t p = 0; p < E.size(); ++p) if (Cnt[p]) { E[p] = E[p] * (1.0f / float(Cnt[p])); Valid[p] /= float(Cnt[p]); }
                 }
                 I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0;
-                m_bEmitDirty = true;
+                I.m_bEmitRelevel = true;
                 I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
                 ResetMoments(I);
                 }
@@ -2340,8 +2319,8 @@ namespace xlionrender::gi
                                     && Pixels < m_Setup.m_PixelsPerSurfel * float(M.m_Levels[1].size()) * (I.m_bCube ? 1.25f : 1.0f);
                 std::vector<int> Set;
                 if (bCubeWant && !I.m_bCube) Set = CubeSetOf(M);
-                if (bCubeWant && !I.m_bCube && !Set.empty()) { I.m_bCube = true; I.m_CubeSet = std::move(Set); I.m_Cursor = 0; m_bEmitDirty = true; }
-                else if (!bCubeWant && I.m_bCube) { I.m_bCube = false; I.m_CubeSet.clear(); I.m_Cursor = 0; I.m_bDirty = true; m_bEmitDirty = true; }       // the parents trace again: from the start
+                if (bCubeWant && !I.m_bCube && !Set.empty()) { I.m_bCube = true; I.m_CubeSet = std::move(Set); I.m_Cursor = 0; I.m_bEmitDirty = true; }
+                else if (!bCubeWant && I.m_bCube) { I.m_bCube = false; I.m_CubeSet.clear(); I.m_Cursor = 0; I.m_bDirty = true; I.m_bEmitDirty = true; }       // the parents trace again: from the start
             }
 
             Lap(St.m_LevelsMs);
@@ -2433,12 +2412,12 @@ namespace xlionrender::gi
             Lap(St.m_PickMs);
 
             ++m_nUpdates;
-            if (m_bLinksMoved && m_nUpdates - m_LinksMovedAt >= links_settle_v) { m_bLinksMoved = false; m_bLinksDirty = true; }
-            if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; m_bEmitDirty = true; ++m_nLinkRebuilds; ++St.m_nLinkRebuilds; }
+            const double LinkUsedMs = PumpLinks(double(m_Setup.m_TraceAllowanceMs) * (m_Pending.empty() ? 1.0 : double(m_Setup.m_LinkShare)), St);   // the trace waits for nothing: all of it
             Lap(St.m_LinksMs);
             // The emitters' light: made of the links, the emissions (SetSurfelMaterial: the links again) and the scale; a level switch
             // changes its layout. Nothing else: not every update
-            if (m_bEmitDirty || m_EmitScale != m_Setup.m_EmissiveScale) { UpdateEmittedLight(); m_bEmitDirty = false; m_EmitScale = m_Setup.m_EmissiveScale; }
+            if (m_EmitScale != m_Setup.m_EmissiveScale) { m_bEmitDirty = true; m_EmitScale = m_Setup.m_EmissiveScale; }
+            UpdateEmittedLight(m_bEmitDirty); m_bEmitDirty = false;
             Lap(St.m_EmitMs);
 
             // The policy's value per instance (Unsupported): this update's mean light of its valid surfels; none valid: the world's
@@ -2461,7 +2440,7 @@ namespace xlionrender::gi
             // started finishes: the overshoot is one unit. Without an allowance a chunk is all of a surfel's rays and one round traces them all
             // (the solver as it was: the same rays, the same seeds). A surfel is committed when all its rays are in; until then it is pending
             const auto T1      = std::chrono::steady_clock::now();
-            const double Allow = double(m_Setup.m_TraceAllowanceMs);
+            const double Allow = m_Setup.m_TraceAllowanceMs > 0 ? std::max(double(m_Setup.m_TraceAllowanceMs) - LinkUsedMs, 0.001) : 0.0;     // what the links left
             const auto Deadline = T1 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(Allow));
             // conservative: the slowest ray cost seen lately (it decays), at least the mean plus twice the mean deviation. The cost of a ray
             // has a long tail (a ray into dense geometry): sized by the mean, units of 8 rays reached 1.1 ms in the Police level
@@ -2478,7 +2457,7 @@ namespace xlionrender::gi
                 if (Allow > 0 && std::chrono::steady_clock::now() >= Deadline) break;
                 const int Before = RaysDone.load();
                 ++St.m_Rounds;
-                m_Pool.Run(int(Live.size()), [&](int k)
+                ParallelFor(int(Live.size()), [&](int k)
                 {
                     auto& W = m_Pending[Live[k]];
                     const int r0 = W.m_RaysDone, r1 = std::min(W.m_Rays, r0 + Chunk);
@@ -2639,9 +2618,9 @@ namespace xlionrender::gi
 
     private:
 
-        // A surfel's view of an emitter (RebuildEmitterLinks): the emitter (m_Emitters), its weight (area x both cosines / distance^2:
+        // A surfel's view of an emitter (PumpLinks): the emitter (m_Emitters), its weight (area x both cosines / distance^2:
         // the irradiance per unit of its radiance) and the shares of the surfel's 3 basis directions
-        struct emit_link { std::uint32_t m_Emitter; float m_W; std::array<float, 3> m_Bw; };
+        struct emit_link { std::uint32_t m_EmInst, m_EmSurf; float m_W; std::array<float, 3> m_Bw; };     // the emitter by (instance, fine surfel): stable while the emitter list changes
 
         struct instance
         {
@@ -2656,8 +2635,19 @@ namespace xlionrender::gi
             std::vector<v3>         m_TriEmission, m_SurfEmissionPoint;   // per triangle (SetTriangleEmission), and the surfels' emission sampled at their center (SetSurfelMaterial)
             bool                    m_bTriEmission = false;           // m_TriEmission is complete: m_SurfEmission is made from it (ResolveSurfEmission)
             std::vector<std::uint8_t> m_SeeThrough, m_SurfSeeThrough;   // per triangle, per fine surfel: transparent (SetSeeThrough; empty: none)
-            std::vector<std::uint32_t> m_LinkFirst;              // per fine surfel + 1: its emitter links (RebuildEmitterLinks)
+            std::vector<std::uint32_t> m_LinkFirst;              // per fine surfel + 1: its emitter links (PumpLinks)
             std::vector<emit_link>  m_Links;
+            std::vector<int>        m_EmitSurfs;                // the fine surfels that emit (EmittersChanged)
+            v3                      m_LinkLo{ 0, 0, 0 }, m_LinkHi{ 0, 0, 0 };   // the published links' hull: the union of the surfels' (m_SurfLinkLo/Hi)
+            bool                    m_bLinkHull   = false;
+            bool                    m_bLinkQueued = false;      // in m_LinkQueue
+            bool                    m_bLinkDirtyAll = false;    // every surfel's links are built again (MarkLinks)
+            std::vector<std::uint8_t> m_LinkDirty;              // per fine surfel: its links are built again (MarkLinksCrossing)
+            std::vector<v3>         m_SurfLinkLo, m_SurfLinkHi; // per fine surfel: it and the emitters it examined (what an occluder must cross)
+            bool                    m_bEmitDirty  = false;      // m_EmitB is made again from all its links (UpdateEmittedLight)
+            bool                    m_bEmitRelevel = false;     // m_EmitB is made again from m_EmitFine (its level changed)
+            std::vector<basis>      m_EmitFine, m_EmitSum;      // per fine surfel its emitted light; per parent the sum of its children's
+            std::vector<int>        m_ParentCnt;                // per parent its children
             std::vector<basis>      m_EmitB;                    // per surfel of the active level: the emitters' irradiance this update, per basis direction
             std::vector<basis>      m_Frac;                     // per surfel: the fraction of its light from around each basis direction (per channel)
             std::vector<basis>      m_BasisAcc;                 // this pass: the light per basis direction
@@ -2798,98 +2788,355 @@ namespace xlionrender::gi
         // (an emitter's light reaches it as its radiance x its area x both cosines / distance^2) and keeps the strongest that nothing
         // hides (a shadow ray each), once - not by waiting for 8 random rays to find a small sign. Rebuilt when emitters or placements
         // change
-        static constexpr int max_links_v = 32;                 // enough that neighbors keep about the same emitters (no steps where their sets differ)
-        void RebuildEmitterLinks() noexcept
+        static constexpr int max_links_v    = 32;              // enough that neighbors keep about the same emitters (no steps where their sets differ)
+        static constexpr int max_examined_v = 64;              // the shadow rays of one receiver surfel at most (the link work's unit is bounded: rule 4)
+
+        // Phase 2 (documentation/gi_dynamic_master_plan.md): the links are maintained per receiver surfel. A change marks what it
+        // concerns: a receiver that moves, all its surfels; an emitter that moves or appears, every receiver; an occluder, only the
+        // surfels whose examined segments (each surfel's box with the emitters it examined) cross its old or new box. A queue of
+        // instances builds the marked surfels in chunks within the links' share of the allowance, beside the published links, and
+        // publishes the instance when its list is done. A mark while an instance is being built queues it again (repeated edits
+        // coalesce, a drag still publishes as it goes); after the last change every marked surfel was built after it, so the links
+        // equal a fresh build of the final scene
+        struct emitter_pt { v3 m_C, m_N; float m_A; };
+        // A candidate: the listed surfels are built (into one flat buffer: no allocation per surfel), then the instance's links are
+        // flattened with the published ones of the other surfels into staging storage, a slice per update, and swapped in
+        struct link_build
         {
-            m_Emitters.clear();
+            static constexpr std::uint8_t not_built_v = 0xFF;
+            int                                  m_Inst  = -1;
+            int                                  m_Next  = 0;      // the next entry of m_List
+            std::vector<int>                     m_List;           // the receiver surfels to build
+            std::vector<emit_link>               m_Flat;           // the built surfels' links
+            std::vector<std::uint32_t>           m_Off;            // per receiver surfel: its first in m_Flat
+            std::vector<std::uint8_t>            m_Cnt;            // per receiver surfel: its count (not_built_v: keeps the published)
+            std::vector<v3>                      m_Lo, m_Hi;       // per receiver surfel: it and the emitters it examined
+            int                                  m_FlatNext = -1;  // >= 0: flattening, the next surfel
+            std::vector<std::uint32_t>           m_StFirst;        // the staging storage
+            std::vector<emit_link>               m_StLinks;
+            std::vector<basis>                   m_StEmit;         // per receiver surfel its emitted light (made in the slices too)
+            v3                                   m_HullLo{ 0, 0, 0 }, m_HullHi{ 0, 0, 0 };
+        };
+
+        static bool Overlap(const v3& aLo, const v3& aHi, const v3& bLo, const v3& bHi) noexcept
+        {
+            return aLo.m_X <= bHi.m_X && bLo.m_X <= aHi.m_X && aLo.m_Y <= bHi.m_Y && bLo.m_Y <= aHi.m_Y && aLo.m_Z <= bHi.m_Z && bLo.m_Z <= aHi.m_Z;
+        }
+
+        void QueueLinks(int Id) noexcept
+        {
+            auto& I = m_Instances[Id];
+            if (!I.m_bLinkQueued) { I.m_bLinkQueued = true; m_LinkQueue.push_back(Id); }
+        }
+        void MarkLinks(int Id) noexcept                         // every surfel of the receiver
+        {
+            if (!m_bEmitterLinks || !m_Instances[Id].m_bAlive) return;
+            m_Instances[Id].m_bLinkDirtyAll = true;
+            QueueLinks(Id);
+        }
+        void MarkAllLinks() noexcept { for (int i = 0; i < int(m_Instances.size()); ++i) MarkLinks(i); }
+        void MarkLinksCrossing(const v3& Lo, const v3& Hi) noexcept      // an occluder's box: the surfels whose examined segments may cross it
+        {
+            if (!m_bEmitterLinks) return;
+            for (int i = 0; i < int(m_Instances.size()); ++i)
+            {
+                auto& I = m_Instances[i];
+                if (!I.m_bAlive || !I.m_bLinkHull || I.m_bLinkDirtyAll || !Overlap(I.m_LinkLo, I.m_LinkHi, Lo, Hi)) continue;
+                bool bAny = false;
+                for (std::size_t s = 0; s < I.m_SurfLinkLo.size(); ++s)
+                    if (!I.m_LinkDirty[s] && Overlap(I.m_SurfLinkLo[s], I.m_SurfLinkHi[s], Lo, Hi)) { I.m_LinkDirty[s] = 1; bAny = true; }
+                if (bAny) QueueLinks(i);
+            }
+        }
+
+        // An instance's material changed: which of its surfels emit. Only a change of that set changes links (a link's weight is
+        // geometric); a change of how much they emit changes the emitted light only
+        void EmittersChanged(int Id) noexcept
+        {
+            auto& I = m_Instances[Id];
+            std::vector<int> Now;
+            for (int e = 0; e < int(I.m_SurfEmission.size()); ++e)
+                if (I.m_SurfEmission[e].m_X + I.m_SurfEmission[e].m_Y + I.m_SurfEmission[e].m_Z > 1e-3f) Now.push_back(e);
+            m_bEmitDirty = true;
+            if (Now == I.m_EmitSurfs) return;
+            I.m_EmitSurfs = std::move(Now);
+            m_bEmittersDirty = true;
+            MarkAllLinks();
+        }
+
+        void RebuildEmitterList() noexcept
+        {
+            m_Emitters.clear(); m_Em.clear();
             for (int i = 0; i < int(m_Instances.size()); ++i)
             {
                 const auto& I = m_Instances[i];
                 if (!I.m_bAlive) continue;
-                for (std::size_t e = 0; e < I.m_SurfEmission.size(); ++e)
-                    if (I.m_SurfEmission[e].m_X + I.m_SurfEmission[e].m_Y + I.m_SurfEmission[e].m_Z > 1e-3f) m_Emitters.push_back({ i, int(e) });
-            }
-            struct emitter { v3 m_C, m_N; float m_A; };
-            std::vector<emitter> Em(m_Emitters.size());
-            for (std::size_t k = 0; k < Em.size(); ++k)
-            {
-                const auto& I = m_Instances[m_Emitters[k].first];
-                const auto& S = I.m_pMesh->m_Levels[0][m_Emitters[k].second];
-                const float r = S.m_Radius * I.m_MeanScale;
-                Em[k] = { I.m_L2W * S.m_Center, NormalToWorld(I, S.m_Normal), 1.47f * r * r };     // its share of the surface: surfels baked r apart cover ~1.47 r^2 each
-            }
-            for (int i = 0; i < int(m_Instances.size()); ++i)
-            {
-                auto& I = m_Instances[i];
-                I.m_LinkFirst.clear(); I.m_Links.clear();
-                if (!I.m_bAlive || Em.empty()) continue;
-                const auto& L = I.m_pMesh->m_Levels[0];
-                std::vector<std::vector<emit_link>> Per(L.size());
-                ParallelFor(int(L.size()), [&](int s)
+                for (const int e : I.m_EmitSurfs)
                 {
-                    const v3 C = I.m_L2W * L[s].m_Center, N = NormalToWorld(I, L[s].m_Normal);
-                    std::vector<std::pair<float, std::uint32_t>> Cand;
-                    for (std::uint32_t k = 0; k < Em.size(); ++k)
-                    {
-                        if (m_Emitters[k].first == i && m_Emitters[k].second == s) continue;
-                        const v3 D = Em[k].m_C - C;
-                        const float d2 = D.Dot(D);
-                        if (d2 < 1e-10f) continue;
-                        const v3 Dn = D * (1.0f / std::sqrt(d2));
-                        const float cr = N.Dot(Dn), ce = -Em[k].m_N.Dot(Dn);
-                        if (cr <= 0 || ce <= 0) continue;
-                        Cand.push_back({ Em[k].m_A * cr * ce / (d2 + Em[k].m_A), k });       // a small disk, not a point: soft up close (no hotspot next to an emitter)
-                    }
-                    std::sort(Cand.begin(), Cand.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-                    const basis Dirs = BasisDirs(L[s].m_Normal);
-                    for (const auto& [w, k] : Cand)
-                    {
-                        if (int(Per[s].size()) >= max_links_v || w < 1e-5f) break;
-                        const v3 D = Em[k].m_C - C;
-                        const float d = D.Length();
-                        if (Occluded(C + N * 1e-3f, D * (1.0f / d), d * 0.98f)) continue;      // stops short of the emitter's own surface
-                        v3 Dm = I.m_W2L.TransformDirection(D * (1.0f / d));
-                        Dm = Dm * (1.0f / std::max(Dm.Length(), 1e-12f));
-                        Per[s].push_back({ k, w, BasisWeights(Dirs, Dm) });
-                    }
-                });
-                I.m_LinkFirst.assign(L.size() + 1, 0);
-                for (std::size_t s = 0; s < L.size(); ++s)
-                {
-                    I.m_LinkFirst[s + 1] = I.m_LinkFirst[s] + std::uint32_t(Per[s].size());
-                    I.m_Links.insert(I.m_Links.end(), Per[s].begin(), Per[s].end());
+                    const auto& S = I.m_pMesh->m_Levels[0][e];
+                    const float r = S.m_Radius * I.m_MeanScale;
+                    m_Emitters.push_back({ i, e });
+                    m_Em.push_back({ I.m_L2W * S.m_Center, NormalToWorld(I, S.m_Normal), 1.47f * r * r });     // its share of the surface: surfels baked r apart cover ~1.47 r^2 each
                 }
             }
         }
 
+        // Entries [First, First + n) of the build's list: every emissive surfel each receiver surfel sees, the strongest that nothing hides
+        // (a shadow ray each, max_examined_v at most), once - not by waiting for 8 random rays to find a small sign. Returns the slowest
+        // surfel's time (us)
+        float BuildLinkChunk(link_build& B, int First, int n) noexcept
+        {
+            const auto& I = m_Instances[B.m_Inst];
+            const auto& L = I.m_pMesh->m_Levels[0];
+            std::vector<float> Us(std::size_t(n), 0.0f);
+            std::vector<emit_link>    Scratch(std::size_t(n) * max_links_v);
+            std::vector<std::uint8_t> Count(std::size_t(n), 0);
+            ParallelFor(n, [&](int j)
+            {
+                const auto TS = std::chrono::steady_clock::now();
+                const int s = B.m_List[std::size_t(First + j)];
+                const v3 C = I.m_L2W * L[s].m_Center, N = NormalToWorld(I, L[s].m_Normal);
+                v3 Lo = C, Hi = C;
+                emit_link* const pOut = &Scratch[std::size_t(j) * max_links_v];
+                int nOut = 0;
+                std::vector<std::pair<float, std::uint32_t>> Cand;
+                for (std::uint32_t k = 0; k < m_Em.size(); ++k)
+                {
+                    if (m_Emitters[k].first == B.m_Inst && m_Emitters[k].second == s) continue;
+                    const v3 D = m_Em[k].m_C - C;
+                    const float d2 = D.Dot(D);
+                    if (d2 < 1e-10f) continue;
+                    const v3 Dn = D * (1.0f / std::sqrt(d2));
+                    const float cr = N.Dot(Dn), ce = -m_Em[k].m_N.Dot(Dn);
+                    if (cr <= 0 || ce <= 0) continue;
+                    const float w = m_Em[k].m_A * cr * ce / (d2 + m_Em[k].m_A);     // a small disk, not a point: soft up close (no hotspot next to an emitter)
+                    if (w >= 1e-5f) Cand.push_back({ w, k });
+                }
+                const auto Better = [](const auto& a, const auto& b) { return a.first > b.first || (a.first == b.first && a.second < b.second); };
+                if (Cand.size() > std::size_t(max_examined_v)) { std::nth_element(Cand.begin(), Cand.begin() + max_examined_v, Cand.end(), Better); Cand.resize(max_examined_v); }
+                std::sort(Cand.begin(), Cand.end(), Better);
+                const basis Dirs = BasisDirs(L[s].m_Normal);
+                for (const auto& [w, k] : Cand)
+                {
+                    if (nOut >= max_links_v) break;
+                    const v3 E = m_Em[k].m_C;
+                    Lo = v3{ std::min(Lo.m_X, E.m_X), std::min(Lo.m_Y, E.m_Y), std::min(Lo.m_Z, E.m_Z) };   // examined: an occluder leaving it uncovers it
+                    Hi = v3{ std::max(Hi.m_X, E.m_X), std::max(Hi.m_Y, E.m_Y), std::max(Hi.m_Z, E.m_Z) };
+                    const v3 D = E - C;
+                    const float d = D.Length();
+                    if (Occluded(C + N * 1e-3f, D * (1.0f / d), d * 0.98f)) continue;      // stops short of the emitter's own surface
+                    v3 Dm = I.m_W2L.TransformDirection(D * (1.0f / d));
+                    Dm = Dm * (1.0f / std::max(Dm.Length(), 1e-12f));
+                    pOut[nOut++] = { std::uint32_t(m_Emitters[k].first), std::uint32_t(m_Emitters[k].second), w, BasisWeights(Dirs, Dm) };
+                }
+                B.m_Lo[s] = Lo; B.m_Hi[s] = Hi; Count[std::size_t(j)] = std::uint8_t(nOut);
+                Us[j] = float(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - TS).count());
+            });
+            for (int j = 0; j < n; ++j)
+            {
+                const int s = B.m_List[std::size_t(First + j)];
+                B.m_Off[s] = std::uint32_t(B.m_Flat.size()); B.m_Cnt[s] = Count[std::size_t(j)];
+                B.m_Flat.insert(B.m_Flat.end(), Scratch.begin() + std::ptrdiff_t(j) * max_links_v, Scratch.begin() + std::ptrdiff_t(j) * max_links_v + Count[std::size_t(j)]);
+            }
+            return n ? *std::max_element(Us.begin(), Us.end()) : 0.0f;
+        }
+
+        // The publication, a slice of surfels per call until done (true): the built surfels' links, the others' published ones, into the
+        // staging storage; then swapped in. The emitted light is made again for the built surfels only (UpdateEmittedLight)
+        bool FlattenLinks(link_build& B, double AllowMs, const std::chrono::steady_clock::time_point& T0) noexcept
+        {
+            auto& I = m_Instances[B.m_Inst];
+            const int n = int(B.m_Cnt.size());
+            const bool bOld = I.m_LinkFirst.size() == std::size_t(n) + 1;
+            if (B.m_FlatNext < 0)
+            {
+                B.m_FlatNext = 0;
+                B.m_StFirst.assign(std::size_t(n) + 1, 0);
+                B.m_StLinks.clear(); B.m_StLinks.reserve(B.m_Flat.size() + (bOld ? I.m_Links.size() : 0));
+                B.m_StEmit.assign(std::size_t(n), basis{});
+                B.m_HullLo = I.m_Lo; B.m_HullHi = I.m_Hi;
+                if (I.m_SurfLinkLo.size() != std::size_t(n)) { I.m_SurfLinkLo.assign(std::size_t(n), I.m_Lo); I.m_SurfLinkHi.assign(std::size_t(n), I.m_Hi); }
+            }
+            constexpr int slice_v = 512;
+            while (B.m_FlatNext < n)
+            {
+                const int End = std::min(n, B.m_FlatNext + slice_v);
+                for (int s = B.m_FlatNext; s < End; ++s)
+                {
+                    if (B.m_Cnt[s] != link_build::not_built_v)
+                    {
+                        B.m_StLinks.insert(B.m_StLinks.end(), B.m_Flat.begin() + B.m_Off[s], B.m_Flat.begin() + B.m_Off[s] + B.m_Cnt[s]);
+                        I.m_SurfLinkLo[s] = B.m_Lo[s]; I.m_SurfLinkHi[s] = B.m_Hi[s];
+                        B.m_StEmit[s] = EmittedBy(B.m_Flat.data() + B.m_Off[s], B.m_Cnt[s]);
+                    }
+                    else if (bOld)
+                    {
+                        B.m_StLinks.insert(B.m_StLinks.end(), I.m_Links.begin() + I.m_LinkFirst[s], I.m_Links.begin() + I.m_LinkFirst[s + 1]);
+                        B.m_StEmit[s] = I.m_EmitFine.size() == std::size_t(n) ? I.m_EmitFine[s] : EmittedAt(I, std::size_t(s));
+                    }
+                    B.m_StFirst[std::size_t(s) + 1] = std::uint32_t(B.m_StLinks.size());
+                    const v3& a = I.m_SurfLinkLo[s]; const v3& b = I.m_SurfLinkHi[s];
+                    B.m_HullLo = v3{ std::min(B.m_HullLo.m_X, a.m_X), std::min(B.m_HullLo.m_Y, a.m_Y), std::min(B.m_HullLo.m_Z, a.m_Z) };
+                    B.m_HullHi = v3{ std::max(B.m_HullHi.m_X, b.m_X), std::max(B.m_HullHi.m_Y, b.m_Y), std::max(B.m_HullHi.m_Z, b.m_Z) };
+                }
+                B.m_FlatNext = End;
+                if (AllowMs > 0 && B.m_FlatNext < n && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count() >= AllowMs) return false;
+            }
+            // swapped in; the emitted light: per built surfel its change into its parent's sum (O(built)); or re-derived (O(surfels), once)
+            const bool bDeltas = bOld && int(B.m_List.size()) < n && I.m_EmitFine.size() == std::size_t(n) && !I.m_bEmitDirty && !I.m_bEmitRelevel
+                              && (I.m_Level == 0 ? I.m_EmitB.size() == std::size_t(n) : I.m_EmitSum.size() == I.m_pMesh->m_Levels[1].size() && I.m_EmitB.size() == I.m_EmitSum.size());
+            if (bDeltas)
+                for (const int x : B.m_List)
+                {
+                    const basis& New = B.m_StEmit[x];
+                    if (I.m_Level == 0) I.m_EmitB[x] = New;
+                    else
+                    {
+                        const int p = I.m_pMesh->m_ParentOf[x];
+                        for (int i = 0; i < 3; ++i) I.m_EmitSum[p][i] = I.m_EmitSum[p][i] + (New[i] - I.m_EmitFine[x][i]);
+                        const float c = 1.0f / float(std::max<int>(I.m_ParentCnt[p], 1));
+                        for (int i = 0; i < 3; ++i) I.m_EmitB[p][i] = I.m_EmitSum[p][i] * c;
+                    }
+                }
+            else I.m_bEmitRelevel = true;
+            I.m_EmitFine.swap(B.m_StEmit);
+            I.m_Links.swap(B.m_StLinks);
+            if (I.m_Links.empty()) I.m_LinkFirst.clear(); else I.m_LinkFirst.swap(B.m_StFirst);
+            I.m_LinkLo = B.m_HullLo; I.m_LinkHi = B.m_HullHi; I.m_bLinkHull = true;
+            return true;
+        }
+
+        // The link work of an update: the queued receivers' marked surfels in chunks until the queue is empty or AllowMs is spent (0: no
+        // limit, everything now). A chunk is sized by the slowest recent surfel; one started finishes (the overshoot is one chunk), and
+        // every update makes progress (at least one surfel per worker). Returns the time it used
+        double PumpLinks(double AllowMs, stats& St) noexcept
+        {
+            const auto T0 = std::chrono::steady_clock::now();
+            const auto Elapsed = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count(); };
+            if (!m_bEmitterLinks)
+            {
+                if (!m_Emitters.empty() || !m_LinkQueue.empty() || m_LinkCur.m_Inst >= 0)
+                {
+                    m_Emitters.clear(); m_Em.clear(); m_LinkQueue.clear(); m_LinkCur = {};
+                    for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); I.m_bLinkQueued = false; I.m_bLinkHull = false; I.m_bEmitDirty = true; }
+                }
+                return 0;
+            }
+            if (m_bEmittersDirty) { RebuildEmitterList(); m_bEmittersDirty = false; }
+            for (;;)
+            {
+                if (m_LinkCur.m_Inst < 0)
+                {
+                    while (!m_LinkQueue.empty() && m_LinkCur.m_Inst < 0)
+                    {
+                        const int Id = m_LinkQueue.front(); m_LinkQueue.pop_front();
+                        auto& I = m_Instances[Id];
+                        I.m_bLinkQueued = false;
+                        if (!I.m_bAlive) continue;
+                        const int n = int(I.m_pMesh->m_Levels[0].size());
+                        auto& B = m_LinkCur;
+                        B.m_Inst = Id; B.m_Next = 0; B.m_List.clear();
+                        if (I.m_LinkDirty.size() != std::size_t(n)) { I.m_LinkDirty.assign(std::size_t(n), 0); I.m_bLinkDirtyAll = true; }
+                        for (int s = 0; s < n; ++s) if (I.m_bLinkDirtyAll || I.m_LinkDirty[s]) B.m_List.push_back(s);
+                        std::fill(I.m_LinkDirty.begin(), I.m_LinkDirty.end(), std::uint8_t(0)); I.m_bLinkDirtyAll = false;
+                        B.m_Flat.clear(); B.m_Off.assign(std::size_t(n), 0); B.m_Cnt.assign(std::size_t(n), link_build::not_built_v); B.m_FlatNext = -1;
+                        B.m_Lo.assign(std::size_t(n), v3{ 0, 0, 0 }); B.m_Hi.assign(std::size_t(n), v3{ 0, 0, 0 });
+                    }
+                    if (m_LinkCur.m_Inst < 0) break;
+                }
+                auto& B = m_LinkCur;
+                if (!m_Instances[B.m_Inst].m_bAlive) { B = {}; continue; }
+                const int Left = int(B.m_List.size()) - B.m_Next;
+                if (Left > 0 && AllowMs > 0 && B.m_Next > 0 && Elapsed() >= AllowMs) break;
+                if (Left > 0)
+                {
+                    const double Used = Elapsed();
+                    if (AllowMs > 0 && Used >= AllowMs && St.m_LinkSurfels > 0) break;
+                    int Chunk = Left;
+                    if (AllowMs > 0)
+                    {
+                        // the workers take a surfel each: a chunk of n costs about n / workers of the slowest surfel lately
+                        int Fit = m_LinkUsHi > 0 ? int((AllowMs - Used) * 1000.0 / double(m_LinkUsHi)) * ParallelWidth() : link_unit_first_v;
+                        if (Fit < 1)
+                        {
+                            if (St.m_LinkSurfels > 0) break;                        // it would not fit: next update
+                            Fit = ParallelWidth();                                  // but every update makes progress (the one-unit overshoot)
+                        }
+                        Chunk = std::min(Fit, Left);
+                    }
+                    Chunk = std::min(Chunk, 4096);                                  // (the chunk's scratch: 32 links a surfel)
+                    const float SlowUs = BuildLinkChunk(B, B.m_Next, Chunk);
+                    m_LinkUsHi = std::max(m_LinkUsHi * 0.98f, SlowUs);              // conservative: the slowest surfel lately (it decays)
+                    B.m_Next += Chunk; St.m_LinkSurfels += Chunk;
+                }
+                if (B.m_Next >= int(B.m_List.size()))
+                {
+                    if (!FlattenLinks(B, AllowMs, T0)) break;                         // the rest of the publication next update
+                    ++St.m_nLinkRebuilds; ++m_nLinkRebuilds;
+                    B = {};
+                }
+            }
+            St.m_LinkPending = int(m_LinkQueue.size()) + (m_LinkCur.m_Inst >= 0 ? 1 : 0);
+            return Elapsed();
+        }
+
         // This update's emitted light reaching each surfel (its links x the emitters' current radiance), per basis direction, at the
         // instance's active level (a parent: the mean of its children)
-        void UpdateEmittedLight() noexcept
+        basis EmittedAt(const instance& I, std::size_t s) const noexcept     // a fine surfel's emitted light: its links x the emitters' radiance now
+        {
+            if (s + 1 >= I.m_LinkFirst.size()) return basis{};
+            return EmittedBy(I.m_Links.data() + I.m_LinkFirst[s], int(I.m_LinkFirst[s + 1] - I.m_LinkFirst[s]));
+        }
+        basis EmittedBy(const emit_link* pLinks, int n) const noexcept
+        {
+            basis B{};
+            for (int k = 0; k < n; ++k)
+            {
+                const auto& Lk = pLinks[k];
+                const auto& EI = m_Instances[Lk.m_EmInst];
+                if (!EI.m_bAlive || Lk.m_EmSurf >= EI.m_SurfEmission.size()) continue;      // (a published link to what is gone: until its rebuild)
+                const v3 Le = EI.m_SurfEmission[Lk.m_EmSurf] * (Lk.m_W * m_Setup.m_EmissiveScale);
+                for (int i = 0; i < 3; ++i) B[i] = B[i] + Le * (3.0f * Lk.m_Bw[i]);   // the basis' mean is the irradiance
+            }
+            return B;
+        }
+
+        // This update's emitted light reaching each surfel, per basis direction, at the instance's active level (a parent: the mean of its
+        // children). Made again from the links when the emissions changed (bAll, m_bEmitDirty: O(links)); from the kept fine values when
+        // the level switched or links were published (FlattenLinks makes the fine values in its slices)
+        void UpdateEmittedLight(bool bAll) noexcept
         {
             for (auto& I : m_Instances)
             {
-                I.m_EmitB.clear();
-                if (!I.m_bAlive || I.m_Links.empty()) continue;
                 const auto& M = *I.m_pMesh;
-                std::vector<basis> Fine(M.m_Levels[0].size(), basis{});
-                for (std::size_t s = 0; s + 1 < I.m_LinkFirst.size(); ++s)
-                    for (std::uint32_t k = I.m_LinkFirst[s]; k < I.m_LinkFirst[s + 1]; ++k)
-                    {
-                        const auto& Lk = I.m_Links[k];
-                        const auto& Em = m_Emitters[Lk.m_Emitter];
-                        const v3    Le = m_Instances[Em.first].m_SurfEmission[Em.second] * (Lk.m_W * m_Setup.m_EmissiveScale);
-                        for (int i = 0; i < 3; ++i) Fine[s][i] = Fine[s][i] + Le * (3.0f * Lk.m_Bw[i]);     // the basis' mean is the irradiance
-                    }
-                if (I.m_Level == 0) { I.m_EmitB = std::move(Fine); continue; }
-                I.m_EmitB.assign(M.m_Levels[1].size(), basis{});
-                std::vector<int> Cnt(I.m_EmitB.size(), 0);
-                for (std::size_t s = 0; s < Fine.size(); ++s)
+                const std::size_t nFine = M.m_Levels[0].size();
+                if (!I.m_bAlive || I.m_Links.empty())
+                {
+                    if (!I.m_EmitB.empty() || !I.m_EmitFine.empty()) { I.m_EmitB.clear(); I.m_EmitFine.clear(); I.m_EmitSum.clear(); }
+                    I.m_bEmitDirty = I.m_bEmitRelevel = false;
+                    continue;
+                }
+                const bool bParents = I.m_Level != 0;
+                if (bAll || I.m_bEmitDirty || I.m_EmitFine.size() != nFine)
+                {
+                    I.m_EmitFine.resize(nFine);
+                    for (std::size_t s = 0; s < nFine; ++s) I.m_EmitFine[s] = EmittedAt(I, s);
+                    I.m_bEmitRelevel = true;
+                }
+                I.m_bEmitDirty = false;
+                if (!I.m_bEmitRelevel) continue;
+                I.m_bEmitRelevel = false;
+                if (!bParents) { I.m_EmitB = I.m_EmitFine; continue; }
+                const std::size_t nP = M.m_Levels[1].size();
+                I.m_EmitSum.assign(nP, basis{}); I.m_ParentCnt.assign(nP, 0);
+                for (std::size_t s = 0; s < nFine; ++s)
                 {
                     const int p = M.m_ParentOf[s];
-                    for (int i = 0; i < 3; ++i) I.m_EmitB[p][i] = I.m_EmitB[p][i] + Fine[s][i];
-                    ++Cnt[p];
+                    for (int i = 0; i < 3; ++i) I.m_EmitSum[p][i] = I.m_EmitSum[p][i] + I.m_EmitFine[s][i];
+                    ++I.m_ParentCnt[p];
                 }
-                for (std::size_t p = 0; p < Cnt.size(); ++p) if (Cnt[p]) for (int i = 0; i < 3; ++i) I.m_EmitB[p][i] = I.m_EmitB[p][i] * (1.0f / float(Cnt[p]));
+                I.m_EmitB.resize(nP);
+                for (std::size_t p = 0; p < nP; ++p) { const float c = 1.0f / float(std::max<int>(I.m_ParentCnt[p], 1)); for (int i = 0; i < 3; ++i) I.m_EmitB[p][i] = I.m_EmitSum[p][i] * c; }
             }
         }
 
@@ -2951,19 +3198,21 @@ namespace xlionrender::gi
             return Sum;
         }
 
-        bool                                    m_bLinksDirty = false;
+        bool                                    m_bEmittersDirty = false;   // m_Emitters / m_Em are made again (PumpLinks)
+        std::deque<int>                         m_LinkQueue;                // receivers waiting for a link build (MarkLinks)
+        link_build                              m_LinkCur;                  // the one being built
+        std::vector<emitter_pt>                 m_Em;                       // per m_Emitters: world center, normal, area
+        float                                   m_LinkUsHi = 0;             // a link build's cost of one receiver surfel, the slowest lately
         int                                     m_nMovesAcc = 0, m_MoveMarked = 0;     // (instrumentation) SetTransform since the last update
         double                                  m_MovesMsAcc = 0;
         std::vector<work_item>                  m_Pending;              // Phase 1: the surfels picked and not finished
         float                                   m_RayUsMean = 50, m_RayUsDev = 50, m_RayUsHi = 0;     // the governor's running cost of a ray (us), and the slowest seen lately
         int                                     m_nEmitters = 0;
-        bool                                    m_bLinksMoved = false;      // an instance moved: m_bLinksDirty links_settle_v updates after the last move
-        unsigned                                m_nUpdates = 0, m_LinksMovedAt = 0;
+        unsigned                                m_nUpdates = 0;
         int                                     m_nLinkRebuilds = 0;        // (tests)
         bool                                    m_bEmitDirty = true;        // UpdateEmittedLight's inputs changed (Update)
         float                                   m_EmitScale = -1;           // the scale it was made with
         std::vector<std::pair<int, int>>        m_Emitters;         // (instance, fine surfel) of every surfel that emits
-        mutable worker_pool                     m_Pool;                 // (BasisLight, const, runs on it too)
         std::vector<instance>                   m_Instances;
         mutable bvh                             m_Tlas;
         mutable std::vector<int>                m_TlasIds;          // TLAS primitive -> instance (the alive ones)

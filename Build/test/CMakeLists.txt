@@ -55,7 +55,7 @@ add_library(xlionrender_new STATIC
   "${XLION_ROOT}/dependencies/xGPU/source/xGPU.cpp"
   ${SHADER_HEADERS})
 target_include_directories(xlionrender_new PUBLIC
-  "${XLIONRENDER_DIR}/src" "${XLION_ROOT}" "${XLION_ROOT}/dependencies/xGPU/source" "${VULKAN_SDK}/Include" "${SHADER_OUT_DIR}")
+  "${XLIONRENDER_DIR}/src" "${XLION_ROOT}" "${XLION_ROOT}/dependencies/xscheduler" "${XLION_ROOT}/dependencies/xGPU/source" "${VULKAN_SDK}/Include" "${SHADER_OUT_DIR}")
 target_link_directories(xlionrender_new PUBLIC "${VULKAN_SDK}")   # xGPU links "/Lib/vulkan-1.lib" via #pragma
 target_compile_definitions(xlionrender_new PUBLIC UNICODE _UNICODE NOMINMAX)
 target_compile_options(xlionrender_new PUBLIC /MP)
