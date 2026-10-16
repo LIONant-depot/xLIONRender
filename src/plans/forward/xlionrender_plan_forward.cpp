@@ -1314,14 +1314,15 @@ namespace xlionrender
             Cmd.WriteTimestamp(m_Timestamps, 3);
         }
 
-        renderOutline(Window, Scene, View, W2C, Eye);           // the selection's outline, over the tone-mapped image
-
         // Editor overlays over the tone-mapped image, depth-tested against the scene
         if( Overlay )
         {
             auto Cmd = Window.StartRenderPass(View.m_OverlayPass);
             Overlay(Cmd);
         }
+
+        // The selection's outline last, over the overlays too: the host's grid is opaque floor and painted over the outline of an object standing on it
+        renderOutline(Window, Scene, View, W2C, Eye);
 
         const auto T3 = clock::now();
         m_CPUTimes = { Ms(T0, T1), Ms(T1, T2), m_LightBuildMs, Ms(T0, T3) };
