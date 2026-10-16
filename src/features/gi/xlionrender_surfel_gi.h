@@ -2230,6 +2230,127 @@ namespace xlionrender::gi
             Out.m_TlasLeaves.insert(Out.m_TlasLeaves.end(), m_Tlas.m_Prims.begin(), m_Tlas.m_Prims.end());
         }
 
+        // Part II, G2: everything a surfel pass reads besides the rays' structures, for shaders/xlionrender_gi_surfel_pass_comp.glsl, as
+        // one array of words (floats as their bits). Per mesh a header (gpu_mesh_v words) of offsets into the array; per world instance a
+        // record (gpu_inst_v words); the lights; the setup. Layouts (word offsets):
+        //   mesh:     0 nVerts 1 pos 2 nrm 3 tris 4 vertSurfels (2 per uint, 0xFFFF none) 5 level0 (7 floats: center, normal, radius)
+        //             6 n0 7 level1 8 n1 9 parentOf 10 readTable (4 per entry) 11 its size 12 readList 13 readCell 14 originFirst
+        //             15 originPos 16 originNrm 17 leak protection
+        //   instance: 0 mesh 1 level 2 E 3 valid 4 moments (32 per surfel) 5..7 mean light 8..10 albedo 11 triAlbedo 12 surfAlbedo
+        //             13 surfEmission 14 see-through bits 15 meanScale 16..27 L2W rows 28..39 W2L rows 40 alive   (~0u: none)
+        //   header:   0 instances 1 nInstances 2 lights 3 nPoints 4 sky oct (0/1) 5 emissive scale 6 spread origins 7 no emitters
+        //   lights:   sun direction 3, sun color 3, sky 3, sky oct 48, then per point position 3, color 3, radius
+        // ponytail: the whole scene every call (G3 keeps it resident and uploads changes)
+        static constexpr std::uint32_t gpu_mesh_v = 18, gpu_inst_v = 41, gpu_none_v = 0xFFFFFFFFu;
+        struct gpu_item { int m_Inst = 0, m_Surf = 0, m_Level = 0, m_Rays = 0; float m_Off1 = 0, m_Off2 = 0; int m_Shift = 0, m_Pad = 0; };
+        struct gpu_result                       // per item: what TraceChunk accumulates, before it finishes the pass
+        {
+            float   m_Sum[3];
+            float   m_Basis[9];
+            float   m_Moments[3 * moment_texels_v];
+            int     m_nBack, m_nBackAll, m_nUnsupported, m_nHits;
+            float   m_UnsupportedAt[3], m_Pad;
+        };
+        void PackGPUSurfels(std::vector<std::uint32_t>& D, const lights& L) const noexcept
+        {
+            D.assign(8, 0);
+            const auto F = [](float f) { return std::bit_cast<std::uint32_t>(f); };
+            const auto PushV = [&](const v3& v) { D.push_back(F(v.m_X)); D.push_back(F(v.m_Y)); D.push_back(F(v.m_Z)); };
+            std::unordered_map<const surfel_mesh*, std::uint32_t> Meshes;
+            const auto MeshOf = [&](const surfel_mesh& M) -> std::uint32_t
+            {
+                if (auto It = Meshes.find(&M); It != Meshes.end()) return It->second;
+                std::uint32_t H[gpu_mesh_v]{};
+                H[0] = std::uint32_t(M.m_Pos.size());
+                H[1] = std::uint32_t(D.size()); for (const auto& p : M.m_Pos) PushV(p);
+                H[2] = std::uint32_t(D.size()); for (const auto& n : M.m_Nrm) PushV(n);
+                H[3] = std::uint32_t(D.size()); for (const auto& t : M.m_Tris) for (int k = 0; k < 3; ++k) D.push_back(std::uint32_t(t[k]));
+                H[4] = std::uint32_t(D.size());
+                for (std::size_t v = 0; v < M.m_Pos.size(); ++v)
+                {
+                    const auto U = [&](int k) { const int s = v < M.m_VertSurfels.size() ? M.m_VertSurfels[v][k] : -1; return s < 0 ? 0xFFFFu : std::uint32_t(s); };
+                    D.push_back(U(0) | (U(1) << 16)); D.push_back(U(2) | (U(3) << 16));
+                }
+                for (int Lv = 0; Lv < 2; ++Lv)
+                {
+                    H[5 + 2 * Lv] = std::uint32_t(D.size()); H[6 + 2 * Lv] = std::uint32_t(M.m_Levels[Lv].size());
+                    for (const auto& S : M.m_Levels[Lv]) { PushV(S.m_Center); PushV(S.m_Normal); D.push_back(F(S.m_Radius)); }
+                }
+                H[9]  = std::uint32_t(D.size()); for (const int p : M.m_ParentOf) D.push_back(std::uint32_t(p));
+                H[10] = std::uint32_t(D.size()); for (const auto& E : M.m_ReadTable) D.insert(D.end(), E.begin(), E.end());
+                H[11] = std::uint32_t(M.m_ReadTable.size());
+                H[12] = std::uint32_t(D.size()); D.insert(D.end(), M.m_ReadList.begin(), M.m_ReadList.end());
+                H[13] = F(M.m_ReadCell);
+                H[14] = std::uint32_t(D.size()); D.insert(D.end(), M.m_OriginFirst.begin(), M.m_OriginFirst.end());
+                if (M.m_OriginFirst.empty()) H[14] = gpu_none_v;
+                H[15] = std::uint32_t(D.size()); for (const auto& p : M.m_OriginPos) PushV(p);
+                H[16] = std::uint32_t(D.size()); for (const auto& n : M.m_OriginNrm) PushV(n);
+                H[17] = M.m_bLeakProtection ? 1u : 0u;
+                const std::uint32_t At = std::uint32_t(D.size());
+                D.insert(D.end(), H, H + gpu_mesh_v);
+                Meshes[&M] = At;
+                return At;
+            };
+            std::vector<std::uint32_t> Recs(m_Instances.size() * gpu_inst_v, gpu_none_v);
+            for (std::size_t i = 0; i < m_Instances.size(); ++i)
+            {
+                const auto& I = m_Instances[i];
+                std::uint32_t* R = &Recs[i * gpu_inst_v];
+                R[40] = I.m_bAlive ? 1u : 0u;
+                if (!I.m_bAlive) continue;
+                R[0] = MeshOf(*I.m_pMesh);
+                R[1] = std::uint32_t(I.m_Level);
+                R[2] = std::uint32_t(D.size()); for (const auto& e : I.m_E) PushV(e);
+                R[3] = std::uint32_t(D.size()); for (const float v : I.m_Valid) D.push_back(F(v));
+                R[4] = std::uint32_t(D.size()); for (const auto& Mo : I.m_Moments) for (const float m : Mo) D.push_back(F(m));
+                R[5] = F(I.m_MeanE.m_X); R[6] = F(I.m_MeanE.m_Y); R[7] = F(I.m_MeanE.m_Z);
+                R[8] = F(I.m_Albedo.m_X); R[9] = F(I.m_Albedo.m_Y); R[10] = F(I.m_Albedo.m_Z);
+                if (!I.m_TriAlbedo.empty())   { R[11] = std::uint32_t(D.size()); for (const auto& a : I.m_TriAlbedo) PushV(a); }
+                if (!I.m_SurfAlbedo.empty())  { R[12] = std::uint32_t(D.size()); for (const auto& a : I.m_SurfAlbedo) PushV(a); }
+                if (!I.m_SurfEmission.empty()){ R[13] = std::uint32_t(D.size()); for (const auto& e : I.m_SurfEmission) PushV(e); }
+                if (!I.m_SeeThrough.empty())
+                {
+                    R[14] = std::uint32_t(D.size());
+                    D.resize(D.size() + (I.m_SeeThrough.size() + 31) / 32, 0u);
+                    for (std::size_t t = 0; t < I.m_SeeThrough.size(); ++t) if (I.m_SeeThrough[t]) D[R[14] + t / 32] |= 1u << (t % 32);
+                }
+                R[15] = F(I.m_MeanScale);
+                for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) { R[16 + 4 * r + c] = F(I.m_L2W(r, c)); R[28 + 4 * r + c] = F(I.m_W2L(r, c)); }
+            }
+            D[0] = std::uint32_t(D.size()); D[1] = std::uint32_t(m_Instances.size());
+            D.insert(D.end(), Recs.begin(), Recs.end());
+            D[2] = std::uint32_t(D.size()); D[3] = std::uint32_t(L.m_Points.size());
+            PushV(L.m_SunDirection); PushV(L.m_SunColor); PushV(L.m_Sky);
+            for (const auto& s : L.m_SkyOct) PushV(s);
+            for (const auto& P : L.m_Points) { PushV(P.m_Position); PushV(P.m_Color); D.push_back(F(P.m_Radius)); }
+            D[4] = L.m_bSkyOct ? 1u : 0u;
+            D[5] = F(m_Setup.m_EmissiveScale);
+            D[6] = m_Setup.m_bSpreadOrigins ? 1u : 0u;
+            D[7] = m_Emitters.empty() ? 1u : 0u;
+        }
+
+        // (tests) The CPU's surfel pass for the same items (TraceChunk, all rays at once), its sums before the pass is finished. Items whose
+        // instance has emitter links get their finishing light in m_Basis (the scenes compared have none)
+        void TraceReference(std::span<const gpu_item> Items, const lights& L, std::vector<gpu_result>& Out) noexcept
+        {
+            BuildTlas();
+            if (L.m_Points.size() != m_nLightBvh) BuildLightBvh(L);
+            Out.assign(Items.size(), gpu_result{});
+            for (std::size_t k = 0; k < Items.size(); ++k)
+            {
+                const auto& G = Items[k];
+                work_item W; W.m_Inst = G.m_Inst; W.m_Surf = G.m_Surf; W.m_Level = G.m_Level; W.m_Rays = G.m_Rays; W.m_Off1 = G.m_Off1; W.m_Off2 = G.m_Off2; W.m_Shift = G.m_Shift;
+                TraceChunk(W, 0, W.m_Rays, L);
+                const auto& I = m_Instances[G.m_Inst];
+                auto& R = Out[k];
+                for (int a = 0; a < 3; ++a) R.m_Sum[a] = W.m_Sum[a];
+                for (int i = 0; i < 3; ++i) for (int a = 0; a < 3; ++a) R.m_Basis[3 * i + a] = I.m_BasisAcc[G.m_Surf][i][a];
+                for (int t = 0; t < 3 * moment_texels_v; ++t) R.m_Moments[t] = I.m_MomAcc[G.m_Surf][t];
+                R.m_nBack = W.m_nBack; R.m_nBackAll = W.m_nBackAll; R.m_nUnsupported = W.m_nUnsupported; R.m_nHits = W.m_nHits;
+                for (int a = 0; a < 3; ++a) R.m_UnsupportedAt[a] = W.m_UnsupportedAt[a];
+            }
+        }
+
         // The nearest hit before TMax (the instances as they are now: the TLAS is rebuilt after Add / SetTransform; not
         // thread safe across that rebuild - Update rebuilds before its parallel part)
         hit Cast(const v3& O, const v3& D, float TMax = 1e30f) const noexcept

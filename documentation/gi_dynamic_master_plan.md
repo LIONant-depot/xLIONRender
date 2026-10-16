@@ -692,10 +692,42 @@ transform's float rounding.
 - **The walk (`shaders/xlionrender_gi_bvh.glsl`).** It is `Cast`'s, mirrored: the same 4-wide box test with the near plane per
   axis, nearest children first, a stack of 64, Möller–Trumbore per row, and the same `SafeInverse`. A mesh is walked with the
   ray in its space, at the same parameter t.
-  - Not handled yet: see-through triangles (needed in G2) and the any-hit shadow query.
+  - Not handled in G1: see-through triangles (added in G2) and an any-hit shadow query (still to do).
 - **What it means for the target.** About 0.4 ms of GPU time per million rays in a dense instanced scene. Police's roughly 8M
   rays to converge are about 0.4 s of GPU time in all, so 1 s is within reach once G2 and G3 move the rest of the surfel pass
   to the GPU.
+
+**G2 results** (2026-10-17, RTX 4070 Ti SUPER, Release; `xlionrender_test_gi_surfel_pass`). Every surfel of each scene gets
+16 rays (32 for the sign), and its sums are compared with the CPU's (`gi::world::TraceReference`, which is `TraceChunk` over
+the same rays). The sums are the light, its share per basis direction, the depth moments, and the back-face, unsupported and
+hit counts.
+
+| Scene | Surfels | Differ from the CPU | Worst of the others | CPU (one thread) | GPU |
+|---|---|---|---|---|---|
+| Cornell box (the box rotated), point light, read grid | 226 | 0 | 3e-6 | 1.1k rays/ms | 2.7k rays/ms (226 threads) |
+| The same, 64 passes per surfel (the GPU full) | 14,464 | 0 | 4e-5 | 1.2k rays/ms | **66.7k rays/ms** |
+| Cornell box, vertex reads (no read grid) | 226 | 0 | 3e-6 | 1.5k rays/ms | 3.6k rays/ms |
+| A see-through pane over a floor and a slab, the sun and the sky by direction | 604 | 0 | 4e-6 | 4.1k rays/ms | 23k rays/ms |
+| An emissive sign over the ground, the emitter links off | 330 | 0 | 9e-6 | 3.5k rays/ms | 18k rays/ms |
+
+"Differ" means a count differs, or a sum is off by more than 1e-3 of the surfel's light (for the moments, of its largest
+moment). A GPU ray here is a whole ray of the pass: the cast, the shadow rays, the reads and the material.
+
+- **The pass (`shaders/xlionrender_gi_surfel_pass_comp.glsl`).**
+  - One invocation per work item traces its rays in `TraceChunk`'s order and writes the item's sums.
+  - The CPU keeps the finishing step: the emitter links, E = π·mean(L), and the validity.
+  - The hit's light is a mirror of the CPU's: `SurfaceAt`, `Indirect` (`ReadPoint` through the read grid with `Visibility`,
+    or `ReadVertex` with the level-1 parent dedupe), `Unsupported`, `Direct` (sun and point lights), and `SkyAt`.
+- **The data (`gi::world::PackGPUSurfels`).** One array of words: per mesh a header of offsets, per instance a record, then the
+  lights and the setup. The layout is written beside the function.
+- **The BVH walk** gained see-through triangles. A hook in `xlionrender_gi_bvh.glsl` reads the instance's bits.
+  - Shadow rays turn see-through off, as the CPU's `Occluded` does. They use the nearest-hit walk, so they are correct but
+    slower than an any-hit query would be.
+- **Not covered yet.**
+  - Level-1 (LOD) instances. Their reads are ported but untested here.
+  - The whole scene is packed on every call. G3 keeps it resident.
+- **What it means for the target.** 66.7k full rays/ms is about 57 times one CPU thread. Police's roughly 8M rays are about
+  0.12 s of GPU time, once G3 makes the pass resident and has it pick its own work.
 
 **Risks.**
 - xGPU has no compute path yet. It declares a compute stage, but nothing creates a compute pipeline or dispatches one.

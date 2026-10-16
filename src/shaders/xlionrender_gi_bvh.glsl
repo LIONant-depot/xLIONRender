@@ -10,6 +10,11 @@
 
 int g_GIBvhTlasRoot   = 0;
 int g_GIBvhPrimOffset = 0;
+bool g_GIBvhSeeThrough = false;     // the casts leave the see-through triangles out (GISeeThrough(world instance, triangle), the includer's when it
+                                    // defines GI_BVH_SEE_THROUGH); the shadow rays do not, as gi::world::Occluded
+#ifndef GI_BVH_SEE_THROUGH
+bool GISeeThrough(int Inst, int Tri) { return false; }
+#endif
 
 const int gi_bvh_stack_v = 64;
 
@@ -32,7 +37,7 @@ vec3 GISafeInverse(vec3 D)
 }
 
 // tri4::Intersect: the nearest of a row's 4 triangles before TMax (-1 none)
-int GIIntersectTri4(int Row, vec3 O, vec3 D, float TMax, out float Dist, out float U, out float V)
+int GIIntersectTri4(int Row, int Inst, vec3 O, vec3 D, float TMax, out float Dist, out float U, out float V)
 {
     int Best = -1;
     Dist = TMax; U = 0.0; V = 0.0;
@@ -43,6 +48,7 @@ int GIIntersectTri4(int Row, vec3 O, vec3 D, float TMax, out float Dist, out flo
         const vec3 P  = cross(D, E2);
         const float det = dot(E1, P);
         if (abs(det) <= 1e-12) continue;
+        if (g_GIBvhSeeThrough && GISeeThrough(Inst, GIBvhTri4[Row].m_Tri[k])) continue;
         const float inv = 1.0 / det;
         const vec3 Tv = O - vec3(GIBvhTri4[Row].m_V0[0][k], GIBvhTri4[Row].m_V0[1][k], GIBvhTri4[Row].m_V0[2][k]);
         const float u = dot(Tv, P) * inv;
@@ -73,7 +79,7 @@ void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
         if (c < 0)
         {
             float d, u, v;
-            const int k = GIIntersectTri4(~c, O, D, H.m_T, d, u, v);
+            const int k = GIIntersectTri4(~c, Inst, O, D, H.m_T, d, u, v);
             if (k >= 0) { H.m_T = d; H.m_U = u; H.m_V = v; H.m_Inst = Inst; H.m_Tri = GIBvhTri4[~c].m_Tri[k]; }
             continue;
         }
