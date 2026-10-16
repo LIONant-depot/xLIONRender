@@ -268,6 +268,7 @@ namespace xlionrender
                 if (m_ViewOptions.m_bNoGI)        G.m_bEnable   = false;
                 if (m_ViewOptions.m_bNoPerPixel)  G.m_bPerPixel = false;
                 if (m_ViewOptions.m_bNoMoments)   G.m_bMoments  = false;
+                if (m_ViewOptions.m_GITraceAllowanceMs >= 0) G.m_TraceAllowanceMs = m_ViewOptions.m_GITraceAllowanceMs;
             }
             Each.template operator()<mesh>       ([&](std::uint64_t E, const mesh& C,        const xmath::fmat4& L2W) { R.AddMesh(C, L2W, E); });
             Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });
@@ -288,6 +289,9 @@ namespace xlionrender
                               , S.m_Meshes, S.m_Drawn, S.m_Waiting, S.m_ConstantSlots, S.m_Materials, S.m_bSun, S.m_Lights, m_pScene->m_Renderer.getDrawsRendered()
                               , S.m_GIMeshes, GI.m_Updated, GI.m_Rays, GI.m_Ms, m_pScene->m_TotalGILoadMs, GI.m_nBad, GI.m_nColored, GI.m_nEmissive, GI.m_MeanAlbedo.m_X, GI.m_MeanAlbedo.m_Y, GI.m_MeanAlbedo.m_Z, GI.m_nLinks, GI.m_MaxEmitted, GI.m_MaxEmitter.m_X, GI.m_MaxEmitter.m_Y, GI.m_MaxEmitter.m_Z, int(m_pScene->m_Renderer.isGICapturingAny()), GI.m_nUnsupported, GI.m_TraceMs, GI.m_UploadMs);
         }
+
+        // The main-thread time the GI's trace used in the last RenderScene (what the host's shared allowance is charged)
+        float GITraceMs() const noexcept { return m_pScene ? float(m_pScene->m_Renderer.getGIStats().m_TraceMs) : 0.0f; }
 
         // The GI's surfels of the last RenderScene to a CSV file (gi::world::Dump): the surfels written, -1 when there is no GI
         int DumpGI(const char* pPath) const noexcept { return m_pScene ? m_pScene->m_Renderer.DumpGI(pPath) : -1; }

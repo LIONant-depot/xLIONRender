@@ -165,8 +165,13 @@ pick, the far box served, and the floor converges to the scene without an allowa
   a ray is not possible; what would cut the tail is cheaper casting and reads.
 - **The estimator is conservative by design**: it sizes by the slowest recent ray (about 340 us against a 13 us mean), so the
   allowance is used safely but not fully. A high quantile instead of the maximum would recover rays; to tune after Phase 3.
-- **Not done yet in Phase 1:** the host's per-frame allowance shared by every renderer (each renderer has its own 1 ms today),
-  and the other per-surfel stages (filter, ring copy, statistics, mean light: about 9 ms a frame) which are Phase 3's.
+- **The host's shared allowance:** `xeditor::gi_allowance` (`host::m_GIAllowance`, reset at the top of each frame) holds 1.5 ms
+  for the whole application. The Level's viewport (the foreground) asks first through `view_options::m_GITraceAllowanceMs`
+  and reports through `xRenderEditor::GITraceMs` (interface version 9); the static geometry preview gets what is left. What the
+  foreground used in the last frame stays reserved for it until it renders, whatever the render order; a foreground that did
+  not render keeps nothing. Only the trace is charged so far. Test: `smoke/test_gi_allowance.py` (the rule, no editor).
+- **Not done yet in Phase 1:** the other per-surfel stages (filter, ring copy, statistics, mean light: about 9 ms a frame),
+  which are Phase 3's, and charging them to the allowance.
 
 ### Phase 2: Bounded, incremental emitter links
 

@@ -53,7 +53,7 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 8;                // 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
+        static constexpr std::uint32_t kVersion = 9;                // 9: GITraceMs and view_options::m_GITraceAllowanceMs (the host's shared GI allowance); 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
@@ -86,6 +86,8 @@ namespace xlionrender
         virtual int           DumpGI(const void* pWorld, const char* pPath) noexcept = 0;
         // The world's viewing choices from now on (view_options: the GI view of an editor's viewport, on top of its Environment). Version 7.
         virtual void          SetViewOptions(const void* pWorld, const view_options& Options) noexcept = 0;
+        // The main-thread time the world's GI trace used in its last RenderScene. Version 9.
+        virtual float         GITraceMs(const void* pWorld) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";

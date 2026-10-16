@@ -20,6 +20,7 @@ namespace xlionrender
         bool        m_bNoGI       = false;      // drawn without GI, whatever the Environment says
         bool        m_bNoPerPixel = false;      // the vertex read only (the Environment's GIPerPixel off)
         bool        m_bNoMoments  = false;      // the reads without the depth-moment visibility test (the Environment's GIMoments off)
+        float       m_GITraceAllowanceMs = -1;  // < 0: the scene's own; else this frame's grant of the host's shared allowance (version 9)
         bool operator==(const view_options&) const noexcept = default;
     };
 

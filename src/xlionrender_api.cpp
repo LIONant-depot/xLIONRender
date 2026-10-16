@@ -107,6 +107,11 @@ namespace xlionrender
             {
                 if (auto* pSystem = FindSystem(pWorld)) pSystem->m_ViewOptions = Options;
             }
+            float         GITraceMs(const void* pWorld) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                return pSystem ? pSystem->GITraceMs() : 0.0f;
+            }
             int           DumpGI(const void* pWorld, const char* pPath) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);
