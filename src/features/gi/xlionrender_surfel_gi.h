@@ -1491,12 +1491,10 @@ namespace xlionrender::gi
             float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
             int     m_FilterPasses  = 4;        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
             bool    m_bSpreadOrigins = true;    // the fine surfels' rays start across their patch (surfel_mesh::BuildOrigins), not at their center
-            float   m_LodDistance   = 40;       // beyond it (eye to bounds) an instance holds its parent level
+            float   m_LodDistance   = 40;       // the priority's distance scale: an instance this far (eye to bounds) scores half as much (Update)
             float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
             bool    m_bCube         = true;     // an instance that covers few pixels for its parents traces 6 of them, one per axis direction, and blends the others from them (an ambient cube)
-            float   m_ViewPixels    = 0;        // the view's pixels (width x height; 0: not known, then "small" is an angle: SmallOnScreen)
-            float   m_SmallFraction = 0.05f;    // the screen-area rule (parents, ambient cube) applies only to an instance covering less than this of the view
-            float   m_PixelsPerSurfel = 256;    // the screen area an instance needs per surfel of its level: below it the parent level (about 16 x 16 pixels)
+            float   m_PixelsPerSurfel = 256;    // the level rule: a level's surfels must each cover this many pixels where the instance is nearest the eye (about 16 x 16), else coarser
             float   m_ChangeMargin  = 4;        // a moved instance dirties the instances within this distance of its bounds
         };
 
@@ -2173,16 +2171,6 @@ namespace xlionrender::gi
             }
         }
 
-        // Is an instance small on the screen, for the screen-area rule: the eye is outside its box and it covers less than m_SmallFraction of
-        // the view (1.25 times that once it is reduced: no flicker at the edge). Without the view's size, the angle of its bounding sphere
-        // stands for it (a ratio of radius to distance under 0.1)
-        bool SmallOnScreen(float Dist, float Ratio, float Pixels, bool bReduced) const noexcept
-        {
-            if (Dist <= 0) return false;
-            const float k = bReduced ? 1.25f : 1.0f;
-            return m_Setup.m_ViewPixels > 0 ? Pixels < m_Setup.m_SmallFraction * k * m_Setup.m_ViewPixels : Ratio < 0.1f * std::sqrt(k);
-        }
-
         // A pending surfel (Phase 1): its pass, traced in chunks across updates. The pass' random offsets are drawn when it is picked; its
         // sums live here until all its rays are in
         struct work_item
@@ -2298,21 +2286,24 @@ namespace xlionrender::gi
             TrackLights(L);
             Lap(St.m_TlasLightsMs);
 
-            // Levels: the parent level beyond m_LodDistance, or when the instance covers too few pixels for its fine surfels (m_PixelsPerSurfel
-            // each; the area its bounding sphere covers: pi (r / d)^2 ProjScale^2, whatever its shape; coming back at 1.25 times that: no flicker
-            // at the edge). Finer: children start from their parent; coarser: a parent is the mean of its children
+            // Levels (Phase 2b: one rule): the finest level whose surfels, at the instance's point nearest the eye, each cover at least
+            // m_PixelsPerSurfel pixels (a disk of the level's radius: pi (r / d)^2 ProjScale^2); the ambient cube (6 of the parents traced)
+            // when not even the parents do. Coming back finer needs 1.25 times that (no flicker at the edge). Far, small and large instances
+            // alike: the eye inside a building is at distance 0 from it, its surfels cover the view. Finer: children start from their
+            // parent; coarser: a parent is the mean of its children
             for (auto& I : m_Instances)
             {
                 if (!I.m_bAlive) continue;
-                const float Dist   = BoxDistance(I, Eye);
-                const float Radius = 0.5f * (I.m_Hi - I.m_Lo).Length();
-                const float Ratio  = Radius / std::max(Dist + Radius, 1e-6f);
-                const float Pixels = pi_v * Ratio * Ratio * m_Setup.m_ProjScale * m_Setup.m_ProjScale;
-                const float Need   = m_Setup.m_PixelsPerSurfel * float(I.m_pMesh->m_Levels[0].size()) * (I.m_Level == 1 ? 1.25f : 1.0f);
-                // The rule is for small instances only: a large one (a building, the eye inside it) always has more surfels than the screen
-                // can show, wherever it is, and it held its parents and then an ambient cube of 6 samples (found by Phase 0's measurements)
-                const bool  bSmall = SmallOnScreen(Dist, Ratio, Pixels, I.m_Level == 1);
-                const int   Want   = (Dist > m_Setup.m_LodDistance || (m_Setup.m_ProjScale > 0 && bSmall && Pixels < Need)) ? 1 : 0;
+                const auto& Mh   = *I.m_pMesh;
+                const float Dist = BoxDistance(I, Eye);
+                const auto  Px   = [&](int Lv) { const float r = Mh.m_Levels[Lv][0].m_Radius * I.m_MeanScale, d = std::max(Dist, r); return pi_v * (r / d) * (r / d) * m_Setup.m_ProjScale * m_Setup.m_ProjScale; };
+                int  Want = 0;
+                bool bCubeWant = false;
+                if (m_Setup.m_ProjScale > 0 && !Mh.m_Levels[0].empty() && !Mh.m_Levels[1].empty())
+                {
+                    if (Px(0) < m_Setup.m_PixelsPerSurfel * (I.m_Level == 1 ? 1.25f : 1.0f)) Want = 1;
+                    bCubeWant = Want == 1 && m_Setup.m_bCube && Mh.m_Levels[1].size() > 12 && Px(1) < m_Setup.m_PixelsPerSurfel * (I.m_bCube ? 1.25f : 1.0f);
+                }
                 const auto& M = *I.m_pMesh;
                 if (Want != I.m_Level)
                 {
@@ -2333,9 +2324,8 @@ namespace xlionrender::gi
                 I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
                 ResetMoments(I);
                 }
-                // An ambient cube: few pixels for its parents: 6 of them traced, the rest blended (the instance is still at level 1 for everything that reads it)
-                const bool bCubeWant = I.m_Level == 1 && m_Setup.m_bCube && m_Setup.m_ProjScale > 0 && bSmall && M.m_Levels[1].size() > 12
-                                    && Pixels < m_Setup.m_PixelsPerSurfel * float(M.m_Levels[1].size()) * (I.m_bCube ? 1.25f : 1.0f);
+                // An ambient cube: its parents cover too few pixels: 6 of them traced, the rest blended (the instance is still at level 1 for everything that reads it)
+                bCubeWant = bCubeWant && I.m_Level == 1;
                 std::vector<int> Set;
                 if (bCubeWant && !I.m_bCube) Set = CubeSetOf(M);
                 if (bCubeWant && !I.m_bCube && !Set.empty()) { I.m_bCube = true; I.m_CubeSet = std::move(Set); I.m_Cursor = 0; I.m_bEmitDirty = true; }

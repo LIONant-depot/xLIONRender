@@ -205,6 +205,7 @@ int main()
         const float Heights[3] = { 8, 16, 30 };
         for (int k = 0; k < 3; ++k) { Meshes[1 + k] = Box({ 8, Heights[k], 8 }, 1.0f); Meshes[1 + k].Bake(1.5f, 4.0f); }
         world W;
+        W.m_Setup.m_ProjScale = 400;                      // a wide view: the far streets (beyond ~66 m for 1.5 m surfels) take their parents
         W.Add(Meshes[0], xmath::fmat4::fromIdentity(), { 0.4f, 0.4f, 0.4f });
         int FirstBuilding = 1, Moved = -1;
         for (int z = 0; z < 20; ++z) for (int x = 0; x < 20; ++x)
@@ -357,6 +358,7 @@ int main()
         surfel_mesh Receiver = Box({ 2, 2, 2 }, 0.25f);
         CHECK(SurfelsFromXGeomStatic(Receiver, G) && !Receiver.m_bBounce, "RECEIVE did not make the mesh receive-only");
         world W;
+        W.m_Setup.m_ProjScale = 1000;                     // the level rule: 500 m off takes the parents
         const int iBounce  = W.Add(Loaded,   xmath::fmat4::fromTranslation({ 0, 0, 5 }), { 0.5f, 0.5f, 0.5f });
         const int iReceive = W.Add(Receiver, xmath::fmat4::fromTranslation({ 0, 0, -5 }), { 0.5f, 0.5f, 0.5f });
         CHECK(W.Cast({ 0, 0, 0 }, { 0, 0, 1 }).m_Inst == iBounce, "a ray misses the bouncing mesh");
@@ -785,6 +787,7 @@ int main()
         AddQuad(Panel,  { -0.5f, 1, -0.5f }, { 1, 0, 0 }, { 0, 0, 1 }, 0.25f);    // facing down
         Ground.Bake(0.3f, 0.9f); Panel.Bake(0.3f, 0.9f);
         world D;
+        D.m_Setup.m_ProjScale = 1000;                     // the level rule: far (500 m) takes the parents
         const int iGround = D.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
         const int iPanel  = D.Add(Panel, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
         D.SetSurfelMaterial(iPanel, {}, std::vector<v3>(Panel.m_Levels[0].size(), v3{ 2, 2, 2 }));
@@ -996,8 +999,9 @@ int main()
         CHECK(Zero == 0, "%d surfels were never traced in 8 passes", Zero);
     }
 
-    // 6j7. The level by the screen area (setup::m_ProjScale, m_PixelsPerSurfel): the pixels an instance's bounding sphere covers per fine surfel. A small
-    //      box holds its parent level where it covers too few, the fine one nearer, and it comes back at 1.25 times the area it left at (no flicker)
+    // 6j7. The level by the screen area (setup::m_ProjScale, m_PixelsPerSurfel, Phase 2b's one rule): the pixels a fine surfel covers where the
+    //      instance is nearest the eye. A small box holds its parent level where they cover too few, the fine one nearer, and it comes back at
+    //      1.25 times the area it left at (no flicker)
     {
         surfel_mesh Box;
         AddQuad(Box, { -0.1f, 0.2f, -0.1f }, { 0, 0, 0.2f }, { 0.2f, 0, 0 }, 0.1f);       // a 20 cm box, six faces
@@ -1013,9 +1017,9 @@ int main()
         W.m_Setup.m_PixelsPerSurfel = 256;
         lights L;
         L.m_Sky = v3{ 1, 1, 1 };
-        const float Radius = 0.5f * std::sqrt(0.12f);                                                           // the bounds' radius
-        const float dStar  = std::sqrt(pi_v * Radius * Radius * 1.0e6f / (256.0f * float(Box.m_Levels[0].size())));   // the distance (from the near face + radius) it leaves at
-        const auto LevelAt = [&](float x) { W.Update(L, { 0, 0.1f, x * dStar - Radius + 0.1f }, 1 << 20, 20000); return W.Level(i); };
+        const float r0     = Box.m_Levels[0][0].m_Radius;
+        const float dStar  = r0 * 1000.0f * std::sqrt(pi_v / 256.0f);                  // the distance (from the near face) where a fine surfel covers 256 pixels
+        const auto LevelAt = [&](float x) { W.Update(L, { 0, 0.1f, 0.1f + x * dStar }, 1 << 20, 20000); return W.Level(i); };
         const int Near = LevelAt(0.5f), Far = LevelAt(2.0f), Between = LevelAt(0.95f), Back = LevelAt(0.5f);
         std::printf("surfel level by screen area (%zu fine surfels, leaves at %.2f m): near %d, far %d, then inside the hysteresis %d, near again %d\n", Box.m_Levels[0].size(), dStar, Near, Far, Between, Back);
         CHECK(Near == 0, "a box covering many pixels is not at the fine level (%d)", Near);
@@ -1024,9 +1028,9 @@ int main()
         CHECK(Back == 0, "the box did not come back to the fine level when near (%d)", Back);
     }
 
-    // 6j7b. The screen-area rule is for small instances only: a large one (a 40 m building) with the eye inside its box, or one that
-    //       covers most of the view, keeps its fine surfels and is never an ambient cube, though it has far more surfels than the screen
-    //       could show at m_PixelsPerSurfel each (Phase 0 found the Police building held as a 6-sample cube)
+    // 6j7b. The level rule on a large instance (a 40 m floor and wall): with the eye inside its box, or near enough that it fills the view,
+    //       it keeps its fine surfels; at 26 m its fine surfels are too small and it takes its parents, but never the ambient cube while
+    //       they cover enough (Phase 0 found the Police building held as a 6-sample cube); 2.5 km off, its parents
     {
         surfel_mesh Big;
         AddQuad(Big, { -20, 0, -20 }, { 0, 0, 40 }, { 40, 0, 0 }, 1.0f);              // a 40 m floor ...
@@ -1034,18 +1038,21 @@ int main()
         Big.Bake(0.25f, 0.75f);
         world W;
         const int i = W.Add(Big, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
-        W.m_Setup.m_ProjScale = 547; W.m_Setup.m_ViewPixels = 450 * 631; W.m_Setup.m_PixelsPerSurfel = 256;
+        W.m_Setup.m_ProjScale = 547; W.m_Setup.m_PixelsPerSurfel = 256;               // a 450 x 631 view
         lights L; L.m_Sky = v3{ 1, 1, 1 };
         for (int f = 0; f < 4; ++f) W.Update(L, { 0, 2, 0 }, 1 << 16, 24000 + f);         // the eye inside its box
         const int Inside = W.Level(i); const bool bInsideCube = W.IsCube(i);
-        for (int f = 0; f < 4; ++f) W.Update(L, { 0, 15, 45 }, 1 << 16, 24100 + f);       // outside, but it fills the view
+        for (int f = 0; f < 4; ++f) W.Update(L, { 0, 10, 22 }, 1 << 16, 24100 + f);       // outside, 3 m from it: it fills the view
         const int Near = W.Level(i); const bool bNearCube = W.IsCube(i);
+        for (int f = 0; f < 4; ++f) W.Update(L, { 0, 15, 45 }, 1 << 16, 24150 + f);       // 26 m off: the fine surfels cover ~90 pixels, the parents ~800
+        const int Mid = W.Level(i); const bool bMidCube = W.IsCube(i);
         for (int f = 0; f < 4; ++f) W.Update(L, { 0, 30, 2500 }, 1 << 16, 24200 + f);     // 2.5 km off: small on the screen (beyond m_LodDistance too)
         const int Far = W.Level(i);
-        std::printf("large instance (%zu surfels): eye inside -> level %d%s, filling the view -> level %d%s, 2.5 km off -> level %d\n", Big.m_Levels[0].size(),
-                    Inside, bInsideCube ? " (cube)" : "", Near, bNearCube ? " (cube)" : "", Far);
+        std::printf("large instance (%zu surfels): eye inside -> level %d%s, filling the view -> level %d%s, 26 m off -> level %d%s, 2.5 km off -> level %d\n", Big.m_Levels[0].size(),
+                    Inside, bInsideCube ? " (cube)" : "", Near, bNearCube ? " (cube)" : "", Mid, bMidCube ? " (cube)" : "", Far);
         CHECK(Inside == 0 && !bInsideCube, "a large instance around the eye left its fine surfels (level %d, cube %d)", Inside, int(bInsideCube));
         CHECK(Near == 0 && !bNearCube, "a large instance filling the view left its fine surfels (level %d, cube %d)", Near, int(bNearCube));
+        CHECK(Mid == 1 && !bMidCube, "a large instance 26 m off is not at its parents (level %d, cube %d)", Mid, int(bMidCube));
         CHECK(Far == 1, "a large instance far off did not take its parents (%d)", Far);
     }
 
