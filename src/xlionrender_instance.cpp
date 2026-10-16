@@ -932,6 +932,39 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    int instance::DumpGI( const char* pPath ) const noexcept
+    {
+        if( !m_pGIWorld ) return -1;
+        const int n = m_pGIWorld->Dump(pPath);
+        if( n >= 0 ) (void)DumpGIFrames((std::string(pPath) + ".frames.csv").c_str());
+        return n;
+    }
+
+    int instance::DumpGIFrames( const char* pPath ) const noexcept
+    {
+        std::FILE* f = nullptr;
+    #ifdef _WIN32
+        if( fopen_s(&f, pPath, "w") != 0 ) f = nullptr;
+    #else
+        f = std::fopen(pPath, "w");
+    #endif
+        if( f == nullptr ) return -1;
+        std::fprintf(f, "# GI frame log (documentation/gi_dynamic_master_plan.md, Phase 0): times in ms (main thread), LongestSurfelUs in us; the trace's worker time is TraceMs (the main thread waits for it); Hits evaluate the direct light (shadow rays)\n");
+        std::fprintf(f, "frame,UpdateGIMs,TotalMs,TlasLightsMs,LevelsMs,PickMs,LinksMs,EmitMs,MeanMs,TraceMs,CommitMs,CubeMs,StatsMs,FilterMs,RingCopyMs,MomentsMs,CaptureMs,LoadMs,"
+                       "Updated,Surfels,Rays,Hits,LongestSurfelUs,LinkRebuilds,Links,Emitters,Moves,MovesMs,MarkedDirty,HistoryResets,Dirty,UploadBytes,Dropped,LinkBytes,LightBytes,FilterBytes,Unsupported,Bad,Cubes,CubeParents\n");
+        for( const auto& F : m_GIFrames )
+        {
+            const auto& S = F.m_Stats;
+            std::fprintf(f, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%lld,%.1f,%d,%d,%d,%d,%.3f,%d,%d,%d,%zu,%d,%zu,%zu,%zu,%d,%d,%d,%d\n"
+                , (unsigned long long)F.m_Frame, S.m_UpdateGIMs, S.m_TotalMs, S.m_TlasLightsMs, S.m_LevelsMs, S.m_PickMs, S.m_LinksMs, S.m_EmitMs, S.m_MeanMs, S.m_TraceMs, S.m_CommitMs, S.m_CubeMs, S.m_StatsMs
+                , S.m_FilterMs, S.m_RingCopyMs, S.m_MomentsMs, S.m_CaptureMs, S.m_LoadMs
+                , S.m_Updated, S.m_Surfels, S.m_Rays, S.m_Hits, S.m_LongestSurfelUs, S.m_nLinkRebuilds, S.m_nLinks, S.m_nEmitters, S.m_nMoves, S.m_MovesMs, S.m_nMarkedDirty, S.m_nHistoryResets, S.m_Dirty
+                , S.m_UploadBytes, S.m_nDropped, S.m_LinkBytes, S.m_LightBytes, S.m_FilterBytes, S.m_nUnsupported, S.m_nBad, S.m_nCubes, S.m_CubeParents);
+        }
+        std::fclose(f);
+        return int(m_GIFrames.size());
+    }
+
     xgpu::device::error* instance::createOutlineTargets( render_view& View ) noexcept
     {
         if( View.m_Mask.m_Private && View.m_MaskWidth == View.m_Width && View.m_MaskHeight == View.m_Height ) return nullptr;

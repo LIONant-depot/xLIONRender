@@ -1099,6 +1099,44 @@ int main()
         CHECK(After == 1, "the links were rebuilt %d times by the end (one when it stops)", After);
     }
 
+    // 6j10. Phase 0 instrumentation (documentation/gi_dynamic_master_plan.md): a wall dragged over a floor lit by a sign (an emitter) for 20
+    //       updates, then left still. The stage times add up to the update's total, the moves and what they mark are counted, the deferred
+    //       link rebuild shows up with its time, and the trace's longest unit is reported. Measuring only: the light is the same as before
+    {
+        surfel_mesh Floor, Wall, Sign;
+        AddQuad(Floor, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
+        AddQuad(Wall,  { -1, 0, 0 }, { 0, 1.5f, 0 }, { 2, 0, 0 }, 0.5f);
+        AddQuad(Sign,  { -0.2f, 2, -0.2f }, { 0.4f, 0, 0 }, { 0, 0, 0.4f }, 0.2f);       // facing down
+        Floor.Bake(0.3f, 0.9f); Wall.Bake(0.3f, 0.9f); Sign.Bake(0.15f, 0.45f);
+        world W;
+        W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iWall = W.Add(Wall, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iSign = W.Add(Sign, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        W.SetSurfelMaterial(iSign, {}, std::vector<v3>(Sign.m_Levels[0].size(), v3{ 10, 10, 10 }));
+        lights L; L.m_Sky = v3{ 0.2f, 0.2f, 0.2f };
+        for (int f = 0; f < 30; ++f) W.Update(L, { 0, 1, 3 }, 1 << 14, 23000 + f);
+        int Moves = 0, Marked = 0, Resets = 0, Rebuilds = 0, Hits = 0; double MaxLinks = 0, MaxUnit = 0, MaxGap = 0, MaxTotal = 0;
+        std::size_t LinkBytes = 0, LightBytes = 0;
+        for (int f = 0; f < 40; ++f)
+        {
+            if (f < 20) W.SetTransform(iWall, xmath::fmat4::fromTranslation({ 0.05f * float(f), 0, 0 }));
+            const auto St = W.Update(L, { 0, 1, 3 }, 1 << 14, 23100 + f);
+            Moves += St.m_nMoves; Marked += St.m_nMarkedDirty; Resets += St.m_nHistoryResets; Rebuilds += St.m_nLinkRebuilds; Hits += int(St.m_Hits);
+            MaxLinks = std::max(MaxLinks, St.m_LinksMs); MaxUnit = std::max(MaxUnit, St.m_LongestSurfelUs); MaxTotal = std::max(MaxTotal, St.m_TotalMs);
+            const double Sum = St.m_TlasLightsMs + St.m_LevelsMs + St.m_PickMs + St.m_LinksMs + St.m_EmitMs + St.m_MeanMs + St.m_TraceMs + St.m_CommitMs + St.m_CubeMs + St.m_StatsMs;
+            MaxGap = std::max(MaxGap, St.m_TotalMs - Sum);
+            LinkBytes = St.m_LinkBytes; LightBytes = St.m_LightBytes;
+            CHECK(Sum <= St.m_TotalMs * 1.02 + 0.05, "the stage times (%.3f ms) exceed the update's total (%.3f ms)", Sum, St.m_TotalMs);
+        }
+        std::printf("instrumentation, a wall dragged 20 updates: %d moves marked %d instances dirty, %d history resets, %d link rebuilds (the slowest %.2f ms), "
+                    "longest surfel %.1f us, %d hits, slowest update %.2f ms (%.3f ms not in a stage), links %zu B, light state %zu B\n",
+                    Moves, Marked, Resets, Rebuilds, MaxLinks, MaxUnit, Hits, MaxTotal, MaxGap, LinkBytes, LightBytes);
+        CHECK(Moves == 20, "%d moves counted (20 were made)", Moves);
+        CHECK(Marked > 0 && Resets > 0, "the moves marked nothing dirty (%d) or reset no history (%d)", Marked, Resets);
+        CHECK(Rebuilds == 1, "%d link rebuilds counted (one when the moving stops)", Rebuilds);
+        CHECK(MaxUnit > 0 && Hits > 0 && LinkBytes > 0 && LightBytes > 0, "a counter stayed at 0");
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {

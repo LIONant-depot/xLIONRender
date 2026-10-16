@@ -1536,6 +1536,41 @@ namespace xlionrender::gi
             v3      m_MaxEmitter{ 0, 0, 0 };    // the brightest emitter's radiance
             int     m_nUnsupported = 0;         // this update's rays whose hit read no surfel (Indirect unsupported: the policy's light, Unsupported)
             double  m_UploadMs  = 0;            // the renderer's: the shown light (BasisLight, its filter) and the moments into the GPU's buffers
+
+            // Phase 0 instrumentation (documentation/gi_dynamic_master_plan.md): where an update's main-thread time goes, stage by stage. Measuring
+            // only: nothing here changes what the solver does
+            double  m_TlasLightsMs  = 0;        // the instances' TLAS and the light tracking (TrackLights)
+            double  m_LevelsMs      = 0;        // the level / ambient cube switches
+            double  m_PickMs        = 0;        // ordering the instances and picking this update's surfels
+            double  m_LinksMs       = 0;        // the emitters' links (RebuildEmitterLinks: the whole world in one call)
+            double  m_EmitMs        = 0;        // the emitted light from the links (UpdateEmittedLight)
+            double  m_MeanMs        = 0;        // every instance's mean light (a pass over every surfel)
+            double  m_CommitMs      = 0;        // the traced results into the estimators, validity, basis and moments
+            double  m_CubeMs        = 0;        // the ambient cubes' blend (ExpandCube)
+            double  m_StatsMs       = 0;        // these statistics' own pass over every surfel (nBad, albedo, links...)
+            double  m_TotalMs       = 0;        // the whole Update, the statistics included (m_Ms leaves them out)
+            double  m_LongestSurfelUs = 0;      // the slowest surfel's trace (its rays and every hit's direct light and read): the longest unit of the trace
+            long long m_Hits        = 0;        // rays that hit a lit surface: each one evaluates the direct light (the sun's shadow ray, the point lights in reach)
+            int     m_nLinkRebuilds = 0;        // RebuildEmitterLinks calls this update
+            int     m_nEmitters     = 0;
+            int     m_nCubes        = 0;        // instances held as an ambient cube, and their parents blended this update (ExpandCube)
+            int     m_CubeParents   = 0;
+            int     m_nMoves        = 0;        // SetTransform calls since the last update
+            double  m_MovesMs       = 0;        // their time (DirtyNear, Place)
+            int     m_nMarkedDirty  = 0;        // instances they marked dirty (DirtyNear: each mover's old and new bounds, plus the margin)
+            int     m_nHistoryResets = 0;       // instances whose history went to 0 this update (dirty: their next pass replaces their light)
+            std::size_t m_LinkBytes  = 0;       // memory: the emitter links
+            std::size_t m_LightBytes = 0;       // memory: the per-instance light state (light, estimators, validity, basis, moments, accumulators)
+            std::size_t m_FilterBytes = 0;      // memory: the display filter's buffers
+            // the renderer's, filled after Update (instance::updateGI)
+            double  m_FilterMs      = 0;        // the display filter (BasisLight) of every shown instance
+            double  m_RingCopyMs    = 0;        // copying the shown light into the frame's ring region
+            double  m_MomentsMs     = 0;        // packing and copying the moments
+            std::size_t m_UploadBytes = 0;      // bytes written into the frame's GI regions
+            int     m_nDropped      = 0;        // shown instances left without GI: the frame's region was full
+            double  m_UpdateGIMs    = 0;        // the renderer's whole updateGI (instances, Update, upload)
+            double  m_CaptureMs     = 0;        // the material capture (processGICapture)
+            double  m_LoadMs        = 0;        // meshes' GI made ready this frame (scene_renderer::MeshOf: decoding, the rays' BVH)
         };
 
         struct hit
@@ -1687,10 +1722,13 @@ namespace xlionrender::gi
 
         void SetTransform(int Id, const xmath::fmat4& L2W) noexcept
         {
+            const auto T0 = std::chrono::steady_clock::now();
             auto& I = m_Instances[Id];
-            DirtyNear(I.m_Lo, I.m_Hi);
+            m_MoveMarked += DirtyNear(I.m_Lo, I.m_Hi);
             Place(I, L2W);
-            DirtyNear(I.m_Lo, I.m_Hi);
+            m_MoveMarked += DirtyNear(I.m_Lo, I.m_Hi);
+            ++m_nMovesAcc;
+            m_MovesMsAcc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
             m_bTlasDirty = true;
             m_bLinksMoved = true;           // the links are rebuilt when the moving stops (links_settle_v updates later): while it goes on they keep the last place's visibility
             m_LinksMovedAt = m_nUpdates;    // ponytail: every link at once, not per instance; per instance (the moved one's, and those whose segments cross its box) when a scene needs it
@@ -2128,8 +2166,13 @@ namespace xlionrender::gi
         {
             const auto T0 = std::chrono::steady_clock::now();
             stats St;
+            auto TPrev = T0;
+            const auto Lap = [&](double& Out) { const auto T = std::chrono::steady_clock::now(); Out += std::chrono::duration<double, std::milli>(T - TPrev).count(); TPrev = T; };
+            St.m_nMoves = m_nMovesAcc; St.m_MovesMs = m_MovesMsAcc; St.m_nMarkedDirty = m_MoveMarked;
+            m_nMovesAcc = 0; m_MovesMsAcc = 0; m_MoveMarked = 0;
             BuildTlas();
             TrackLights(L);
+            Lap(St.m_TlasLightsMs);
 
             // Levels: the parent level beyond m_LodDistance, or when the instance covers too few pixels for its fine surfels (m_PixelsPerSurfel
             // each; the area its bounding sphere covers: pi (r / d)^2 ProjScale^2, whatever its shape; coming back at 1.25 times that: no flicker
@@ -2172,6 +2215,7 @@ namespace xlionrender::gi
                 else if (!bCubeWant && I.m_bCube) { I.m_bCube = false; I.m_CubeSet.clear(); I.m_Cursor = 0; I.m_bDirty = true; m_bEmitDirty = true; }       // the parents trace again: from the start
             }
 
+            Lap(St.m_LevelsMs);
             // Pick: dirty first, then a pass in progress, then age over distance, until the budget is spent. An instance is updated in
             // slices (a cursor over its surfels): a pass over a big mesh spans several updates and the budget holds whatever one mesh
             // has. A pass starts with the blend of its own (1 / n after a change); a change in the middle of a pass starts it again.
@@ -2195,7 +2239,7 @@ namespace xlionrender::gi
                 const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
                 if (I.m_Cursor == 0)
                 {
-                    if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; }
+                    if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; }
                     I.m_PassAlpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
                 }
                 // A buried surfel (validity 0: inside a solid, on a see-through material) is traced one pass in dead_retrace_v, not every one:
@@ -2229,13 +2273,16 @@ namespace xlionrender::gi
             }
             St.m_Surfels = int(m_Work.size());
             St.m_Rays    = St.m_Surfels * m_Setup.m_RaysPerSurfel;
+            Lap(St.m_PickMs);
 
             ++m_nUpdates;
             if (m_bLinksMoved && m_nUpdates - m_LinksMovedAt >= links_settle_v) { m_bLinksMoved = false; m_bLinksDirty = true; }
-            if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; m_bEmitDirty = true; ++m_nLinkRebuilds; }
+            if (m_bLinksDirty) { if (m_bEmitterLinks) RebuildEmitterLinks(); else { m_Emitters.clear(); for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); } } m_bLinksDirty = false; m_bEmitDirty = true; ++m_nLinkRebuilds; ++St.m_nLinkRebuilds; }
+            Lap(St.m_LinksMs);
             // The emitters' light: made of the links, the emissions (SetSurfelMaterial: the links again) and the scale; a level switch
             // changes its layout. Nothing else: not every update
             if (m_bEmitDirty || m_EmitScale != m_Setup.m_EmissiveScale) { UpdateEmittedLight(); m_bEmitDirty = false; m_EmitScale = m_Setup.m_EmissiveScale; }
+            Lap(St.m_EmitMs);
 
             // The policy's value per instance (Unsupported): this update's mean light of its valid surfels; none valid: the world's
             {
@@ -2252,17 +2299,21 @@ namespace xlionrender::gi
             }
             m_WorkUnsupported.assign(m_Work.size(), 0);
             m_WorkUnsupportedAt.resize(m_Work.size());
+            m_WorkUs.assign(m_Work.size(), 0.0f);
+            m_WorkHits.assign(m_Work.size(), 0);
+            Lap(St.m_MeanMs);
 
             const auto T1 = std::chrono::steady_clock::now();
             m_Pool.Run(int(m_Work.size()), [&](int w)
             {
+                const auto Tw = std::chrono::steady_clock::now();
                 const auto [i, s] = m_Work[w];
                 auto& I = m_Instances[i];
                 const auto& S = I.m_pMesh->m_Levels[I.m_Level][s];
                 const v3 C = I.m_L2W * S.m_Center, N = NormalToWorld(I, S.m_Normal);
                 rng Rng(Seed * 2654435761u + unsigned(w) * 7919u);
                 v3 Sum{ 0, 0, 0 };
-                int nBack = 0, nBackAll = 0, nUnsupported = 0;      // back faces within its reach, at any distance
+                int nBack = 0, nBackAll = 0, nUnsupported = 0, nHits = 0;      // back faces within its reach, at any distance
                 const int R = m_Setup.m_RaysPerSurfel;
                 auto& MA = I.m_MomAcc[s];
                 MA.fill(0);
@@ -2303,6 +2354,7 @@ namespace xlionrender::gi
                     SurfaceAt(H, Albedo, Emission);
                     const query Q  = Indirect(H);
                     if (!Q.m_bSupported) { if (nUnsupported++ == 0) m_WorkUnsupportedAt[w] = HitPosition(H); }
+                    ++nHits;
                     const v3 In = Direct(HitPosition(H), Nh, L) + (Q.m_bSupported ? Q.m_E : Unsupported(H));
                     const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (m_Emitters.empty() ? Emission : v3{ 0, 0, 0 });     // with emitters the links bring their light
                     Sum = Sum + Lr;
@@ -2319,15 +2371,20 @@ namespace xlionrender::gi
                 const float All  = std::clamp(1.0f - (float(nBackAll) / float(R) - 0.8f) / 0.15f, 0.0f, 1.0f);
                 I.m_AccValid[s] = std::min(Near, All);
                 m_WorkUnsupported[w] = nUnsupported;
+                m_WorkHits[w] = nHits;
+                m_WorkUs[w] = std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - Tw).count();
             });
             m_UnsupportedAt.clear();
             for (std::size_t w = 0; w < m_Work.size(); ++w)
             {
                 St.m_nUnsupported += m_WorkUnsupported[w];
                 if (m_WorkUnsupported[w] && m_UnsupportedAt.size() < 4096) m_UnsupportedAt.push_back(m_WorkUnsupportedAt[w]);
+                St.m_Hits += m_WorkHits[w];
+                St.m_LongestSurfelUs = std::max(St.m_LongestSurfelUs, double(m_WorkUs[w]));
             }
 
             St.m_TraceMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
+            TPrev = std::chrono::steady_clock::now();
             for (const auto& [i, s] : m_Work)
             {
                 auto& I = m_Instances[i];
@@ -2370,7 +2427,14 @@ namespace xlionrender::gi
                 }
                 if (I.m_Valid[s] < 1e-6f) I.m_Valid[s] = 0;         // buried: 0, not a decay into denormals (the reads divide by sums of these weights)
             }
-            for (int i = 0; i < int(m_Instances.size()); ++i) if (m_Instances[i].m_bAlive && m_Instances[i].m_bCube) ExpandCube(i);
+            Lap(St.m_CommitMs);
+            for (int i = 0; i < int(m_Instances.size()); ++i)
+                if (m_Instances[i].m_bAlive && m_Instances[i].m_bCube)
+                {
+                    ExpandCube(i);
+                    ++St.m_nCubes; St.m_CubeParents += int(m_Instances[i].m_pMesh->m_Levels[1].size());
+                }
+            Lap(St.m_CubeMs);
             for (auto& I : m_Instances)
             {
                 if (!I.m_bAlive) continue;
@@ -2401,6 +2465,20 @@ namespace xlionrender::gi
                 const v3 Le = m_Instances[i].m_SurfEmission[e] * m_Setup.m_EmissiveScale;
                 if (Le.m_X + Le.m_Y + Le.m_Z > St.m_MaxEmitter.m_X + St.m_MaxEmitter.m_Y + St.m_MaxEmitter.m_Z) St.m_MaxEmitter = Le;
             }
+            // memory by category (rule 5 of the plan)
+            m_nEmitters = int(m_Emitters.size());
+            St.m_nEmitters = m_nEmitters;
+            for (const auto& I : m_Instances)
+            {
+                St.m_LinkBytes  += I.m_Links.capacity() * sizeof(I.m_Links[0]) + I.m_LinkFirst.capacity() * sizeof(std::uint32_t);
+                St.m_LightBytes += (I.m_E.capacity() + I.m_Acc.capacity() + I.m_SurfAlbedo.capacity() + I.m_SurfEmission.capacity()) * sizeof(v3)
+                                 + (I.m_Valid.capacity() + I.m_AccValid.capacity()) * sizeof(float)
+                                 + I.m_Est.capacity() * sizeof(estimator) + (I.m_Frac.capacity() + I.m_BasisAcc.capacity() + I.m_EmitB.capacity()) * sizeof(basis)
+                                 + I.m_Moments.capacity() * sizeof(moments) + I.m_MomAcc.capacity() * sizeof(I.m_MomAcc[0]) + I.m_MomCount.capacity() * sizeof(I.m_MomCount[0]);
+                St.m_FilterBytes += (I.m_Filtered.capacity() + I.m_FilterIn.capacity()) * sizeof(basis);
+            }
+            Lap(St.m_StatsMs);
+            St.m_TotalMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
             return St;
         }
 
@@ -2511,13 +2589,15 @@ namespace xlionrender::gi
             }
         }
 
-        void DirtyNear(const v3& Lo, const v3& Hi) noexcept
+        int DirtyNear(const v3& Lo, const v3& Hi) noexcept
         {
             const v3 M{ m_Setup.m_ChangeMargin, m_Setup.m_ChangeMargin, m_Setup.m_ChangeMargin };
             const v3 A = Lo - M, B = Hi + M;
+            int nNew = 0;       // (instrumentation: the instances newly marked)
             for (auto& I : m_Instances)
-                if (I.m_bAlive && I.m_Hi.m_X >= A.m_X && I.m_Lo.m_X <= B.m_X && I.m_Hi.m_Y >= A.m_Y && I.m_Lo.m_Y <= B.m_Y && I.m_Hi.m_Z >= A.m_Z && I.m_Lo.m_Z <= B.m_Z)
-                    I.m_bDirty = true;
+                if (I.m_bAlive && !I.m_bDirty && I.m_Hi.m_X >= A.m_X && I.m_Lo.m_X <= B.m_X && I.m_Hi.m_Y >= A.m_Y && I.m_Lo.m_Y <= B.m_Y && I.m_Hi.m_Z >= A.m_Z && I.m_Lo.m_Z <= B.m_Z)
+                    { I.m_bDirty = true; ++nNew; }
+            return nNew;
         }
 
         // A changed point light dirties the instances in its sphere (old and new); a sun / sky change dirties everything
@@ -2738,6 +2818,11 @@ namespace xlionrender::gi
         }
 
         bool                                    m_bLinksDirty = false;
+        int                                     m_nMovesAcc = 0, m_MoveMarked = 0;     // (instrumentation) SetTransform since the last update
+        double                                  m_MovesMsAcc = 0;
+        std::vector<float>                      m_WorkUs;               // (instrumentation) per work item: its trace time
+        std::vector<int>                        m_WorkHits;             // per work item: its rays that hit a lit surface
+        int                                     m_nEmitters = 0;
         bool                                    m_bLinksMoved = false;      // an instance moved: m_bLinksDirty links_settle_v updates after the last move
         unsigned                                m_nUpdates = 0, m_LinksMovedAt = 0;
         int                                     m_nLinkRebuilds = 0;        // (tests)

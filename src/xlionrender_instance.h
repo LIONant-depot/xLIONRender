@@ -72,7 +72,11 @@ namespace xlionrender
                       const gi::world::stats& getGIStats( void ) const                                      noexcept { return m_GIStats; }
                       const gi::world*        getGIWorld( void ) const                                      noexcept { return m_pGIWorld.get(); }      // tests, tools
                       bool                    isGICapturingAny( void ) const                                noexcept { return !m_GICaptures.empty(); }
-                      int                     DumpGI( const char* pPath ) const                             noexcept { return m_pGIWorld ? m_pGIWorld->Dump(pPath) : -1; }      // gi::world::Dump
+                      int                     DumpGI( const char* pPath ) const                             noexcept;      // gi::world::Dump, and the frame log to pPath + ".frames.csv" (DumpGIFrames)
+        // The GI's frame log (Phase 0 of documentation/gi_dynamic_master_plan.md): the last gi_frame_log_v frames' stage times and counts, as CSV
+                      int                     DumpGIFrames( const char* pPath ) const                       noexcept;
+        // A mesh's GI was made ready on the main thread (scene_renderer::MeshOf): its time goes into this frame's record
+                      void                    NoteGILoad( double Ms )                                       noexcept { m_GILoadMsAcc += Ms; }
                       int                     getGIId( std::uint64_t Instance ) const                       noexcept { const auto It = m_GIIds.find(std::uint32_t(Instance)); return It == m_GIIds.end() ? -1 : It->second; }    // a draw's instance in getGIWorld (-1: none)
                       bool                    isGICapturing( void ) const                                   noexcept { return !m_GICaptures.empty(); }
 
@@ -261,6 +265,10 @@ namespace xlionrender
         xgpu::buffer                m_GIMomentRing;             // per surfel of m_GILightRing: gi::moment_texels_v uints (half mean, half mean^2) - ponytail: 48 MB host-visible, size it to the scenes if it matters
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
         std::uint64_t               m_GIRender = 0, m_GIFrame = ~0ull;
+        struct gi_frame { std::uint64_t m_Frame; gi::world::stats m_Stats; };
+        static constexpr std::size_t gi_frame_log_v = 1200;     // about 20 s at 60 FPS
+        std::vector<gi_frame>       m_GIFrames;                 // DumpGIFrames
+        double                      m_GILoadMsAcc = 0;
         int                         m_GIRingUsed = 0;
         std::unordered_map<int, int> m_GIFrameRegion;           // this frame: per GI instance the first surfel of its uploaded light (one upload a frame)
         gi::world::stats            m_GIStats;

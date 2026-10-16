@@ -72,7 +72,9 @@ namespace xlionrender
                 gi::FromXGeomStatic(Surfels, *pGeom);
                 const bool bGI = gi::SurfelsFromXGeomStatic(Surfels, *pGeom) && Surfels.m_Levels[0].size() < 0xFFFF && !m_Renderer.SetMeshGI(It->second, std::move(Surfels));
                 m_GIBaked[pGeom] = bGI;
-                m_TotalGILoadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+                const double LoadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+                m_TotalGILoadMs += LoadMs;
+                m_Renderer.NoteGILoad(LoadMs);
             }
             if (auto G = m_GIBaked.find(pGeom); G != m_GIBaked.end()) m_Stats.m_GIMeshes += G->second;
             return &It->second;

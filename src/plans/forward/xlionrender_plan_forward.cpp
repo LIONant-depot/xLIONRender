@@ -84,6 +84,8 @@ namespace xlionrender
     {
         m_DrawGI.assign(Scene.m_Draws.size(), { 0u, 0xFFFFFFFFu });
         if( !Scene.m_GI.m_bEnable ) return;
+        const auto TGI = std::chrono::steady_clock::now();
+        const auto MsSince = [](std::chrono::steady_clock::time_point T) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T).count(); };
         if( !m_pGIWorld ) m_pGIWorld = std::make_unique<gi::world>();
         auto& W = *m_pGIWorld;
         ++m_GIRender;
@@ -177,6 +179,7 @@ namespace xlionrender
         {
             for( int t = 0; t < gi::moment_texels_v; ++t ) pOut[t] = details::Half(M[2 * t]) | (std::uint32_t(details::Half(M[2 * t + 1])) << 16);
         };
+        const auto TMoments = std::chrono::steady_clock::now();
         for( const auto& [i, s] : W.LastUpdated() )
         {
             if( std::size_t(i) >= m_GITrack.size() ) continue;
@@ -191,6 +194,9 @@ namespace xlionrender
         const int Base = int(Frame % ring_frames_v) * gi_light_region_v;
         std::vector<std::pair<int, int>> Written;          // (first surfel of the region, instance): their moments next
         const int Start = m_GIRingUsed;
+        m_GIStats.m_MomentsMs += MsSince(TMoments);
+        double FilterMs = 0;
+        const auto TRing = std::chrono::steady_clock::now();
         (void)m_GILightRing.MemoryMap(std::size_t(Base + m_GIRingUsed) * 3, std::size_t(gi_light_region_v - m_GIRingUsed) * 3, [&](void* pMemory)     // 3 vec4 a surfel
         {
             auto* pOut = static_cast<xmath::fvec4*>(pMemory);
@@ -209,9 +215,11 @@ namespace xlionrender
                     m_DrawGI[i] = { std::uint32_t(Base + It->second), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };
                     continue;
                 }
+                const auto TFilter = std::chrono::steady_clock::now();
                 const auto& E = W.BasisLight(Id);              // shown: the HL2 basis, spatially filtered (the solver keeps its own)
+                FilterMs += MsSince(TFilter);
                 const auto& V = W.InstanceValid(Id);
-                if( m_GIRingUsed + Used + 1 + int(E.size()) > gi_light_region_v ) continue;  // ponytail: no GI for what does not fit
+                if( m_GIRingUsed + Used + 1 + int(E.size()) > gi_light_region_v ) { ++m_GIStats.m_nDropped; continue; }  // ponytail: no GI for what does not fit
                 // The slot before its surfels: its mean light, what a pixel no read supports shows (SurfelGIMean: the solver's policy too,
                 // gi::world::Unsupported). Then its surfels
                 const auto& Mean = W.MeanLight(Id);
@@ -229,7 +237,11 @@ namespace xlionrender
                 Used += int(E.size());
             }
             m_GIRingUsed += Used;
+            m_GIStats.m_UploadBytes += std::size_t(Used) * 3 * sizeof(xmath::fvec4);
         });
+        m_GIStats.m_FilterMs   = FilterMs;
+        m_GIStats.m_RingCopyMs = MsSince(TRing) - FilterMs;
+        const auto TMomentsCopy = std::chrono::steady_clock::now();
 
         // The surfels' depth moments at the same index (gi::moment_texels_v per surfel, each a mean and a mean^2 in two 16-bit floats)
         if( m_GIRingUsed > Start )
@@ -249,7 +261,12 @@ namespace xlionrender
                     std::memcpy(pOut + std::size_t(First) * gi::moment_texels_v, T.m_Moments.data(), T.m_Moments.size() * sizeof(std::uint32_t));
                 }
             });
+        m_GIStats.m_MomentsMs += MsSince(TMomentsCopy);
         m_GIStats.m_UploadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TUpload).count();
+        m_GIStats.m_UpdateGIMs = MsSince(TGI);
+        m_GIStats.m_LoadMs = m_GILoadMsAcc; m_GILoadMsAcc = 0;
+        m_GIFrames.push_back({ m_Device.getFrameIndex(), m_GIStats });
+        if( m_GIFrames.size() > gi_frame_log_v ) m_GIFrames.erase(m_GIFrames.begin(), m_GIFrames.begin() + std::ptrdiff_t(m_GIFrames.size() - gi_frame_log_v));
     }
 
     //------------------------------------------------------------------------------------------------
@@ -1294,7 +1311,11 @@ namespace xlionrender
         updateEnvironment(Window, Scene);
         updateInstances(Window, Scene, Eye);
         updateGI(Scene, Eye, ProjScale);                                   // CPU (getGIStats); the probes' captures read it too
-        processGICapture(Window);                               // the surfels' material colors (one mesh at a time)
+        {
+            const auto TCapture = std::chrono::steady_clock::now();
+            processGICapture(Window);                           // the surfels' material colors (one mesh at a time)
+            if( !m_GIFrames.empty() ) m_GIFrames.back().m_Stats.m_CaptureMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TCapture).count();
+        }
         const auto T1 = clock::now();
         Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
         renderShadows(Window, Scene, Eye, ProjScale);
