@@ -417,16 +417,43 @@ namespace xlionrender::gi
         v3              m_Mean{ 0, 0, 0 }, m_Short{ 0, 0, 0 }, m_Variance{ 0, 0, 0 };
         float           m_Vbbr          = 1;        // the variance-based blend reduction
         float           m_Inconsistency = 0;
-        std::uint16_t   m_N             = 0;        // samples since the last Restart (counts to warmup_passes_v)
+        std::uint16_t   m_N             = 0;        // samples since the last Restart (counts to warmup_passes_v); its confidence
+        std::int8_t     m_Streak        = 0;        // Lower: the sign of the last sample's large difference to the mean (0: none)
+        bool            m_bWatch        = false;    // Lower: watching for a real change (two large differences the same way)
+        v3              m_Last{ 0, 0, 0 };          // the last sample, while watching
+        v3              m_Ref{ 0, 0, 0 };           // the light when the change came (what a real change differs from)
 
         // A value carried over (a level switch, a new layout): it continues as settled light
         void Seed(const v3& E) noexcept { m_Mean = m_Short = E; m_Variance = { 0, 0, 0 }; m_Vbbr = 1; m_Inconsistency = 0; m_N = warmup_passes_v; }
-        void Restart() noexcept { m_N = 0; }        // what it saw is out of date: the next sample replaces it
+        void Restart() noexcept { m_N = 0; }        // nothing to keep (a new surfel): the next sample replaces it
+
+        // Phase 4: a change affects it by a (0..1): its confidence drops to (1 - a) of the warm-up, one sample at least, so a single
+        // noisy pass never replaces its light (at most half of it); what it had is the warm start. Until it is confident again it
+        // watches for a real change: two samples in a row that differ from the light it had by half of it, the same way, replace it with
+        // their own mean (two passes of evidence, as production DDGI rejects history on a large change)
+        void Lower(float a) noexcept
+        {
+            const int k = std::max(1, int((1.0f - std::clamp(a, 0.0f, 1.0f)) * float(warmup_passes_v)));
+            if (m_N > k) m_N = std::uint16_t(k);
+            if (m_N > 0) { m_bWatch = true; m_Streak = 0; m_Ref = m_Mean; }
+        }
 
         // MinBlend: the warm-up's blend never below it (1: every sample replaces, no history)
         void Add(v3 y, float MinBlend = 0, float ShortBlend = 0.08f) noexcept
         {
             if (MinBlend >= 1) { Seed(y); return; }
+            if (m_bWatch)
+            {
+                const auto Luma = [](const v3& c) { return 0.299f * c.m_X + 0.587f * c.m_Y + 0.114f * c.m_Z; };
+                const float D = Luma(y) - Luma(m_Ref);
+                const std::int8_t Sign = std::abs(D) > 0.5f * std::max(Luma(m_Ref), 1e-3f) ? (D > 0 ? 1 : -1) : 0;
+                if (Sign != 0 && Sign == m_Streak)
+                {
+                    m_Mean = m_Short = (m_Last + y) * 0.5f; m_Variance = { 0, 0, 0 }; m_N = 2; m_Streak = 0; m_Last = y;
+                    return;
+                }
+                m_Streak = Sign; m_Last = y;
+            }
             if (m_N < warmup_passes_v)
             {
                 ++m_N;
@@ -435,6 +462,7 @@ namespace xlionrender::gi
                 // the multiscale blend starts from no variance (as before the merge): the light is still building up (each bounce
                 // lights the next), and a large variance measured from 8-ray samples would make it slow to follow
                 m_Short = m_Mean; m_Variance = { 0, 0, 0 }; m_Vbbr = 1; m_Inconsistency = 0;
+                if (m_N >= warmup_passes_v) m_bWatch = false;
                 return;
             }
             const auto Luma = [](const v3& c) { return 0.299f * c.m_X + 0.587f * c.m_Y + 0.114f * c.m_Z; };
@@ -1544,11 +1572,12 @@ namespace xlionrender::gi
             double  m_DirectMs      = 0;        //   the direct light at the hits (shadow rays),
             double  m_ReadMs        = 0;        //   and the reads of the hit's light (Indirect, Unsupported)
             int     m_FairSurfels   = 0;        // surfels picked by the fairness share
+            int     m_UrgentSurfels = 0;        // Phase 4: surfels picked from the urgent lists (a change affected them)
             int     m_nCubes        = 0;        // instances held as an ambient cube, and their parents blended this update (ExpandCube)
             int     m_CubeParents   = 0;
             int     m_nMoves        = 0;        // SetTransform calls since the last update
-            double  m_MovesMs       = 0;        // their time (DirtyNear, Place)
-            int     m_nMarkedDirty  = 0;        // instances they marked dirty (DirtyNear: each mover's old and new bounds, plus the margin)
+            double  m_MovesMs       = 0;        // their time (AffectNear, Place)
+            int     m_nMarkedDirty  = 0;        // instances they marked dirty (AffectNear: each mover's old and new bounds, plus the margin)
             int     m_nHistoryResets = 0;       // instances whose history went to 0 this update (dirty: their next pass replaces their light)
             std::size_t m_LinkBytes  = 0;       // memory: the emitter links
             std::size_t m_LightBytes = 0;       // memory: the per-instance light state (light, estimators, validity, basis, moments, accumulators)
@@ -1598,7 +1627,7 @@ namespace xlionrender::gi
             I.m_SurfEmissionPoint = Emission.size() == n ? std::move(Emission) : std::vector<v3>{};
             ResolveSurfEmission(Id);
             EmittersChanged(Id);
-            DirtyNear(I.m_Lo, I.m_Hi);
+            AffectNear(I.m_Lo, I.m_Hi, Id);
         }
 
         // An instance's triangles' emission (the material capture, triangle First on). A surfel's emission is the mean over its patch, so
@@ -1614,7 +1643,7 @@ namespace xlionrender::gi
             I.m_bTriEmission = true;
             ResolveSurfEmission(Id);
             EmittersChanged(Id);
-            DirtyNear(I.m_Lo, I.m_Hi);
+            AffectNear(I.m_Lo, I.m_Hi, Id);
         }
 
         // The surfels' emission: the radiance whose power over the surfel's nominal area (1.47 r^2, RebuildEmitterList) is the emitted power
@@ -1674,7 +1703,7 @@ namespace xlionrender::gi
             const std::size_t n = I.m_pMesh->m_Tris.size();
             if (I.m_TriAlbedo.size() != n) I.m_TriAlbedo.assign(n, I.m_Albedo);
             for (std::size_t k = 0; k < Albedo.size() && First + k < n; ++k) I.m_TriAlbedo[First + k] = Albedo[k];
-            DirtyNear(I.m_Lo, I.m_Hi);
+            AffectNear(I.m_Lo, I.m_Hi, Id);
         }
         const std::vector<v3>& TriangleAlbedo( int Id ) const noexcept { return m_Instances[Id].m_TriAlbedo; }
         const std::vector<v3>& SurfaceEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }       // per fine surfel (tests)
@@ -1692,21 +1721,33 @@ namespace xlionrender::gi
             I.m_SurfSeeThrough.assign(M.m_Levels[0].size(), 0);
             for (std::size_t s = 0; s < I.m_SurfSeeThrough.size(); ++s) I.m_SurfSeeThrough[s] = Slot(s < M.m_SurfelMaterial.size() ? M.m_SurfelMaterial[s].m_iMaterial : 0u);
             if (std::find(I.m_SeeThrough.begin(), I.m_SeeThrough.end(), 1) == I.m_SeeThrough.end()) { I.m_SeeThrough.clear(); I.m_SurfSeeThrough.clear(); }
-            DirtyNear(I.m_Lo, I.m_Hi);
+            AffectNear(I.m_Lo, I.m_Hi, Id);
         }
 
         const std::vector<v3>& SurfelAlbedo  ( int Id ) const noexcept { return m_Instances[Id].m_SurfAlbedo; }
         const std::vector<v3>& SurfelEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }
 
-        void DirtyAll() noexcept { for (auto& I : m_Instances) if (I.m_bAlive) I.m_bDirty = true; }
+        void DirtyAll() noexcept { for (auto& I : m_Instances) if (I.m_bAlive) MarkDirty(I, 1.0f); }
+
+        // The angle between two placements' rotations (radians; their scale left out)
+        static float RotationAngle(const xmath::fmat4& A, const xmath::fmat4& B) noexcept
+        {
+            float Tr = 0;
+            for (int c = 0; c < 3; ++c)
+            {
+                const v3 a = v3{ A(0, c), A(1, c), A(2, c) }.NormalizeCopy(), b = v3{ B(0, c), B(1, c), B(2, c) }.NormalizeCopy();
+                Tr += a.Dot(b);
+            }
+            return std::acos(std::clamp((Tr - 1.0f) * 0.5f, -1.0f, 1.0f));
+        }
 
         // The instance stops casting, bouncing and updating (its id is not reused)
         void Remove(int Id) noexcept
         {
             auto& I = m_Instances[Id];
             if (!I.m_bAlive) return;
-            DirtyNear(I.m_Lo, I.m_Hi);
             I.m_bAlive = false;
+            AffectNear(I.m_Lo, I.m_Hi);
             I.m_E.clear(); I.m_Acc.clear(); I.m_Valid.clear(); I.m_AccValid.clear();
             I.m_Links.clear(); I.m_LinkFirst.clear(); I.m_EmitB.clear(); I.m_bLinkHull = false; I.m_SurfLinkLo.clear(); I.m_SurfLinkHi.clear();
             m_bTlasDirty = true;
@@ -1720,10 +1761,14 @@ namespace xlionrender::gi
         {
             const auto T0 = std::chrono::steady_clock::now();
             auto& I = m_Instances[Id];
-            m_MoveMarked += DirtyNear(I.m_Lo, I.m_Hi);
             const v3 OldLo = I.m_Lo, OldHi = I.m_Hi;
+            const xmath::fmat4 Old = I.m_L2W;
             Place(I, L2W);
-            m_MoveMarked += DirtyNear(I.m_Lo, I.m_Hi);
+            // Phase 4: it keeps its layout and starts from its light, its confidence lowered by half for a move, more by its rotation (the
+            // basis turns with it: its directions are no longer what they saw; the angle weighs it, a heuristic, not an error bound)
+            const float SelfA = std::max(0.5f, std::clamp(RotationAngle(Old, L2W) / (0.5f * pi_v), 0.0f, 1.0f));
+            m_MoveMarked += AffectNear(OldLo, OldHi, Id, SelfA);
+            m_MoveMarked += AffectNear(I.m_Lo, I.m_Hi, Id, SelfA);
             m_bTlasDirty = true;
             // The links (Phase 2): an emitter that moves changes what everyone sees of it; an occluder, only the links whose segments
             // cross its old or new box; a receiver, its own. They are rebuilt in bounded chunks (PumpLinks), the published ones stay in use
@@ -1739,6 +1784,11 @@ namespace xlionrender::gi
         const std::vector<int>& CubeSet( int Id ) const noexcept { return m_Instances[Id].m_CubeSet; }
         int             LinkRebuilds   ( void ) const noexcept { return m_nLinkRebuilds; }
         int             LinkCount      ( int Id ) const noexcept { return int(m_Instances[Id].m_Links.size()); }
+        std::uint32_t   LastPass       ( int Id, int s ) const noexcept { return m_Instances[Id].m_LastPass[s]; }       // the update that last finished it
+        std::array<float, 2> RayOffsets( int Id, int s ) const noexcept { return m_Instances[Id].m_LastOff[s]; }        // its last pass' ray offsets
+        std::uint32_t   UpdateCount    ( void ) const noexcept { return m_nUpdates; }
+        int             Confidence     ( int Id, int s ) const noexcept { return m_Instances[Id].m_Est[s].m_N; }      // its samples since a restart, lowered by a change (estimator::Lower)
+        int             UrgentCount    ( int Id ) const noexcept { return int(m_Instances[Id].m_Urgent.size()); }
         // (tests) the published links of an instance as one number: two builds of the same scene give the same
         std::uint64_t   LinksDigest    ( int Id ) const noexcept
         {
@@ -2435,14 +2485,25 @@ namespace xlionrender::gi
                     const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
                     if (I.m_Cursor == 0)
                     {
-                        if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; for (auto& Es : I.m_Est) Es.Restart(); }
-                        I.m_PassAlpha = std::max(1.0f / float(++I.m_History), m_Setup.m_MinBlend);
+                        if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; for (auto& Es : I.m_Est) Es.Lower(I.m_DirtyA); I.m_DirtyA = 1; }
+                        ++I.m_History;
                     }
                     const bool bSettled = I.m_History > warmup_passes_v;
                     int Took = 0;
+                    // Phase 4: the surfels a change affected first (its urgent list), then the pass (which skips them this pick)
+                    const std::size_t UrgentAt = m_Work.size();
+                    while (!I.m_Urgent.empty() && Took < Cap)
+                    {
+                        const int Surf = I.m_Urgent.back(); I.m_Urgent.pop_back();
+                        if (std::size_t(Surf) >= I.m_E.size()) continue;
+                        I.m_UrgentMark[Surf] = 2;
+                        m_Work.push_back({ i, Surf }); ++Took; ++St.m_UrgentSurfels;
+                    }
+                    const std::size_t UrgentEnd = m_Work.size();
                     for (; I.m_Cursor < n && Took < Cap; ++I.m_Cursor)
                     {
                         const int Surf = I.m_bCube ? I.m_CubeSet[I.m_Cursor] : I.m_Cursor;
+                        if (I.m_UrgentMark[Surf] == 2) continue;
                         if (bSettled)
                         {
                             const int Period = TracePeriod(I, Surf, Eye);
@@ -2451,6 +2512,7 @@ namespace xlionrender::gi
                         m_Work.push_back({ i, Surf });
                         ++Took;
                     }
+                    for (std::size_t w = UrgentAt; w < UrgentEnd; ++w) I.m_UrgentMark[m_Work[w].second] = 0;
                     if (I.m_Cursor >= n) { I.m_Cursor = 0; I.m_Age = 0; }
                     SurfelsLeft -= Took;
                     if (i == Fair) St.m_FairSurfels = Took;
@@ -2464,6 +2526,7 @@ namespace xlionrender::gi
                     work_item W;
                     W.m_Inst = pi; W.m_Surf = ps; W.m_Level = m_Instances[pi].m_Level; W.m_Rays = m_Setup.m_RaysPerSurfel;
                     W.m_Off1 = Rng.Next(); W.m_Off2 = Rng.Next(); W.m_Shift = int(Rng.Next() * 64.0f);
+                    if (auto& PI = m_Instances[pi]; std::size_t(ps) < PI.m_LastOff.size()) PI.m_LastOff[ps] = { W.m_Off1, W.m_Off2 };
                     m_Pending.push_back(W);
                 }
                 m_Work.clear();             // from here m_Work lists the surfels finished this update (LastUpdated)
@@ -2568,18 +2631,20 @@ namespace xlionrender::gi
                 // The light: the estimator (it warms up after a change, settles, and still follows one). The validity and the depth
                 // moments: their own slow blends (they weigh the reads: noise there swims too)
                 auto& Es = I.m_Est[s];
+                const float Conf = std::max(1.0f / float(Es.m_N + 1), m_Setup.m_MinBlend);     // the blends of its fractions and validity: by its confidence
+                if (std::size_t(s) < I.m_LastPass.size()) I.m_LastPass[s] = m_nUpdates;
                 I.m_FilterDirty.push_back(s);
                 I.m_MeanS = I.m_MeanS - I.m_E[s] * I.m_Valid[s]; I.m_MeanW -= I.m_Valid[s];     // its share of the mean, out (in again below)
                 I.m_nBad -= BadSurfel(I.m_E[s], I.m_Valid[s]);
                 Es.Add(I.m_Acc[s], m_Setup.m_MinBlend);
                 I.m_E[s] = Es.m_Mean;
-                const float av = std::max(I.m_PassAlpha, 0.05f);
+                const float av = std::max(Conf, 0.05f);
                 I.m_Valid[s] = I.m_Valid[s] * (1 - av) + I.m_AccValid[s] * av;
                 if (I.m_Level == 0 && s < I.m_SurfSeeThrough.size() && I.m_SurfSeeThrough[s]) I.m_Valid[s] = 0;     // on a transparent material
                 {   // the basis: what fraction of the light came from around each direction (per channel), slowly (8 rays split 3 ways)
                     const auto& BA = I.m_BasisAcc[s];
                     const v3 Tot = BA[0] + BA[1] + BA[2];
-                    const float af = std::max(I.m_PassAlpha, 0.1f);
+                    const float af = std::max(Conf, 0.1f);
                     for (int i = 0; i < 3; ++i)
                     {
                         const v3 F{ Tot.m_X > 1e-9f ? BA[i].m_X / Tot.m_X : 1.0f / 3, Tot.m_Y > 1e-9f ? BA[i].m_Y / Tot.m_Y : 1.0f / 3, Tot.m_Z > 1e-9f ? BA[i].m_Z / Tot.m_Z : 1.0f / 3 };
@@ -2744,7 +2809,17 @@ namespace xlionrender::gi
             int                     m_Age       = 0;
             int                     m_History   = 0;
             int                     m_Cursor    = 0;            // the next surfel of the pass in progress (0: none)
-            float                   m_PassAlpha = 1;            // the blend of the pass in progress
+            float                   m_DirtyA    = 1;            // MarkDirty: how much the change affects it (estimator::Lower at its next pass)
+            std::vector<int>        m_Urgent;                   // Phase 4: surfels a change affected, traced first (AffectNear)
+            mutable bool            m_bBuckets = false;         // BuildBuckets: its surfels in world cells (what a change near it looks at)
+            mutable float           m_BucketCell = 1;
+            mutable v3              m_BucketLo{ 0, 0, 0 };
+            mutable int             m_BucketDim[3] = { 1, 1, 1 };
+            mutable std::vector<float> m_BucketPos;             // per surfel: its world center
+            mutable std::vector<std::uint32_t> m_BucketFirst, m_BucketIndex;
+            std::vector<std::uint8_t> m_UrgentMark;             // per surfel: 1 in m_Urgent, 2 picked from it this pick
+            std::vector<std::uint32_t> m_LastPass;              // per surfel: the update that last finished it
+            std::vector<std::array<float, 2>> m_LastOff;        // per surfel: its last pass' ray offsets (tests: the ray sequence advances)
             bool                    m_bDirty    = true;
             bool                    m_bPicked   = false;
             bool                    m_bAlive    = true;
@@ -2757,6 +2832,7 @@ namespace xlionrender::gi
         {
             I.m_L2W = L2W;
             I.m_W2L = L2W.InverseSRT();
+            I.m_bBuckets = false;
             I.m_MeanScale = (L2W.TransformDirection({ 1, 0, 0 }).Length() + L2W.TransformDirection({ 0, 1, 0 }).Length() + L2W.TransformDirection({ 0, 0, 1 }).Length()) / 3;
             const auto& M = *I.m_pMesh;
             I.m_Lo = { 1e30f, 1e30f, 1e30f }; I.m_Hi = { -1e30f, -1e30f, -1e30f };
@@ -2774,6 +2850,7 @@ namespace xlionrender::gi
             I.m_E.assign(n, v3{ 0, 0, 0 }); I.m_Acc.assign(n, v3{ 0, 0, 0 });
             I.m_Valid.assign(n, 1); I.m_AccValid.assign(n, 1);
             ResetMoments(I);
+            for (auto& Es : I.m_Est) Es.Restart();                      // new: the first sample is its light
         }
 
         // Fully open (every direction travels the whole reach): a new surfel reads at full weight until its rays say otherwise
@@ -2781,6 +2858,8 @@ namespace xlionrender::gi
         {
             I.m_bFilterFull = true; I.m_bMeanDirty = true;
             ++I.m_MomentsReset;
+            I.m_Urgent.clear(); I.m_UrgentMark.assign(I.m_pMesh->m_Levels[I.m_Level].size(), 0); I.m_bBuckets = false;
+            I.m_LastPass.assign(I.m_pMesh->m_Levels[I.m_Level].size(), 0); I.m_LastOff.assign(I.m_pMesh->m_Levels[I.m_Level].size(), { 0.0f, 0.0f });
             const auto& L = I.m_pMesh->m_Levels[I.m_Level];
             I.m_Moments.resize(L.size());
             I.m_MomAcc.assign(L.size(), {});
@@ -2797,15 +2876,87 @@ namespace xlionrender::gi
             }
         }
 
-        int DirtyNear(const v3& Lo, const v3& Hi) noexcept
+        // Phase 4: a change in a box (a moved, added or removed instance, a changed material or point light) affects the surfels around
+        // it by their distance to it: 1 at the box, 0 at its reach (twice its diagonal, at least half a meter, at most m_ChangeMargin: a
+        // small object changes the light near it, a large one farther). An affected surfel's confidence drops (estimator::Lower), its
+        // moments refresh when it is affected by half or more, and it is traced first (its instance's urgent list). Self (an instance
+        // that changed itself: moved, recolored) is affected as a whole instead (MarkDirty). Returns the instances affected
+        int AffectNear(const v3& Lo, const v3& Hi, int Self = -1, float SelfA = 1.0f) noexcept
         {
-            const v3 M{ m_Setup.m_ChangeMargin, m_Setup.m_ChangeMargin, m_Setup.m_ChangeMargin };
+            const float Mg = std::clamp(2.0f * (Hi - Lo).Length(), std::min(0.5f, m_Setup.m_ChangeMargin), std::max(m_Setup.m_ChangeMargin, 1e-3f));
+            const v3 M{ Mg, Mg, Mg };
             const v3 A = Lo - M, B = Hi + M;
-            int nNew = 0;       // (instrumentation: the instances newly marked)
-            for (auto& I : m_Instances)
-                if (I.m_bAlive && !I.m_bDirty && I.m_Hi.m_X >= A.m_X && I.m_Lo.m_X <= B.m_X && I.m_Hi.m_Y >= A.m_Y && I.m_Lo.m_Y <= B.m_Y && I.m_Hi.m_Z >= A.m_Z && I.m_Lo.m_Z <= B.m_Z)
-                    { I.m_bDirty = true; ++nNew; }
+            int nNew = 0;       // (instrumentation)
+            for (int i = 0; i < int(m_Instances.size()); ++i)
+            {
+                auto& I = m_Instances[i];
+                if (i == Self || !I.m_bAlive || I.m_E.empty() || !(I.m_Hi.m_X >= A.m_X && I.m_Lo.m_X <= B.m_X && I.m_Hi.m_Y >= A.m_Y && I.m_Lo.m_Y <= B.m_Y && I.m_Hi.m_Z >= A.m_Z && I.m_Lo.m_Z <= B.m_Z)) continue;
+                if (I.m_bDirty) continue;                               // its whole pass is coming anyway
+                BuildBuckets(I);
+                bool bAny = false;
+                const float* W = I.m_BucketPos.data();
+                const int c0[3] = { BucketOf(I, 0, A.m_X), BucketOf(I, 1, A.m_Y), BucketOf(I, 2, A.m_Z) }, c1[3] = { BucketOf(I, 0, B.m_X), BucketOf(I, 1, B.m_Y), BucketOf(I, 2, B.m_Z) };
+                for (int z = c0[2]; z <= c1[2]; ++z) for (int y = c0[1]; y <= c1[1]; ++y) for (int x = c0[0]; x <= c1[0]; ++x)
+                {
+                    const int Cell = (z * I.m_BucketDim[1] + y) * I.m_BucketDim[0] + x;
+                    for (std::uint32_t k = I.m_BucketFirst[Cell]; k < I.m_BucketFirst[Cell + 1]; ++k)
+                    {
+                        const std::uint32_t s = I.m_BucketIndex[k];
+                        const float* C = W + 3 * std::size_t(s);       // (plain floats: a Debug build calls every v3 operator)
+                        const float dx = std::max(std::max(Lo.m_X - C[0], C[0] - Hi.m_X), 0.0f), dy = std::max(std::max(Lo.m_Y - C[1], C[1] - Hi.m_Y), 0.0f), dz = std::max(std::max(Lo.m_Z - C[2], C[2] - Hi.m_Z), 0.0f);
+                        const float a = 1.0f - std::sqrt(dx * dx + dy * dy + dz * dz) / Mg;
+                        if (a <= 0) continue;
+                        I.m_Est[s].Lower(a);
+                        if (a >= 0.5f) I.m_MomCount[s] = {};
+                        if (!I.m_UrgentMark[s]) { I.m_UrgentMark[s] = 1; I.m_Urgent.push_back(int(s)); }
+                        bAny = true;
+                    }
+                }
+                nNew += bAny;
+            }
+            if (Self >= 0) MarkDirty(m_Instances[Self], SelfA);
             return nNew;
+        }
+
+        // An instance's surfels (its active level) by where they are in the world, in cells of m_ChangeMargin: what a change near it
+        // looks at (AffectNear). Made again after it moves or switches level (m_bBuckets false)
+        void BuildBuckets(instance& I) const noexcept
+        {
+            if (I.m_bBuckets) return;
+            const auto& L = I.m_pMesh->m_Levels[I.m_Level];
+            const float Cell = std::max(m_Setup.m_ChangeMargin, 1e-3f);
+            I.m_BucketCell = Cell; I.m_BucketLo = I.m_Lo;
+            for (int a = 0; a < 3; ++a) I.m_BucketDim[a] = std::clamp(int((I.m_Hi[a] - I.m_Lo[a]) / Cell) + 1, 1, 256);
+            const int nCells = I.m_BucketDim[0] * I.m_BucketDim[1] * I.m_BucketDim[2];
+            I.m_BucketPos.resize(3 * L.size());
+            std::vector<int> CellOf(L.size());
+            I.m_BucketFirst.assign(std::size_t(nCells) + 1, 0);
+            float T[12];                                        // the placement as plain floats (a Debug build calls every v3 and matrix operator)
+            for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) T[r * 4 + c] = I.m_L2W(r, c);
+            for (std::size_t s = 0; s < L.size(); ++s)
+            {
+                const float x = L[s].m_Center.m_X, y = L[s].m_Center.m_Y, z = L[s].m_Center.m_Z;
+                float* C = &I.m_BucketPos[3 * s];
+                for (int r = 0; r < 3; ++r) C[r] = T[r * 4] * x + T[r * 4 + 1] * y + T[r * 4 + 2] * z + T[r * 4 + 3];
+                CellOf[s] = (BucketOf(I, 2, C[2]) * I.m_BucketDim[1] + BucketOf(I, 1, C[1])) * I.m_BucketDim[0] + BucketOf(I, 0, C[0]);
+                ++I.m_BucketFirst[CellOf[s] + 1];
+            }
+            for (int c = 0; c < nCells; ++c) I.m_BucketFirst[c + 1] += I.m_BucketFirst[c];
+            I.m_BucketIndex.resize(L.size());
+            std::vector<std::uint32_t> At(I.m_BucketFirst.begin(), I.m_BucketFirst.end() - 1);
+            for (std::size_t s = 0; s < L.size(); ++s) I.m_BucketIndex[At[CellOf[s]]++] = std::uint32_t(s);
+            I.m_bBuckets = true;
+        }
+        static int BucketOf(const instance& I, int Axis, float v) noexcept
+        {
+            return std::clamp(int((v - I.m_BucketLo[Axis]) / I.m_BucketCell), 0, I.m_BucketDim[Axis] - 1);
+        }
+
+        // A whole instance changed (by a: its confidence at the next pass, estimator::Lower): it is traced again from the start
+        static void MarkDirty(instance& I, float a) noexcept
+        {
+            I.m_DirtyA = I.m_bDirty ? std::max(I.m_DirtyA, a) : a;
+            I.m_bDirty = true;
         }
 
         // A changed point light dirties the instances in its sphere (old and new); a sun / sky change dirties everything
@@ -2824,7 +2975,7 @@ namespace xlionrender::gi
                     if (k == 0 ? !bOld : !bNew) continue;
                     const auto K = k == 0 ? m_PrevPoints[i] : Key(L.m_Points[i]);
                     const v3 P{ K[0], K[1], K[2] }, R{ K[6], K[6], K[6] };
-                    DirtyNear(P - R, P + R);
+                    AffectNear(P - R, P + R);
                 }
             }
             bool bMoved = m_PrevPoints.size() != L.m_Points.size();
@@ -2862,12 +3013,13 @@ namespace xlionrender::gi
         }
 
         // The one priority (documentation/gi_dynamic_master_plan.md, Phase 2b): which instance is served first, from one queue under the
-        // one allowance. Its terms: a change (dirty) first, then a pass in progress (finish what was started), then age over distance
+        // one allowance. Its terms: a change (dirty) first, then the surfels a change affected (Phase 4's urgent list), then a pass in
+        // progress (finish what was started), then age over distance
         // (m_LodDistance: the distance at which it counts half). Later terms (Phase 5's transport roles, Phase 6's relighting) are added
         // here, never as a pass or a queue of their own. Fairness stays outside it (Update: the oldest instance's share, whatever this says)
         float Priority(const instance& I, const v3& Eye) const noexcept
         {
-            return (I.m_bDirty ? 1e6f : 0.0f) + (I.m_Cursor ? 5e5f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
+            return (I.m_bDirty ? 1e6f : 0.0f) + (I.m_Urgent.empty() ? 0.0f : 7e5f) + (I.m_Cursor ? 5e5f : 0.0f) + float(I.m_Age + 1) / (1 + BoxDistance(I, Eye) / m_Setup.m_LodDistance);
         }
 
         // Within a settled instance's pass, how often a surfel is served (1: every pass, n: one pass in n, staggered). A buried surfel
@@ -2954,8 +3106,10 @@ namespace xlionrender::gi
                 auto& I = m_Instances[i];
                 if (!I.m_bAlive || !I.m_bLinkHull || I.m_bLinkDirtyAll || !Overlap(I.m_LinkLo, I.m_LinkHi, Lo, Hi)) continue;
                 bool bAny = false;
+                const v3* pLo = I.m_SurfLinkLo.data(); const v3* pHi = I.m_SurfLinkHi.data();      // (plain floats: a Debug build calls every v3 operator)
+                const float lx = Lo.m_X, ly = Lo.m_Y, lz = Lo.m_Z, hx = Hi.m_X, hy = Hi.m_Y, hz = Hi.m_Z;
                 for (std::size_t s = 0; s < I.m_SurfLinkLo.size(); ++s)
-                    if (!I.m_LinkDirty[s] && Overlap(I.m_SurfLinkLo[s], I.m_SurfLinkHi[s], Lo, Hi)) { I.m_LinkDirty[s] = 1; bAny = true; }
+                    if (!I.m_LinkDirty[s] && pLo[s].m_X <= hx && lx <= pHi[s].m_X && pLo[s].m_Y <= hy && ly <= pHi[s].m_Y && pLo[s].m_Z <= hz && lz <= pHi[s].m_Z) { I.m_LinkDirty[s] = 1; bAny = true; }
                 if (bAny) QueueLinks(i);
             }
         }

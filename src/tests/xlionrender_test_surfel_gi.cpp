@@ -261,8 +261,9 @@ int main()
         }
         W.SetTransform(Moved, xmath::fmat4::fromTranslation({ 2.0f, 0, 1.0f }) * xmath::fmat4::fromTranslation({ 5, 4, 5 }));
         const auto St = W.Update(L, Eye, budget_v, 3000);
-        std::printf("city steady: %.1f ms per update; a building moved: %d instances dirty (of %d), updated in %.1f ms\n", Steady / 10, St.m_Dirty, W.InstanceCount(), St.m_Ms);
-        CHECK(St.m_Dirty > 1 && St.m_Dirty < 15, "a moved building dirtied %d instances", St.m_Dirty);
+        // (Phase 4: the moved one is dirty, its neighbors' surfels near it are affected, not their whole instances)
+        std::printf("city steady: %.1f ms per update; a building moved: %d instances dirty, %d affected (of %d), updated in %.1f ms\n", Steady / 10, St.m_Dirty, St.m_nMarkedDirty, W.InstanceCount(), St.m_Ms);
+        CHECK(St.m_Dirty == 1 && St.m_nMarkedDirty > 1 && St.m_nMarkedDirty < 30, "a moved building affected %d instances (%d dirty)", St.m_nMarkedDirty, St.m_Dirty);
     }
 
     // 5. Surfels saved by the GeomStatic compiler load back as baked (SurfelsFromXGeomStatic), and a receive-only mesh is not in the rays' way
@@ -1300,6 +1301,88 @@ int main()
                     Worst, MaxChanged, W.InstanceLight(iF).size());
         CHECK(Worst < 1e-5, "the incremental shown light differs from the whole filter (%.2e)", Worst);
         CHECK(MaxChanged > 0 && MaxChanged < W.InstanceLight(iF).size() / 2, "a settled update made %zu floor surfels again (of %zu)", MaxChanged, W.InstanceLight(iF).size());
+    }
+
+    // 6j13. Phase 4: a change lowers confidence, it does not restart. A wall on a floor in the sun, settled; the wall moves 30 cm.
+    //       (a) no floor surfel restarts (confidence 0) and none takes more than half of a single pass: the first update after the move
+    //       changes each finished surfel's light by at most half of its distance to the new sample; the surfels near the wall are lowered,
+    //       the far ones untouched. (b) The recovery: updates (and ms) until the floor's mean light is within 2 % of a fresh solve of the
+    //       final scene. (c) A 90 degree rotation in place under a uniform sky: the wall's light barely moves (the sky is the same from
+    //       every side) and recovers. (d) The rays: a surfel's offsets advance from pass to pass and across the move, and two surfels'
+    //       differ in the same pass
+    {
+        surfel_mesh Floor, Wall;
+        AddQuad(Floor, { -8, 0, -8 }, { 0, 0, 16 }, { 16, 0, 0 }, 0.5f);
+        AddQuad(Wall,  { -1, 0, 0 }, { 0, 1.5f, 0 }, { 2, 0, 0 }, 0.5f);
+        Floor.Bake(0.15f, 0.45f); Wall.Bake(0.15f, 0.45f);
+        lights L; L.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = v3{ 2, 2, 2 }; L.m_Sky = v3{ 0.3f, 0.3f, 0.3f };
+        const v3 Eye{ 0, 1, 4 };
+        const auto Mean = [](const world& Wd, int Id) { double m = 0; const auto& E = Wd.InstanceLight(Id); for (const auto& e : E) m += e.m_X; return m / double(std::max<std::size_t>(E.size(), 1)); };
+        world W;
+        const int iF = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        const int iW = W.Add(Wall,  xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        for (int f = 0; f < 300; ++f) W.Update(L, Eye, 1 << 13, 27000 + f);
+        const int nF = int(W.InstanceLight(iF).size());
+        const std::array<float, 2> Off0 = W.RayOffsets(iF, 0), Off1 = W.RayOffsets(iF, 1);
+        // (a)
+        const std::vector<v3> Before = W.InstanceLight(iF);
+        const xmath::fmat4 Moved = xmath::fmat4::fromTranslation({ 0.3f, 0, 0 });
+        W.SetTransform(iW, Moved);
+        int Restarted = 0, Lowered = 0, FarLowered = 0;
+        for (int k = 0; k < nF; ++k)
+        {
+            const int c = W.Confidence(iF, k);
+            Restarted += c == 0; Lowered += c < 16;
+            FarLowered += c < 16 && std::abs(Floor.m_Levels[0][k].m_Center.m_Z) > 5.5f;   // more than 5 m from the wall's plane z = 0 (beyond the 4 m margin)
+        }
+        W.Update(L, Eye, 1 << 13, 27300);
+        double WorstShare = 0;
+        for (const auto& [i, k] : W.LastUpdated())
+        {
+            if (i != iF) continue;
+            const float d = (W.InstanceLight(iF)[k] - Before[k]).Length(), ref = std::max(Before[k].Length(), 1e-3f);
+            WorstShare = std::max(WorstShare, double(d / ref));
+        }
+        // (b)
+        world Ref;
+        const int rF = Ref.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        Ref.Add(Wall, Moved, { 0.6f, 0.6f, 0.6f });
+        for (int f = 0; f < 300; ++f) Ref.Update(L, Eye, 1 << 13, 27400 + f);
+        const double Target = Mean(Ref, rF);
+        int Recovery = -1; double RecoveryMs = 0;
+        for (int f = 0; f < 300 && Recovery < 0; ++f)
+        {
+            const auto St = W.Update(L, Eye, 1 << 13, 27700 + f);
+            RecoveryMs += St.m_TotalMs;
+            if (std::abs(Mean(W, iF) - Target) < 0.02 * Target) Recovery = f + 1;
+        }
+        // (d)
+        const std::array<float, 2> Off0b = W.RayOffsets(iF, 0);
+        // (c)
+        lights Sky; Sky.m_Sky = v3{ 1, 1, 1 };
+        world R;
+        R.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        const int rW = R.Add(Wall, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        for (int f = 0; f < 300; ++f) R.Update(Sky, Eye, 1 << 13, 28000 + f);
+        const double WallBefore = Mean(R, rW);
+        R.SetTransform(rW, xmath::fmat4::fromRotation(xmath::fquat(xmath::fvec3(0, 1, 0), xmath::radian(pi_v * 0.5f))));
+        int RotRestarted = 0;
+        for (int k = 0; k < int(R.InstanceLight(rW).size()); ++k) RotRestarted += R.Confidence(rW, k) == 0;
+        R.Update(Sky, Eye, 1 << 13, 28300);
+        const double WallJump = std::abs(Mean(R, rW) - WallBefore) / WallBefore;
+        int RotRecovery = -1;
+        for (int f = 0; f < 300 && RotRecovery < 0; ++f) { R.Update(Sky, Eye, 1 << 13, 28400 + f); if (std::abs(Mean(R, rW) - WallBefore) < 0.03 * WallBefore) RotRecovery = f + 1; }
+        std::printf("a change lowers confidence: %d restarted, %d of %d floor surfels lowered (%d of them far), the first update moved a surfel's light by %.0f %% at most; "
+                    "recovery to a fresh solve in %d updates (%.1f ms); rotated 90 degrees: %d restarted, the wall's light moved %.1f %%, back within 3 %% after %d updates; "
+                    "ray offsets %.3f,%.3f -> %.3f,%.3f (a neighbor %.3f,%.3f)\n",
+                    Restarted, Lowered, nF, FarLowered, WorstShare * 100, Recovery, RecoveryMs, RotRestarted, WallJump * 100, RotRecovery,
+                    Off0[0], Off0[1], Off0b[0], Off0b[1], Off1[0], Off1[1]);
+        CHECK(Restarted == 0 && RotRestarted == 0, "a change restarted surfels (%d moved, %d rotated)", Restarted, RotRestarted);
+        CHECK(Lowered > 0 && Lowered < nF && FarLowered == 0, "the move lowered %d of %d floor surfels (%d far from it)", Lowered, nF, FarLowered);
+        CHECK(Recovery > 0 && RotRecovery > 0, "no recovery (%d, %d updates)", Recovery, RotRecovery);
+        CHECK(WorstShare < 0.5, "a floor surfel's light moved %.0f %% in the first update after the move (a single pass replaced it?)", WorstShare * 100);
+        CHECK(WallJump < 0.1, "the wall's light jumped %.1f %% when it turned under a uniform sky", WallJump * 100);
+        CHECK(Off0 != Off0b && Off0 != Off1, "the ray offsets did not advance, or two surfels share them");
     }
 
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the

@@ -411,6 +411,34 @@ Separate what one dirty flag does today:
 - A regression test proves the ray sequence advances per pass, across a move, and is not reused between surfels.
 - **Done when:** after a move, no surfel's published light jumps to a single noisy pass, and recovery time is reported per test.
 
+**Phase 4 results** (2026-10-17):
+- **A change lowers confidence; it never restarts.** `estimator::Lower(a)` sets the sample count to (1 − a) of the warm-up,
+  one sample at least, so a single noisy pass moves a surfel's light by half at most. What the surfel had is the warm start.
+- **A real change is still taken.** Until the surfel is confident again, two samples in a row that differ from the light it
+  had by half, the same way, replace it with their own mean: two passes of evidence.
+  - "The light doubled" now reaches 90 % in 5 updates (10 with the old restart). A sun change is reached by the same rule.
+- **"Affected" is scored per surfel (`AffectNear`)**, by its distance to the changed box: 1 at the box, 0 at its reach.
+  - The reach is twice the box's diagonal, between 0.5 m and `m_ChangeMargin`, so a small object changes the light near it
+    and a large one farther.
+  - An affected surfel is lowered, its moments refresh if it is affected by half or more, and it goes on its instance's
+    urgent list. The urgent list is traced first and is a term of `Priority`.
+  - Neighbour instances are no longer marked dirty as a whole. The city test: a moved building leaves 1 instance dirty and
+    affects 15.
+  - Surfels are found through per-instance world buckets (cells of the margin), built once per placement.
+- **The moved instance keeps its layout and its light**, lowered by half, more by its rotation angle (the basis turns with
+  it; the angle weighs it as a heuristic). Its fractions and validity blend by the surfel's confidence, not by a per-instance
+  pass blend (`m_PassAlpha` is gone).
+- **Recorded per surfel:** the update that last finished it (`LastPass`) and its last ray offsets (`RayOffsets`).
+- **Test 6j13.**
+  - A 30 cm move: 0 surfels restarted, 1661 of 6222 floor surfels lowered and none beyond the reach, the first update moving
+    a surfel's light by 32 % at most.
+  - Recovery to a fresh solve of the final scene in 1 update (2.2 ms; this move barely changes the floor's mean).
+  - A 90° rotation in place under a uniform sky: 0 restarted, the wall's light moved 0.0 %.
+  - The ray offsets advance per pass and across the move, and differ between surfels.
+- **Police, Debug, the drag.** A move costs 1.5 ms on average (`AffectNear` and the link marks in plain floats over buckets),
+  against 33 ms in the first version. The worst frame is the first bucket build of the building (16 ms, once per placement).
+  Mean GI main thread: 3.7 ms during the drag, 2.3 ms after.
+
 ### Phase 5: Transport roles
 
 - Per-instance roles, overriding the asset's default:
