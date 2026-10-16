@@ -1513,6 +1513,7 @@ namespace xlionrender::gi
             bool    m_bSpreadOrigins = true;    // the fine surfels' rays start across their patch (surfel_mesh::BuildOrigins), not at their center
             float   m_LodDistance   = 40;       // beyond it (eye to bounds) an instance holds its parent level
             float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
+            bool    m_bCube         = true;     // an instance that covers few pixels for its parents traces 6 of them, one per axis direction, and blends the others from them (an ambient cube)
             float   m_PixelsPerSurfel = 256;    // the screen area an instance needs per surfel of its level: below it the parent level (about 16 x 16 pixels)
             float   m_ChangeMargin  = 4;        // a moved instance dirties the instances within this distance of its bounds
         };
@@ -1695,6 +1696,8 @@ namespace xlionrender::gi
 
         int             InstanceCount  ( void ) const noexcept { return int(m_Instances.size()); }
         int             Level          ( int Id ) const noexcept { return m_Instances[Id].m_Level; }
+        bool            IsCube         ( int Id ) const noexcept { return m_Instances[Id].m_bCube; }
+        const std::vector<int>& CubeSet( int Id ) const noexcept { return m_Instances[Id].m_CubeSet; }
         const v3&       Albedo         ( int Id ) const noexcept { return m_Instances[Id].m_Albedo; }
         // What the GPU buffer would hold for an instance: its active level's irradiance and validity per surfel
         const std::vector<v3>&    InstanceLight( int Id ) const noexcept { return m_Instances[Id].m_E; }
@@ -2071,6 +2074,52 @@ namespace xlionrender::gi
         const v3& MeanLight(int Id) const noexcept { return m_Instances[Id].m_MeanE; }      // the same for the GPU's reads (the renderer uploads it)
         const std::vector<v3>& UnsupportedAt() const noexcept { return m_UnsupportedAt; }
 
+        // The 6 parents an ambient cube traces: for each axis direction (+-x, +-y, +-z) the parent whose normal faces it best (within 60 degrees)
+        static std::vector<int> CubeSetOf(const surfel_mesh& M) noexcept
+        {
+            std::vector<int> Set;
+            const v3 Axes[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+            for (const v3& A : Axes)
+            {
+                int Best = -1; float BestD = 0.5f;
+                for (int p = 0; p < int(M.m_Levels[1].size()); ++p) { const float d = M.m_Levels[1][p].m_Normal.Dot(A); if (d > BestD) { BestD = d; Best = p; } }
+                if (Best >= 0 && std::find(Set.begin(), Set.end(), Best) == Set.end()) Set.push_back(Best);
+            }
+            return Set;
+        }
+
+        // The parents an ambient cube did not trace: the traced ones' light blended by the normals (the squared cosine, as the HL2 basis does),
+        // their validity and their directional fractions with it. A cube's light at any point is what the 6 directions bring, by the way it faces
+        void ExpandCube(int Id) noexcept
+        {
+            auto& I = m_Instances[Id];
+            const auto& L = I.m_pMesh->m_Levels[1];
+            std::vector<char> InSet(L.size(), 0);
+            for (int k : I.m_CubeSet) InSet[std::size_t(k)] = 1;
+            for (std::size_t p = 0; p < L.size(); ++p)
+            {
+                if (InSet[p]) continue;
+                v3 E{ 0, 0, 0 }; float W = 0, V = 0; basis F{};
+                for (int k : I.m_CubeSet)
+                {
+                    const float c = std::max(L[p].m_Normal.Dot(L[std::size_t(k)].m_Normal), 0.0f), w = c * c * (I.m_Valid[std::size_t(k)] + 1e-3f);
+                    if (w <= 0) continue;
+                    E = E + I.m_E[std::size_t(k)] * w; V += I.m_Valid[std::size_t(k)] * c * c; W += w;
+                    for (int i = 0; i < 3; ++i) F[i] = F[i] + I.m_Frac[std::size_t(k)][i] * w;
+                }
+                if (W <= 0)     // facing none of them: the nearest in direction
+                {
+                    int Best = I.m_CubeSet[0]; float BestD = -2;
+                    for (int k : I.m_CubeSet) { const float d = L[p].m_Normal.Dot(L[std::size_t(k)].m_Normal); if (d > BestD) { BestD = d; Best = k; } }
+                    I.m_E[p] = I.m_E[std::size_t(Best)]; I.m_Valid[p] = I.m_Valid[std::size_t(Best)]; I.m_Frac[p] = I.m_Frac[std::size_t(Best)];
+                    continue;
+                }
+                const float r = 1.0f / W;
+                I.m_E[p] = E * r; I.m_Valid[p] = std::min(V * r * 1.0f, 1.0f);
+                for (int i = 0; i < 3; ++i) I.m_Frac[p][i] = F[i] * r;
+            }
+        }
+
         // One update: the light changes, the levels, then the ray budget over the instances that need it most
         stats Update(const lights& L, const v3& Eye, int RayBudget, unsigned Seed) noexcept
         {
@@ -2091,8 +2140,9 @@ namespace xlionrender::gi
                 const float Pixels = pi_v * Ratio * Ratio * m_Setup.m_ProjScale * m_Setup.m_ProjScale;
                 const float Need   = m_Setup.m_PixelsPerSurfel * float(I.m_pMesh->m_Levels[0].size()) * (I.m_Level == 1 ? 1.25f : 1.0f);
                 const int   Want   = (Dist > m_Setup.m_LodDistance || (m_Setup.m_ProjScale > 0 && Pixels < Need)) ? 1 : 0;
-                if (Want == I.m_Level) continue;
                 const auto& M = *I.m_pMesh;
+                if (Want != I.m_Level)
+                {
                 std::vector<v3> E(M.m_Levels[Want].size(), v3{ 0, 0, 0 });
                 std::vector<float> Valid(E.size(), 0);
                 if (Want == 0)
@@ -2109,6 +2159,14 @@ namespace xlionrender::gi
                 m_bEmitDirty = true;
                 I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
                 ResetMoments(I);
+                }
+                // An ambient cube: few pixels for its parents: 6 of them traced, the rest blended (the instance is still at level 1 for everything that reads it)
+                const bool bCubeWant = I.m_Level == 1 && m_Setup.m_bCube && m_Setup.m_ProjScale > 0 && M.m_Levels[1].size() > 12
+                                    && Pixels < m_Setup.m_PixelsPerSurfel * float(M.m_Levels[1].size()) * (I.m_bCube ? 1.25f : 1.0f);
+                std::vector<int> Set;
+                if (bCubeWant && !I.m_bCube) Set = CubeSetOf(M);
+                if (bCubeWant && !I.m_bCube && !Set.empty()) { I.m_bCube = true; I.m_CubeSet = std::move(Set); I.m_Cursor = 0; m_bEmitDirty = true; }
+                else if (!bCubeWant && I.m_bCube) { I.m_bCube = false; I.m_CubeSet.clear(); I.m_Cursor = 0; I.m_bDirty = true; m_bEmitDirty = true; }       // the parents trace again: from the start
             }
 
             // Pick: dirty first, then a pass in progress, then age over distance, until the budget is spent. An instance is updated in
@@ -2131,7 +2189,7 @@ namespace xlionrender::gi
             {
                 if (SurfelsLeft <= 0) break;
                 auto& I = m_Instances[i];
-                const int n    = int(I.m_E.size());
+                const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
                 if (I.m_Cursor == 0)
                 {
                     if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; }
@@ -2145,19 +2203,20 @@ namespace xlionrender::gi
                 int Took = 0;
                 for (; I.m_Cursor < n && Took < SurfelsLeft; ++I.m_Cursor)
                 {
+                    const int Surf = I.m_bCube ? I.m_CubeSet[I.m_Cursor] : I.m_Cursor;
                     if (bSettled)
                     {
                         int Period = 1;
-                        if (I.m_Valid[I.m_Cursor] < 0.01f) Period = dead_retrace_v;
+                        if (I.m_Valid[Surf] < 0.01f) Period = dead_retrace_v;
                         else if (m_Setup.m_bDistanceTiers)
                         {
-                            const surfel& S = Lv[I.m_Cursor];
+                            const surfel& S = Lv[Surf];
                             const float   d = (I.m_L2W * S.m_Center - Eye).Length() / (S.m_Radius * Scale);
                             Period = d < far_tier_radii_v[0] ? 1 : d < far_tier_radii_v[1] ? 2 : d < far_tier_radii_v[2] ? 4 : 8;
                         }
-                        if (Period > 1 && ((I.m_History + I.m_Cursor) % Period) != 0) continue;     // staggered: a period's passes together trace every one
+                        if (Period > 1 && ((I.m_History + Surf) % Period) != 0) continue;     // staggered: a period's passes together trace every one
                     }
-                    m_Work.push_back({ i, I.m_Cursor });
+                    m_Work.push_back({ i, Surf });
                     ++Took;
                 }
                 if (I.m_Cursor >= n) { I.m_Cursor = 0; I.m_Age = 0; }
@@ -2306,6 +2365,7 @@ namespace xlionrender::gi
                 }
                 if (I.m_Valid[s] < 1e-6f) I.m_Valid[s] = 0;         // buried: 0, not a decay into denormals (the reads divide by sums of these weights)
             }
+            for (int i = 0; i < int(m_Instances.size()); ++i) if (m_Instances[i].m_bAlive && m_Instances[i].m_bCube) ExpandCube(i);
             for (auto& I : m_Instances)
             {
                 if (!I.m_bAlive) continue;
@@ -2389,6 +2449,8 @@ namespace xlionrender::gi
             std::vector<std::array<std::uint16_t, moment_texels_v>> m_MomCount; // per texel the samples it has had (its blend: 1 / n, then slow)
             std::vector<estimator>  m_Est;                      // per surfel of the active level: its light over time
             int                     m_Level     = 0;
+            bool                    m_bCube     = false;        // level 1 as an ambient cube: only m_CubeSet is traced, the other parents blend from them (ExpandCube)
+            std::vector<int>        m_CubeSet;                  // the parents traced: for each axis direction the one facing it best
             int                     m_Age       = 0;
             int                     m_History   = 0;
             int                     m_Cursor    = 0;            // the next surfel of the pass in progress (0: none)

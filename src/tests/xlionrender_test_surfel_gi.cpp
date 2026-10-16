@@ -1024,6 +1024,58 @@ int main()
         CHECK(Back == 0, "the box did not come back to the fine level when near (%d)", Back);
     }
 
+    // 6j8. The ambient cube (setup::m_bCube): an instance that covers few pixels for its parents traces 6 of them, one per axis direction, and
+    //      blends the others from those by the way they face. A 40 cm box under a bright sky over a dark ground: a pass traces at most 6, and the light on the top and
+    //      the bottom of the box is the one the full parents give (within a third), the top lit and the bottom dark
+    {
+        const auto Make = []()
+        {
+            surfel_mesh Box;
+            AddQuad(Box, { -0.2f, 0.4f, -0.2f }, { 0, 0, 0.4f }, { 0.4f, 0, 0 }, 0.1f);       // top (up)
+            AddQuad(Box, { -0.2f, 0, -0.2f }, { 0.4f, 0, 0 }, { 0, 0, 0.4f }, 0.1f);          // bottom (down)
+            AddQuad(Box, { -0.2f, 0, -0.2f }, { 0, 0.4f, 0 }, { 0, 0, 0.4f }, 0.1f);          // -x
+            AddQuad(Box, { 0.2f, 0, -0.2f }, { 0, 0, 0.4f }, { 0, 0.4f, 0 }, 0.1f);           // +x
+            AddQuad(Box, { -0.2f, 0, -0.2f }, { 0.4f, 0, 0 }, { 0, 0.4f, 0 }, 0.1f);          // -z
+            AddQuad(Box, { -0.2f, 0, 0.2f }, { 0, 0.4f, 0 }, { 0.4f, 0, 0 }, 0.1f);           // +z
+            Box.Bake(0.05f, 0.15f);
+            return Box;
+        };
+        const surfel_mesh Box = Make();
+        const auto Run = [&](bool bCube, double& Top, double& Bottom, std::size_t& MaxTraced, bool& bIsCube)
+        {
+            world W;
+            W.m_Setup.m_ProjScale = 1000; W.m_Setup.m_PixelsPerSurfel = 256; W.m_Setup.m_bCube = bCube;
+            const int i = W.Add(Box, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            lights L;
+            L.m_Sky = v3{ 0.5f, 0.5f, 0.5f }; L.m_bSkyOct = true;                                // the sky above 1, the ground below 0.1 (the center of the map)
+            for (auto& T : L.m_SkyOct) T = v3{ 1, 1, 1 };
+            for (int j = 1; j <= 2; ++j) for (int k = 1; k <= 2; ++k) L.m_SkyOct[std::size_t(j * 4 + k)] = v3{ 0.1f, 0.1f, 0.1f };
+            const v3 Eye{ 0, 0.2f, 40 };                         // far: it covers a few hundred pixels
+            for (int f = 0; f < 300; ++f) W.Update(L, Eye, 1 << 30, 21000 + f);
+            MaxTraced = 0;
+            for (int f = 0; f < 16; ++f) { W.Update(L, Eye, 1 << 30, 21400 + f); MaxTraced = std::max(MaxTraced, W.LastUpdated().size()); }
+            bIsCube = W.IsCube(i);
+            const auto& E = W.InstanceLight(i);
+            double St = 0, Sb = 0; int nt = 0, nb = 0;
+            for (std::size_t p = 0; p < E.size() && p < Box.m_Levels[1].size(); ++p)
+            {
+                const float ny = Box.m_Levels[1][p].m_Normal.m_Y;
+                if (ny > 0.9f)  { St += E[p].m_X; ++nt; }
+                if (ny < -0.9f) { Sb += E[p].m_X; ++nb; }
+            }
+            Top = St / std::max(nt, 1); Bottom = Sb / std::max(nb, 1);
+        };
+        double TopFull, BotFull, TopCube, BotCube; std::size_t MaxFull, MaxCube; bool bFullIsCube, bCubeIsCube;
+        Run(false, TopFull, BotFull, MaxFull, bFullIsCube);
+        Run(true,  TopCube, BotCube, MaxCube, bCubeIsCube);
+        std::printf("ambient cube (%zu parents): a pass traces %zu (all parents: %zu); the top %.3f vs %.3f, the bottom %.3f vs %.3f\n", Box.m_Levels[1].size(), MaxCube, MaxFull, TopCube, TopFull, BotCube, BotFull);
+        CHECK(bCubeIsCube && !bFullIsCube, "the box is not (only when asked) an ambient cube");
+        CHECK(MaxCube <= 6, "a cube pass traces %zu surfels", MaxCube);
+        CHECK(MaxFull > MaxCube, "the cube traces no fewer surfels (%zu vs %zu)", MaxCube, MaxFull);
+        CHECK(std::abs(TopCube - TopFull) < 0.33 * TopFull, "the top's light is off: %.3f vs %.3f", TopCube, TopFull);
+        CHECK(TopCube > 2 * BotCube, "the top is not lit over the bottom (%.3f vs %.3f)", TopCube, BotCube);
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {
