@@ -161,8 +161,9 @@ pick, the far box served, and the floor converges to the scene without an allowa
 
 - **Casting dominates the trace, not shadow rays**: over the workers, casting 7.8 ms, reads of the hit's light 3.9 ms, direct
   light 1.3 ms. The bounded light sampling of section 5c is not needed for now; faster casting (the rays' BVH in Debug) would be.
-- **A single ray is now the indivisible unit**, and its tail (672 us in Debug) is above the 0.5 ms declared maximum. Splitting
-  a ray is not possible; what would cut the tail is cheaper casting and reads.
+- **A single ray is now the indivisible unit**, and its tail (672 us in Debug) is above the 0.5 ms declared maximum. The current
+  traversal cannot interrupt a ray; what would cut the tail is cheaper casting and reads. (Historical: the declared units are
+  consolidated in Phase 6b's results.)
 - **The estimator is conservative by design**: it sizes by the slowest recent ray (about 340 us against a 13 us mean), so the
   allowance is used safely but not fully. A high quantile instead of the maximum would recover rays; to tune after Phase 3.
 - **The host's shared allowance:** `xeditor::gi_allowance` (`host::m_GIAllowance`, reset at the top of each frame) holds 1.5 ms
@@ -522,6 +523,87 @@ features:
 7. **A closure run.** GI main-thread median, p95, p99 and maximum; the longest unit by type; worker CPU; memory; the oldest
    work; the time since a useful publication. Several renderers open, sustained overload.
 
+**Phase 6b results** (2026-10-17, Police, Debug, a fresh editor, the statue dragged 4 s and released, 1200 frames; `p6b_close.py`):
+
+| GI main thread per frame (the Level) | Median | p95 | p99 | Max |
+|---|---|---|---|---|
+| The whole run (settling, drag, release) | 1.84 ms | 2.32 ms | 2.58 ms | 3.56 ms |
+| During the drag | 1.61 ms | 2.15 ms | 2.39 ms | 2.42 ms |
+| For comparison, Phase 3 (before the ledger) | 2.7 ms mean | | | 6.5 ms |
+
+Per frame:
+- The stages went past the allowance by 0.91 ms at p99 and 1.75 ms at most, about one link unit.
+- Means: pre-charges 0.25 ms; trace 0.51 ms on the main thread (3.67 ms on the workers); links 0.45 (2.63); filter 0.57; ring 0.14.
+- 101 units were admitted with the token in 1200 frames.
+
+What was built:
+- **The ledger (`Update`).** One allowance is shared, and each stage's grant is what is left of it: the allowance, minus the
+  pre-charges (the events since the last update, and the renderer's own GI work outside the update smoothed as `m_OverheadMs`),
+  minus the time the update has used so far.
+  - The stages are, in order: the events that wait for buckets, the links, the trace (keeping `m_ShowShare` for the shown light
+    while it has a backlog), and the shown light.
+  - No stage overshoots on its own. A token goes to the stage that has had work for the most updates and done none; only it may
+    start one unit past the budget. That bounds the overshoot to one unit and still lets every stage progress.
+  - The host is charged the whole GI main-thread time (`GITraceMs` now returns the whole of `updateGI`), not only the trace.
+- **No unbudgeted fallbacks.**
+  - The whole filter is a resumable cursor (pass by pass, blocks of 4096). On a layout change, pass 0 is shown at once and the
+    filtered values replace it as the passes complete. The "a quarter of it: all at once" shortcut is gone.
+  - A link chunk is one round at most, a surfel per worker, and is admitted again before the next. The minimum progress is one
+    surfel, and only with the token.
+  - A change near an instance whose buckets are not built yet waits (`m_PendingAffect`). The buckets are built in slices of
+    2048 surfels under the ledger, and the change is applied once they are ready. The first-build spike (16 ms) is gone.
+- **Two bugs found by the closure run.**
+  - A link chunk's size truncated the time divided by the per-surfel cost before multiplying by the workers, so a budget under
+    one surfel admitted nothing, and the first link build crawled.
+  - Chunks could hold several rounds, so their wall time could pass the estimate by several units (5.5 ms over).
+- **Batch accounting**, per update in the frame log:
+  - each stage's main-thread time;
+  - the trace's and the links' worker time summed (`TraceCpuMs`, `LinkCpuMs`);
+  - the longest ray unit and link surfel;
+  - how far past the allowance the stages went (`OverAllowMs`);
+  - the units admitted with the token (`TokenUnits`);
+  - the pre-charges (`PreMs`).
+- **The declared units (Debug, Police; this replaces the earlier figures).**
+  - A ray: 0.65 ms at most.
+  - A link surfel: 1.2 ms at most (O(emitters) candidates plus up to 64 shadow rays).
+  - A shown-light chunk: 64 dirty surfels and their halo, or one 4096-surfel block of the whole filter.
+  - A bucket slice: 2048 surfels.
+  - The frame's bound is therefore the allowance plus the largest of these, the link surfel. Release units are smaller; a
+    Release editor run is still to do.
+- **Publication, stated.** The unit is one surfel's shown basis, written whole into a ring slot. Neighbouring surfels in a slot
+  may be from different revisions while a backlog is worked off: each is made from the passes as they are when it is made, and
+  its own value is never torn. When the inputs stop changing, every surfel reaches the whole filter of the final inputs.
+  - Test 6j16: a wall moving every update and a light toggling every 7, under 0.3 ms. The shown light stays within 0.2 % of the
+    whole filter of its current inputs, made apart, with no bad values. 198 updates after the changes stop, it equals that filter.
+- **The affected radius is a priority and confidence heuristic, not visibility.** `AffectNear` decides which surfels are
+  lowered and queued. Whether a stored visibility result still holds is decided elsewhere:
+  - the emitter links by their own segment tests (`MarkLinksCrossing`, all of an occluder's crossings, whatever the radius);
+  - the moments by the rays that refresh them;
+  - and the surfels outside the radius by their recorded age (`LastPass`), "not refreshed yet" rather than valid.
+- **The change detector, defined.**
+  - It compares the luminance (0.299, 0.587, 0.114) of a sample with the light the surfel had when the change came (`m_Ref`),
+    with a floor of 1e-3 under the denominator. Two samples in a row more than half of that apart, the same way, replace the
+    light with their mean. The samples are the same batch size: one pass of the surfel's rays.
+  - Test 6j18, one case at a time:
+    - noisy constant light (±90 %): 3 takes in 60 samples, mean 0.91 for a true 1;
+    - near black: 0 takes;
+    - rapid on/off: the mean stays in [0, 1];
+    - a colour change at equal luminance: not detected, followed by the warm-up average (green 0.48 of 0.51);
+    - a ramp to 5: followed (5.00);
+    - lowered every 3 samples for 600 samples: an unbiased mean (1.99 for 2).
+- **Localized recovery (test 6j17)**, over the affected region against a fresh solve, under 1 ms: when the error gets under
+  10 % and stays there, in updates and ms of updates.
+  - A bright light off: 21 updates.
+  - A door shut across an emitter's link: 5 updates.
+  - A receiver into a dark room: 2 updates.
+  - The sun turned 90° at the same energy: 1 update.
+  - The 95th percentile of the error at the end is 3–9 %.
+- **Not done.**
+  - The Release editor run.
+  - Several renderers drawing at once: in this editor only one GI view draws at a time, since a resource editor takes the
+    screen from the Level. The shared host allowance is unit-tested.
+  - Slicing the allocator's compaction, which is rare: it writes every instance whole into each slot once.
+
 ### Phase 7: First use is bounded too
 
 - Separate compiler work, runtime loading and runtime GI initialisation. Precompute in the compiler what can be (the rays'
@@ -658,9 +740,16 @@ Later or not at all:
 
 From a read of their sources (`E:\source_code\surfles\SurfelGI`, `E:\source_code\surfles\SurfelPlus`; SurfelPlus is a SIGGRAPH 2025
 poster for low-end hardware). Both are GPU-driven, spawn surfels from the screen and cap their cost by a ray count only, never by
-time. Both have energy errors that make their images a poor reference. SurfelGI samples uniformly but shades as if cosine
-sampled, so it is 2x too dark per bounce. SurfelPlus drops the 1/pi, so it is pi too bright per bounce. Ours was checked and is
-right: cosine rays, E = pi x mean(L), and a hit's outgoing light is albedo x E / pi. We also already have three things that
+time. **From reading their code, not shown on an analytic test:**
+- **SurfelGI** draws its rays uniformly over the hemisphere (pdf 1/2π per steradian). Its weight cancels to 1, so a surfel stores
+  mean(L cos θ) = E/2π, and its shading multiplies that by the albedo as if the rays were cosine-distributed. That would be a fixed
+  factor of 2 too dark if no other factor is applied elsewhere.
+- **SurfelPlus** stores E = mean(L cos θ / pdf), which is irradiance, and its shading has the 1/π commented out. That would be π
+  too bright per bounce.
+
+Both would have to be confirmed on an analytic case (a uniform white sky over a plane: E = π) before being quoted as fact. Ours
+was checked: cosine rays (pdf cos θ/π), E = π × mean(L) published as irradiance, and a hit's outgoing radiance is albedo × E/π.
+Test 6m compares an open sky with π (3.142), and test 3 compares the Cornell box with a path tracer. We also already have three things that
 either one lacks, done more soundly:
 - a Chebyshev variance floor and bleeding reduction (the term cubed);
 - moments capped at the surfel's reach;
@@ -699,7 +788,9 @@ Taken into the phases:
   trace one bounce and read the cache at every hit, so this has no use now.
 
 Not adopted:
-- Their ray guiding (both versions use the discrete texel probability as the pdf, which is biased; 5c's guiding stands).
+- Their ray guiding. A discrete texel probability is a valid pdf only when converted to a solid-angle density (divided by the
+  texel's solid angle, with the sample spread within the texel). As read, neither does that, and SurfelGI jitters the
+  direction afterwards. 5c's guiding stands, to be built with that conversion.
 - Screen-space spawning, recycling and lifetimes (our surfels are baked).
 - SurfelPlus's denoise chain (it applies only to its reflections; the diffuse GI gets none).
 - Their compression (a stock 32-bit octahedral normal).

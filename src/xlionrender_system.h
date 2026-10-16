@@ -290,8 +290,8 @@ namespace xlionrender
                               , S.m_GIMeshes, GI.m_Updated, GI.m_Rays, GI.m_Ms, m_pScene->m_TotalGILoadMs, GI.m_nBad, GI.m_nColored, GI.m_nEmissive, GI.m_MeanAlbedo.m_X, GI.m_MeanAlbedo.m_Y, GI.m_MeanAlbedo.m_Z, GI.m_nLinks, GI.m_MaxEmitted, GI.m_MaxEmitter.m_X, GI.m_MaxEmitter.m_Y, GI.m_MaxEmitter.m_Z, int(m_pScene->m_Renderer.isGICapturingAny()), GI.m_nUnsupported, GI.m_TraceMs, GI.m_UploadMs);
         }
 
-        // The main-thread time the GI's trace used in the last RenderScene (what the host's shared allowance is charged)
-        float GITraceMs() const noexcept { return m_pScene ? float(m_pScene->m_Renderer.getGIStats().m_TraceMs) : 0.0f; }
+        // The GI's main-thread time in the last RenderScene, all of it (the update and the upload: what the host's shared allowance is charged)
+        float GITraceMs() const noexcept { return m_pScene ? float(m_pScene->m_Renderer.getGIStats().m_UpdateGIMs) : 0.0f; }
 
         // The GI's surfels of the last RenderScene to a CSV file (gi::world::Dump): the surfels written, -1 when there is no GI
         int DumpGI(const char* pPath) const noexcept { return m_pScene ? m_pScene->m_Renderer.DumpGI(pPath) : -1; }

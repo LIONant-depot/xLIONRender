@@ -86,7 +86,7 @@ namespace xlionrender
         virtual int           DumpGI(const void* pWorld, const char* pPath) noexcept = 0;
         // The world's viewing choices from now on (view_options: the GI view of an editor's viewport, on top of its Environment). Version 7.
         virtual void          SetViewOptions(const void* pWorld, const view_options& Options) noexcept = 0;
-        // The main-thread time the world's GI trace used in its last RenderScene. Version 9.
+        // The main-thread time the world's GI used in its last RenderScene, all of it (Phase 6b). Version 9.
         virtual float         GITraceMs(const void* pWorld) noexcept = 0;
     };
 

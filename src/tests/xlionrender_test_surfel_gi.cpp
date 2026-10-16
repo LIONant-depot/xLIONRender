@@ -1284,14 +1284,14 @@ int main()
         const int iF = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
         const int iW = W.Add(Wall,  xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
         W.m_Setup.m_FilterPasses = 4; W.m_Setup.m_Saturation = 1.3f;
-        W.m_Setup.m_ShowAllowanceMs = 0.001f;                                   // one chunk of 64 an update: a backlog while the wall moves, drained after
+        W.m_Setup.m_TraceAllowanceMs = 0.05f;                                  // a tiny allowance: the shown light's backlog carries over while the wall moves
         double Worst = 0; std::size_t MaxChanged = 0;
-        for (int f = 0; f < 80; ++f)
+        for (int f = 0; f < 160; ++f)
         {
             if (f < 30) W.SetTransform(iW, xmath::fmat4::fromTranslation({ 0.03f * float(f), 0, 0 }));
             W.Update(L, { 0, 1, 4 }, f < 30 ? 1 << 10 : 64, 26000 + f);
             if (f >= 40) MaxChanged = std::max(MaxChanged, W.ShownChanged(iF).size());
-            if (f % 10 != 9 || f < 49) continue;
+            if (f % 10 != 9 || f < 139) continue;                               // (the backlog drained: the shown stage gets the token when it waits)
             const std::vector<basis> Inc = W.BasisLight(iF);
             W.ShowAllAgain();
             const auto& Full = W.BasisLight(iF);
@@ -1328,6 +1328,7 @@ int main()
         const std::vector<v3> Before = W.InstanceLight(iF);
         const xmath::fmat4 Moved = xmath::fmat4::fromTranslation({ 0.3f, 0, 0 });
         W.SetTransform(iW, Moved);
+        W.Update(L, Eye, 1 << 13, 27300);                                          // (Phase 6b: the change is applied in the update, its buckets made in slices)
         int Restarted = 0, Lowered = 0, FarLowered = 0;
         for (int k = 0; k < nF; ++k)
         {
@@ -1335,7 +1336,6 @@ int main()
             Restarted += c == 0; Lowered += c < 16;
             FarLowered += c < 16 && std::abs(Floor.m_Levels[0][k].m_Center.m_Z) > 5.5f;   // more than 5 m from the wall's plane z = 0 (beyond the 4 m margin)
         }
-        W.Update(L, Eye, 1 << 13, 27300);
         double WorstShare = 0;
         for (const auto& [i, k] : W.LastUpdated())
         {
@@ -1366,9 +1366,9 @@ int main()
         for (int f = 0; f < 300; ++f) R.Update(Sky, Eye, 1 << 13, 28000 + f);
         const double WallBefore = Mean(R, rW);
         R.SetTransform(rW, xmath::fmat4::fromRotation(xmath::fquat(xmath::fvec3(0, 1, 0), xmath::radian(pi_v * 0.5f))));
+        R.Update(Sky, Eye, 1 << 13, 28300);
         int RotRestarted = 0;
         for (int k = 0; k < int(R.InstanceLight(rW).size()); ++k) RotRestarted += R.Confidence(rW, k) == 0;
-        R.Update(Sky, Eye, 1 << 13, 28300);
         const double WallJump = std::abs(Mean(R, rW) - WallBefore) / WallBefore;
         int RotRecovery = -1;
         for (int f = 0; f < 300 && RotRecovery < 0; ++f) { R.Update(Sky, Eye, 1 << 13, 28400 + f); if (std::abs(Mean(R, rW) - WallBefore) < 0.03 * WallBefore) RotRecovery = f + 1; }
@@ -1421,9 +1421,9 @@ int main()
             for (int f = 0; f < 60; ++f)                                                   // dragged to z = +1.5 (behind the wall: in its shadow, 3 m long)
             {
                 W.SetTransform(iB, xmath::fmat4::fromTranslation({ 0, 0, -3 + 0.075f * float(f + 1) }));
+                const auto St = W.Update(L, Eye, 1 << 14, 29200 + f);
                 for (int k = 0; k < int(W.InstanceLight(iF).size()); ++k) R.Lowered += W.Confidence(iF, k) < 16;
                 R.Queued += W.UrgentCount(iF);
-                const auto St = W.Update(L, Eye, 1 << 14, 29200 + f);
                 R.OtherLinks += St.m_LinkPending > 1 ? 1 : 0;
             }
             for (int f = 0; f < 200; ++f) W.Update(L, Eye, 1 << 14, 29300 + f);
@@ -1488,6 +1488,202 @@ int main()
                     Fixed, RaysFixed, Adapt, RaysAdapt, SetFixed, SetAdapt, int(bFirst), int(bSoon), Dirty0, MaxRays, 1 << 11);
         CHECK(Adapt <= Fixed * 1.05 && SetAdapt <= SetFixed * 1.1 + 0.01, "the adaptive rays recover worse (%.3f vs %.3f; settled %.3f vs %.3f)", Adapt, Fixed, SetAdapt, SetFixed);
         CHECK(bFirst && !bSoon && Dirty0 == 3 && MaxRays <= (1 << 11), "RelightAll is not rate-limited or not sliced (%d %d, %d dirty, %d rays)", int(bFirst), int(bSoon), Dirty0, MaxRays);
+    }
+
+    // 6j16. Phase 6b, publication while the light keeps changing: a wall moves on every update and a point light toggles every 7, under a
+    //       0.3 ms allowance (the shown light's backlog is worked off a slice at a time). Each update's shown light is compared with the
+    //       whole filter of the inputs it has then (made apart): the difference stays bounded while it changes, no value is torn or bad,
+    //       and once the changes stop it goes to 0
+    {
+        surfel_mesh Floor, Wall;
+        AddQuad(Floor, { -6, 0, -6 }, { 0, 0, 12 }, { 12, 0, 0 }, 0.5f);
+        AddQuad(Wall,  { -1, 0, 0 }, { 0, 1.5f, 0 }, { 2, 0, 0 }, 0.5f);
+        Floor.Bake(0.15f, 0.45f); Wall.Bake(0.15f, 0.45f);
+        lights Off; Off.m_Sky = v3{ 0.1f, 0.1f, 0.1f };
+        lights On = Off; On.m_Points.push_back({ v3{ 1.5f, 1.5f, 1.0f }, v3{ 20, 20, 20 }, 8.0f });
+        world W;
+        const int iF = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        const int iW = W.Add(Wall,  xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        W.m_Setup.m_TraceAllowanceMs = 0.3f;
+        const auto Diff = [&]
+        {
+            const auto& A = W.BasisLight(iF); const auto B = W.FilterOf(iF);
+            double d = 0, n = 0; int Bad = 0;
+            for (std::size_t k = 0; k < A.size() && k < B.size(); ++k)
+                for (int i = 0; i < 3; ++i) { d += (A[k][i] - B[k][i]).Length(); n += B[k][i].Length(); Bad += !std::isfinite(A[k][i].m_X + A[k][i].m_Y + A[k][i].m_Z); }
+            return std::pair{ d / std::max(n, 1e-9), Bad };
+        };
+        for (int f = 0; f < 100; ++f) W.Update(Off, { 0, 1, 4 }, 1 << 12, 33000 + f);
+        double WorstDuring = 0; int BadAll = 0;
+        for (int f = 0; f < 80; ++f)
+        {
+            W.SetTransform(iW, xmath::fmat4::fromTranslation({ 0.02f * float(f % 40), 0, 0 }));
+            W.Update((f / 7) % 2 ? On : Off, { 0, 1, 4 }, 1 << 12, 33100 + f);
+            const auto [d, Bad] = Diff(); WorstDuring = std::max(WorstDuring, d); BadAll += Bad;
+        }
+        int Settle = -1;
+        for (int f = 0; f < 400 && Settle < 0; ++f) { W.Update(On, { 0, 1, 4 }, 64, 33200 + f); if (Diff().first < 1e-6) Settle = f + 1; }   // (a few surfels an update: the backlog drains)
+        std::printf("publication while the light changes: the shown light off the whole filter of its inputs by %.1f %% at most, %d bad values; %d updates after the changes stop it is the whole filter\n",
+                    WorstDuring * 100, BadAll, Settle);
+        CHECK(BadAll == 0 && Settle > 0 && WorstDuring < 0.5, "publication under change: %.1f %% off, %d bad, settled after %d", WorstDuring * 100, BadAll, Settle);
+    }
+
+    // 6j17. Phase 6b, localized recovery: four events, the error over the region they affect against a fresh solve of the final scene
+    //       (mean absolute relative error, its 95th percentile, its sum over the updates, and when it reaches and stays under 10 %, in
+    //       updates and ms), under a 1 ms allowance. (1) a bright light off; (2) a door closing across an emitter's link; (3) a receiver
+    //       moving from a lit room to a dark one; (4) the sun turning 90 degrees at the same energy
+    {
+        struct report { double Mae0 = 0, P95End = 0, Integral = 0, Ms = 0; int Below = -1; };
+        const auto Measure = [](world& W, const lights& L, const v3& Eye, const std::vector<std::pair<int, int>>& Region, const std::vector<v3>& Ref, unsigned Seed)
+        {
+            report R; int Run = 0;
+            const auto Err = [&](double* pP95)
+            {
+                std::vector<double> e; double Sum = 0, RefSum = 0;
+                for (std::size_t k = 0; k < Region.size(); ++k)
+                {
+                    const v3 A = W.InstanceLight(Region[k].first)[Region[k].second], B = Ref[k];
+                    const double d = std::abs(A.m_X - B.m_X) + std::abs(A.m_Y - B.m_Y) + std::abs(A.m_Z - B.m_Z), r = B.m_X + B.m_Y + B.m_Z;
+                    Sum += d; RefSum += r; e.push_back(d / std::max(r, 0.05 * 3));
+                }
+                if (pP95 && !e.empty()) { std::sort(e.begin(), e.end()); *pP95 = e[std::size_t(0.95 * double(e.size() - 1))]; }
+                return Sum / std::max(RefSum, 1e-6);
+            };
+            R.Mae0 = Err(nullptr);
+            for (int f = 0; f < 400; ++f)
+            {
+                const auto St = W.Update(L, Eye, 1 << 13, Seed + f);
+                R.Ms += St.m_TotalMs;
+                const double e = Err(nullptr);
+                R.Integral += e;
+                if (e < 0.10) { if (++Run == 1) R.Below = f + 1; } else { Run = 0; R.Below = -1; }
+            }
+            Err(&R.P95End);
+            return R;
+        };
+        const auto Settle = [](world& W, const lights& L, const v3& Eye, unsigned Seed) { for (int f = 0; f < 400; ++f) W.Update(L, Eye, 1 << 13, Seed + f); };
+        const auto RegionOf = [](const world& W, int Id) { std::vector<std::pair<int, int>> R; for (int s = 0; s < int(W.InstanceLight(Id).size()); ++s) R.push_back({ Id, s }); return R; };
+        const auto RefOf = [](const world& W, const std::vector<std::pair<int, int>>& R) { std::vector<v3> V; for (const auto& [i, s] : R) V.push_back(W.InstanceLight(i)[s]); return V; };
+        report Rep[4];
+        // (1) a bright light off, a room
+        {
+            surfel_mesh Floor, WallA;
+            AddQuad(Floor, { -4, 0, -4 }, { 0, 0, 8 }, { 8, 0, 0 }, 0.5f);
+            AddQuad(WallA, { -4, 0, -4 }, { 0, 3, 0 }, { 0, 0, 8 }, 0.5f);
+            Floor.Bake(0.2f, 0.6f); WallA.Bake(0.2f, 0.6f);
+            lights Off; Off.m_Sky = v3{ 0.05f, 0.05f, 0.05f };
+            lights On = Off; On.m_Points.push_back({ v3{ -2, 2, 0 }, v3{ 40, 40, 40 }, 10.0f });
+            const auto Make = [&](world& W) { const int f = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f }); W.Add(WallA, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f }); W.m_Setup.m_TraceAllowanceMs = 1.0f; return f; };
+            world Ref; const int rF = Make(Ref); Settle(Ref, Off, { 2, 1.6f, 2 }, 34000);
+            world W; const int iF = Make(W); Settle(W, On, { 2, 1.6f, 2 }, 34500);
+            const auto Region = RegionOf(W, iF);
+            Rep[0] = Measure(W, Off, { 2, 1.6f, 2 }, Region, RefOf(Ref, RegionOf(Ref, rF)), 35000);
+        }
+        // (2) a door closes across an emitter's link (the lamp, the door, the floor of 6j9b)
+        {
+            surfel_mesh Floor, Lamp, Door;
+            AddQuad(Floor, { 1, 0, -1 }, { 0, 0, 2 }, { 2, 0, 0 }, 0.25f);
+            AddQuad(Lamp,  { -1, 0.5f, -0.5f }, { 0, 1, 0 }, { 0, 0, 1 }, 0.25f);
+            AddQuad(Door,  { 0, -1, -3 }, { 0, 0, 6 }, { 0, 4, 0 }, 0.5f);
+            Floor.Bake(0.15f, 0.45f); Lamp.Bake(0.15f, 0.45f); Door.Bake(0.3f, 0.9f);
+            lights Dark; Dark.m_Sky = v3{ 0.02f, 0.02f, 0.02f };
+            const auto Make = [&](world& W, bool bShut, int& iD)
+            {
+                const int f = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+                const int l = W.Add(Lamp, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+                iD = W.Add(Door, bShut ? xmath::fmat4::fromIdentity() : xmath::fmat4::fromTranslation({ 0, 0, 10 }), { 0, 0, 0 });
+                W.SetSurfelMaterial(l, {}, std::vector<v3>(Lamp.m_Levels[0].size(), v3{ 20, 20, 20 }));
+                W.m_Setup.m_TraceAllowanceMs = 1.0f;
+                return f;
+            };
+            int d0, d1;
+            world Ref; const int rF = Make(Ref, true, d0); Settle(Ref, Dark, { 2, 1, 0 }, 36000);
+            world W; const int iF = Make(W, false, d1); Settle(W, Dark, { 2, 1, 0 }, 36500);
+            W.SetTransform(d1, xmath::fmat4::fromIdentity());
+            Rep[1] = Measure(W, Dark, { 2, 1, 0 }, RegionOf(W, iF), RefOf(Ref, RegionOf(Ref, rF)), 37000);
+        }
+        // (3) a receiver from a lit room into a dark one (a wall between, the light in the first)
+        {
+            surfel_mesh Floor, Wall, Box;
+            AddQuad(Floor, { -6, 0, -3 }, { 0, 0, 6 }, { 12, 0, 0 }, 0.5f);
+            AddQuad(Wall,  { 0, 0, -3 }, { 0, 3, 0 }, { 0, 0, 6 }, 0.5f);
+            AddQuad(Wall,  { 0, 0, -3 }, { 0, 0, 6 }, { 0, 3, 0 }, 0.5f);                  // both sides
+            AddQuad(Box,   { -0.2f, 0.4f, -0.2f }, { 0, 0, 0.4f }, { 0.4f, 0, 0 }, 0.1f);
+            AddQuad(Box,   { -0.2f, 0, -0.2f }, { 0, 0.4f, 0 }, { 0, 0, 0.4f }, 0.1f);
+            AddQuad(Box,   { 0.2f, 0, -0.2f }, { 0, 0, 0.4f }, { 0, 0.4f, 0 }, 0.1f);
+            Floor.Bake(0.25f, 0.75f); Wall.Bake(0.25f, 0.75f); Box.Bake(0.05f, 0.15f);
+            lights L; L.m_Sky = v3{ 0.01f, 0.01f, 0.01f }; L.m_Points.push_back({ v3{ -3, 2, 0 }, v3{ 30, 30, 30 }, 6.0f });
+            const auto Make = [&](world& W, float x) { W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f }); W.Add(Wall, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+                                                       const int b = W.Add(Box, xmath::fmat4::fromTranslation({ x, 0, 0 }), { 0.6f, 0.6f, 0.6f }); W.SetRole(b, role::RECEIVER); W.m_Setup.m_TraceAllowanceMs = 1.0f; return b; };
+            world Ref; const int rB = Make(Ref, 3); Settle(Ref, L, { 0, 2, -5 }, 38000);
+            world W; const int iB = Make(W, -3); Settle(W, L, { 0, 2, -5 }, 38500);
+            W.SetTransform(iB, xmath::fmat4::fromTranslation({ 3, 0, 0 }));
+            Rep[2] = Measure(W, L, { 0, 2, -5 }, RegionOf(W, iB), RefOf(Ref, RegionOf(Ref, rB)), 39000);
+        }
+        // (4) the sun turns 90 degrees, the same energy: a floor and a wall
+        {
+            surfel_mesh Floor, Wall;
+            AddQuad(Floor, { -4, 0, -4 }, { 0, 0, 8 }, { 8, 0, 0 }, 0.5f);
+            AddQuad(Wall,  { -2, 0, 0 }, { 0, 3, 0 }, { 4, 0, 0 }, 0.5f);
+            Floor.Bake(0.2f, 0.6f); Wall.Bake(0.2f, 0.6f);
+            lights A; A.m_SunDirection = v3{ 0.5f, -1, 0.5f }.NormalizeCopy(); A.m_SunColor = v3{ 2, 2, 2 }; A.m_Sky = v3{ 0.1f, 0.1f, 0.1f };
+            lights B = A; B.m_SunDirection = v3{ -0.5f, -1, -0.5f }.NormalizeCopy();
+            const auto Make = [&](world& W) { const int f = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f }); W.Add(Wall, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f }); W.m_Setup.m_TraceAllowanceMs = 1.0f; return f; };
+            world Ref; const int rF = Make(Ref); Settle(Ref, B, { 0, 2, 5 }, 40000);
+            world W; const int iF = Make(W); Settle(W, A, { 0, 2, 5 }, 40500);
+            Rep[3] = Measure(W, B, { 0, 2, 5 }, RegionOf(W, iF), RefOf(Ref, RegionOf(Ref, rF)), 41000);
+        }
+        const char* Names[4] = { "light off", "door shut", "receiver into the dark", "sun turned" };
+        for (int k = 0; k < 4; ++k)
+            std::printf("recovery, %s: error %.0f %% at the event, under 10 %% and staying after %d updates (of 400, %.0f ms of updates in all), the error summed over updates %.2f, at the end its p95 %.0f %%\n",
+                        Names[k], Rep[k].Mae0 * 100, Rep[k].Below, Rep[k].Ms, Rep[k].Integral, Rep[k].P95End * 100);
+        for (int k = 0; k < 4; ++k) CHECK(Rep[k].Below > 0, "%s: the region's error did not stay under 10 %% (%.0f %% at the event)", Names[k], Rep[k].Mae0 * 100);
+    }
+
+    // 6j18. Phase 6b, the change detector (estimator::Lower / Add, defined: the luminance of a sample against the light the surfel had when
+    //       the change came, two in a row more than half of it apart the same way, with a floor of 1e-3 for the dark; the samples are the
+    //       same batch size, a pass of the surfel's rays): (a) constant light, noisy samples: few false takes, the mean near the truth;
+    //       (b) near black: the floor keeps noise from triggering; (c) rapid on/off: the mean stays between them; (d) a color change at the
+    //       same luminance is not detected but followed by the warm-up; (e) a bright source ramping up is followed; (f) lowered again and
+    //       again before it reconverges, it stays near the light
+    {
+        rng R(4242);
+        const auto Noise = [&](float m, float a) { return m + (R.Next() * 2 - 1) * a; };
+        const auto Settled = [](const v3& E) { estimator Es; Es.Restart(); for (int k = 0; k < 40; ++k) Es.Add(E); return Es; };
+        // (a)
+        estimator A = Settled(v3{ 1, 1, 1 });
+        A.Lower(1);
+        for (int k = 0; k < 60; ++k) { const float y = Noise(1, 0.9f); A.Add(v3{ y, y, y }); }
+        // (b)
+        estimator B = Settled(v3{ 1e-4f, 1e-4f, 1e-4f });
+        B.Lower(1);
+        for (int k = 0; k < 60; ++k) { const float y = std::max(Noise(1e-4f, 1e-4f), 0.0f); B.Add(v3{ y, y, y }); }
+        // (c)
+        estimator C = Settled(v3{ 1, 1, 1 });
+        float CMin = 1e9f, CMax = -1e9f;
+        for (int k = 0; k < 60; ++k) { if (k % 2 == 0) C.Lower(1); const float y = (k / 2) % 2 ? 1.0f : 0.0f; C.Add(v3{ y, y, y }); CMin = std::min(CMin, C.m_Mean.m_X); CMax = std::max(CMax, C.m_Mean.m_X); }
+        // (d) red to green at the same luminance
+        const float g = 0.299f / 0.587f;
+        estimator D = Settled(v3{ 1, 0, 0 });
+        D.Lower(1);
+        for (int k = 0; k < 20; ++k) D.Add(v3{ 0, g, 0 });
+        // (e) a ramp 1 -> 5 over 20 samples, then held
+        estimator E = Settled(v3{ 1, 1, 1 });
+        E.Lower(1);
+        for (int k = 0; k < 40; ++k) { const float y = 1 + 4 * std::min(1.0f, float(k) / 20.0f); E.Add(v3{ y, y, y }); }
+        // (f) lowered every 3 samples, constant noisy light
+        estimator F = Settled(v3{ 2, 2, 2 });
+        double FAvg = 0;                                                       // (its mean over the run: a bias, not one noisy value of a 3-sample mean)
+        for (int k = 0; k < 600; ++k) { if (k % 3 == 0) F.Lower(0.8f); const float y = Noise(2, 1.5f); F.Add(v3{ y, y, y }); FAvg += F.m_Mean.m_X / 600.0; }
+        std::printf("change detector: (a) noisy constant light: %d takes, mean %.2f (1); (b) near black: %d takes; (c) rapid on/off: the mean in [%.2f, %.2f]; "
+                    "(d) red to green at equal luminance: %d takes, green %.2f (%.2f) red %.2f; (e) a ramp to 5: %.2f; (f) lowered again and again: %.2f (2)\n",
+                    A.m_nTaken, A.m_Mean.m_X, B.m_nTaken, CMin, CMax, D.m_nTaken, D.m_Mean.m_Y, g, D.m_Mean.m_X, E.m_Mean.m_X, FAvg);
+        CHECK(A.m_nTaken <= 6 && std::abs(A.m_Mean.m_X - 1) < 0.25f, "noisy constant light: %d takes, mean %.2f", A.m_nTaken, A.m_Mean.m_X);
+        CHECK(B.m_nTaken == 0, "near black, noise triggered %d takes", B.m_nTaken);
+        CHECK(CMin >= -1e-6f && CMax <= 1.0f + 1e-6f, "rapid on/off left the range [0, 1] (%.2f, %.2f)", CMin, CMax);
+        CHECK(D.m_Mean.m_Y > 0.8f * g && D.m_Mean.m_X < 0.2f, "an equal-luminance color change was not followed (green %.2f, red %.2f)", D.m_Mean.m_Y, D.m_Mean.m_X);
+        CHECK(E.m_Mean.m_X > 4.5f, "the ramp was not followed (%.2f)", E.m_Mean.m_X);
+        CHECK(std::abs(FAvg - 2) < 0.2, "repeated lowering drifted (its mean %.2f over the run)", FAvg);
     }
 
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the

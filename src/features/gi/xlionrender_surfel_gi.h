@@ -420,6 +420,7 @@ namespace xlionrender::gi
         float           m_Inconsistency = 0;
         std::uint16_t   m_N             = 0;        // samples since the last Restart (counts to warmup_passes_v); its confidence
         std::int8_t     m_Streak        = 0;        // Lower: the sign of the last sample's large difference to the mean (0: none)
+        std::uint16_t   m_nTaken        = 0;        // (tests) the changes it took (two large differences: their mean replaced it)
         bool            m_bWatch        = false;    // Lower: watching for a real change (two large differences the same way)
         v3              m_Last{ 0, 0, 0 };          // the last sample, while watching
         v3              m_Ref{ 0, 0, 0 };           // the light when the change came (what a real change differs from)
@@ -450,7 +451,7 @@ namespace xlionrender::gi
                 const std::int8_t Sign = std::abs(D) > 0.5f * std::max(Luma(m_Ref), 1e-3f) ? (D > 0 ? 1 : -1) : 0;
                 if (Sign != 0 && Sign == m_Streak)
                 {
-                    m_Mean = m_Short = (m_Last + y) * 0.5f; m_Variance = { 0, 0, 0 }; m_N = 2; m_Streak = 0; m_Last = y;
+                    m_Mean = m_Short = (m_Last + y) * 0.5f; m_Variance = { 0, 0, 0 }; m_N = 2; m_Streak = 0; m_Last = y; ++m_nTaken;
                     return;
                 }
                 m_Streak = Sign; m_Last = y;
@@ -1521,7 +1522,8 @@ namespace xlionrender::gi
             float   m_Saturation    = 1;        // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
             float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
             int     m_FilterPasses  = 4;
-            float   m_ShowAllowanceMs = 0;      // Phase 3: the shown light's halo work per update and instance (UpdateShown; 0: all of it now). The renderer sets it with the trace's        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
+            float   m_ShowShare     = 0.2f;     // Phase 6b: the part of the allowance kept for the shown light while it has a backlog
+            float   m_OverheadMs    = 0;        // Phase 6b: the GI work of the frame outside Update (the renderer's upload, by its last frames): taken from the allowance        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
             bool    m_bSpreadOrigins = true;    // the fine surfels' rays start across their patch (surfel_mesh::BuildOrigins), not at their center
             float   m_LodDistance   = 40;       // the priority's distance scale: an instance this far (eye to bounds) scores half as much (Update)
             float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
@@ -1577,6 +1579,12 @@ namespace xlionrender::gi
             double  m_ReadMs        = 0;        //   and the reads of the hit's light (Indirect, Unsupported)
             int     m_FairSurfels   = 0;        // surfels picked by the fairness share
             int     m_UrgentSurfels = 0;        // Phase 4: surfels picked from the urgent lists (a change affected them)
+            double  m_PreMs     = 0;            // Phase 6b: what the frame spent on the GI before the update (events, the renderer's overhead)
+            double  m_OverAllowMs = 0;          // Phase 6b: how far the update's stages went past the allowance (one unit at most; < 0: under it)
+            double  m_TraceCpuMs = 0;           // Phase 6b batch accounting: the trace's units' time on the workers, summed (the main thread: m_TraceMs)
+            double  m_LinkCpuMs  = 0;           // ... the link chunks' surfels, summed (the main thread: m_LinksMs)
+            double  m_LinkLongestUs = 0;        // ... the slowest link surfel
+            int     m_TokenUnits = 0;           // units started past the allowance (the token: one at most an update)
             int     m_nCubes        = 0;        // instances held as an ambient cube, and their parents blended this update (ExpandCube)
             int     m_CubeParents   = 0;
             int     m_nMoves        = 0;        // SetTransform calls since the last update
@@ -1849,19 +1857,36 @@ namespace xlionrender::gi
         {
             ShownSettings();
             const auto& I = m_Instances[Id];
-            if (I.m_Shown.size() != I.m_E.size() || I.m_bFilterFull) UpdateShown(Id);
+            if (I.m_Shown.size() != I.m_E.size() || I.m_bFilterFull || I.m_FullPass >= 0) UpdateShown(Id);
             return I.m_Shown;
         }
         // What the last Update changed of an instance's shown light (the renderer uploads only that): all of it, or these surfels
         bool                      ShownFull   ( int Id ) const noexcept { return m_Instances[Id].m_bShownFull; }
+        // (tests) the whole filter of an instance's current inputs, made apart (its kept passes and its shown light are not touched)
+        std::vector<basis>        FilterOf    ( int Id ) const noexcept
+        {
+            const auto& I = m_Instances[Id];
+            world Copy; Copy.m_Setup = m_Setup;
+            Copy.m_Instances.push_back(I);
+            Copy.m_Instances[0].m_bFilterFull = true; Copy.m_Instances[0].m_FullPass = -1; Copy.m_Instances[0].m_Shown.clear();
+            Copy.UpdateShown(0);
+            return Copy.m_Instances[0].m_Shown;
+        }
         void                      ShowAllAgain( void ) const noexcept { for (int i = 0; i < int(m_Instances.size()); ++i) if (m_Instances[i].m_bAlive) { m_Instances[i].m_bFilterFull = true; UpdateShown(i); } }   // (tests: the full filter, to compare)
         const std::vector<int>&   ShownChanged( int Id ) const noexcept { return m_Instances[Id].m_ShownChanged; }
 
-        // The shown light kept up to date (Phase 3: no filter over every surfel every frame). The passes are kept; the surfels whose light,
-        // fractions or validity changed (m_FilterDirty: the ones finished) are pass 0's, and each further pass is made again for the
-        // surfels that read any made again by the pass before (the reverse neighbor lists): the dependency halo grows one ring a pass.
-        // A level switch, a new layout or a new setting (passes, saturation) makes all of it again
-        void UpdateShown(int Id) const noexcept
+        // The shown light kept up to date (Phase 3; Phase 6b: under the update's deadline, resumable). The passes are kept; the surfels
+        // whose light, fractions or validity changed (m_FilterDirty: the ones finished) are pass 0's, and each further pass is made again
+        // for the surfels that read any made again by the pass before (the reverse neighbor lists): the dependency halo grows one ring a
+        // pass. That work goes in chunks of 64 dirty surfels until the deadline. A level switch, a new layout or a new setting makes all of
+        // it again through a cursor (pass by pass, in blocks), also until the deadline: its pass 0 is shown at once (unfiltered) when the
+        // layout changed, the filtered values replace it as the passes complete. bToken: this stage may start one chunk past the deadline
+        // (the update's one-unit overshoot, given to the stage that waited longest). Returns whether it did any work.
+        //
+        // Publication (what the renderer uploads of BasisLight): the unit is one surfel's shown basis, written whole. Neighboring surfels
+        // may be of different revisions while a backlog is worked off (a surfel is made from the passes as they are when it is made); once
+        // the inputs stop changing, every surfel reaches the whole filter of the final inputs (test 6j12, 6j16)
+        bool UpdateShown(int Id, double DeadlineMs = 0, const std::chrono::steady_clock::time_point* pT0 = nullptr, bool* pToken = nullptr) const noexcept
         {
             const auto& I = m_Instances[Id];
             const int   n  = int(I.m_E.size());
@@ -1869,6 +1894,8 @@ namespace xlionrender::gi
             const bool  bNb = Nb.m_First.size() == std::size_t(n) + 1;
             const int   nP  = bNb ? std::clamp(m_Setup.m_FilterPasses, 0, 16) : 0;
             I.m_ShownChanged.clear(); I.m_bShownFull = false;
+            const auto Late = [&] { return pT0 && DeadlineMs > 0 && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - *pT0).count() >= DeadlineMs; };
+            const auto Admit = [&](bool bDidAny) { if (!Late()) return true; if (!bDidAny && pToken && *pToken) { *pToken = false; return true; } return false; };
             const auto Pass0 = [&](int s)
             {
                 for (int i = 0; i < 3; ++i)
@@ -1898,18 +1925,24 @@ namespace xlionrender::gi
                 O[1].m_X = a3 * r; O[1].m_Y = a4 * r; O[1].m_Z = a5 * r;
                 O[2].m_X = a6 * r; O[2].m_Y = a7 * r; O[2].m_Z = a8 * r;
             };
-            const auto Show = [&](int s) { I.m_Shown[s] = I.m_Pass[nP][s]; SaturateOne(I.m_Shown[s]); };
+            const auto Show = [&](int s, int p) { I.m_Shown[s] = I.m_Pass[p][s]; SaturateOne(I.m_Shown[s]); };
             const auto Blocks = [&](std::size_t Count, auto&& Fn)     // Fn(k) for k in [0, Count) across the workers, in blocks
             {
                 constexpr std::size_t block_v = 256;
                 ParallelFor(int((Count + block_v - 1) / block_v), [&](int b) { for (std::size_t k = std::size_t(b) * block_v; k < std::min(Count, std::size_t(b + 1) * block_v); ++k) Fn(k); });
             };
-            bool bFull = I.m_bFilterFull || I.m_Shown.size() != std::size_t(n) || int(I.m_Pass.size()) != nP + 1 || I.m_Pass[0].size() != std::size_t(n);
-            if (!bFull && I.m_FilterDirty.size() * 4 > std::size_t(n)) bFull = true;       // a backlog past a quarter of it: all of it at once
-            if (bFull)
+
+            // a new layout or setting: the cursor starts (pass 0 shown at once when the layout changed: the renderer needs a value per surfel)
+            const bool bLayout = I.m_Shown.size() != std::size_t(n) || I.m_Pass.size() != std::size_t(nP) + 1 || I.m_Pass[0].size() != std::size_t(n);
+            if (I.m_bFilterFull || bLayout)
             {
-                I.m_Pass.assign(std::size_t(nP) + 1, std::vector<basis>(std::size_t(n)));
-                I.m_Shown.resize(std::size_t(n)); I.m_Mark.assign(std::size_t(n), 0);
+                if (bLayout)
+                {
+                    I.m_Pass.assign(std::size_t(nP) + 1, std::vector<basis>(std::size_t(n)));
+                    I.m_Shown.resize(std::size_t(n)); I.m_Mark.assign(std::size_t(n), 0);
+                    Blocks(std::size_t(n), [&](std::size_t k) { Pass0(int(k)); Show(int(k), 0); });
+                    I.m_bShownFull = true;
+                }
                 I.m_RevFirst.clear(); I.m_RevIndex.clear();
                 if (bNb)        // who reads each surfel (the neighbor lists need not be symmetric: the radii may differ)
                 {
@@ -1920,40 +1953,52 @@ namespace xlionrender::gi
                     std::vector<std::uint32_t> At(I.m_RevFirst.begin(), I.m_RevFirst.end() - 1);
                     for (int s = 0; s < n; ++s) for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k) I.m_RevIndex[At[Nb.m_Index[k]]++] = std::uint32_t(s);
                 }
-                Blocks(std::size_t(n), [&](std::size_t k) { Pass0(int(k)); });
-                for (int p = 1; p <= nP; ++p) Blocks(std::size_t(n), [&](std::size_t k) { PassAt(p, int(k)); });
-                Blocks(std::size_t(n), [&](std::size_t k) { Show(int(k)); });
-                I.m_bShownFull = true; I.m_bFilterFull = false; I.m_FilterDirty.clear();
-                return;
+                I.m_bFilterFull = false;
+                I.m_FullPass = bLayout ? 1 : 0; I.m_FullAt = 0;
             }
-            if (I.m_FilterDirty.empty()) return;
-            // The halo work in slices: the dirty surfels in chunks of 64 until m_ShowAllowanceMs is spent (one chunk at least); the rest
-            // waits for the next update (shown a little later, never mixed: each surfel's value is made from the passes as they are)
-            const auto TS = std::chrono::steady_clock::now();
+            bool bDid = false;
+            // the whole filter, resumable: pass by pass (pass nP + 1: shown), blocks of 4096 surfels
+            if (I.m_FullPass >= 0)
+            {
+                constexpr int full_block_v = 4096;
+                while (I.m_FullPass >= 0 && Admit(bDid))
+                {
+                    const int p = I.m_FullPass, s0 = I.m_FullAt, s1 = std::min(n, s0 + full_block_v);
+                    if (p == 0)           Blocks(std::size_t(s1 - s0), [&](std::size_t k) { Pass0(s0 + int(k)); });
+                    else if (p <= nP)     Blocks(std::size_t(s1 - s0), [&](std::size_t k) { PassAt(p, s0 + int(k)); });
+                    else                { Blocks(std::size_t(s1 - s0), [&](std::size_t k) { Show(s0 + int(k), nP); }); for (int s = s0; s < s1; ++s) I.m_ShownChanged.push_back(s); }
+                    bDid = true;
+                    I.m_FullAt = s1;
+                    if (s1 >= n) { I.m_FullAt = 0; if (++I.m_FullPass > nP + 1) I.m_FullPass = -1; }
+                }
+                if (I.m_FullPass >= 0) return bDid;          // the dirty surfels wait for the whole filter (they are made again after it)
+            }
+            if (I.m_FilterDirty.empty()) return bDid;
+            // the halo work in chunks of 64 dirty surfels until the deadline; the rest waits for the next update
             std::vector<int> Changed;
             std::size_t Taken = 0;
-            while (Taken < I.m_FilterDirty.size())
+            while (Taken < I.m_FilterDirty.size() && Admit(bDid))
             {
-                auto& Cur = I.m_ShownChanged;
-                Cur.clear();
+                std::vector<int> Chunk;
                 const std::size_t End = std::min(I.m_FilterDirty.size(), Taken + 64);
-                for (; Taken < End; ++Taken) if (const int x = I.m_FilterDirty[Taken]; x < n && !I.m_Mark[x]) { I.m_Mark[x] = 1; Cur.push_back(x); }
-            Blocks(Cur.size(), [&](std::size_t k) { Pass0(Cur[k]); });
-            for (int p = 1; p <= nP; ++p)
-            {
-                const std::size_t k0 = Cur.size();
-                for (std::size_t c = 0; c < k0; ++c)
-                    for (std::uint32_t k = I.m_RevFirst[Cur[c]]; k < I.m_RevFirst[Cur[c] + 1]; ++k)
-                        if (const auto r = I.m_RevIndex[k]; !I.m_Mark[r]) { I.m_Mark[r] = 1; Cur.push_back(int(r)); }
-                Blocks(Cur.size(), [&](std::size_t k) { PassAt(p, Cur[k]); });
-            }
-            Blocks(Cur.size(), [&](std::size_t k) { Show(Cur[k]); });
-            for (const int x : Cur) I.m_Mark[x] = 0;
-                Changed.insert(Changed.end(), Cur.begin(), Cur.end());
-                if (m_Setup.m_ShowAllowanceMs > 0 && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TS).count() >= m_Setup.m_ShowAllowanceMs) break;
+                for (; Taken < End; ++Taken) if (const int x = I.m_FilterDirty[Taken]; x < n && !I.m_Mark[x]) { I.m_Mark[x] = 1; Chunk.push_back(x); }
+                Blocks(Chunk.size(), [&](std::size_t k) { Pass0(Chunk[k]); });
+                for (int p = 1; p <= nP; ++p)
+                {
+                    const std::size_t k0 = Chunk.size();
+                    for (std::size_t c = 0; c < k0; ++c)
+                        for (std::uint32_t k = I.m_RevFirst[Chunk[c]]; k < I.m_RevFirst[Chunk[c] + 1]; ++k)
+                            if (const auto r = I.m_RevIndex[k]; !I.m_Mark[r]) { I.m_Mark[r] = 1; Chunk.push_back(int(r)); }
+                    Blocks(Chunk.size(), [&](std::size_t k) { PassAt(p, Chunk[k]); });
+                }
+                Blocks(Chunk.size(), [&](std::size_t k) { Show(Chunk[k], nP); });
+                for (const int x : Chunk) I.m_Mark[x] = 0;
+                Changed.insert(Changed.end(), Chunk.begin(), Chunk.end());
+                bDid = true;
             }
             I.m_FilterDirty.erase(I.m_FilterDirty.begin(), I.m_FilterDirty.begin() + std::ptrdiff_t(Taken));
-            I.m_ShownChanged = std::move(Changed);
+            I.m_ShownChanged.insert(I.m_ShownChanged.end(), Changed.begin(), Changed.end());
+            return bDid;
         }
 
         // A new setting of what is shown (the passes, the saturation): all of it is made again
@@ -2430,6 +2475,23 @@ namespace xlionrender::gi
             auto TPrev = T0;
             const auto Lap = [&](double& Out) { const auto T = std::chrono::steady_clock::now(); Out += std::chrono::duration<double, std::milli>(T - TPrev).count(); TPrev = T; };
             St.m_nMoves = m_nMovesAcc; St.m_MovesMs = m_MovesMsAcc; St.m_nMarkedDirty = m_MoveMarked;
+            // Phase 6b: the one allowance of the update. What this frame already spent on the GI before it (the events since the last
+            // update: moves, their marks; the renderer's own work: m_OverheadMs) and everything the update has done so far are taken
+            // from it; each stage gets what is left (Left), the trace leaving the shown light its reserve while that has a backlog. Only
+            // the stage that waited longest may start one unit past it (the token): the update stays within the allowance plus one unit
+            const double AllowMs = m_Setup.m_TraceAllowanceMs;
+            const double PreMs   = m_MovesMsAcc + std::max(double(m_Setup.m_OverheadMs), 0.0);
+            const auto   Left    = [&] { return AllowMs - PreMs - std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count(); };
+            const auto   Grant   = [](double Ms) { return std::max(Ms, 1e-6); };      // (0 would mean "no limit" to a stage)
+            int Token = -1;                                                         // 0 links, 1 trace, 2 shown, 3 events
+            if (AllowMs > 0) for (int k = 0, Best = 0; k < 4; ++k) if (m_Starve[k] > Best) { Best = m_Starve[k]; Token = k; }
+            St.m_PreMs = PreMs;
+            {   // the events' work that waits for buckets (a change near an instance whose buckets are not made yet)
+                const bool bWork = m_bPendingAffects;
+                bool bTok = Token == 3;
+                const bool bDid = PumpAffects(AllowMs > 0 ? Grant(AllowMs - PreMs) : 0.0, T0, &bTok);
+                if (AllowMs > 0) m_Starve[3] = bWork && !bDid ? m_Starve[3] + 1 : 0;
+            }
             m_nMovesAcc = 0; m_MovesMsAcc = 0; m_MoveMarked = 0;
             BuildTlas();
             TrackLights(L);
@@ -2572,7 +2634,14 @@ namespace xlionrender::gi
 
             ++m_nUpdates;
             if (m_bRelightDeferred && m_nUpdates >= m_RelightAt) RelightAll();
-            const double LinkUsedMs = PumpLinks(double(m_Setup.m_TraceAllowanceMs) * (m_Pending.empty() ? 1.0 : double(m_Setup.m_LinkShare)), St);   // the trace waits for nothing: all of it
+            bool bShowBacklog = false;
+            for (const auto& I : m_Instances) if (I.m_bAlive && (!I.m_FilterDirty.empty() || I.m_FullPass >= 0 || I.m_bFilterFull)) { bShowBacklog = true; break; }
+            const double ShowReserve = AllowMs > 0 && bShowBacklog ? AllowMs * double(m_Setup.m_ShowShare) : 0.0;
+            const bool   bLinkWork   = m_LinkCur.m_Inst >= 0 || !m_LinkQueue.empty();
+            const int    LinkSurfels0 = St.m_LinkSurfels;
+            const double LinkUsedMs = PumpLinks(AllowMs > 0 ? Grant((Left() - ShowReserve) * (m_Pending.empty() ? 1.0 : double(m_Setup.m_LinkShare))) : 0.0, St, Token == 0);   // the trace waits for nothing: all of it
+            (void)LinkUsedMs;
+            if (AllowMs > 0) m_Starve[0] = bLinkWork && St.m_LinkSurfels == LinkSurfels0 ? m_Starve[0] + 1 : 0;
             Lap(St.m_LinksMs);
             // The emitters' light: made of the links, the emissions (SetSurfelMaterial: the links again) and the scale; a level switch
             // changes its layout. Nothing else: not every update
@@ -2605,8 +2674,8 @@ namespace xlionrender::gi
             // started finishes: the overshoot is one unit. Without an allowance a chunk is all of a surfel's rays and one round traces them all
             // (the solver as it was: the same rays, the same seeds). A surfel is committed when all its rays are in; until then it is pending
             const auto T1      = std::chrono::steady_clock::now();
-            // what the links left, and its own share at least: a link unit that overran (the one-unit overshoot) does not starve the trace
-            const double Allow = m_Setup.m_TraceAllowanceMs > 0 ? std::max({ double(m_Setup.m_TraceAllowanceMs) - LinkUsedMs, double(m_Setup.m_TraceAllowanceMs) * (1.0 - double(m_Setup.m_LinkShare)), 0.001 }) : 0.0;
+            const double Allow = AllowMs > 0 ? Grant(Left() - ShowReserve) : 0.0;     // what is left of the one allowance, the shown light's reserve kept
+            bool bTraceToken = Token == 1;
             const auto Deadline = T1 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(Allow));
             // conservative: the slowest ray cost seen lately (it decays), at least the mean plus twice the mean deviation. The cost of a ray
             // has a long tail (a ray into dense geometry): sized by the mean, units of 8 rays reached 1.1 ms in the Police level
@@ -2623,10 +2692,14 @@ namespace xlionrender::gi
                 if (Allow > 0 && std::chrono::steady_clock::now() >= Deadline) break;
                 const int Before = RaysDone.load();
                 ++St.m_Rounds;
+                const bool bForce = bTraceToken && St.m_Rays == 0 && RaysDone.load() == 0;   // the token: one unit past the deadline, the first item's
+                St.m_TokenUnits += bForce;
+                bTraceToken = false;
                 ParallelFor(int(Live.size()), [&](int k)
                 {
                     auto& W = m_Pending[Live[k]];
                     const int r0 = W.m_RaysDone, r1 = std::min(W.m_Rays, r0 + Chunk);
+                    if (bForce && k == 0) { TraceChunk(W, r0, r1, L); RaysDone += r1 - r0; return; }
                     if (Allow > 0 && std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::micro>(double(RayUs) * (r1 - r0))) > Deadline) return;
                     TraceChunk(W, r0, r1, L);
                     RaysDone += r1 - r0;
@@ -2634,6 +2707,7 @@ namespace xlionrender::gi
                 if (Allow <= 0 || RaysDone.load() == Before) break;      // one round traces everything without an allowance; no unit fits any more
             }
             St.m_Rays = RaysDone.load();
+            if (AllowMs > 0) m_Starve[1] = !m_Pending.empty() && St.m_Rays == 0 ? m_Starve[1] + 1 : 0;
             m_UnsupportedAt.clear();
             // the governor's estimate of a ray's cost, from this update's units (the mean and the mean deviation, slowly)
             m_RayUsHi *= 0.98f;
@@ -2656,7 +2730,7 @@ namespace xlionrender::gi
                 if (W.m_nUnsupported && m_UnsupportedAt.size() < 4096) m_UnsupportedAt.push_back(W.m_UnsupportedAt);
                 St.m_Hits += W.m_nHits;
             }
-            for (auto& W : m_Pending) { W.m_UnitUs = 0; W.m_UnitRays = 0; W.m_CastUs = W.m_DirectUs = W.m_ReadUs = 0; }
+            for (auto& W : m_Pending) { St.m_TraceCpuMs += W.m_UnitUs * 1e-3; W.m_UnitUs = 0; W.m_UnitRays = 0; W.m_CastUs = W.m_DirectUs = W.m_ReadUs = 0; }
             std::erase_if(m_Pending, [](const work_item& W) { return W.m_RaysDone >= W.m_Rays; });
             St.m_Surfels = int(m_Work.size());
             St.m_Pending = int(m_Pending.size());
@@ -2716,9 +2790,15 @@ namespace xlionrender::gi
                 }
             Lap(St.m_CubeMs);
             ShownSettings();
-            for (int i = 0; i < int(m_Instances.size()); ++i)
-                if (m_Instances[i].m_bAlive) UpdateShown(i);
-                else { m_Instances[i].m_ShownChanged.clear(); m_Instances[i].m_bShownFull = false; }
+            {
+                bool bShowToken = Token == 2, bShowDid = false;
+                const double ShowDeadline = AllowMs > 0 ? AllowMs - PreMs : 0.0;     // what is left of the allowance, measured from T0
+                for (int i = 0; i < int(m_Instances.size()); ++i)
+                    if (m_Instances[i].m_bAlive) bShowDid |= UpdateShown(i, ShowDeadline, AllowMs > 0 ? &T0 : nullptr, &bShowToken);
+                    else { m_Instances[i].m_ShownChanged.clear(); m_Instances[i].m_bShownFull = false; }
+                if (AllowMs > 0) m_Starve[2] = bShowBacklog && !bShowDid ? m_Starve[2] + 1 : 0;
+                St.m_OverAllowMs = AllowMs > 0 ? -Left() : 0.0;                  // (before the bookkeeping that follows: how far past it the stages went)
+            }
             Lap(St.m_FilterMs);
             for (auto& I : m_Instances)
             {
@@ -2830,6 +2910,8 @@ namespace xlionrender::gi
             mutable std::vector<std::uint32_t> m_RevFirst, m_RevIndex;   // per surfel: who reads it (the neighbor lists reversed)
             mutable bool               m_bFilterFull = true;    // UpdateShown makes all of it again
             mutable bool               m_bShownFull  = false;   // the last UpdateShown made all of it
+            mutable int                m_FullPass = -1;         // UpdateShown's whole filter in progress: the pass (nP + 1: shown), -1: none
+            mutable int                m_FullAt   = 0;          // ... and its cursor
             bool                       m_bMeanDirty  = true;    // m_MeanS / m_MeanW are made again (its light changed)
             v3                         m_MeanS{ 0, 0, 0 };      // the sum of its valid surfels' light, and of their validity
             float                      m_MeanW = 0;
@@ -2856,6 +2938,9 @@ namespace xlionrender::gi
             mutable v3              m_BucketLo{ 0, 0, 0 };
             mutable int             m_BucketDim[3] = { 1, 1, 1 };
             mutable std::vector<float> m_BucketPos;             // per surfel: its world center
+            mutable std::vector<int>   m_BucketCellOf;          // per surfel: its cell (BuildBuckets' slices)
+            mutable std::size_t        m_BucketAt = 0;          // BuildBuckets: the next surfel of the slices
+            std::vector<std::array<v3, 3>> m_PendingAffect;     // Phase 6b: changes near it waiting for its buckets (Lo, Hi, reach in x)
             mutable std::vector<std::uint32_t> m_BucketFirst, m_BucketIndex;
             std::vector<std::uint8_t> m_UrgentMark;             // per surfel: 1 in m_Urgent, 2 picked from it this pick
             std::vector<std::uint32_t> m_LastPass;              // per surfel: the update that last finished it
@@ -2872,7 +2957,7 @@ namespace xlionrender::gi
         {
             I.m_L2W = L2W;
             I.m_W2L = L2W.InverseSRT();
-            I.m_bBuckets = false;
+            I.m_bBuckets = false; I.m_BucketAt = 0;
             I.m_MeanScale = (L2W.TransformDirection({ 1, 0, 0 }).Length() + L2W.TransformDirection({ 0, 1, 0 }).Length() + L2W.TransformDirection({ 0, 0, 1 }).Length()) / 3;
             const auto& M = *I.m_pMesh;
             I.m_Lo = { 1e30f, 1e30f, 1e30f }; I.m_Hi = { -1e30f, -1e30f, -1e30f };
@@ -2898,7 +2983,7 @@ namespace xlionrender::gi
         {
             I.m_bFilterFull = true; I.m_bMeanDirty = true;
             ++I.m_MomentsReset;
-            I.m_Urgent.clear(); I.m_UrgentMark.assign(I.m_pMesh->m_Levels[I.m_Level].size(), 0); I.m_bBuckets = false;
+            I.m_Urgent.clear(); I.m_UrgentMark.assign(I.m_pMesh->m_Levels[I.m_Level].size(), 0); I.m_bBuckets = false; I.m_BucketAt = 0;
             I.m_LastPass.assign(I.m_pMesh->m_Levels[I.m_Level].size(), 0); I.m_LastOff.assign(I.m_pMesh->m_Levels[I.m_Level].size(), { 0.0f, 0.0f });
             const auto& L = I.m_pMesh->m_Levels[I.m_Level];
             I.m_Moments.resize(L.size());
@@ -2932,55 +3017,101 @@ namespace xlionrender::gi
                 auto& I = m_Instances[i];
                 if (i == Self || !I.m_bAlive || I.m_E.empty() || !(I.m_Hi.m_X >= A.m_X && I.m_Lo.m_X <= B.m_X && I.m_Hi.m_Y >= A.m_Y && I.m_Lo.m_Y <= B.m_Y && I.m_Hi.m_Z >= A.m_Z && I.m_Lo.m_Z <= B.m_Z)) continue;
                 if (I.m_bDirty) continue;                               // its whole pass is coming anyway
-                BuildBuckets(I);
-                bool bAny = false;
-                const float* W = I.m_BucketPos.data();
-                const int c0[3] = { BucketOf(I, 0, A.m_X), BucketOf(I, 1, A.m_Y), BucketOf(I, 2, A.m_Z) }, c1[3] = { BucketOf(I, 0, B.m_X), BucketOf(I, 1, B.m_Y), BucketOf(I, 2, B.m_Z) };
-                for (int z = c0[2]; z <= c1[2]; ++z) for (int y = c0[1]; y <= c1[1]; ++y) for (int x = c0[0]; x <= c1[0]; ++x)
-                {
-                    const int Cell = (z * I.m_BucketDim[1] + y) * I.m_BucketDim[0] + x;
-                    for (std::uint32_t k = I.m_BucketFirst[Cell]; k < I.m_BucketFirst[Cell + 1]; ++k)
-                    {
-                        const std::uint32_t s = I.m_BucketIndex[k];
-                        const float* C = W + 3 * std::size_t(s);       // (plain floats: a Debug build calls every v3 operator)
-                        const float dx = std::max(std::max(Lo.m_X - C[0], C[0] - Hi.m_X), 0.0f), dy = std::max(std::max(Lo.m_Y - C[1], C[1] - Hi.m_Y), 0.0f), dz = std::max(std::max(Lo.m_Z - C[2], C[2] - Hi.m_Z), 0.0f);
-                        const float a = 1.0f - std::sqrt(dx * dx + dy * dy + dz * dz) / Mg;
-                        if (a <= 0) continue;
-                        I.m_Est[s].Lower(a);
-                        if (a >= 0.5f) I.m_MomCount[s] = {};
-                        if (!I.m_UrgentMark[s]) { I.m_UrgentMark[s] = 1; I.m_Urgent.push_back(int(s)); }
-                        bAny = true;
-                    }
-                }
+                // Phase 6b: its buckets not made yet (the first change near it, or it moved): the box waits, the buckets are made in
+                // slices of the update's allowance (PumpAffects), then it is applied
+                if (!I.m_bBuckets) { I.m_PendingAffect.push_back({ Lo, Hi, v3{ Mg, 0, 0 } }); m_bPendingAffects = true; ++nNew; continue; }
+                const bool bAny = ApplyAffect(I, Lo, Hi, Mg);
                 nNew += bAny;
             }
             if (Self >= 0) MarkDirty(m_Instances[Self], SelfA);
             return nNew;
         }
 
+        // The surfels of I within Mg of the box: lowered by their distance, their moments refreshed by half or more, queued (urgent)
+        bool ApplyAffect(instance& I, const v3& Lo, const v3& Hi, float Mg) noexcept
+        {
+            const v3 M{ Mg, Mg, Mg };
+            const v3 A = Lo - M, B = Hi + M;
+            bool bAny = false;
+            const float* W = I.m_BucketPos.data();
+            const int c0[3] = { BucketOf(I, 0, A.m_X), BucketOf(I, 1, A.m_Y), BucketOf(I, 2, A.m_Z) }, c1[3] = { BucketOf(I, 0, B.m_X), BucketOf(I, 1, B.m_Y), BucketOf(I, 2, B.m_Z) };
+            for (int z = c0[2]; z <= c1[2]; ++z) for (int y = c0[1]; y <= c1[1]; ++y) for (int x = c0[0]; x <= c1[0]; ++x)
+            {
+                const int Cell = (z * I.m_BucketDim[1] + y) * I.m_BucketDim[0] + x;
+                for (std::uint32_t k = I.m_BucketFirst[Cell]; k < I.m_BucketFirst[Cell + 1]; ++k)
+                {
+                    const std::uint32_t s = I.m_BucketIndex[k];
+                    if (s >= I.m_Est.size()) continue;
+                    const float* C = W + 3 * std::size_t(s);       // (plain floats: a Debug build calls every v3 operator)
+                    const float dx = std::max(std::max(Lo.m_X - C[0], C[0] - Hi.m_X), 0.0f), dy = std::max(std::max(Lo.m_Y - C[1], C[1] - Hi.m_Y), 0.0f), dz = std::max(std::max(Lo.m_Z - C[2], C[2] - Hi.m_Z), 0.0f);
+                    const float a = 1.0f - std::sqrt(dx * dx + dy * dy + dz * dz) / Mg;
+                    if (a <= 0) continue;
+                    I.m_Est[s].Lower(a);
+                    if (a >= 0.5f) I.m_MomCount[s] = {};
+                    if (!I.m_UrgentMark[s]) { I.m_UrgentMark[s] = 1; I.m_Urgent.push_back(int(s)); }
+                    bAny = true;
+                }
+            }
+            return bAny;
+        }
+
+        // Phase 6b: the boxes waiting for buckets (AffectNear), their buckets made in slices until the deadline (pToken: one slice past it)
+        bool PumpAffects(double DeadlineMs, const std::chrono::steady_clock::time_point& T0, bool* pToken) noexcept
+        {
+            if (!m_bPendingAffects) return false;
+            bool bDid = false, bLeft = false;
+            const auto Late = [&] { return DeadlineMs > 0 && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count() >= DeadlineMs; };
+            for (auto& I : m_Instances)
+            {
+                if (I.m_PendingAffect.empty()) continue;
+                if (!I.m_bAlive) { I.m_PendingAffect.clear(); continue; }
+                while (!I.m_bBuckets)
+                {
+                    if (Late() && !(pToken && *pToken && !bDid)) break;
+                    if (Late() && pToken) *pToken = false;
+                    BuildBuckets(I, 2048);
+                    bDid = true;
+                }
+                if (!I.m_bBuckets) { bLeft = true; continue; }
+                for (const auto& [Lo, Hi, Mg] : I.m_PendingAffect) ApplyAffect(I, Lo, Hi, Mg.m_X);
+                I.m_PendingAffect.clear();
+            }
+            m_bPendingAffects = bLeft;
+            return bDid;
+        }
+
         // An instance's surfels (its active level) by where they are in the world, in cells of m_ChangeMargin: what a change near it
-        // looks at (AffectNear). Made again after it moves or switches level (m_bBuckets false)
-        void BuildBuckets(instance& I) const noexcept
+        // looks at (AffectNear). Made again after it moves or switches level (m_bBuckets false). Phase 6b: in slices of Slice surfels
+        // (0: all of it now); the cells are counted and filled when the last slice is in
+        void BuildBuckets(instance& I, int Slice = 0) const noexcept
         {
             if (I.m_bBuckets) return;
             const auto& L = I.m_pMesh->m_Levels[I.m_Level];
             const float Cell = std::max(m_Setup.m_ChangeMargin, 1e-3f);
-            I.m_BucketCell = Cell; I.m_BucketLo = I.m_Lo;
-            for (int a = 0; a < 3; ++a) I.m_BucketDim[a] = std::clamp(int((I.m_Hi[a] - I.m_Lo[a]) / Cell) + 1, 1, 256);
+            if (I.m_BucketAt == 0)
+            {
+                I.m_BucketCell = Cell; I.m_BucketLo = I.m_Lo;
+                for (int a = 0; a < 3; ++a) I.m_BucketDim[a] = std::clamp(int((I.m_Hi[a] - I.m_Lo[a]) / Cell) + 1, 1, 256);
+                I.m_BucketPos.resize(3 * L.size());
+                I.m_BucketCellOf.resize(L.size());
+            }
             const int nCells = I.m_BucketDim[0] * I.m_BucketDim[1] * I.m_BucketDim[2];
-            I.m_BucketPos.resize(3 * L.size());
-            std::vector<int> CellOf(L.size());
-            I.m_BucketFirst.assign(std::size_t(nCells) + 1, 0);
+            auto& CellOf = I.m_BucketCellOf;
             float T[12];                                        // the placement as plain floats (a Debug build calls every v3 and matrix operator)
             for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) T[r * 4 + c] = I.m_L2W(r, c);
-            for (std::size_t s = 0; s < L.size(); ++s)
+            const std::size_t End = Slice > 0 ? std::min(L.size(), I.m_BucketAt + std::size_t(Slice)) : L.size();
+            for (std::size_t s = I.m_BucketAt; s < End; ++s)
             {
                 const float x = L[s].m_Center.m_X, y = L[s].m_Center.m_Y, z = L[s].m_Center.m_Z;
                 float* C = &I.m_BucketPos[3 * s];
                 for (int r = 0; r < 3; ++r) C[r] = T[r * 4] * x + T[r * 4 + 1] * y + T[r * 4 + 2] * z + T[r * 4 + 3];
                 CellOf[s] = (BucketOf(I, 2, C[2]) * I.m_BucketDim[1] + BucketOf(I, 1, C[1])) * I.m_BucketDim[0] + BucketOf(I, 0, C[0]);
-                ++I.m_BucketFirst[CellOf[s] + 1];
             }
+            I.m_BucketAt = End;
+            if (End < L.size()) return;
+            I.m_BucketAt = 0;
+            I.m_BucketFirst.assign(std::size_t(nCells) + 1, 0);
+            for (std::size_t s = 0; s < L.size(); ++s) ++I.m_BucketFirst[CellOf[s] + 1];
             for (int c = 0; c < nCells; ++c) I.m_BucketFirst[c + 1] += I.m_BucketFirst[c];
             I.m_BucketIndex.resize(L.size());
             std::vector<std::uint32_t> At(I.m_BucketFirst.begin(), I.m_BucketFirst.end() - 1);
@@ -3267,6 +3398,7 @@ namespace xlionrender::gi
                 B.m_Off[s] = std::uint32_t(B.m_Flat.size()); B.m_Cnt[s] = Count[std::size_t(j)];
                 B.m_Flat.insert(B.m_Flat.end(), Scratch.begin() + std::ptrdiff_t(j) * max_links_v, Scratch.begin() + std::ptrdiff_t(j) * max_links_v + Count[std::size_t(j)]);
             }
+            m_LastChunkCpuUs = 0; for (const float u : Us) m_LastChunkCpuUs += u;
             return n ? *std::max_element(Us.begin(), Us.end()) : 0.0f;
         }
 
@@ -3339,7 +3471,7 @@ namespace xlionrender::gi
         // The link work of an update: the queued receivers' marked surfels in chunks until the queue is empty or AllowMs is spent (0: no
         // limit, everything now). A chunk is sized by the slowest recent surfel; one started finishes (the overshoot is one chunk), and
         // every update makes progress (at least one surfel per worker). Returns the time it used
-        double PumpLinks(double AllowMs, stats& St) noexcept
+        double PumpLinks(double AllowMs, stats& St, bool bToken = false) noexcept
         {
             const auto T0 = std::chrono::steady_clock::now();
             const auto Elapsed = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count(); };
@@ -3377,25 +3509,26 @@ namespace xlionrender::gi
                 auto& B = m_LinkCur;
                 if (!m_Instances[B.m_Inst].m_bAlive) { B = {}; continue; }
                 const int Left = int(B.m_List.size()) - B.m_Next;
-                if (Left > 0 && AllowMs > 0 && B.m_Next > 0 && Elapsed() >= AllowMs) break;
+                if (Left > 0 && AllowMs > 0 && Elapsed() >= AllowMs && !bToken) break;
                 if (Left > 0)
                 {
                     const double Used = Elapsed();
-                    if (AllowMs > 0 && Used >= AllowMs && St.m_LinkSurfels > 0) break;
+                    if (AllowMs > 0 && Used >= AllowMs && !bToken) break;
                     int Chunk = Left;
                     if (AllowMs > 0)
                     {
                         // the workers take a surfel each: a chunk of n costs about n / workers of the slowest surfel lately
-                        int Fit = m_LinkUsHi > 0 ? int((AllowMs - Used) * 1000.0 / double(m_LinkUsHi)) * ParallelWidth() : link_unit_first_v;
+                        int Fit = m_LinkUsHi > 0 ? int((AllowMs - Used) * 1000.0 * double(ParallelWidth()) / double(m_LinkUsHi)) : link_unit_first_v;   // (the time, then the workers: not truncated to whole surfels first)
                         if (Fit < 1)
                         {
-                            if (St.m_LinkSurfels > 0) break;                        // it would not fit: next update
-                            Fit = ParallelWidth();                                  // but every update makes progress (the one-unit overshoot)
+                            if (!bToken) break;                                     // it would not fit: next update
+                            bToken = false; Fit = 1; ++St.m_TokenUnits;             // the token (the stage that waited longest): one surfel past it
                         }
-                        Chunk = std::min(Fit, Left);
+                        Chunk = std::min({ Fit, Left, ParallelWidth() });       // one round at most (a surfel per worker): admitted again before the next, the overshoot one surfel's time
                     }
                     Chunk = std::min(Chunk, 4096);                                  // (the chunk's scratch: 32 links a surfel)
                     const float SlowUs = BuildLinkChunk(B, B.m_Next, Chunk);
+                    St.m_LinkCpuMs += m_LastChunkCpuUs * 1e-3; St.m_LinkLongestUs = std::max(St.m_LinkLongestUs, double(SlowUs));
                     m_LinkUsHi = std::max(m_LinkUsHi * 0.98f, SlowUs);              // conservative: the slowest surfel lately (it decays)
                     B.m_Next += Chunk; St.m_LinkSurfels += Chunk;
                 }
@@ -3536,6 +3669,7 @@ namespace xlionrender::gi
         std::deque<int>                         m_LinkQueue;                // receivers waiting for a link build (MarkLinks)
         link_build                              m_LinkCur;                  // the one being built
         std::vector<emitter_pt>                 m_Em;                       // per m_Emitters: world center, normal, area
+        float                                   m_LastChunkCpuUs = 0;       // BuildLinkChunk: its surfels' time, summed (batch accounting)
         float                                   m_LinkUsHi = 0;             // a link build's cost of one receiver surfel, the slowest lately
         int                                     m_nMovesAcc = 0, m_MoveMarked = 0;     // (instrumentation) SetTransform since the last update
         double                                  m_MovesMsAcc = 0;
@@ -3545,6 +3679,8 @@ namespace xlionrender::gi
         unsigned                                m_nUpdates = 0;
         int                                     m_nLinkRebuilds = 0;        // (tests)
         unsigned                                m_RelightAt = 0;            // RelightAll: the update from which it may run again
+        int                                     m_Starve[4] = { 0, 0, 0, 0 };   // Phase 6b: per stage (links, trace, shown, events) the updates it had work and did none: the token's
+        bool                                    m_bPendingAffects = false;  // some instance has changes waiting for its buckets (PumpAffects)
         bool                                    m_bRelightDeferred = false; // a RelightAll that came too soon (Update runs it when it may)
         mutable int                             m_ShownPasses = -1;         // the settings the shown light was made with (ShownSettings)
         mutable float                           m_ShownSat    = -1;

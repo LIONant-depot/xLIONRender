@@ -176,7 +176,7 @@ namespace xlionrender
         W.m_Setup.m_Saturation    = std::clamp(Scene.m_GI.m_Saturation, 0.0f, 4.0f);     // what is shown only: no re-solve
         W.m_Setup.m_ProjScale     = ProjScale;
         W.m_Setup.m_TraceAllowanceMs = std::max(Scene.m_GI.m_TraceAllowanceMs, 0.0f);
-        W.m_Setup.m_ShowAllowanceMs  = 0.5f * W.m_Setup.m_TraceAllowanceMs;       // the shown light's halo work (Phase 3): half the trace's, per instance
+        W.m_Setup.m_OverheadMs       = float(m_GIOverheadMs);                      // Phase 6b: this renderer's GI work outside Update (its last frames), from the allowance
         W.m_Setup.m_PixelsPerSurfel = std::max(Scene.m_GI.m_PixelsPerSurfel, 0.0f);
         if( W.m_Setup.m_EmissiveScale != Scene.m_GI.m_EmissiveScale )          // a new scale: every instance re-solves
         {
@@ -316,6 +316,7 @@ namespace xlionrender
         m_GIStats.m_MomentsMs += MsSince(TMomentsCopy);
         m_GIStats.m_UploadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TUpload).count();
         m_GIStats.m_UpdateGIMs = MsSince(TGI);
+        m_GIOverheadMs += (std::max(m_GIStats.m_UpdateGIMs - m_GIStats.m_TotalMs, 0.0) - m_GIOverheadMs) * 0.2;      // (the outside part, slowly)
         m_GIStats.m_LoadMs = m_GILoadMsAcc; m_GILoadMsAcc = 0;
         m_GIFrames.push_back({ m_Device.getFrameIndex(), m_GIStats });
         if( m_GIFrames.size() > gi_frame_log_v ) m_GIFrames.erase(m_GIFrames.begin(), m_GIFrames.begin() + std::ptrdiff_t(m_GIFrames.size() - gi_frame_log_v));

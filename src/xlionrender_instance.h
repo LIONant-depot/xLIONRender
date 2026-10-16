@@ -269,6 +269,7 @@ namespace xlionrender
         xgpu::buffer                m_GIMomentRing;             // per surfel of m_GILightRing: gi::moment_texels_v uints (half mean, half mean^2) - ponytail: 48 MB host-visible, size it to the scenes if it matters
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
         std::uint64_t               m_GIRender = 0;
+        double                      m_GIOverheadMs = 0;         // the GI's main-thread work in updateGI outside gi::world::Update (the upload), smoothed: its allowance's pre-charge
         struct gi_frame { std::uint64_t m_Frame; gi::world::stats m_Stats; };
         static constexpr std::size_t gi_frame_log_v = 1200;     // about 20 s at 60 FPS
         std::vector<gi_frame>       m_GIFrames;                 // DumpGIFrames
