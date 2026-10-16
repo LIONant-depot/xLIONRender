@@ -1168,6 +1168,10 @@ namespace xlionrender
         using clock = std::chrono::steady_clock;
         const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
         const auto T0 = clock::now();
+        // The probe atlas and the shadow atlas are bound by every lit pipeline, the GI capture's below included: cleared before anything samples them
+        // (the first frame's capture used to read them undefined: a Vulkan validation error)
+        if( !m_bProbeAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ProbeAtlasClearPass); m_bProbeAtlasReady = true; }
+        if( !m_bShadowAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ShadowClearPass); m_bShadowAtlasReady = true; }
         updateEnvironment(Window, Scene);
         updateInstances(Window, Scene, Eye);
         updateGI(Scene, Eye, ProjScale);                                   // CPU (getGIStats); the probes' captures read it too
