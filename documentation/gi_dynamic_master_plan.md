@@ -345,6 +345,48 @@ working CPU result
   scene stays within its share of the allowance, and an image comparison shows no mixing between published and in-progress
   data.
 
+**Phase 3 results** (2026-10-17, Police, Debug, the Phase 0 wall drag and release):
+
+| GI main thread per frame | Phase 2 | Phase 3 |
+|---|---|---|
+| Mean while settled | 10.9 ms | 2.7–2.9 ms |
+| Worst during the drag, after the release | 16.0 ms | 6.5 ms |
+| Upload | 3.03 MB/frame | 0.2–0.4 MB/frame |
+
+What was built:
+- **The shown light (`UpdateShown`).**
+  - The filter's passes are kept per instance. The surfels finished in an update are pass 0's dirty set, and each further
+    pass is made again for the surfels that read any made again by the pass before: the reverse neighbour lists, a halo that
+    grows one ring a pass.
+  - The halo work runs in chunks of 64 dirty surfels within `m_ShowAllowanceMs` (half the trace's allowance), and a backlog
+    waits for the next update. Past a quarter of the instance, the whole filter runs in parallel instead.
+  - A level switch, a new layout or a new setting (passes, saturation) makes all of it again.
+  - `BasisLight` returns the kept result.
+- **The rings (`updateGI`).**
+  - Every instance has a stable place in every frame slot: its mean, then its surfels. The places come from a first-fit
+    allocator, compacted when it is full.
+  - Each instance keeps, per slot, the surfels the slot has not had since they changed (or "all of it"), for the light and
+    for the moments. A slot is written only those.
+  - Each frame's slot is therefore one complete version, never written while the GPU reads it. This is the publication
+    protocol at the scale of a ring slot.
+- **The statistics.**
+  - Per instance, kept where they change: the mean light and the bad count by deltas over finished surfels, summed again
+    exactly once per surfel count of deltas; the material's colours when it is set; the emitted light's maximum with the
+    emitted light.
+  - No loop over every surfel per update remains. A census every 16th update was tried first and caused 3 ms spikes.
+- **Tests.** 6j12 checks that the incremental shown light equals the whole filter made again (difference 0), through a
+  sliced backlog. A settled update makes again 507 of 3469 floor surfels at most. All GI and GPU render tests pass, with
+  output unchanged.
+- **Image.** An overview capture of the Police level matches the Phase 2b build. The large dark block in both images is
+  unconverged light, not this change.
+
+Left for later phases:
+- Persistent GPU storage per instance, without the per-slot copies. Today the 3 slots hold 3 copies, which costs memory, not
+  time.
+- Publication of partial ranges.
+- The remaining spikes (6.5 ms) are a link chunk plus a filter chunk landing in the same frame. Phase 4 and the host
+  allowance can schedule them against each other.
+
 ### Phase 4: Splitting the solver's state
 
 Separate what one dirty flag does today:

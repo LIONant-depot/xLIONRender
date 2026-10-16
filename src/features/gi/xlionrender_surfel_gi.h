@@ -1489,7 +1489,8 @@ namespace xlionrender::gi
             bool    m_bDistanceTiers = true;    // a surfel far from the eye (in its radii) is traced every 2nd, 4th, 8th pass (Update)
             float   m_Saturation    = 1;        // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
             float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
-            int     m_FilterPasses  = 4;        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
+            int     m_FilterPasses  = 4;
+            float   m_ShowAllowanceMs = 0;      // Phase 3: the shown light's halo work per update and instance (UpdateShown; 0: all of it now). The renderer sets it with the trace's        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
             bool    m_bSpreadOrigins = true;    // the fine surfels' rays start across their patch (surfel_mesh::BuildOrigins), not at their center
             float   m_LodDistance   = 40;       // the priority's distance scale: an instance this far (eye to bounds) scores half as much (Update)
             float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
@@ -1755,78 +1756,139 @@ namespace xlionrender::gi
 
         // The light the reads show (the GPU's upload), per basis direction: 3 x the light times its fractions (their mean is the light),
         // blended with the neighbors' (the mesh's neighbor lists, their weights times their validity; itself at weight 1),
-        // m_Setup.m_FilterPasses times over. The independent noise of neighboring surfels averages out. Only what is shown: the solver
-        // keeps its own light (a filter fed back every update would keep spreading the light)
-        // Every frame for every shown instance (the GPU's upload): on plain floats through raw pointers (a Debug build calls every
-        // vector and v3 operator: 175 ms a frame for the Police Station's 63k surfels), the surfels in blocks across the workers
+        // m_Setup.m_FilterPasses times over, then saturated. The independent noise of neighboring surfels averages out. Only what is
+        // shown: the solver keeps its own light (a filter fed back every update would keep spreading the light). Kept by UpdateShown
         const std::vector<basis>& BasisLight( int Id ) const noexcept
         {
-            const auto& I  = m_Instances[Id];
-            const auto& Nb = I.m_pMesh->m_Neighbors[I.m_Level];
+            ShownSettings();
+            const auto& I = m_Instances[Id];
+            if (I.m_Shown.size() != I.m_E.size() || I.m_bFilterFull) UpdateShown(Id);
+            return I.m_Shown;
+        }
+        // What the last Update changed of an instance's shown light (the renderer uploads only that): all of it, or these surfels
+        bool                      ShownFull   ( int Id ) const noexcept { return m_Instances[Id].m_bShownFull; }
+        void                      ShowAllAgain( void ) const noexcept { for (int i = 0; i < int(m_Instances.size()); ++i) if (m_Instances[i].m_bAlive) { m_Instances[i].m_bFilterFull = true; UpdateShown(i); } }   // (tests: the full filter, to compare)
+        const std::vector<int>&   ShownChanged( int Id ) const noexcept { return m_Instances[Id].m_ShownChanged; }
+
+        // The shown light kept up to date (Phase 3: no filter over every surfel every frame). The passes are kept; the surfels whose light,
+        // fractions or validity changed (m_FilterDirty: the ones finished) are pass 0's, and each further pass is made again for the
+        // surfels that read any made again by the pass before (the reverse neighbor lists): the dependency halo grows one ring a pass.
+        // A level switch, a new layout or a new setting (passes, saturation) makes all of it again
+        void UpdateShown(int Id) const noexcept
+        {
+            const auto& I = m_Instances[Id];
             const int   n  = int(I.m_E.size());
-            auto&       F  = I.m_Filtered;
-            F.resize(n);
+            const auto& Nb = I.m_pMesh->m_Neighbors[I.m_Level];
+            const bool  bNb = Nb.m_First.size() == std::size_t(n) + 1;
+            const int   nP  = bNb ? std::clamp(m_Setup.m_FilterPasses, 0, 16) : 0;
+            I.m_ShownChanged.clear(); I.m_bShownFull = false;
+            const auto Pass0 = [&](int s)
             {
-                const v3* pE = I.m_E.data(); const basis* pFrac = I.m_Frac.data(); basis* pF = F.data();
-                for (int s = 0; s < n; ++s)
-                    for (int i = 0; i < 3; ++i)
-                    {
-                        const v3& f = pFrac[s][i];
-                        pF[s][i].m_X = pE[s].m_X * f.m_X * 3.0f; pF[s][i].m_Y = pE[s].m_Y * f.m_Y * 3.0f; pF[s][i].m_Z = pE[s].m_Z * f.m_Z * 3.0f;
-                    }
-            }
-            if (Nb.m_First.size() != std::size_t(n) + 1 || m_Setup.m_FilterPasses <= 0) { Saturate(F); return F; }
-            auto& In = I.m_FilterIn;
-            In.resize(n);
-            const std::uint32_t* pFirst = Nb.m_First.data(); const std::uint32_t* pIdx = Nb.m_Index.data();
-            const float* pWt = Nb.m_Weight.data(); const float* pValid = I.m_Valid.data();
-            constexpr int block_v = 512;
-            for (int Pass = 0; Pass < m_Setup.m_FilterPasses; ++Pass)
-            {
-                In.swap(F);
-                const basis* pIn = In.data(); basis* pOut = F.data();
-                ParallelFor((n + block_v - 1) / block_v, [&](int b)
+                for (int i = 0; i < 3; ++i)
                 {
-                    const int s1 = std::min(n, (b + 1) * block_v);
-                    for (int s = b * block_v; s < s1; ++s)
-                    {
-                        const basis& Me = pIn[s];
-                        float a0 = Me[0].m_X, a1 = Me[0].m_Y, a2 = Me[0].m_Z, a3 = Me[1].m_X, a4 = Me[1].m_Y, a5 = Me[1].m_Z, a6 = Me[2].m_X, a7 = Me[2].m_Y, a8 = Me[2].m_Z, W = 1;
-                        for (std::uint32_t k = pFirst[s], k1 = pFirst[s + 1]; k < k1; ++k)
-                        {
-                            const std::uint32_t j = pIdx[k];
-                            const float w = pWt[k] * pValid[j];
-                            const basis& B = pIn[j];
-                            a0 += B[0].m_X * w; a1 += B[0].m_Y * w; a2 += B[0].m_Z * w;
-                            a3 += B[1].m_X * w; a4 += B[1].m_Y * w; a5 += B[1].m_Z * w;
-                            a6 += B[2].m_X * w; a7 += B[2].m_Y * w; a8 += B[2].m_Z * w;
-                            W += w;
-                        }
-                        const float r = 1.0f / W;
-                        basis& O = pOut[s];
-                        O[0].m_X = a0 * r; O[0].m_Y = a1 * r; O[0].m_Z = a2 * r;
-                        O[1].m_X = a3 * r; O[1].m_Y = a4 * r; O[1].m_Z = a5 * r;
-                        O[2].m_X = a6 * r; O[2].m_Y = a7 * r; O[2].m_Z = a8 * r;
-                    }
-                });
+                    const v3& f = I.m_Frac[s][i];
+                    I.m_Pass[0][s][i] = v3{ I.m_E[s].m_X * f.m_X * 3.0f, I.m_E[s].m_Y * f.m_Y * 3.0f, I.m_E[s].m_Z * f.m_Z * 3.0f };
+                }
+            };
+            const auto PassAt = [&](int p, int s)      // (plain floats through raw pointers: a Debug build calls every v3 operator)
+            {
+                const basis* pIn = I.m_Pass[p - 1].data();
+                const basis& Me = pIn[s];
+                float a0 = Me[0].m_X, a1 = Me[0].m_Y, a2 = Me[0].m_Z, a3 = Me[1].m_X, a4 = Me[1].m_Y, a5 = Me[1].m_Z, a6 = Me[2].m_X, a7 = Me[2].m_Y, a8 = Me[2].m_Z, W = 1;
+                for (std::uint32_t k = Nb.m_First[s], k1 = Nb.m_First[s + 1]; k < k1; ++k)
+                {
+                    const std::uint32_t j = Nb.m_Index[k];
+                    const float w = Nb.m_Weight[k] * I.m_Valid[j];
+                    const basis& B = pIn[j];
+                    a0 += B[0].m_X * w; a1 += B[0].m_Y * w; a2 += B[0].m_Z * w;
+                    a3 += B[1].m_X * w; a4 += B[1].m_Y * w; a5 += B[1].m_Z * w;
+                    a6 += B[2].m_X * w; a7 += B[2].m_Y * w; a8 += B[2].m_Z * w;
+                    W += w;
+                }
+                const float r = 1.0f / W;
+                basis& O = I.m_Pass[p][s];
+                O[0].m_X = a0 * r; O[0].m_Y = a1 * r; O[0].m_Z = a2 * r;
+                O[1].m_X = a3 * r; O[1].m_Y = a4 * r; O[1].m_Z = a5 * r;
+                O[2].m_X = a6 * r; O[2].m_Y = a7 * r; O[2].m_Z = a8 * r;
+            };
+            const auto Show = [&](int s) { I.m_Shown[s] = I.m_Pass[nP][s]; SaturateOne(I.m_Shown[s]); };
+            const auto Blocks = [&](std::size_t Count, auto&& Fn)     // Fn(k) for k in [0, Count) across the workers, in blocks
+            {
+                constexpr std::size_t block_v = 256;
+                ParallelFor(int((Count + block_v - 1) / block_v), [&](int b) { for (std::size_t k = std::size_t(b) * block_v; k < std::min(Count, std::size_t(b + 1) * block_v); ++k) Fn(k); });
+            };
+            bool bFull = I.m_bFilterFull || I.m_Shown.size() != std::size_t(n) || int(I.m_Pass.size()) != nP + 1 || I.m_Pass[0].size() != std::size_t(n);
+            if (!bFull && I.m_FilterDirty.size() * 4 > std::size_t(n)) bFull = true;       // a backlog past a quarter of it: all of it at once
+            if (bFull)
+            {
+                I.m_Pass.assign(std::size_t(nP) + 1, std::vector<basis>(std::size_t(n)));
+                I.m_Shown.resize(std::size_t(n)); I.m_Mark.assign(std::size_t(n), 0);
+                I.m_RevFirst.clear(); I.m_RevIndex.clear();
+                if (bNb)        // who reads each surfel (the neighbor lists need not be symmetric: the radii may differ)
+                {
+                    I.m_RevFirst.assign(std::size_t(n) + 1, 0);
+                    for (const auto j : Nb.m_Index) ++I.m_RevFirst[j + 1];
+                    for (int s = 0; s < n; ++s) I.m_RevFirst[s + 1] += I.m_RevFirst[s];
+                    I.m_RevIndex.resize(Nb.m_Index.size());
+                    std::vector<std::uint32_t> At(I.m_RevFirst.begin(), I.m_RevFirst.end() - 1);
+                    for (int s = 0; s < n; ++s) for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k) I.m_RevIndex[At[Nb.m_Index[k]]++] = std::uint32_t(s);
+                }
+                Blocks(std::size_t(n), [&](std::size_t k) { Pass0(int(k)); });
+                for (int p = 1; p <= nP; ++p) Blocks(std::size_t(n), [&](std::size_t k) { PassAt(p, int(k)); });
+                Blocks(std::size_t(n), [&](std::size_t k) { Show(int(k)); });
+                I.m_bShownFull = true; I.m_bFilterFull = false; I.m_FilterDirty.clear();
+                return;
             }
-            Saturate(F);
-            return F;
+            if (I.m_FilterDirty.empty()) return;
+            // The halo work in slices: the dirty surfels in chunks of 64 until m_ShowAllowanceMs is spent (one chunk at least); the rest
+            // waits for the next update (shown a little later, never mixed: each surfel's value is made from the passes as they are)
+            const auto TS = std::chrono::steady_clock::now();
+            std::vector<int> Changed;
+            std::size_t Taken = 0;
+            while (Taken < I.m_FilterDirty.size())
+            {
+                auto& Cur = I.m_ShownChanged;
+                Cur.clear();
+                const std::size_t End = std::min(I.m_FilterDirty.size(), Taken + 64);
+                for (; Taken < End; ++Taken) if (const int x = I.m_FilterDirty[Taken]; x < n && !I.m_Mark[x]) { I.m_Mark[x] = 1; Cur.push_back(x); }
+            Blocks(Cur.size(), [&](std::size_t k) { Pass0(Cur[k]); });
+            for (int p = 1; p <= nP; ++p)
+            {
+                const std::size_t k0 = Cur.size();
+                for (std::size_t c = 0; c < k0; ++c)
+                    for (std::uint32_t k = I.m_RevFirst[Cur[c]]; k < I.m_RevFirst[Cur[c] + 1]; ++k)
+                        if (const auto r = I.m_RevIndex[k]; !I.m_Mark[r]) { I.m_Mark[r] = 1; Cur.push_back(int(r)); }
+                Blocks(Cur.size(), [&](std::size_t k) { PassAt(p, Cur[k]); });
+            }
+            Blocks(Cur.size(), [&](std::size_t k) { Show(Cur[k]); });
+            for (const int x : Cur) I.m_Mark[x] = 0;
+                Changed.insert(Changed.end(), Cur.begin(), Cur.end());
+                if (m_Setup.m_ShowAllowanceMs > 0 && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TS).count() >= m_Setup.m_ShowAllowanceMs) break;
+            }
+            I.m_FilterDirty.erase(I.m_FilterDirty.begin(), I.m_FilterDirty.begin() + std::ptrdiff_t(Taken));
+            I.m_ShownChanged = std::move(Changed);
         }
 
-        // The shown light's saturation: each color of the basis moved from its luminance by m_Setup.m_Saturation (the luminance kept; what
-        // the filter and the surfels' size average away). Only what is shown (the solver's light is not touched: its bounces would compound it)
-        void Saturate(std::vector<basis>& F) const noexcept
+        // A new setting of what is shown (the passes, the saturation): all of it is made again
+        void ShownSettings() const noexcept
+        {
+            if (m_ShownPasses == m_Setup.m_FilterPasses && m_ShownSat == m_Setup.m_Saturation) return;
+            for (const auto& I : m_Instances) I.m_bFilterFull = true;
+            m_ShownPasses = m_Setup.m_FilterPasses; m_ShownSat = m_Setup.m_Saturation;
+        }
+
+        // A color of the shown basis moved from its luminance by m_Setup.m_Saturation (the luminance kept; what the filter and the
+        // surfels' size average away). Only what is shown (the solver's light is not touched: its bounces would compound it)
+        void SaturateOne(basis& B) const noexcept
         {
             const float Sa = m_Setup.m_Saturation;
             if (Sa == 1.0f) return;
-            for (auto& B : F)
-                for (int i = 0; i < 3; ++i)
-                {
-                    v3& C = B[i];
-                    const float Y = 0.2126f * C.m_X + 0.7152f * C.m_Y + 0.0722f * C.m_Z;
-                    C.m_X = std::max(Y + (C.m_X - Y) * Sa, 0.0f); C.m_Y = std::max(Y + (C.m_Y - Y) * Sa, 0.0f); C.m_Z = std::max(Y + (C.m_Z - Y) * Sa, 0.0f);
-                }
+            for (int i = 0; i < 3; ++i)
+            {
+                v3& C = B[i];
+                const float Y = 0.2126f * C.m_X + 0.7152f * C.m_Y + 0.0722f * C.m_Z;
+                C.m_X = std::max(Y + (C.m_X - Y) * Sa, 0.0f); C.m_Y = std::max(Y + (C.m_Y - Y) * Sa, 0.0f); C.m_Z = std::max(Y + (C.m_Z - Y) * Sa, 0.0f);
+            }
         }
 
         // The mean of the shown basis (what a surfel's own normal reads)
@@ -2422,10 +2484,15 @@ namespace xlionrender::gi
                 v3 WSum{ 0, 0, 0 }; float WW = 0;
                 for (auto& I : m_Instances)
                 {
-                    v3 S{ 0, 0, 0 }; float W = 0;
-                    if (I.m_bAlive) for (std::size_t s = 0; s < I.m_E.size(); ++s) { S = S + I.m_E[s] * I.m_Valid[s]; W += I.m_Valid[s]; }
-                    I.m_MeanE = W > 0 ? S * (1.0f / W) : v3{ -1, -1, -1 };
-                    WSum = WSum + S; WW += W;
+                    if (!I.m_bAlive) { I.m_MeanS = v3{ 0, 0, 0 }; I.m_MeanW = 0; I.m_nBad = 0; I.m_bMeanDirty = false; }
+                    else if (I.m_bMeanDirty)            // (Phase 3: only an instance whose light changed)
+                    {
+                        v3 S{ 0, 0, 0 }; float W = 0; int nBad = 0;
+                        for (std::size_t s = 0; s < I.m_E.size(); ++s) { S = S + I.m_E[s] * I.m_Valid[s]; W += I.m_Valid[s]; nBad += BadSurfel(I.m_E[s], I.m_Valid[s]); }
+                        I.m_MeanS = S; I.m_MeanW = W; I.m_nBad = nBad; I.m_nMeanDeltas = 0; I.m_bMeanDirty = false;
+                    }
+                    I.m_MeanE = I.m_MeanW > 0 ? I.m_MeanS * (1.0f / I.m_MeanW) : v3{ -1, -1, -1 };
+                    WSum = WSum + I.m_MeanS; WW += I.m_MeanW;
                 }
                 const v3 World = WW > 0 ? WSum * (1.0f / WW) : v3{ 0, 0, 0 };
                 for (auto& I : m_Instances) if (I.m_MeanE.m_X < 0) I.m_MeanE = World;
@@ -2501,6 +2568,9 @@ namespace xlionrender::gi
                 // The light: the estimator (it warms up after a change, settles, and still follows one). The validity and the depth
                 // moments: their own slow blends (they weigh the reads: noise there swims too)
                 auto& Es = I.m_Est[s];
+                I.m_FilterDirty.push_back(s);
+                I.m_MeanS = I.m_MeanS - I.m_E[s] * I.m_Valid[s]; I.m_MeanW -= I.m_Valid[s];     // its share of the mean, out (in again below)
+                I.m_nBad -= BadSurfel(I.m_E[s], I.m_Valid[s]);
                 Es.Add(I.m_Acc[s], m_Setup.m_MinBlend);
                 I.m_E[s] = Es.m_Mean;
                 const float av = std::max(I.m_PassAlpha, 0.05f);
@@ -2528,15 +2598,24 @@ namespace xlionrender::gi
                     Mo[2 * t + 1] += (MA[3 * t + 1] / MA[3 * t + 2] - Mo[2 * t + 1]) * a;
                 }
                 if (I.m_Valid[s] < 1e-6f) I.m_Valid[s] = 0;         // buried: 0, not a decay into denormals (the reads divide by sums of these weights)
+                I.m_MeanS = I.m_MeanS + I.m_E[s] * I.m_Valid[s]; I.m_MeanW += I.m_Valid[s];     // its new share of the mean
+                I.m_nBad += BadSurfel(I.m_E[s], I.m_Valid[s]);
+                if (++I.m_nMeanDeltas > I.m_E.size()) I.m_bMeanDirty = true;  // summed again exactly now and then (float drift)
             }
 
             for (int i = 0; i < int(m_Instances.size()); ++i)
                 if (m_Instances[i].m_bAlive && m_Instances[i].m_bCube)
                 {
                     ExpandCube(i);
+                    m_Instances[i].m_bFilterFull = true; m_Instances[i].m_bMeanDirty = true;   // (36 parents or so)
                     ++St.m_nCubes; St.m_CubeParents += int(m_Instances[i].m_pMesh->m_Levels[1].size());
                 }
             Lap(St.m_CubeMs);
+            ShownSettings();
+            for (int i = 0; i < int(m_Instances.size()); ++i)
+                if (m_Instances[i].m_bAlive) UpdateShown(i);
+                else { m_Instances[i].m_ShownChanged.clear(); m_Instances[i].m_bShownFull = false; }
+            Lap(St.m_FilterMs);
             for (auto& I : m_Instances)
             {
                 if (!I.m_bAlive) continue;
@@ -2544,24 +2623,22 @@ namespace xlionrender::gi
                 I.m_bPicked = false;
             }
             St.m_Ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
-            for (const auto& I : m_Instances)
-                for (std::size_t s = 0; s < I.m_E.size(); ++s)
-                    St.m_nBad += !(std::isfinite(I.m_E[s].m_X + I.m_E[s].m_Y + I.m_E[s].m_Z + I.m_Valid[s]) && I.m_E[s].m_X >= 0 && I.m_E[s].m_Y >= 0 && I.m_E[s].m_Z >= 0);
+            // The diagnostics, from what each instance keeps where it changes (Phase 3: no loop over every surfel every update): its
+            // bad surfels and its mean (the finished surfels' deltas), its colors (its material), its emitted light (UpdateEmittedLight)
             std::size_t nAlbedo = 0;
             for (const auto& I : m_Instances)
             {
-                if (!I.m_bAlive || I.m_SurfAlbedo.empty()) continue;
+                if (!I.m_bAlive) continue;
+                St.m_nBad += I.m_nBad;
+                St.m_nLinks += int(I.m_Links.size());
+                St.m_MaxEmitted = std::max(St.m_MaxEmitted, I.m_MaxEmitted);
+                if (I.m_nAlbedo == 0) continue;
                 ++St.m_nColored;
-                for (const auto& a : I.m_SurfAlbedo) St.m_MeanAlbedo = St.m_MeanAlbedo + a;
-                nAlbedo += I.m_SurfAlbedo.size();
-                for (const auto& e : I.m_SurfEmission) St.m_nEmissive += (e.m_X + e.m_Y + e.m_Z) > 0.01f;
+                St.m_MeanAlbedo = St.m_MeanAlbedo + I.m_AlbedoSum;
+                nAlbedo += I.m_nAlbedo;
+                St.m_nEmissive += I.m_nEmissiveSurf;
             }
             if (nAlbedo) St.m_MeanAlbedo = St.m_MeanAlbedo * (1.0f / float(nAlbedo));
-            for (const auto& I : m_Instances)
-            {
-                St.m_nLinks += int(I.m_Links.size());
-                for (const auto& B : I.m_EmitB) St.m_MaxEmitted = std::max(St.m_MaxEmitted, (B[0].m_X + B[1].m_X + B[2].m_X + B[0].m_Y + B[1].m_Y + B[2].m_Y) / 6.0f);
-            }
             for (const auto& [i, e] : m_Emitters)
             {
                 const v3 Le = m_Instances[i].m_SurfEmission[e] * m_Setup.m_EmissiveScale;
@@ -2577,7 +2654,8 @@ namespace xlionrender::gi
                                  + (I.m_Valid.capacity() + I.m_AccValid.capacity()) * sizeof(float)
                                  + I.m_Est.capacity() * sizeof(estimator) + (I.m_Frac.capacity() + I.m_BasisAcc.capacity() + I.m_EmitB.capacity()) * sizeof(basis)
                                  + I.m_Moments.capacity() * sizeof(moments) + I.m_MomAcc.capacity() * sizeof(I.m_MomAcc[0]) + I.m_MomCount.capacity() * sizeof(I.m_MomCount[0]);
-                St.m_FilterBytes += (I.m_Filtered.capacity() + I.m_FilterIn.capacity()) * sizeof(basis);
+                for (const auto& P : I.m_Pass) St.m_FilterBytes += P.capacity() * sizeof(basis);
+                St.m_FilterBytes += I.m_Shown.capacity() * sizeof(basis) + (I.m_RevFirst.capacity() + I.m_RevIndex.capacity()) * sizeof(std::uint32_t);
             }
             Lap(St.m_StatsMs);
             St.m_TotalMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
@@ -2640,7 +2718,23 @@ namespace xlionrender::gi
             std::vector<basis>      m_EmitB;                    // per surfel of the active level: the emitters' irradiance this update, per basis direction
             std::vector<basis>      m_Frac;                     // per surfel: the fraction of its light from around each basis direction (per channel)
             std::vector<basis>      m_BasisAcc;                 // this pass: the light per basis direction
-            mutable std::vector<basis> m_Filtered, m_FilterIn;  // BasisLight's (the result, the pass before)
+            mutable std::vector<std::vector<basis>> m_Pass;     // UpdateShown: per filter pass (0: unfiltered) per surfel
+            mutable std::vector<basis> m_Shown;                 // BasisLight: the last pass, saturated
+            mutable std::vector<int>   m_FilterDirty;           // surfels whose light, fractions or validity changed since UpdateShown
+            mutable std::vector<int>   m_ShownChanged;          // what the last UpdateShown made again (the renderer's upload)
+            mutable std::vector<std::uint8_t> m_Mark;           // (UpdateShown's scratch)
+            mutable std::vector<std::uint32_t> m_RevFirst, m_RevIndex;   // per surfel: who reads it (the neighbor lists reversed)
+            mutable bool               m_bFilterFull = true;    // UpdateShown makes all of it again
+            mutable bool               m_bShownFull  = false;   // the last UpdateShown made all of it
+            bool                       m_bMeanDirty  = true;    // m_MeanS / m_MeanW are made again (its light changed)
+            v3                         m_MeanS{ 0, 0, 0 };      // the sum of its valid surfels' light, and of their validity
+            float                      m_MeanW = 0;
+            std::size_t                m_nMeanDeltas = 0;       // finished surfels since m_MeanS was summed exactly
+            int                        m_nBad = 0;              // its surfels with a light that is not one (BadSurfel)
+            v3                         m_AlbedoSum{ 0, 0, 0 };  // its material's colors (EmittersChanged: the diagnostics)
+            std::size_t                m_nAlbedo = 0;
+            int                        m_nEmissiveSurf = 0;
+            float                      m_MaxEmitted = 0;        // its brightest emitted light (UpdateEmittedLight)
             std::vector<std::array<float, 3 * moment_texels_v>> m_MomAcc;     // this pass: per texel the sum of d, of d^2, the count
             std::vector<std::array<std::uint16_t, moment_texels_v>> m_MomCount; // per texel the samples it has had (its blend: 1 / n, then slow)
             std::vector<estimator>  m_Est;                      // per surfel of the active level: its light over time
@@ -2683,8 +2777,9 @@ namespace xlionrender::gi
         }
 
         // Fully open (every direction travels the whole reach): a new surfel reads at full weight until its rays say otherwise
-        static void ResetMoments(instance& I) noexcept
+        static void ResetMoments(instance& I) noexcept      // (a new layout: its shown light and its mean are made again too)
         {
+            I.m_bFilterFull = true; I.m_bMeanDirty = true;
             ++I.m_MomentsReset;
             const auto& L = I.m_pMesh->m_Levels[I.m_Level];
             I.m_Moments.resize(L.size());
@@ -2788,6 +2883,11 @@ namespace xlionrender::gi
             return d < far_tier_radii_v[0] ? 1 : d < far_tier_radii_v[1] ? 2 : d < far_tier_radii_v[2] ? 4 : 8;
         }
 
+        static int BadSurfel(const v3& E, float Valid) noexcept      // not a light: not finite, or negative
+        {
+            return !(std::isfinite(E.m_X + E.m_Y + E.m_Z + Valid) && E.m_X >= 0 && E.m_Y >= 0 && E.m_Z >= 0);
+        }
+
         static float BoxDistance(const instance& I, const v3& P) noexcept
         {
             const v3 D = v3::Max(v3::Max(I.m_Lo - P, P - I.m_Hi), v3{ 0, 0, 0 });
@@ -2865,6 +2965,9 @@ namespace xlionrender::gi
         void EmittersChanged(int Id) noexcept
         {
             auto& I = m_Instances[Id];
+            I.m_AlbedoSum = v3{ 0, 0, 0 }; I.m_nAlbedo = I.m_SurfAlbedo.size(); I.m_nEmissiveSurf = 0;       // (the diagnostics)
+            for (const auto& a : I.m_SurfAlbedo) I.m_AlbedoSum = I.m_AlbedoSum + a;
+            for (const auto& e : I.m_SurfEmission) I.m_nEmissiveSurf += (e.m_X + e.m_Y + e.m_Z) > 0.01f;
             std::vector<int> Now;
             for (int e = 0; e < int(I.m_SurfEmission.size()); ++e)
                 if (I.m_SurfEmission[e].m_X + I.m_SurfEmission[e].m_Y + I.m_SurfEmission[e].m_Z > 1e-3f) Now.push_back(e);
@@ -3000,6 +3103,7 @@ namespace xlionrender::gi
                 for (const int x : B.m_List)
                 {
                     const basis& New = B.m_StEmit[x];
+                    I.m_MaxEmitted = std::max(I.m_MaxEmitted, EmittedLuma(New));       // ponytail: a decrease shows at the next re-derive
                     if (I.m_Level == 0) I.m_EmitB[x] = New;
                     else
                     {
@@ -3093,6 +3197,7 @@ namespace xlionrender::gi
 
         // This update's emitted light reaching each surfel (its links x the emitters' current radiance), per basis direction, at the
         // instance's active level (a parent: the mean of its children)
+        static float EmittedLuma(const basis& B) noexcept { return (B[0].m_X + B[1].m_X + B[2].m_X + B[0].m_Y + B[1].m_Y + B[2].m_Y) / 6.0f; }
         basis EmittedAt(const instance& I, std::size_t s) const noexcept     // a fine surfel's emitted light: its links x the emitters' radiance now
         {
             if (s + 1 >= I.m_LinkFirst.size()) return basis{};
@@ -3124,6 +3229,7 @@ namespace xlionrender::gi
                 if (!I.m_bAlive || I.m_Links.empty())
                 {
                     if (!I.m_EmitB.empty() || !I.m_EmitFine.empty()) { I.m_EmitB.clear(); I.m_EmitFine.clear(); I.m_EmitSum.clear(); }
+                    I.m_MaxEmitted = 0;
                     I.m_bEmitDirty = I.m_bEmitRelevel = false;
                     continue;
                 }
@@ -3137,7 +3243,7 @@ namespace xlionrender::gi
                 I.m_bEmitDirty = false;
                 if (!I.m_bEmitRelevel) continue;
                 I.m_bEmitRelevel = false;
-                if (!bParents) { I.m_EmitB = I.m_EmitFine; continue; }
+                if (!bParents) { I.m_EmitB = I.m_EmitFine; I.m_MaxEmitted = 0; for (const auto& B : I.m_EmitB) I.m_MaxEmitted = std::max(I.m_MaxEmitted, EmittedLuma(B)); continue; }
                 const std::size_t nP = M.m_Levels[1].size();
                 I.m_EmitSum.assign(nP, basis{}); I.m_ParentCnt.assign(nP, 0);
                 for (std::size_t s = 0; s < nFine; ++s)
@@ -3148,6 +3254,8 @@ namespace xlionrender::gi
                 }
                 I.m_EmitB.resize(nP);
                 for (std::size_t p = 0; p < nP; ++p) { const float c = 1.0f / float(std::max<int>(I.m_ParentCnt[p], 1)); for (int i = 0; i < 3; ++i) I.m_EmitB[p][i] = I.m_EmitSum[p][i] * c; }
+                I.m_MaxEmitted = 0;
+                for (const auto& B : I.m_EmitB) I.m_MaxEmitted = std::max(I.m_MaxEmitted, EmittedLuma(B));
             }
         }
 
@@ -3221,6 +3329,8 @@ namespace xlionrender::gi
         int                                     m_nEmitters = 0;
         unsigned                                m_nUpdates = 0;
         int                                     m_nLinkRebuilds = 0;        // (tests)
+        mutable int                             m_ShownPasses = -1;         // the settings the shown light was made with (ShownSettings)
+        mutable float                           m_ShownSat    = -1;
         bool                                    m_bEmitDirty = true;        // UpdateEmittedLight's inputs changed (Update)
         float                                   m_EmitScale = -1;           // the scale it was made with
         std::vector<std::pair<int, int>>        m_Emitters;         // (instance, fine surfel) of every surfel that emits

@@ -143,7 +143,14 @@ namespace xlionrender
         }
         for( auto It = m_GIIds.begin(); It != m_GIIds.end(); )
         {
-            if( m_GITrack[It->second].m_Render != m_GIRender ) { W.Remove(It->second); It = m_GIIds.erase(It); }
+            if( m_GITrack[It->second].m_Render != m_GIRender )
+            {
+                W.Remove(It->second);
+                auto& T = m_GITrack[It->second];
+                if( T.m_Offset >= 0 ) m_GIFree.push_back({ T.m_Offset, T.m_Size + 1 });     // its place in the rings
+                T.m_Offset = -1;
+                It = m_GIIds.erase(It);
+            }
             else ++It;
         }
 
@@ -166,6 +173,7 @@ namespace xlionrender
         W.m_Setup.m_Saturation    = std::clamp(Scene.m_GI.m_Saturation, 0.0f, 4.0f);     // what is shown only: no re-solve
         W.m_Setup.m_ProjScale     = ProjScale;
         W.m_Setup.m_TraceAllowanceMs = std::max(Scene.m_GI.m_TraceAllowanceMs, 0.0f);
+        W.m_Setup.m_ShowAllowanceMs  = 0.5f * W.m_Setup.m_TraceAllowanceMs;       // the shown light's halo work (Phase 3): half the trace's, per instance
         W.m_Setup.m_PixelsPerSurfel = std::max(Scene.m_GI.m_PixelsPerSurfel, 0.0f);
         if( W.m_Setup.m_EmissiveScale != Scene.m_GI.m_EmissiveScale )          // a new scale: every instance re-solves
         {
@@ -175,7 +183,10 @@ namespace xlionrender
         m_GIStats = W.Update(L, Eye, Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));
         const auto TUpload = std::chrono::steady_clock::now();
 
-        // The packed moments (gi_track::m_Moments): the surfels this update changed (each a mean and a mean^2 per texel in two 16-bit floats)
+        // Phase 3 (documentation/gi_dynamic_master_plan.md): every frame slot of the rings keeps every instance at the same place (its mean,
+        // then its surfels); a slot is written only what changed since it was last written (each instance keeps, per slot, the surfels
+        // it has not had, or "all of it"). Each frame's slot is then one complete version of the light, never mixed with another frame's:
+        // the GPU reads slot f while the CPU brings slot f + 1 up to date
         const auto PackMoments = [&](std::uint32_t* pOut, const gi::moments& M)
         {
             for( int t = 0; t < gi::moment_texels_v; ++t ) pOut[t] = details::Half(M[2 * t]) | (std::uint32_t(details::Half(M[2 * t + 1])) << 16);
@@ -186,82 +197,119 @@ namespace xlionrender
             if( std::size_t(i) >= m_GITrack.size() ) continue;
             auto& T = m_GITrack[i];
             const auto& M = W.InstanceMoments(i);
-            if( T.m_MomentsReset == W.MomentsReset(i) && T.m_Moments.size() == M.size() * gi::moment_texels_v ) PackMoments(T.m_Moments.data() + std::size_t(s) * gi::moment_texels_v, M[s]);
+            if( T.m_MomentsReset == W.MomentsReset(i) && T.m_Moments.size() == M.size() * gi::moment_texels_v )
+            {
+                PackMoments(T.m_Moments.data() + std::size_t(s) * gi::moment_texels_v, M[s]);
+                for( int f = 0; f < ring_frames_v; ++f ) if( !T.m_bMomFull[f] ) T.m_MomPending[f].push_back(s);
+            }
+        }
+        m_GIStats.m_MomentsMs += MsSince(TMoments);
+
+        // The places: a new instance, or one with a new size (a level switch), gets one, and every slot all of it. When the region is too
+        // fragmented, every place is given again (all of it to every slot). ponytail: first fit, free blocks not merged (the compaction does)
+        const auto Alloc = [&](int Size) -> int
+        {
+            for( auto It = m_GIFree.begin(); It != m_GIFree.end(); ++It )
+                if( It->second >= Size ) { const int At = It->first; It->first += Size; It->second -= Size; if( It->second == 0 ) m_GIFree.erase(It); return At; }
+            if( m_GIAllocTop + Size > gi_light_region_v ) return -1;
+            const int At = m_GIAllocTop; m_GIAllocTop += Size; return At;
+        };
+        const auto Place = [&](gi_track& T, int n) -> bool
+        {
+            if( T.m_Offset >= 0 ) m_GIFree.push_back({ T.m_Offset, T.m_Size + 1 });
+            T.m_Size = n; T.m_Offset = Alloc(n + 1);
+            T.m_bFull.fill(true); T.m_bMomFull.fill(true);
+            for( auto& P : T.m_Pending ) P.clear();
+            for( auto& P : T.m_MomPending ) P.clear();
+            return T.m_Offset >= 0;
+        };
+        bool bCompact = false;
+        for( const auto& [ID, Id] : m_GIIds )
+        {
+            auto& T = m_GITrack[Id];
+            const int n = int(W.InstanceLight(Id).size());
+            if( (T.m_Offset < 0 || T.m_Size != n) && !Place(T, n) ) bCompact = true;
+        }
+        if( bCompact )
+        {
+            m_GIFree.clear(); m_GIAllocTop = 0;
+            for( auto& T : m_GITrack ) T.m_Offset = -1;
+            for( const auto& [ID, Id] : m_GIIds ) (void)Place(m_GITrack[Id], int(W.InstanceLight(Id).size()));
+        }
+        for( const auto& [ID, Id] : m_GIIds )
+        {
+            auto& T = m_GITrack[Id];
+            const auto& M = W.InstanceMoments(Id);
+            if( T.m_MomentsReset != W.MomentsReset(Id) || T.m_Moments.size() != M.size() * gi::moment_texels_v )     // all of them again
+            {
+                T.m_Moments.resize(M.size() * gi::moment_texels_v);
+                for( std::size_t k = 0; k < M.size(); ++k ) PackMoments(T.m_Moments.data() + k * gi::moment_texels_v, M[k]);
+                T.m_MomentsReset = W.MomentsReset(Id);
+                T.m_bMomFull.fill(true);
+            }
+            if( W.ShownFull(Id) ) T.m_bFull.fill(true);
+            else for( int f = 0; f < ring_frames_v; ++f ) if( !T.m_bFull[f] ) T.m_Pending[f].insert(T.m_Pending[f].end(), W.ShownChanged(Id).begin(), W.ShownChanged(Id).end());
         }
 
-        // This frame's light region (several renders per frame append)
+        // This frame's slot: what each drawn instance has not had
         const std::uint64_t Frame = m_Device.getFrameIndex();
-        if( Frame != m_GIFrame ) { m_GIFrame = Frame; m_GIRingUsed = 0; m_GIFrameRegion.clear(); }
-        const int Base = int(Frame % ring_frames_v) * gi_light_region_v;
-        std::vector<std::pair<int, int>> Written;          // (first surfel of the region, instance): their moments next
-        const int Start = m_GIRingUsed;
-        m_GIStats.m_MomentsMs += MsSince(TMoments);
-        double FilterMs = 0;
+        const int Slot = int(Frame % ring_frames_v);
+        const int Base = Slot * gi_light_region_v;
+        // scene::gi_debug in the shaders' bits (xlionrender_surfel_gi.glsl GIDebugCode): 1..3 at bit 9, 4 and 8 at bits 12 and 13
+        const std::uint32_t GIDebugBits = ((std::uint32_t(Scene.m_GI.m_Debug) & 3u) << 9) | ((std::uint32_t(Scene.m_GI.m_Debug) & 0xCu) << 10)
+                                        | (Scene.m_GI.m_bMoments ? 0u : 0x4000u);                   // gi_no_moments_v
         const auto TRing = std::chrono::steady_clock::now();
-        (void)m_GILightRing.MemoryMap(std::size_t(Base + m_GIRingUsed) * 3, std::size_t(gi_light_region_v - m_GIRingUsed) * 3, [&](void* pMemory)     // 3 vec4 a surfel
+        std::size_t Entries = 0, MomentUints = 0;
+        (void)m_GILightRing.MemoryMap(std::size_t(Base) * 3, std::size_t(gi_light_region_v) * 3, [&](void* pMemory)     // 3 vec4 a surfel
         {
             auto* pOut = static_cast<xmath::fvec4*>(pMemory);
-            int   Used = 0;
-            // scene::gi_debug in the shaders' bits (xlionrender_surfel_gi.glsl GIDebugCode): 1..3 at bit 9, 4 and 8 at bits 12 and 13
-            const std::uint32_t GIDebugBits = ((std::uint32_t(Scene.m_GI.m_Debug) & 3u) << 9) | ((std::uint32_t(Scene.m_GI.m_Debug) & 0xCu) << 10)
-                                            | (Scene.m_GI.m_bMoments ? 0u : 0x4000u);                   // gi_no_moments_v
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
             {
                 const int Id = DrawId[i];
                 if( Id < 0 ) continue;
-                // One upload a frame: the frame's other renders (the probes' faces, other views) read the same region. Each used to
-                // upload its own copy and the frame's region ran out: a render without GI, a different one every frame (flashing)
-                if( auto It = m_GIFrameRegion.find(Id); It != m_GIFrameRegion.end() )
-                {
-                    m_DrawGI[i] = { std::uint32_t(Base + It->second), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };
-                    continue;
-                }
-                const auto TFilter = std::chrono::steady_clock::now();
+                auto& T = m_GITrack[Id];
+                if( T.m_Offset < 0 ) { ++m_GIStats.m_nDropped; continue; }  // ponytail: no GI for what does not fit
                 const auto& E = W.BasisLight(Id);              // shown: the HL2 basis, spatially filtered (the solver keeps its own)
-                FilterMs += MsSince(TFilter);
                 const auto& V = W.InstanceValid(Id);
-                if( m_GIRingUsed + Used + 1 + int(E.size()) > gi_light_region_v ) { ++m_GIStats.m_nDropped; continue; }  // ponytail: no GI for what does not fit
+                const auto Write = [&](std::size_t k)
+                {
+                    xmath::fvec4* p = pOut + 3 * (std::size_t(T.m_Offset) + 1 + k);
+                    p[0] = xmath::fvec4(E[k][0], V[k]); p[1] = xmath::fvec4(E[k][1], 0); p[2] = xmath::fvec4(E[k][2], 0);
+                };
                 // The slot before its surfels: its mean light, what a pixel no read supports shows (SurfelGIMean: the solver's policy too,
                 // gi::world::Unsupported). Then its surfels
                 const auto& Mean = W.MeanLight(Id);
-                for( int r = 0; r < 3; ++r ) pOut[3 * Used + r] = xmath::fvec4(Mean, 1);
-                ++Used;
-                for( std::size_t k = 0; k < E.size(); ++k )
-                {
-                    pOut[3 * (Used + k) + 0] = xmath::fvec4(E[k][0], V[k]);
-                    pOut[3 * (Used + k) + 1] = xmath::fvec4(E[k][1], 0);
-                    pOut[3 * (Used + k) + 2] = xmath::fvec4(E[k][2], 0);
-                }
-                Written.push_back({ Used, Id });
-                m_GIFrameRegion[Id] = m_GIRingUsed + Used;
-                m_DrawGI[i] = { std::uint32_t(Base + m_GIRingUsed + Used), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
-                Used += int(E.size());
+                for( int r = 0; r < 3; ++r ) pOut[3 * std::size_t(T.m_Offset) + r] = xmath::fvec4(Mean, 1);
+                ++Entries;
+                if( T.m_bFull[Slot] ) { for( std::size_t k = 0; k < E.size(); ++k ) Write(k); Entries += E.size(); T.m_bFull[Slot] = false; }
+                else { for( const int k : T.m_Pending[Slot] ) if( std::size_t(k) < E.size() ) Write(std::size_t(k)); Entries += T.m_Pending[Slot].size(); }
+                T.m_Pending[Slot].clear();
+                m_DrawGI[i] = { std::uint32_t(Base + T.m_Offset + 1), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
             }
-            m_GIRingUsed += Used;
-            m_GIStats.m_UploadBytes += std::size_t(Used) * 3 * sizeof(xmath::fvec4);
         });
-        m_GIStats.m_FilterMs   = FilterMs;
-        m_GIStats.m_RingCopyMs = MsSince(TRing) - FilterMs;
+        m_GIStats.m_RingCopyMs = MsSince(TRing);
         const auto TMomentsCopy = std::chrono::steady_clock::now();
 
         // The surfels' depth moments at the same index (gi::moment_texels_v per surfel, each a mean and a mean^2 in two 16-bit floats)
-        if( m_GIRingUsed > Start )
-            (void)m_GIMomentRing.MemoryMap(std::size_t(Base + Start) * gi::moment_texels_v, std::size_t(m_GIRingUsed - Start) * gi::moment_texels_v, [&](void* pMemory)
+        (void)m_GIMomentRing.MemoryMap(std::size_t(Base) * gi::moment_texels_v, std::size_t(gi_light_region_v) * gi::moment_texels_v, [&](void* pMemory)
+        {
+            auto* pOut = static_cast<std::uint32_t*>(pMemory);
+            for( const auto& [ID, Id] : m_GIIds )
             {
-                auto* pOut = static_cast<std::uint32_t*>(pMemory);
-                for( const auto& [First, Id] : Written )
+                auto& T = m_GITrack[Id];
+                if( T.m_Offset < 0 ) continue;
+                std::uint32_t* pAt = pOut + (std::size_t(T.m_Offset) + 1) * gi::moment_texels_v;
+                if( T.m_bMomFull[Slot] ) { std::memcpy(pAt, T.m_Moments.data(), T.m_Moments.size() * sizeof(std::uint32_t)); MomentUints += T.m_Moments.size(); T.m_bMomFull[Slot] = false; }
+                else for( const int k : T.m_MomPending[Slot] )
                 {
-                    auto& T = m_GITrack[Id];
-                    const auto& M = W.InstanceMoments(Id);
-                    if( T.m_MomentsReset != W.MomentsReset(Id) || T.m_Moments.size() != M.size() * gi::moment_texels_v )     // all of them again
-                    {
-                        T.m_Moments.resize(M.size() * gi::moment_texels_v);
-                        for( std::size_t k = 0; k < M.size(); ++k ) PackMoments(T.m_Moments.data() + k * gi::moment_texels_v, M[k]);
-                        T.m_MomentsReset = W.MomentsReset(Id);
-                    }
-                    std::memcpy(pOut + std::size_t(First) * gi::moment_texels_v, T.m_Moments.data(), T.m_Moments.size() * sizeof(std::uint32_t));
+                    if( std::size_t(k + 1) * gi::moment_texels_v > T.m_Moments.size() ) continue;
+                    std::memcpy(pAt + std::size_t(k) * gi::moment_texels_v, T.m_Moments.data() + std::size_t(k) * gi::moment_texels_v, gi::moment_texels_v * sizeof(std::uint32_t));
+                    MomentUints += gi::moment_texels_v;
                 }
-            });
+                T.m_MomPending[Slot].clear();
+            }
+        });
+        m_GIStats.m_UploadBytes += Entries * 3 * sizeof(xmath::fvec4) + MomentUints * sizeof(std::uint32_t);
         m_GIStats.m_MomentsMs += MsSince(TMomentsCopy);
         m_GIStats.m_UploadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TUpload).count();
         m_GIStats.m_UpdateGIMs = MsSince(TGI);

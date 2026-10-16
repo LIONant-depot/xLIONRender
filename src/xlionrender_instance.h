@@ -256,6 +256,10 @@ namespace xlionrender
             std::vector<material_id> m_Materials;                       // what its colors are captured from (a change: captured again)
             std::vector<std::uint32_t> m_Moments;                       // its moments packed for the GPU (the last update's surfels repacked)
             std::uint32_t           m_MomentsReset = ~0u;               // gi::world::MomentsReset when they were packed (another: all again)
+            int                     m_Offset    = -1;                   // its place in every frame slot of the rings (its mean, then its surfels): updateGI
+            int                     m_Size      = 0;                    // its surfels
+            std::array<bool, ring_frames_v> m_bFull{}, m_bMomFull{};    // a slot gets all of its light, its moments
+            std::array<std::vector<int>, ring_frames_v> m_Pending, m_MomPending;   // the surfels a slot has not had since they changed
         };
         std::unique_ptr<gi::world>  m_pGIWorld;
         std::unordered_map<std::uint32_t, int> m_GIIds;
@@ -264,13 +268,13 @@ namespace xlionrender
         xgpu::buffer                m_GILightRing;
         xgpu::buffer                m_GIMomentRing;             // per surfel of m_GILightRing: gi::moment_texels_v uints (half mean, half mean^2) - ponytail: 48 MB host-visible, size it to the scenes if it matters
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
-        std::uint64_t               m_GIRender = 0, m_GIFrame = ~0ull;
+        std::uint64_t               m_GIRender = 0;
         struct gi_frame { std::uint64_t m_Frame; gi::world::stats m_Stats; };
         static constexpr std::size_t gi_frame_log_v = 1200;     // about 20 s at 60 FPS
         std::vector<gi_frame>       m_GIFrames;                 // DumpGIFrames
         double                      m_GILoadMsAcc = 0;
-        int                         m_GIRingUsed = 0;
-        std::unordered_map<int, int> m_GIFrameRegion;           // this frame: per GI instance the first surfel of its uploaded light (one upload a frame)
+        int                         m_GIAllocTop = 0;                   // the places in a slot of the rings (gi_track::m_Offset): the top, the free blocks
+        std::vector<std::pair<int, int>> m_GIFree;
         gi::world::stats            m_GIStats;
         void                        updateGI        ( const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
 

@@ -1269,6 +1269,39 @@ int main()
         CHECK(std::abs(Floor1 - Floor0) < 0.1 * std::max(Floor0, 1e-3), "the floor did not converge to the scene without an allowance (%.3f vs %.3f)", Floor1, Floor0);
     }
 
+    // 6j12. Phase 3: the shown light is kept up to date incrementally (only the changed surfels and their dependency halo, one ring of
+    //       neighbors a filter pass), in slices of its allowance (a backlog waits for the next update). A wall moves over a lit floor, then
+    //       rests: once the backlog drained, the shown light equals the whole filter made again, and a settled update (8 surfels finished)
+    //       makes again only those and their halo, not the whole floor
+    {
+        surfel_mesh Floor, Wall;
+        AddQuad(Floor, { -6, 0, -6 }, { 0, 0, 12 }, { 12, 0, 0 }, 0.5f);
+        AddQuad(Wall,  { -1, 0, 0 }, { 0, 1.5f, 0 }, { 2, 0, 0 }, 0.5f);
+        Floor.Bake(0.15f, 0.45f); Wall.Bake(0.15f, 0.45f);
+        lights L; L.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = v3{ 2, 2, 2 }; L.m_Sky = v3{ 0.3f, 0.3f, 0.3f };
+        world W;
+        const int iF = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        const int iW = W.Add(Wall,  xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        W.m_Setup.m_FilterPasses = 4; W.m_Setup.m_Saturation = 1.3f;
+        W.m_Setup.m_ShowAllowanceMs = 0.001f;                                   // one chunk of 64 an update: a backlog while the wall moves, drained after
+        double Worst = 0; std::size_t MaxChanged = 0;
+        for (int f = 0; f < 80; ++f)
+        {
+            if (f < 30) W.SetTransform(iW, xmath::fmat4::fromTranslation({ 0.03f * float(f), 0, 0 }));
+            W.Update(L, { 0, 1, 4 }, f < 30 ? 1 << 10 : 64, 26000 + f);
+            if (f >= 40) MaxChanged = std::max(MaxChanged, W.ShownChanged(iF).size());
+            if (f % 10 != 9 || f < 49) continue;
+            const std::vector<basis> Inc = W.BasisLight(iF);
+            W.ShowAllAgain();
+            const auto& Full = W.BasisLight(iF);
+            for (std::size_t k = 0; k < Full.size(); ++k) for (int i = 0; i < 3; ++i) Worst = std::max(Worst, double((Full[k][i] - Inc[k][i]).Length()));
+        }
+        std::printf("shown light kept incrementally: worst difference to the whole filter %.2e; a settled update made again %zu of %zu floor surfels at most\n",
+                    Worst, MaxChanged, W.InstanceLight(iF).size());
+        CHECK(Worst < 1e-5, "the incremental shown light differs from the whole filter (%.2e)", Worst);
+        CHECK(MaxChanged > 0 && MaxChanged < W.InstanceLight(iF).size() / 2, "a settled update made %zu floor surfels again (of %zu)", MaxChanged, W.InstanceLight(iF).size());
+    }
+
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
     //     surfels past the lip that cannot see it (read through the lip, they faded in wedges)
     {
