@@ -1816,7 +1816,7 @@ namespace xlionrender::gi
                     const v3 Fs = s < F.size() ? F[s] : v3{ 0, 0, 0 };
                     const v3 X  = I.m_Level == 0 && s < I.m_SurfEmission.size() ? I.m_SurfEmission[s] : v3{ 0, 0, 0 };
                     std::fprintf(f, "%d,%d,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g\n"
-                                , Id, I.m_Level, s, P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z, L[s].m_Radius * I.m_MeanScale
+                                , Id, I.m_Level + (I.m_bCube ? 1 : 0), s, P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z, L[s].m_Radius * I.m_MeanScale
                                 , I.m_E[s].m_X, I.m_E[s].m_Y, I.m_E[s].m_Z, Fs.m_X, Fs.m_Y, Fs.m_Z
                                 , s < I.m_Valid.size() ? I.m_Valid[s] : 0.0f, A.m_X, A.m_Y, A.m_Z, X.m_X, X.m_Y, X.m_Z);
                 }
@@ -2089,7 +2089,7 @@ namespace xlionrender::gi
         }
 
         // The parents an ambient cube did not trace: the traced ones' light blended by the normals (the squared cosine, as the HL2 basis does),
-        // their validity and their directional fractions with it. A cube's light at any point is what the 6 directions bring, by the way it faces
+        // and their directional fractions with it (not the validity: a parent buried in the solid stays buried, it does not shine). A cube's light at any point is what the 6 directions bring, by the way it faces
         void ExpandCube(int Id) noexcept
         {
             auto& I = m_Instances[Id];
@@ -2099,23 +2099,23 @@ namespace xlionrender::gi
             for (std::size_t p = 0; p < L.size(); ++p)
             {
                 if (InSet[p]) continue;
-                v3 E{ 0, 0, 0 }; float W = 0, V = 0; basis F{};
+                v3 E{ 0, 0, 0 }; float W = 0; basis F{};
                 for (int k : I.m_CubeSet)
                 {
                     const float c = std::max(L[p].m_Normal.Dot(L[std::size_t(k)].m_Normal), 0.0f), w = c * c * (I.m_Valid[std::size_t(k)] + 1e-3f);
                     if (w <= 0) continue;
-                    E = E + I.m_E[std::size_t(k)] * w; V += I.m_Valid[std::size_t(k)] * c * c; W += w;
+                    E = E + I.m_E[std::size_t(k)] * w; W += w;
                     for (int i = 0; i < 3; ++i) F[i] = F[i] + I.m_Frac[std::size_t(k)][i] * w;
                 }
                 if (W <= 0)     // facing none of them: the nearest in direction
                 {
                     int Best = I.m_CubeSet[0]; float BestD = -2;
                     for (int k : I.m_CubeSet) { const float d = L[p].m_Normal.Dot(L[std::size_t(k)].m_Normal); if (d > BestD) { BestD = d; Best = k; } }
-                    I.m_E[p] = I.m_E[std::size_t(Best)]; I.m_Valid[p] = I.m_Valid[std::size_t(Best)]; I.m_Frac[p] = I.m_Frac[std::size_t(Best)];
+                    I.m_E[p] = I.m_E[std::size_t(Best)]; I.m_Frac[p] = I.m_Frac[std::size_t(Best)];
                     continue;
                 }
                 const float r = 1.0f / W;
-                I.m_E[p] = E * r; I.m_Valid[p] = std::min(V * r * 1.0f, 1.0f);
+                I.m_E[p] = E * r;
                 for (int i = 0; i < 3; ++i) I.m_Frac[p][i] = F[i] * r;
             }
         }
