@@ -1512,7 +1512,8 @@ namespace xlionrender::gi
             int     m_FilterPasses  = 4;        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
             bool    m_bSpreadOrigins = true;    // the fine surfels' rays start across their patch (surfel_mesh::BuildOrigins), not at their center
             float   m_LodDistance   = 40;       // beyond it (eye to bounds) an instance holds its parent level
-            float   m_LodScreen     = 0.02f;    // or when its bounds' radius over its distance is below this (about 1 degree of the view): a small prop far off is a few pixels, not 192 surfels (0: only the distance)
+            float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
+            float   m_PixelsPerSurfel = 256;    // the screen area an instance needs per surfel of its level: below it the parent level (about 16 x 16 pixels)
             float   m_ChangeMargin  = 4;        // a moved instance dirties the instances within this distance of its bounds
         };
 
@@ -2078,15 +2079,18 @@ namespace xlionrender::gi
             BuildTlas();
             TrackLights(L);
 
-            // Levels: the parent level beyond m_LodDistance, or when the instance is small on the screen (m_LodScreen; coming back at 1.25 times
-            // that: no flicker at the edge). Finer: children start from their parent; coarser: a parent is the mean of its children
+            // Levels: the parent level beyond m_LodDistance, or when the instance covers too few pixels for its fine surfels (m_PixelsPerSurfel
+            // each; the area its bounding sphere covers: pi (r / d)^2 ProjScale^2, whatever its shape; coming back at 1.25 times that: no flicker
+            // at the edge). Finer: children start from their parent; coarser: a parent is the mean of its children
             for (auto& I : m_Instances)
             {
                 if (!I.m_bAlive) continue;
                 const float Dist   = BoxDistance(I, Eye);
                 const float Radius = 0.5f * (I.m_Hi - I.m_Lo).Length();
-                const float Screen = m_Setup.m_LodScreen * (I.m_Level == 1 ? 1.25f : 1.0f);
-                const int   Want   = (Dist > m_Setup.m_LodDistance || Radius < Screen * (Dist + Radius)) ? 1 : 0;
+                const float Ratio  = Radius / std::max(Dist + Radius, 1e-6f);
+                const float Pixels = pi_v * Ratio * Ratio * m_Setup.m_ProjScale * m_Setup.m_ProjScale;
+                const float Need   = m_Setup.m_PixelsPerSurfel * float(I.m_pMesh->m_Levels[0].size()) * (I.m_Level == 1 ? 1.25f : 1.0f);
+                const int   Want   = (Dist > m_Setup.m_LodDistance || (m_Setup.m_ProjScale > 0 && Pixels < Need)) ? 1 : 0;
                 if (Want == I.m_Level) continue;
                 const auto& M = *I.m_pMesh;
                 std::vector<v3> E(M.m_Levels[Want].size(), v3{ 0, 0, 0 });

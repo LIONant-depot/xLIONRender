@@ -996,8 +996,8 @@ int main()
         CHECK(Zero == 0, "%d surfels were never traced in 8 passes", Zero);
     }
 
-    // 6j7. The level by the size on the screen (setup::m_LodScreen): a small box far off (within m_LodDistance) holds its parent level, the same box
-    //      near holds the fine one, and it comes back finer at 1.25 times the distance it left at (no flicker)
+    // 6j7. The level by the screen area (setup::m_ProjScale, m_PixelsPerSurfel): the pixels an instance's bounding sphere covers per fine surfel. A small
+    //      box holds its parent level where it covers too few, the fine one nearer, and it comes back at 1.25 times the area it left at (no flicker)
     {
         surfel_mesh Box;
         AddQuad(Box, { -0.1f, 0.2f, -0.1f }, { 0, 0, 0.2f }, { 0.2f, 0, 0 }, 0.1f);       // a 20 cm box, six faces
@@ -1009,13 +1009,17 @@ int main()
         Box.Bake(0.05f, 0.15f);
         world W;
         const int i = W.Add(Box, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        W.m_Setup.m_ProjScale = 1000;                     // 1000 pixels per unit at distance 1: a 1080 p view of about 56 degrees
+        W.m_Setup.m_PixelsPerSurfel = 256;
         lights L;
         L.m_Sky = v3{ 1, 1, 1 };
-        const auto LevelAt = [&](float Dist) { W.Update(L, { 0, 0.1f, Dist }, 1 << 20, 20000); return W.Level(i); };
-        const int Near = LevelAt(0.5f), Far = LevelAt(12.0f), Between = LevelAt(7.5f), Back = LevelAt(3.0f);
-        std::printf("surfel level by screen size: 0.5 m -> %d, 12 m -> %d, then 7.5 m (inside the hysteresis) -> %d, 3 m -> %d\n", Near, Far, Between, Back);
-        CHECK(Near == 0, "a near small box is not at the fine level (%d)", Near);
-        CHECK(Far == 1, "a far small box is not at the parent level (%d)", Far);
+        const float Radius = 0.5f * std::sqrt(0.12f);                                                           // the bounds' radius
+        const float dStar  = std::sqrt(pi_v * Radius * Radius * 1.0e6f / (256.0f * float(Box.m_Levels[0].size())));   // the distance (from the near face + radius) it leaves at
+        const auto LevelAt = [&](float x) { W.Update(L, { 0, 0.1f, x * dStar - Radius + 0.1f }, 1 << 20, 20000); return W.Level(i); };
+        const int Near = LevelAt(0.5f), Far = LevelAt(2.0f), Between = LevelAt(0.95f), Back = LevelAt(0.5f);
+        std::printf("surfel level by screen area (%zu fine surfels, leaves at %.2f m): near %d, far %d, then inside the hysteresis %d, near again %d\n", Box.m_Levels[0].size(), dStar, Near, Far, Between, Back);
+        CHECK(Near == 0, "a box covering many pixels is not at the fine level (%d)", Near);
+        CHECK(Far == 1, "a box covering few pixels is not at the parent level (%d)", Far);
         CHECK(Between == 1, "the level flickered back inside the hysteresis (%d)", Between);
         CHECK(Back == 0, "the box did not come back to the fine level when near (%d)", Back);
     }

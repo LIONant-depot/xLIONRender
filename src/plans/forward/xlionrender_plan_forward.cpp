@@ -80,7 +80,7 @@ namespace xlionrender
     // Surfel GI (features/gi/xlionrender_surfel_gi.h): the draws of meshes with surfels and a persistent id become world instances
     // (added, moved, removed when no longer drawn), the scene's lights its lights, one Update on the ray budget; then every drawn
     // instance's active-level light into this frame's region of the GI light ring (m_DrawGI: where, which level)
-    void instance::updateGI( const scene& Scene, const xmath::fvec3& Eye ) noexcept
+    void instance::updateGI( const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
     {
         m_DrawGI.assign(Scene.m_Draws.size(), { 0u, 0xFFFFFFFFu });
         if( !Scene.m_GI.m_bEnable ) return;
@@ -162,6 +162,8 @@ namespace xlionrender
         W.m_Setup.m_FilterPasses  = std::clamp(Scene.m_GI.m_FilterPasses, 0, 16);   // what is shown only: no re-solve
         W.m_Setup.m_RaysPerSurfel = std::clamp(Scene.m_GI.m_RaysPerSurfel, 1, 256);
         W.m_Setup.m_Saturation    = std::clamp(Scene.m_GI.m_Saturation, 0.0f, 4.0f);     // what is shown only: no re-solve
+        W.m_Setup.m_ProjScale     = ProjScale;
+        W.m_Setup.m_PixelsPerSurfel = std::max(Scene.m_GI.m_PixelsPerSurfel, 0.0f);
         if( W.m_Setup.m_EmissiveScale != Scene.m_GI.m_EmissiveScale )          // a new scale: every instance re-solves
         {
             W.m_Setup.m_EmissiveScale = Scene.m_GI.m_EmissiveScale;
@@ -1168,7 +1170,7 @@ namespace xlionrender
         const auto T0 = clock::now();
         updateEnvironment(Window, Scene);
         updateInstances(Window, Scene, Eye);
-        updateGI(Scene, Eye);                                   // CPU (getGIStats); the probes' captures read it too
+        updateGI(Scene, Eye, ProjScale);                                   // CPU (getGIStats); the probes' captures read it too
         processGICapture(Window);                               // the surfels' material colors (one mesh at a time)
         const auto T1 = clock::now();
         Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
