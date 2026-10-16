@@ -272,7 +272,7 @@ namespace xlionrender
         int                         m_GIRingUsed = 0;
         std::unordered_map<int, int> m_GIFrameRegion;           // this frame: per GI instance the first surfel of its uploaded light (one upload a frame)
         gi::world::stats            m_GIStats;
-        void                        updateGI        ( const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
+        void                        updateGI        ( const scene& Scene, const xmath::fvec3& Eye, float ProjScale, float ViewPixels ) noexcept;
 
         // Shadow casters by persistent slot: what they were the last time they were seen, so an unchanged caster costs a compare,
         // not a hash, and a caster that stops being drawn is found from the list of the last render's slots

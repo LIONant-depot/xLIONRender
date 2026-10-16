@@ -1515,6 +1515,8 @@ namespace xlionrender::gi
             float   m_LodDistance   = 40;       // beyond it (eye to bounds) an instance holds its parent level
             float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
             bool    m_bCube         = true;     // an instance that covers few pixels for its parents traces 6 of them, one per axis direction, and blends the others from them (an ambient cube)
+            float   m_ViewPixels    = 0;        // the view's pixels (width x height; 0: not known, then "small" is an angle: SmallOnScreen)
+            float   m_SmallFraction = 0.05f;    // the screen-area rule (parents, ambient cube) applies only to an instance covering less than this of the view
             float   m_PixelsPerSurfel = 256;    // the screen area an instance needs per surfel of its level: below it the parent level (about 16 x 16 pixels)
             float   m_ChangeMargin  = 4;        // a moved instance dirties the instances within this distance of its bounds
         };
@@ -2161,6 +2163,16 @@ namespace xlionrender::gi
             }
         }
 
+        // Is an instance small on the screen, for the screen-area rule: the eye is outside its box and it covers less than m_SmallFraction of
+        // the view (1.25 times that once it is reduced: no flicker at the edge). Without the view's size, the angle of its bounding sphere
+        // stands for it (a ratio of radius to distance under 0.1)
+        bool SmallOnScreen(float Dist, float Ratio, float Pixels, bool bReduced) const noexcept
+        {
+            if (Dist <= 0) return false;
+            const float k = bReduced ? 1.25f : 1.0f;
+            return m_Setup.m_ViewPixels > 0 ? Pixels < m_Setup.m_SmallFraction * k * m_Setup.m_ViewPixels : Ratio < 0.1f * std::sqrt(k);
+        }
+
         // One update: the light changes, the levels, then the ray budget over the instances that need it most
         stats Update(const lights& L, const v3& Eye, int RayBudget, unsigned Seed) noexcept
         {
@@ -2185,7 +2197,10 @@ namespace xlionrender::gi
                 const float Ratio  = Radius / std::max(Dist + Radius, 1e-6f);
                 const float Pixels = pi_v * Ratio * Ratio * m_Setup.m_ProjScale * m_Setup.m_ProjScale;
                 const float Need   = m_Setup.m_PixelsPerSurfel * float(I.m_pMesh->m_Levels[0].size()) * (I.m_Level == 1 ? 1.25f : 1.0f);
-                const int   Want   = (Dist > m_Setup.m_LodDistance || (m_Setup.m_ProjScale > 0 && Pixels < Need)) ? 1 : 0;
+                // The rule is for small instances only: a large one (a building, the eye inside it) always has more surfels than the screen
+                // can show, wherever it is, and it held its parents and then an ambient cube of 6 samples (found by Phase 0's measurements)
+                const bool  bSmall = SmallOnScreen(Dist, Ratio, Pixels, I.m_Level == 1);
+                const int   Want   = (Dist > m_Setup.m_LodDistance || (m_Setup.m_ProjScale > 0 && bSmall && Pixels < Need)) ? 1 : 0;
                 const auto& M = *I.m_pMesh;
                 if (Want != I.m_Level)
                 {
@@ -2207,7 +2222,7 @@ namespace xlionrender::gi
                 ResetMoments(I);
                 }
                 // An ambient cube: few pixels for its parents: 6 of them traced, the rest blended (the instance is still at level 1 for everything that reads it)
-                const bool bCubeWant = I.m_Level == 1 && m_Setup.m_bCube && m_Setup.m_ProjScale > 0 && M.m_Levels[1].size() > 12
+                const bool bCubeWant = I.m_Level == 1 && m_Setup.m_bCube && m_Setup.m_ProjScale > 0 && bSmall && M.m_Levels[1].size() > 12
                                     && Pixels < m_Setup.m_PixelsPerSurfel * float(M.m_Levels[1].size()) * (I.m_bCube ? 1.25f : 1.0f);
                 std::vector<int> Set;
                 if (bCubeWant && !I.m_bCube) Set = CubeSetOf(M);

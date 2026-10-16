@@ -1024,6 +1024,31 @@ int main()
         CHECK(Back == 0, "the box did not come back to the fine level when near (%d)", Back);
     }
 
+    // 6j7b. The screen-area rule is for small instances only: a large one (a 40 m building) with the eye inside its box, or one that
+    //       covers most of the view, keeps its fine surfels and is never an ambient cube, though it has far more surfels than the screen
+    //       could show at m_PixelsPerSurfel each (Phase 0 found the Police building held as a 6-sample cube)
+    {
+        surfel_mesh Big;
+        AddQuad(Big, { -20, 0, -20 }, { 0, 0, 40 }, { 40, 0, 0 }, 1.0f);              // a 40 m floor ...
+        AddQuad(Big, { -20, 0, -20 }, { 40, 0, 0 }, { 0, 8, 0 }, 1.0f);               // ... and a wall
+        Big.Bake(0.25f, 0.75f);
+        world W;
+        const int i = W.Add(Big, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        W.m_Setup.m_ProjScale = 547; W.m_Setup.m_ViewPixels = 450 * 631; W.m_Setup.m_PixelsPerSurfel = 256;
+        lights L; L.m_Sky = v3{ 1, 1, 1 };
+        for (int f = 0; f < 4; ++f) W.Update(L, { 0, 2, 0 }, 1 << 16, 24000 + f);         // the eye inside its box
+        const int Inside = W.Level(i); const bool bInsideCube = W.IsCube(i);
+        for (int f = 0; f < 4; ++f) W.Update(L, { 0, 15, 45 }, 1 << 16, 24100 + f);       // outside, but it fills the view
+        const int Near = W.Level(i); const bool bNearCube = W.IsCube(i);
+        for (int f = 0; f < 4; ++f) W.Update(L, { 0, 30, 2500 }, 1 << 16, 24200 + f);     // 2.5 km off: small on the screen (beyond m_LodDistance too)
+        const int Far = W.Level(i);
+        std::printf("large instance (%zu surfels): eye inside -> level %d%s, filling the view -> level %d%s, 2.5 km off -> level %d\n", Big.m_Levels[0].size(),
+                    Inside, bInsideCube ? " (cube)" : "", Near, bNearCube ? " (cube)" : "", Far);
+        CHECK(Inside == 0 && !bInsideCube, "a large instance around the eye left its fine surfels (level %d, cube %d)", Inside, int(bInsideCube));
+        CHECK(Near == 0 && !bNearCube, "a large instance filling the view left its fine surfels (level %d, cube %d)", Near, int(bNearCube));
+        CHECK(Far == 1, "a large instance far off did not take its parents (%d)", Far);
+    }
+
     // 6j8. The ambient cube (setup::m_bCube): an instance that covers few pixels for its parents traces 6 of them, one per axis direction, and
     //      blends the others from those by the way they face. A 40 cm box under a bright sky over a dark ground: a pass traces at most 6, and the light on the top and
     //      the bottom of the box is the one the full parents give (within a third), the top lit and the bottom dark

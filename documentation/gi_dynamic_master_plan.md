@@ -113,7 +113,13 @@ What it shows:
   parents blended from 6 samples every frame). The screen-area rule compares an instance's whole surfel count with the pixels
   it covers, and a large instance always has more surfels than the screen can show, even with the eye inside it. The rule must
   apply to small instances only. To be fixed as its own change (it changes behaviour), before Phase 1 measures anything.
-- **The unit target.** One surfel's trace reaches 0.47 ms in Debug, above the 0.25 ms starting target of rule 4. The declared
+- **After that fix** (same measurement): the building is on its fine surfels (63142), only the puppy is a cube (49 parents).
+  The settled cost becomes real work: tracing 6.6 ms mean (2048 surfels a frame, the 16384-ray budget), the display filter
+  4.0 ms, the ring copy 3.2 ms, the statistics pass 2.4 ms, the commit 1.8 ms; about 20 ms of GI main-thread time a frame. The
+  release stall grows with the finer receivers: the link rebuild takes **2816 ms**. Memory: light state 40.0 MB, filter 6.1 MB,
+  upload 3.0 MB a frame. One surfel's trace now reaches **2.4–4.3 ms** on the building's geometry: the surfel is too big a unit
+  (its 8 rays and each hit's direct light), so Phase 1 splits it (rays in chunks), and the unit target below stays a target.
+- **The unit target.** One surfel's trace reaches 0.47 ms in Debug (the puppy scene; 4.3 ms on the building after the fix), above the 0.25 ms starting target of rule 4. The declared
   maximum unit time for now is **0.5 ms in Debug**, the surfel being the unit; the link rebuild (1.7 s) and the per-instance
   passes over every surfel have no unit yet and are what Phases 1–3 cut up.
 
