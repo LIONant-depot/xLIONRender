@@ -482,6 +482,10 @@ namespace xlionrender::gi
         }
     };
     constexpr int dead_retrace_v  = 8;      // a buried surfel (validity 0) is traced one pass in this many (Update)
+    // A surfel far from the eye is traced less often: its footprint on the screen is about (radius / distance)^2 pixels, so a far one
+    // is a few pixels and a near one is many. The period by distance in radii; off screen or behind the eye it still bounces light onto what is seen, so it is only
+    // slower, never dropped: every surfel is traced at least once in dead_retrace_v passes
+    constexpr float far_tier_radii_v[3] = { 12.0f, 24.0f, 48.0f };      // beyond each: the period doubles (1, 2, 4, 8)
     constexpr int warmup_passes_v = 16;     // after a change: a running average (1 / n) for this many passes, the estimator after
 
     struct surfel
@@ -1502,6 +1506,7 @@ namespace xlionrender::gi
         {
             int     m_RaysPerSurfel = 8;
             float   m_MinBlend      = 0;        // the warm-up's blend (1 / n after a change) never below this (1: every pass replaces)
+            bool    m_bDistanceTiers = true;    // a surfel far from the eye (in its radii) is traced every 2nd, 4th, 8th pass (Update)
             float   m_Saturation    = 1;        // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
             float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
             int     m_FilterPasses  = 4;        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
@@ -2126,11 +2131,24 @@ namespace xlionrender::gi
                 }
                 // A buried surfel (validity 0: inside a solid, on a see-through material) is traced one pass in dead_retrace_v, not every one:
                 // the reads give it no weight, and its validity is geometry (a change dirties the instance: every pass again, and it comes back)
-                const bool bSkipDead = I.m_History > warmup_passes_v && (I.m_History % dead_retrace_v) != 0;
+                const bool  bSettled = I.m_History > warmup_passes_v;
+                const auto& Lv     = I.m_pMesh->m_Levels[I.m_Level];
+                const float Scale  = std::max(I.m_MeanScale, 1e-9f);
                 int Took = 0;
                 for (; I.m_Cursor < n && Took < SurfelsLeft; ++I.m_Cursor)
                 {
-                    if (bSkipDead && I.m_Valid[I.m_Cursor] < 0.01f) continue;
+                    if (bSettled)
+                    {
+                        int Period = 1;
+                        if (I.m_Valid[I.m_Cursor] < 0.01f) Period = dead_retrace_v;
+                        else if (m_Setup.m_bDistanceTiers)
+                        {
+                            const surfel& S = Lv[I.m_Cursor];
+                            const float   d = (I.m_L2W * S.m_Center - Eye).Length() / (S.m_Radius * Scale);
+                            Period = d < far_tier_radii_v[0] ? 1 : d < far_tier_radii_v[1] ? 2 : d < far_tier_radii_v[2] ? 4 : 8;
+                        }
+                        if (Period > 1 && ((I.m_History + I.m_Cursor) % Period) != 0) continue;     // staggered: a period's passes together trace every one
+                    }
                     m_Work.push_back({ i, I.m_Cursor });
                     ++Took;
                 }

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <numeric>
 #include <random>
+#include <set>
 #include <span>
 
 using namespace xlionrender::gi;
@@ -948,16 +949,51 @@ int main()
         lights L;
         L.m_Sky = v3{ 1, 1, 1 };
         for (int f = 0; f < 100; ++f) W.Update(L, { 0, 3, 0 }, 1 << 30, 18000 + f);       // settled: the warm-up passes are over, the sheet's validity has gone
-        std::size_t Min = 1u << 30, Max = 0;
-        for (int f = 0; f < 16; ++f)
+        std::set<int> Seen;
+        std::size_t Min = 1u << 30;
+        for (int f = 0; f < dead_retrace_v; ++f)
         {
             W.Update(L, { 0, 3, 0 }, 1 << 30, 18100 + f);
-            Min = std::min(Min, W.LastUpdated().size()); Max = std::max(Max, W.LastUpdated().size());
+            Min = std::min(Min, W.LastUpdated().size());
+            for (const auto& [inst, sf] : W.LastUpdated()) Seen.insert(sf);
         }
-        std::printf("dead surfels: a pass traces %zu surfels, all of them (%zu) one in %d\n", Min, Max, dead_retrace_v);
-        CHECK(Min < Max, "buried surfels are traced every pass (%zu of %zu)", Min, Max);
-        CHECK(Max == M.m_Levels[0].size(), "a full pass does not trace every surfel (%zu of %zu)", Max, M.m_Levels[0].size());
+        std::printf("dead surfels: a pass traces at least %zu of %zu surfels, %d passes trace %zu of them\n", Min, M.m_Levels[0].size(), dead_retrace_v, Seen.size());
+        CHECK(Min < M.m_Levels[0].size(), "buried surfels are traced every pass (%zu of %zu)", Min, M.m_Levels[0].size());
+        CHECK(Seen.size() == M.m_Levels[0].size(), "%d passes do not trace every surfel (%zu of %zu)", dead_retrace_v, Seen.size(), M.m_Levels[0].size());
         CHECK(Min >= M.m_Levels[0].size() / 2, "more than half the surfels were skipped as dead (%zu of %zu)", Min, M.m_Levels[0].size());
+    }
+
+    // 6j6. A surfel far from the eye (in its radii) is traced every 2nd, 4th, 8th pass (Update): a 30 m strip with the eye at one end. The near
+    //      end is traced every pass, the far end less, and a few passes together reach every surfel
+    {
+        surfel_mesh M;
+        AddQuad(M, { 0, 0, 0 }, { 0, 0, 30 }, { 1, 0, 0 }, 1);          // facing up
+        M.Bake(0.3f, 0.9f);
+        world W;
+        const int i = W.Add(M, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        lights L;
+        L.m_Sky = v3{ 1, 1, 1 };
+        const v3 Eye{ 0.5f, 2, 0 };
+        for (int f = 0; f < 100; ++f) W.Update(L, Eye, 1 << 30, 19000 + f);      // settled
+        std::vector<int> Count(M.m_Levels[0].size(), 0);
+        for (int f = 0; f < 8; ++f)
+        {
+            W.Update(L, Eye, 1 << 30, 19100 + f);
+            for (const auto& [inst, sf] : W.LastUpdated()) ++Count[std::size_t(sf)];
+        }
+        int NearMin = 8, FarMax = 0, nNear = 0, nFar = 0;
+        for (std::size_t sf = 0; sf < Count.size(); ++sf)
+        {
+            const float d = (M.m_Levels[0][sf].m_Center - Eye).Length() / M.m_Levels[0][sf].m_Radius;
+            if (d < 10) { NearMin = std::min(NearMin, Count[sf]); ++nNear; }
+            if (d > 55) { FarMax = std::max(FarMax, Count[sf]); ++nFar; }
+        }
+        int Zero = 0; for (int c : Count) Zero += c == 0;
+        std::printf("distance tiers: %d near surfels traced at least %d of 8 passes, %d far ones at most %d; %d never\n", nNear, NearMin, nFar, FarMax, Zero);
+        CHECK(nNear > 0 && nFar > 0, "the strip has no near or far surfels");
+        CHECK(NearMin == 8, "a near surfel is not traced every pass (%d of 8)", NearMin);
+        CHECK(FarMax <= 2, "a far surfel is traced %d of 8 passes", FarMax);
+        CHECK(Zero == 0, "%d surfels were never traced in 8 passes", Zero);
     }
 
     // 6k. A recessed panel behind a lip (a door 3 cm behind its frame): it gets surfels of its own next to the lip, not left to the
