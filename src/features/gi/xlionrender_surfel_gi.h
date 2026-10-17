@@ -2317,46 +2317,59 @@ namespace xlionrender::gi
         };
         void PackGPUSurfels(std::vector<std::uint32_t>& D, const lights& L) const noexcept
         {
+            // (whole blocks through raw pointers: the Debug build's checked push_back per word took 290 ms for Police's 11.6M words)
             D.assign(gpu_header_v, 0);
             const auto F = [](float f) { return std::bit_cast<std::uint32_t>(f); };
-            const auto PushV = [&](const v3& v) { D.push_back(F(v.m_X)); D.push_back(F(v.m_Y)); D.push_back(F(v.m_Z)); };
+            const auto Grow = [&](std::size_t n) { const std::size_t At = D.size(); D.resize(At + n); return At; };
+            const auto Words = [&](const void* p, std::size_t n) { const std::size_t At = Grow(n); if (n) std::memcpy(D.data() + At, p, n * 4); return std::uint32_t(At); };
+            const auto V3s = [&](const v3* p, std::size_t n) { const std::size_t At = Grow(3 * n); std::uint32_t* o = D.data() + At; for (std::size_t k = 0; k < n; ++k) std::memcpy(o + 3 * k, &p[k].m_X, 12); return std::uint32_t(At); };
+            const auto PushV = [&](const v3& v) { V3s(&v, 1); };
             std::unordered_map<const surfel_mesh*, std::uint32_t> Meshes;
             const auto MeshOf = [&](const surfel_mesh& M) -> std::uint32_t
             {
                 if (auto It = Meshes.find(&M); It != Meshes.end()) return It->second;
                 std::uint32_t H[gpu_mesh_v]{};
                 H[0] = std::uint32_t(M.m_Pos.size());
-                H[1] = std::uint32_t(D.size()); for (const auto& p : M.m_Pos) PushV(p);
-                H[2] = std::uint32_t(D.size()); for (const auto& n : M.m_Nrm) PushV(n);
-                H[3] = std::uint32_t(D.size()); for (const auto& t : M.m_Tris) for (int k = 0; k < 3; ++k) D.push_back(std::uint32_t(t[k]));
-                H[4] = std::uint32_t(D.size());
-                for (std::size_t v = 0; v < M.m_Pos.size(); ++v)
+                H[1] = V3s(M.m_Pos.data(), M.m_Pos.size());
+                H[2] = V3s(M.m_Nrm.data(), M.m_Nrm.size());
+                static_assert(sizeof(M.m_Tris[0]) == 12 && sizeof(M.m_ReadTable[0]) == 16);
+                H[3] = Words(M.m_Tris.data(), 3 * M.m_Tris.size());
                 {
-                    const auto U = [&](int k) { const int s = v < M.m_VertSurfels.size() ? M.m_VertSurfels[v][k] : -1; return s < 0 ? 0xFFFFu : std::uint32_t(s); };
-                    D.push_back(U(0) | (U(1) << 16)); D.push_back(U(2) | (U(3) << 16));
+                    const std::size_t nV = M.m_Pos.size(), At = Grow(2 * nV);
+                    std::uint32_t* o = D.data() + At;
+                    const auto* pVS = M.m_VertSurfels.data();
+                    for (std::size_t v = 0; v < nV; ++v)
+                    {
+                        std::uint32_t U[4] = { 0xFFFFu, 0xFFFFu, 0xFFFFu, 0xFFFFu };
+                        if (v < M.m_VertSurfels.size()) for (int k = 0; k < 4; ++k) if (pVS[v][std::size_t(k)] >= 0) U[k] = std::uint32_t(pVS[v][std::size_t(k)]);
+                        o[2 * v] = U[0] | (U[1] << 16); o[2 * v + 1] = U[2] | (U[3] << 16);
+                    }
+                    H[4] = std::uint32_t(At);
                 }
                 for (int Lv = 0; Lv < 2; ++Lv)
                 {
-                    H[5 + 2 * Lv] = std::uint32_t(D.size()); H[6 + 2 * Lv] = std::uint32_t(M.m_Levels[Lv].size());
-                    for (const auto& S : M.m_Levels[Lv]) { PushV(S.m_Center); PushV(S.m_Normal); D.push_back(F(S.m_Radius)); }
+                    const auto& Lev = M.m_Levels[Lv];
+                    const std::size_t At = Grow(7 * Lev.size());
+                    std::uint32_t* o = D.data() + At;
+                    for (std::size_t k = 0; k < Lev.size(); ++k) { std::memcpy(o + 7 * k, &Lev[k].m_Center.m_X, 12); std::memcpy(o + 7 * k + 3, &Lev[k].m_Normal.m_X, 12); o[7 * k + 6] = F(Lev[k].m_Radius); }
+                    H[5 + 2 * Lv] = std::uint32_t(At); H[6 + 2 * Lv] = std::uint32_t(Lev.size());
                 }
-                H[9]  = std::uint32_t(D.size()); for (const int p : M.m_ParentOf) D.push_back(std::uint32_t(p));
-                H[10] = std::uint32_t(D.size()); for (const auto& E : M.m_ReadTable) D.insert(D.end(), E.begin(), E.end());
+                H[9]  = Words(M.m_ParentOf.data(), M.m_ParentOf.size());
+                H[10] = Words(M.m_ReadTable.data(), 4 * M.m_ReadTable.size());
                 H[11] = std::uint32_t(M.m_ReadTable.size());
-                H[12] = std::uint32_t(D.size()); D.insert(D.end(), M.m_ReadList.begin(), M.m_ReadList.end());
+                H[12] = Words(M.m_ReadList.data(), M.m_ReadList.size());
                 H[13] = F(M.m_ReadCell);
-                H[14] = std::uint32_t(D.size()); D.insert(D.end(), M.m_OriginFirst.begin(), M.m_OriginFirst.end());
-                if (M.m_OriginFirst.empty()) H[14] = gpu_none_v;
-                H[15] = std::uint32_t(D.size()); for (const auto& p : M.m_OriginPos) PushV(p);
-                H[16] = std::uint32_t(D.size()); for (const auto& n : M.m_OriginNrm) PushV(n);
+                H[14] = M.m_OriginFirst.empty() ? gpu_none_v : Words(M.m_OriginFirst.data(), M.m_OriginFirst.size());
+                H[15] = V3s(M.m_OriginPos.data(), M.m_OriginPos.size());
+                H[16] = V3s(M.m_OriginNrm.data(), M.m_OriginNrm.size());
                 H[17] = M.m_bLeakProtection ? 1u : 0u;
                 for (int Lv = 0; Lv < 2; ++Lv)
                 {
                     const auto& Nb = M.m_Neighbors[Lv];
                     if (Nb.m_First.size() != M.m_Levels[Lv].size() + 1) { H[18 + 3 * Lv] = H[19 + 3 * Lv] = H[20 + 3 * Lv] = gpu_none_v; continue; }
-                    H[18 + 3 * Lv] = std::uint32_t(D.size()); D.insert(D.end(), Nb.m_First.begin(), Nb.m_First.end());
-                    H[19 + 3 * Lv] = std::uint32_t(D.size()); D.insert(D.end(), Nb.m_Index.begin(), Nb.m_Index.end());
-                    H[20 + 3 * Lv] = std::uint32_t(D.size()); for (const float w : Nb.m_Weight) D.push_back(F(w));
+                    H[18 + 3 * Lv] = Words(Nb.m_First.data(), Nb.m_First.size());
+                    H[19 + 3 * Lv] = Words(Nb.m_Index.data(), Nb.m_Index.size());
+                    H[20 + 3 * Lv] = Words(Nb.m_Weight.data(), Nb.m_Weight.size());
                 }
                 {   // per parent its children (the parents' order of m_ParentOf)
                     const std::size_t n1 = M.m_Levels[1].size();
@@ -2365,11 +2378,10 @@ namespace xlionrender::gi
                     for (std::size_t p = 0; p < n1; ++p) First[p + 1] += First[p];
                     std::vector<std::uint32_t> Index(First.back()), At(First.begin(), First.end() - 1);
                     for (std::size_t c = 0; c < M.m_ParentOf.size(); ++c) if (std::size_t(M.m_ParentOf[c]) < n1) Index[At[std::size_t(M.m_ParentOf[c])]++] = std::uint32_t(c);
-                    H[24] = std::uint32_t(D.size()); D.insert(D.end(), First.begin(), First.end());
-                    H[25] = std::uint32_t(D.size()); D.insert(D.end(), Index.begin(), Index.end());
+                    H[24] = Words(First.data(), First.size());
+                    H[25] = Words(Index.data(), Index.size());
                 }
-                const std::uint32_t At = std::uint32_t(D.size());
-                D.insert(D.end(), H, H + gpu_mesh_v);
+                const std::uint32_t At = Words(H, gpu_mesh_v);
                 Meshes[&M] = At;
                 return At;
             };
@@ -2382,25 +2394,47 @@ namespace xlionrender::gi
                 if (!I.m_bAlive) continue;
                 R[0] = MeshOf(*I.m_pMesh);
                 R[1] = std::uint32_t(I.m_Level);
-                R[2] = std::uint32_t(D.size()); for (const auto& e : I.m_E) PushV(e);
-                R[3] = std::uint32_t(D.size()); for (const float v : I.m_Valid) D.push_back(F(v));
-                R[4] = std::uint32_t(D.size()); for (const auto& Mo : I.m_Moments) for (const float m : Mo) D.push_back(F(m));
+                const std::size_t nS = I.m_E.size();
+                R[2] = V3s(I.m_E.data(), nS);
+                R[3] = Words(I.m_Valid.data(), I.m_Valid.size());
+                static_assert(sizeof(moments) == 4 * 2 * moment_texels_v);
+                R[4] = Words(I.m_Moments.data(), I.m_Moments.size() * 2 * moment_texels_v);
                 R[5] = F(I.m_MeanE.m_X); R[6] = F(I.m_MeanE.m_Y); R[7] = F(I.m_MeanE.m_Z);
                 R[8] = F(I.m_Albedo.m_X); R[9] = F(I.m_Albedo.m_Y); R[10] = F(I.m_Albedo.m_Z);
                 {   // its material, always there (changed in place: GPUMaterial)
                     std::vector<std::uint32_t> A[5];
                     R[47] = GPUMaterial(int(i), A);
                     const std::uint32_t Word[5] = { 11, 12, 13, 14, 45 };
-                    for (int k = 0; k < 5; ++k) { R[Word[k]] = std::uint32_t(D.size()); D.insert(D.end(), A[k].begin(), A[k].end()); }
+                    for (int k = 0; k < 5; ++k) R[Word[k]] = Words(A[k].data(), A[k].size());
                 }
                 R[15] = F(I.m_MeanScale);
-                const std::size_t nS = I.m_E.size();
-                R[41] = std::uint32_t(D.size()); for (std::size_t k = 0; k < nS; ++k) for (int i = 0; i < 3; ++i) PushV(k < I.m_Frac.size() ? I.m_Frac[k][i] : v3{ 1.0f / 3, 1.0f / 3, 1.0f / 3 });
-                R[42] = std::uint32_t(D.size()); D.resize(D.size() + nS * gpu_est_v, 0u);
-                for (std::size_t k = 0; k < nS && k < I.m_Est.size(); ++k) PackEst(I.m_Est[k], &D[R[42] + k * gpu_est_v]);
-                R[43] = std::uint32_t(D.size()); for (std::size_t k = 0; k < nS; ++k) for (int t = 0; t < moment_texels_v; ++t) D.push_back(k < I.m_MomCount.size() ? I.m_MomCount[k][std::size_t(t)] : 0u);
-                R[44] = std::uint32_t(D.size()); D.resize(D.size() + nS * 9, 0u);
-                for (std::size_t k = 0; k < nS && k < I.m_EmitB.size(); ++k) for (int i = 0; i < 3; ++i) { D[R[44] + 9 * k + 3 * i] = F(I.m_EmitB[k][i].m_X); D[R[44] + 9 * k + 3 * i + 1] = F(I.m_EmitB[k][i].m_Y); D[R[44] + 9 * k + 3 * i + 2] = F(I.m_EmitB[k][i].m_Z); }
+                {
+                    const std::size_t At = Grow(9 * nS);
+                    std::uint32_t* o = D.data() + At;
+                    const float Third = 1.0f / 3;
+                    for (std::size_t k = 0; k < nS; ++k)
+                        for (int c = 0; c < 3; ++c)
+                            if (k < I.m_Frac.size()) std::memcpy(o + 9 * k + 3 * std::size_t(c), &I.m_Frac[k][std::size_t(c)].m_X, 12);
+                            else for (int q = 0; q < 3; ++q) o[9 * k + 3 * std::size_t(c) + std::size_t(q)] = F(Third);
+                    R[41] = std::uint32_t(At);
+                }
+                {
+                    const std::size_t At = Grow(nS * gpu_est_v);
+                    for (std::size_t k = 0; k < nS && k < I.m_Est.size(); ++k) PackEst(I.m_Est[k], D.data() + At + k * gpu_est_v);
+                    R[42] = std::uint32_t(At);
+                }
+                {
+                    const std::size_t At = Grow(nS * moment_texels_v);
+                    std::uint32_t* o = D.data() + At;
+                    for (std::size_t k = 0; k < nS && k < I.m_MomCount.size(); ++k) for (int t = 0; t < moment_texels_v; ++t) o[k * moment_texels_v + std::size_t(t)] = I.m_MomCount[k][std::size_t(t)];
+                    R[43] = std::uint32_t(At);
+                }
+                {
+                    const std::size_t At = Grow(nS * 9);
+                    std::uint32_t* o = D.data() + At;
+                    for (std::size_t k = 0; k < nS && k < I.m_EmitB.size(); ++k) for (int c = 0; c < 3; ++c) std::memcpy(o + 9 * k + 3 * std::size_t(c), &I.m_EmitB[k][std::size_t(c)].m_X, 12);
+                    R[44] = std::uint32_t(At);
+                }
                 for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) { R[16 + 4 * r + c] = F(I.m_L2W(r, c)); R[28 + 4 * r + c] = F(I.m_W2L(r, c)); }
             }
             D[0] = std::uint32_t(D.size()); D[1] = std::uint32_t(m_Instances.size());
@@ -2429,8 +2463,8 @@ namespace xlionrender::gi
             const auto& I = m_Instances[std::size_t(Id)];
             const std::size_t nT = I.m_pMesh->m_Tris.size(), nF = I.m_pMesh->m_Levels[0].size();
             const auto F = [](float f) { return std::bit_cast<std::uint32_t>(f); };
-            const auto V = [&](std::vector<std::uint32_t>& Out, const std::vector<v3>& In, std::size_t n) { Out.assign(3 * n, 0u); for (std::size_t k = 0; k < In.size() && k < n; ++k) { Out[3 * k] = F(In[k].m_X); Out[3 * k + 1] = F(In[k].m_Y); Out[3 * k + 2] = F(In[k].m_Z); } };
-            const auto B = [&](std::vector<std::uint32_t>& Out, const std::vector<std::uint8_t>& In, std::size_t n) { Out.assign((n + 31) / 32, 0u); for (std::size_t k = 0; k < In.size() && k < n; ++k) if (In[k]) Out[k / 32] |= 1u << (k % 32); };
+            const auto V = [&](std::vector<std::uint32_t>& Out, const std::vector<v3>& In, std::size_t n) { Out.assign(3 * n, 0u); std::uint32_t* o = Out.data(); for (std::size_t k = 0; k < In.size() && k < n; ++k) std::memcpy(o + 3 * k, &In[k].m_X, 12); };
+            const auto B = [&](std::vector<std::uint32_t>& Out, const std::vector<std::uint8_t>& In, std::size_t n) { Out.assign((n + 31) / 32, 0u); std::uint32_t* o = Out.data(); const std::uint8_t* p = In.data(); for (std::size_t k = 0; k < In.size() && k < n; ++k) if (p[k]) o[k / 32] |= 1u << (k % 32); };
             V(A[0], I.m_TriAlbedo, nT); V(A[1], I.m_SurfAlbedo, nF); V(A[2], I.m_SurfEmission, nF);
             B(A[3], I.m_SeeThrough, nT); B(A[4], I.m_SurfSeeThrough, nF);
             for (auto& a : A) if (a.empty()) a.push_back(0u);
@@ -2443,7 +2477,7 @@ namespace xlionrender::gi
         // radiance now 3 (the emissive scale in it), instance, surfel. Room: what the table is packed with for Count of them
         static constexpr std::uint32_t gpu_emitter_v = 12;
         std::size_t EmitterCount() const noexcept { return m_Em.size(); }
-        static constexpr std::uint32_t GPUEmitterRoom(std::uint32_t Count) noexcept { return std::max<std::uint32_t>(64, 2 * Count); }
+        static constexpr std::uint32_t GPUEmitterRoom(std::uint32_t Count) noexcept { return std::max<std::uint32_t>(1024, 2 * Count); }
         void GPUEmitters(std::vector<std::uint32_t>& Out) const noexcept
         {
             Out.clear(); Out.reserve(m_Em.size() * gpu_emitter_v);
