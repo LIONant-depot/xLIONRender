@@ -1,7 +1,8 @@
 # Surfel GI: dynamic scenes under a fixed budget (master plan)
 
-Status: **proposal, revision 2, not approved.** Written 2026-10-17 from the engine study (Unreal, O3DE, Godot, Flax,
-CryEngine), three review rounds, and what the current code does. Nothing here is built yet.
+Status: **phases 0–7, 2b, 6b built; Part II (the GPU) G1–G5 built** (2026-10-17). Written 2026-10-17 from the engine study
+(Unreal, O3DE, Godot, Flax, CryEngine), three review rounds, and what the code did then. Section 5 compares the result with the
+references; section 7 orders what is next.
 
 Revision 2 folds in the third review: bounded contribution rather than invariant frame time, phase-level versus end-to-end
 claims, fairness separate from importance, a memory budget, publication progress, GPU-side publication, filter dependency
@@ -969,38 +970,54 @@ level with the puppy and up to four moving objects; it is widened as measurement
 Each report keeps per-frame cost by stage, the longest unit, recovery error, queue age, memory by category, and the receiver's
 appearance. A speed-up is attributed to its cause: better scheduling, less work, or a deliberately simpler role.
 
-## 5. Where this can beat the competition, and where it cannot
+## 5. Where this beats the competition, and where it does not (revised 2026-10-17, after G1–G5)
 
-These are design goals to be proven by the tests above, not results. The engine study read one checkout of each engine; its
-constants are that checkout's, and it can show what it found, not what does not exist.
+How to read this section:
+- The references are the engine study (Unreal's Lumen, O3DE and Flax's DDGI, Godot's SDFGI and VoxelGI, CryEngine's SVOGI) and
+  the surfel systems read in 5b–5d (Wicked Engine, GIBS, SurfelGI, SurfelPlus, Juretriglav's WebGPU surfel GI).
+- Ours are measured: Police (63k surfels, 350 emitters) in the Debug editor on an RTX 4070 Ti SUPER running at P3 clocks
+  (210–450 MHz: the editor never loads the GPU enough to clock it up), and the unit tests.
+- Theirs come from reading their code or papers. **None of them has been run side by side with ours on the same scene**, so
+  no claim below says "faster than X" in milliseconds.
 
-**Where it can be better**
-- **A documented, tested time contract.** All five engines amortise their GI (per-frame caps, slices, round-robin), and the
-  study also found full-refresh paths in some of them for global changes. xLION's claim is only about itself: its maintenance
-  contract will be written down, cover every stage, and be checked by an overload test.
-- **Small emitters.** Explicit emitter sampling through the links, with emission conserved over a surfel's patch, aims to
-  preserve a small emitter's contribution more reliably than hemisphere sampling alone, within the limits of the material
-  capture, the footprint it is merged into, the link cap, and occluders near the emitter.
-- **Effort follows screen area.** Fine surfels, parents and the ambient cube are chosen by the pixels an instance covers, and
-  far surfels are traced less often. Other systems prioritise relevant work in their own ways (probe classification,
-  visibility, multiresolution); this is xLION's mechanism, not a claim that they lack one.
-- **Explicit transport roles with reference tests.** Receiver-only, proxy and full transport are declared per instance and
-  each is tested against its matching reference, so an approximation is always a decision, never a side effect.
-- **No ray-tracing hardware required,** within xLION's supported graphics capabilities and memory limits. The solver runs on
-  the CPU and the GPU only reads the result, which also keeps it usable in the Debug editor.
-- **Mesh-local representation.** Instances share mesh-local geometry and reconstruction data, so a moved instance needs no
-  rebuild of its representation; its lighting and visibility remain its own and are updated at its new place.
+**Where we are ahead (measured or tested here)**
 
-**Where it cannot (honestly)**
-- **Throughput.** CPU ray tracing does far fewer rays per millisecond than hardware ray tracing on the GPU. Under the same
-  budget, convergence is slower; the plan trades latency for responsiveness, it does not remove the gap.
-- **Diffuse only.** Specular indirect light still comes from the reflection probes and the sky; Lumen and SVOGI also do glossy
-  indirect.
-- **Detail is bounded by surfel size.** Features smaller than a surfel are averaged. (The GI saturation setting is an artistic
-  display adjustment and plays no part in transport accuracy or energy conservation.)
-- **An object's own light is attached to it.** A world probe grid answers "what is the light here" at once; a moved instance
-  answers it after its surfels are re-traced. Phase 4 and test A measure how long that takes.
-- **Not yet proven at scale.** Large open worlds (memory of surfels and links, the 131072-surfel frame region) are untested.
+| What | Ours (measured) | The references (as read) |
+|---|---|---|
+| Radiometric correctness | Checked analytically: an open white sky gives E = π (test 6m), the Cornell box matches a path tracer (test 3), light sampling matches a many-ray reference within 0.2 % (6j). | SurfelGI looks 2× too dark and SurfelPlus π× too bright per bounce, from reading their code (5d; unconfirmed on an analytic case). |
+| A CPU reference for the GPU | The GPU world equals the CPU world surfel for surfel (light, validity, estimator; 5e-7) through events: a recolor, a capture, a change in flight, a drag, a level switch (`xlionrender_test_gi_trace`). The shown light equals the CPU's filter to 4e-7, the moments bit for bit. | None of the open surfel implementations has a reference solver; the engines test visually. |
+| Main-thread cost | 0.57–0.9 ms a frame settled, with nothing per surfel on the CPU (G4c). A drag: 1.9 ms mean, 3.7 ms max (it was 2.45 / 5.8 on the CPU solver). In Debug. | GPU-driven systems (Lumen, GIBS) are also near zero on the CPU. Parity, not a lead; the lead is that it holds in the Debug editor. |
+| No hardware ray tracing | Software BVH4 traversal in compute: 267k full surfel rays/ms on the Cornell batch; 4.2–5.3M rays/s in Police at a 2 ms budget and low clocks. | Juretriglav and three-mesh-bvh also do software traversal. GIBS needs hardware RT. Lumen falls back to software traces of distance fields. |
+| Many small emitters | Weighted light sampling over every emitter, unbiased. Police's 350 emitters need no build; under 64 lamps the links' caps lost 17 % of the light, the sampling none. | Wicked picks one light per ray, uniformly. GIBS and the open ports rely on the hemisphere rays (a small lamp is rarely hit). |
+| Stability once settled | Police's lit surfels: p99 change 0.3 % over half a second; the room, 0.04 % an update (`xlionrender_test_gi_flicker`, which now guards it). | The estimator is Wicked's (MultiscaleMeanEstimator); ours adds a change detector that is noise-aware (after the flicker fix). |
+| Bounded work, by design and in tests | A per-frame GPU budget (a controller on the measured slice time) and a CPU allowance with an overload test. Effort follows screen area (levels, ambient cubes, distance tiers). | All of them amortise. The two open GIBS ports cap by ray count only, never by time (5d). |
+| Mesh-local representation | Baked surfels, read grids and BVHs are per mesh. A moved instance rebuilds only the TLAS (`Retlas`), a recolor only its material arrays (no repack). | Lumen's cards are also mesh-local. Screen-spawned surfels (GIBS, Wicked) are respawned instead. |
+
+**Where we are behind, or not yet proven**
+- **Time to resolution.** Police, counted from the first GI frame in the Debug editor: 8M rays at 2.2 s, the light within
+  10 % at 2.9 s, within 5 % at about 9 s. The Debug start (the material captures, 1.6–2.9 s; three packs) is in that time. The
+  last 5 % is slow because the estimator follows small changes by its averaging (the price of the flicker fix). The 1 s target
+  is not met. Lumen's screen probes and radiance cache react within frames for what is on screen.
+- **Variance with hidden emitters.** The emitter pick weighs each emitter by its unoccluded weight, so behind walls most samples
+  pick hidden lamps. It is unbiased but noisy; the estimator hides it at the cost of convergence. ReSTIR-style reuse
+  (visibility-aware, temporal) is the known answer.
+- **Diffuse only.** Glossy indirect comes from the reflection probes and the sky. Lumen and SVOGI do glossy indirect.
+- **Detail is bounded by surfel size.** The per-pixel read grid helps at edges and walls, but features smaller than a surfel
+  are averaged. Lumen's screen traces keep small detail on screen.
+- **No ray guiding.** The rays are cosine-distributed. GIBS guides them by a per-surfel radiance map (5c, with the pdf done
+  right).
+- **No hardware RT path.** Where hardware RT exists we don't use it; the software walk is all there is.
+- **Skinned and transparent receivers.** Baked surfels follow rigid instances only. GIBS uses world probes for what surfels
+  cannot cover.
+- **Scale and mobile.** Not proven on open worlds (memory, the 131,072-surfel ring region). The mobile GPU budget is declared
+  (`m_GPUBudgetMs`), not measured: there is no device here.
+- **A level switch still repacks the scene:** about 150 ms in Debug since the pack's rewrite, a hitch when the camera crosses
+  the switch distance.
+
+**Verdict.** The architecture is in the same class as the GPU surfel systems (GIBS, Wicked): a world-space surfel cache, solved
+on the GPU, read per pixel. It is ahead on correctness, testability, light handling and cost discipline. It is behind on
+response time, glossy light and variance reduction. Those are specific items with known techniques (section 7), not a
+reason to change the approach.
 
 ## 5b. What Wicked Engine's surfel GI adds (the local checkout: a heavily modified fork, not upstream)
 
@@ -1141,3 +1158,30 @@ Phase 0 instrumentation
 ```
 
 One phase at a time; the plan file is updated at the end of each phase with what was measured.
+
+## 7. Next items, in order (proposed 2026-10-17)
+
+Each is measured before and after on Police and guarded by a test, as G1–G5 were.
+
+1. **Visibility-aware emitter sampling (ReSTIR-style temporal reuse).**
+   - Each surfel keeps a small reservoir (an emitter, its weight, its count). Each pass merges the reservoir with new
+     candidates, and the shadow ray tests the winner. Visible emitters then win and stay.
+   - Same hashes on the CPU and the GPU, so the comparisons hold.
+   - Done when: under 64 lamps with 60 hidden, the per-pass noise drops by half or more; in Police, within 5 % sooner, with
+     no flicker regression.
+2. **The convergence tail.**
+   - Split "a change of level" from "noise" in the estimator's settled blend: a confidence-aware catch-up once the samples'
+     mean has moved beyond their noise for several passes.
+   - Fade new light in by age (5d), so a level switch or a new instance doesn't pop.
+   - Done when: Police is within 5 % in about 3 s, with the flicker test unchanged.
+3. **Remove the level switch's repack.** Allocate both levels' arrays per instance and re-level in place (the migrate shader's
+   kind 1, on the same buffer). Done when: a camera dolly across the switch distance shows no frame over 5 ms in Debug.
+4. **Faster start.**
+   - The material captures are now the first second in Debug: batch them per frame by area, not one mesh at a time.
+   - The first pack, which in Debug is still about 150 ms with its uploads: upload in slices.
+   - Done when: the captures finish within 1 s of the first GI frame.
+5. **Ray guiding** (5c, with the solid-angle pdf), compared with cosine sampling at equal cost. Kept only if it wins.
+6. **Glossy indirect from the surfel cache** (rough reflections ending on the cache, as SurfelPlus does with GGX candidates). A
+   separate plan.
+7. **An optional hardware RT path** for the cast and the shadow rays, behind the same interface. Then mobile: declare and
+   measure the budget on a device.
