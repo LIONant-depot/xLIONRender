@@ -186,6 +186,7 @@ namespace xlionrender
                 m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), It->second + 1));
                 m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), pM->m_GIStamp, 0, D.m_Materials };
                 TakeMaterials(It->second);
+                if( !pM->m_pGI->m_SurfelMaterial.empty() ) W.SetProvisional(It->second, true);     // (gi_dynamic_master_plan.md 7a: until its captures are in)
             }
             else
             {
@@ -249,6 +250,11 @@ namespace xlionrender
         // Diagnostic (gi_dynamic_master_plan.md 7a, smoke/gi_startup.py --captures-first): with XLION_GI_HOLD_CAPTURES set, no solve until
         // the material captures have been done for 10 frames (the control: the solve never sees an uncaptured material)
         static const bool s_bHold = std::getenv("XLION_GI_HOLD_CAPTURES") != nullptr;
+        {   // (gi_dynamic_master_plan.md 7a) an instance is provisional until no capture of it is queued: all of them in (or dropped)
+            std::vector<char> Queued(std::size_t(W.InstanceCount()), 0);
+            for( const auto& J : m_GICaptures ) if( std::size_t(J.m_GIId) < Queued.size() ) Queued[std::size_t(J.m_GIId)] = 1;
+            for( const auto& [Key, Id] : m_GIIds ) if( !Queued[std::size_t(Id)] && W.IsProvisional(Id) ) W.SetProvisional(Id, false);
+        }
         m_GICapturesQuiet = m_GICaptures.empty() ? m_GICapturesQuiet + 1 : 0;
         if( s_bHold && m_GICapturesQuiet < 10 ) return;
         m_GIStats = W.Update(L, Eye, bGPU && Scene.m_GI.m_GPUBudgetMs > 0 ? m_pGITrace->BatchRays() : Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));     // (no GPU budget: the scene's rays, a slice each)

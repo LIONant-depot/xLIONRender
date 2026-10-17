@@ -385,6 +385,7 @@ void SurfaceAt(int Id, int Tri, float U, float V, out vec3 Albedo, out vec3 Emis
     const bool bTri = (GD[R + 47u] & 1u) != 0u;           // (47: the material's flags, world::GPUMaterial)
     Albedo = bTri ? GV(GD[R + 11u] + 3u * uint(Tri)) : GV(R + 8u);
     Emission = vec3(0);
+    if ((GD[R + 47u] & 64u) != 0u) { Albedo = vec3(0); return; }     // (gi::world::SetProvisional: not captured yet)
     const bool bSA = (GD[R + 47u] & 2u) != 0u, bSE = (GD[R + 47u] & 4u) != 0u;
     if (!bSA && !bSE) return;
     const uvec3 T = MTri(M, Tri);

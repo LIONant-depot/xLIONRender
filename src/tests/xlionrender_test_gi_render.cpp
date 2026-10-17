@@ -97,6 +97,10 @@ int main()
     Scene.m_GI = { .m_bEnable = true, .m_RayBudget = 1 << 20, .m_FilterPasses = 2 };    // every instance every frame; the read checks below were tuned at 2 filter passes (more blurs the per-pixel / vertex difference they measure)
     Scene.m_GI.m_TraceAllowanceMs = 0;                                         // no time allowance: the same work every run (the comparisons are not timing dependent)
     Scene.m_GI.m_GPUBudgetMs      = 0;                                         // (on the GPU too: every batch in one slice)
+    // (gi_dynamic_master_plan.md 7a: an instance's hits bring no light until its material is captured, so the bleeding comes after them)
+    CHECK(App.RenderFrame(Scene, View, Camera), "Render with GI");                 // (its first frame queues the captures)
+    for (int f = 0; f < 2000 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render with GI while capturing");
+    CHECK(!Renderer.isGICapturing(), "the captures did not finish");
     for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render with GI");
     const auto On = ReadRGB(Device, View, W, H);
     const auto& St = Renderer.getGIStats();
@@ -142,6 +146,8 @@ int main()
             Sparse.m_Draws[i].m_Mesh     = SparseMeshes[i];
             Sparse.m_Draws[i].m_Instance = std::uint64_t(101 + i);
         }
+        CHECK(App.RenderFrame(Sparse, View, Camera), "Render sparse, pixel read");       // (7a: its captures queued, and waited for)
+        for (int f = 0; f < 2000 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Sparse, View, Camera), "Render sparse while capturing");
         for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Sparse, View, Camera), "Render sparse, pixel read");
         const auto SparseP = ReadRGB(Device, View, W, H);
         Sparse.m_GI.m_bPerPixel = false;

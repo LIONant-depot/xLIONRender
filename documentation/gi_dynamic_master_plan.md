@@ -1275,3 +1275,45 @@ agreement". The measurements below found simpler causes to fix first.
    checkpoints and more than one seed, until regional values stop drifting. The next "within 5 %" claim uses it.
 4. **The dormancy or service rule**, if 2 points at it.
 5. **The estimator's catch-up**, only if a tail remains after 1–4.
+
+**Step 1 done (2026-10-17): material readiness**
+- What it does:
+  - `world::SetProvisional`. The host sets it when it adds an instance whose captures it queues, and clears it once no capture
+    of that instance is queued (all in, or dropped).
+  - While it is set, the instance's hits bring no albedo and no emission (`SurfaceAt` on the CPU, flag bit 64 on the GPU) and it
+    has no emitters. Its geometry stays in the ray scene.
+  - When the last of the initial instances clears, `DirtyAll`: each instance's `estimator::Lower` at its next pick, after the
+    batch in flight.
+  - Later instances relight only their neighbors.
+- Tests:
+  - `xlionrender_test_gi_flicker`: the room with its colors streamed over 18 updates, against the captured-first room after 800
+    updates. At 200 updates:
+
+    | Run | Peak after the captures | Within 5 % from update | Mean at 200 | rms at 200 |
+    |---|---|---|---|---|
+    | captured first | 0.95× | 183 | 0.954× | 8.0 % |
+    | streamed | 1.65× | never | 1.116× | 18.9 % |
+    | provisional | 0.98× | 26 | 0.984× | 4.4 % |
+
+    Even captured first is still 8 % off at 200 updates with every surfel traced every update. Its slow climb from dark is the
+    estimator's history, which the provisional run's startup transition drops.
+  - `xlionrender_test_gi_surfel_pass` (6): a provisional sign, CPU = GPU, no emitters.
+  - `xlionrender_test_gi_render`: now waits for the captures before it checks the bleeding and the per-pixel read. Base colors no
+    longer stand in for them.
+- Police (`gi_startup.py run ready`), in the same table form as above, today's startup in brackets:
+
+  | GI time | Mean / ref | Between, within |
+  |---|---|---|
+  | 1.7 s | 0.43 | 207 %, 71 % |
+  | 3.75 s | 0.85 | 78 %, 56 % |
+  | 5.7 s | 1.06 | 38 %, 23 % |
+  | 9.7 s | 1.03 | 19 %, 13 % (34 %, 17 % at 9 s) |
+  | 15.7 s | 1.02 | 13 %, 10 % (12 %, 10 % at 15 s) |
+
+  - The overshoot is gone (1.06× at most, it was 1.98×).
+  - The captures still end at 4.7 s of GI time, and only 0.1 M rays are traced in the first second. The start is now bounded by
+    the captures: captured first, they take about 1 s and the error is 12 % by 3 s.
+  - Faster captures (section 7, item 4: batched per frame, not one mesh at a time) is therefore the lever for the first seconds,
+    before the service step.
+- A trade-off to decide: a constant-color material's base color is already its capture, so it could skip being provisional
+  and not be dark for the first seconds. Not done; it needs the host to know which materials are constant.

@@ -1814,6 +1814,26 @@ namespace xlionrender::gi
             AffectNear(I.m_Lo, I.m_Hi, Id);
         }
 
+        // 7a (gi_dynamic_master_plan.md): an instance whose material is not captured yet (the host's capture queued, SetSurfelMaterial and
+        // SetTriangleAlbedo / SetTriangleEmission to come). It stays in the ray scene (it occludes) with a provisional lower-energy
+        // response: its hits bring no light (no albedo, no emission) and it has no emitters, where its default albedo (a material's base
+        // color factor: white for most textured ones) would make it a bright reflector. When the last of the initial ones is captured,
+        // every instance's light continues as a warm start with its confidence lowered (DirtyAll: estimator::Lower at its next pass, which
+        // is after the batch in flight) - the light made from provisional materials is not kept as settled. Later instances only relight
+        // their neighbors, as any material change does
+        void SetProvisional(int Id, bool bProvisional) noexcept
+        {
+            auto& I = m_Instances[std::size_t(Id)];
+            if (I.m_bProvisional == bProvisional) return;
+            I.m_bProvisional = bProvisional;
+            m_nProvisional += bProvisional ? 1 : -1;
+            ++I.m_MatGen;
+            EmittersChanged(Id);
+            AffectNear(I.m_Lo, I.m_Hi, Id);
+            if (!bProvisional && m_nProvisional == 0 && !m_bBooted) { m_bBooted = true; DirtyAll(); }
+        }
+        bool IsProvisional(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_bProvisional; }
+
         const std::vector<v3>& SurfelAlbedo  ( int Id ) const noexcept { return m_Instances[Id].m_SurfAlbedo; }
         const std::vector<v3>& SurfelEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }
 
@@ -1848,6 +1868,7 @@ namespace xlionrender::gi
             ++m_GPUGen;
             auto& I = m_Instances[Id];
             if (!I.m_bAlive) return;
+            if (I.m_bProvisional) SetProvisional(Id, false);     // (7a: the count of those not captured yet)
             I.m_bAlive = false;
             if (Transports(I)) AffectNear(I.m_Lo, I.m_Hi);
             I.m_E.clear(); I.m_Acc.clear(); I.m_Valid.clear(); I.m_AccValid.clear();
@@ -2486,7 +2507,8 @@ namespace xlionrender::gi
             B(A[3], I.m_SeeThrough, nT); B(A[4], I.m_SurfSeeThrough, nF);
             for (auto& a : A) if (a.empty()) a.push_back(0u);
             return (I.m_TriAlbedo.empty() ? 0u : 1u) | (I.m_SurfAlbedo.empty() ? 0u : 2u) | (I.m_SurfEmission.empty() ? 0u : 4u) | (I.m_SeeThrough.empty() ? 0u : 8u) | (I.m_SurfSeeThrough.empty() ? 0u : 16u)
-                 | (I.m_EmitB.empty() ? 0u : 32u);     // (32: it has links: its rays' hits leave the emission out, the links bring it)
+                 | (I.m_EmitB.empty() ? 0u : 32u)      // (32: it has links: its rays' hits leave the emission out, the links bring it)
+                 | (I.m_bProvisional ? 64u : 0u);      // (64: 7a, not captured yet: its hits bring nothing)
         }
         std::uint32_t MatGen(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_MatGen; }
 
@@ -3624,6 +3646,7 @@ namespace xlionrender::gi
             std::vector<estimator>  m_Est;                      // per surfel of the active level: its light over time
             std::uint32_t           m_EmitGen   = 0;            // G4: m_EmitB's version (the GPU's copy)
             std::uint32_t           m_MatGen    = 0;            // G4c: its material's version (albedo, emission, see-through: GPUMaterial)
+            bool                    m_bProvisional = false;     // 7a: its material not captured yet (SetProvisional): its hits bring nothing
             float                   m_RaysPerStep = 0;          // G4c: the rays a step of its cursor cost on the GPU (its ranges' mean; 0: not known)
             int                     m_Level     = 0;
             bool                    m_bCube     = false;        // level 1 as an ambient cube: only m_CubeSet is traced, the other parents blend from them (ExpandCube)
@@ -4017,7 +4040,7 @@ namespace xlionrender::gi
             for (const auto& a : I.m_SurfAlbedo) I.m_AlbedoSum = I.m_AlbedoSum + a;
             for (const auto& e : I.m_SurfEmission) I.m_nEmissiveSurf += (e.m_X + e.m_Y + e.m_Z) > 0.01f;
             std::vector<int> Now;
-            for (int e = 0; e < int(I.m_SurfEmission.size()); ++e)
+            for (int e = 0; e < int(I.m_SurfEmission.size()) && !I.m_bProvisional; ++e)      // (7a: none while provisional)
                 if (I.m_SurfEmission[e].m_X + I.m_SurfEmission[e].m_Y + I.m_SurfEmission[e].m_Z > 1e-3f) Now.push_back(e);
             m_bEmitDirty = true;
             if (Now == I.m_EmitSurfs) return;
@@ -4320,6 +4343,7 @@ namespace xlionrender::gi
             const auto& I = m_Instances[H.m_Inst];
             const bool  bTri = std::size_t(H.m_Tri) < I.m_TriAlbedo.size();
             Albedo = bTri ? I.m_TriAlbedo[H.m_Tri] : I.m_Albedo; Emission = { 0, 0, 0 };
+            if (I.m_bProvisional) { Albedo = { 0, 0, 0 }; return; }     // (7a: not captured yet)
             if (I.m_SurfAlbedo.empty() && I.m_SurfEmission.empty()) return;
             const auto& M = *I.m_pMesh; const auto& T = M.m_Tris[H.m_Tri];
             const float Bc[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
@@ -4396,6 +4420,8 @@ namespace xlionrender::gi
         int                                     m_Starve[4] = { 0, 0, 0, 0 };   // Phase 6b: per stage (links, trace, shown, events) the updates it had work and did none: the token's
         bool                                    m_bPendingAffects = false;  // some instance has changes waiting for its buckets (PumpAffects)
         bool                                    m_bRelightDeferred = false; // a RelightAll that came too soon (Update runs it when it may)
+        int                                     m_nProvisional = 0;         // 7a: instances whose material is not captured yet (SetProvisional)
+        bool                                    m_bBooted = false;          // 7a: the initial captures were all done once (the scene-wide transition ran)
         mutable int                             m_ShownPasses = -1;         // the settings the shown light was made with (ShownSettings)
         mutable float                           m_ShownSat    = -1;
         bool                                    m_bEmitDirty = true;        // UpdateEmittedLight's inputs changed (Update)

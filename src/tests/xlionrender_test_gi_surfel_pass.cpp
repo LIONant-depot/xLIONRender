@@ -198,6 +198,25 @@ int main()
         result R; if (Run(App, Pass, W, Dark, 8, 14, R)) return 1;
         if (Report("emissive sign, light sampling", R)) return 1;
     }
+    // (6) 7a: the same sign not captured yet (world::SetProvisional), under the sun and the sky: its hits bring nothing (no albedo, no
+    // emission) and it has no emitters, on the GPU as on the CPU
+    {
+        surfel_mesh Ground, Sign;
+        AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
+        AddQuad(Sign, { -0.5f, 1, -0.5f }, { 1, 0, 0 }, { 0, 0, 1 }, 0.1f);
+        Ground.Bake(0.3f, 0.9f); Sign.Bake(0.05f, 0.15f);
+        world W;
+        W.m_Setup.m_bEmitterSampling = true;
+        W.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iS = W.Add(Sign, xmath::fmat4::fromIdentity(), { 1, 1, 1 });
+        W.SetSurfelMaterial(iS, std::vector<v3>(Sign.m_Levels[0].size(), v3{ 0.3f, 0.6f, 0.3f }), std::vector<v3>(Sign.m_Levels[0].size(), v3{ 20, 20, 20 }));
+        W.SetProvisional(iS, true);
+        lights Sun; Sun.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); Sun.m_SunColor = { 3, 3, 3 }; Sun.m_Sky = { 0.1f, 0.1f, 0.1f };
+        for (int u = 0; u < 4; ++u) W.Update(Sun, { 0, 1, 0 }, 1 << 30, 500 + u);
+        CHECK(W.EmitterCount() == 0, "a provisional instance has %zu emitters", W.EmitterCount());
+        result R; if (Run(App, Pass, W, Sun, 16, 15, R)) return 1;
+        if (Report("provisional sign, sun and sky", R)) return 1;
+    }
     std::printf("PASS\n");
     return 0;
 }

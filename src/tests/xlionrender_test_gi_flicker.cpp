@@ -216,6 +216,49 @@ int main()
         CHECK(std::abs(Samp / X1 - 1) < 0.03, "the sampled emitters' light is %.1f%% off the exact one", 100 * (Samp / X1 - 1));
         CHECK(E1[2] < 0.12, "the sampled emitters' light is %.1f%% off the exact one per surfel after 120 updates (rms)", 100 * E1[2]);
     }
+    // 7a (gi_dynamic_master_plan.md): the start with the materials captured over the first updates, as the host's captures come in. Every
+    // piece of the room added with a white albedo (a material's base color factor: what an instance has until its capture), its colors
+    // captured one piece every 3 updates. (a) captured before the first update (the control), (b) streamed, (c) streamed with the pieces
+    // provisional until captured (world::SetProvisional). The reference: (a) after 800 updates. After 200: (c) never overshoots, is within
+    // 5 % no later than (b), and is as close to the reference as (a) is
+    {
+        const auto Start = [&](int Mode, std::vector<double>& Mean, std::vector<double>& Final, int nUpdates)
+        {
+            world D;
+            for (std::size_t i = 0; i < std::size(Pieces); ++i)
+            {
+                D.Add(M[i], xmath::fmat4::fromTranslation(Pieces[i].m_Pos), { 1, 1, 1 });
+                if (Mode == 2) D.SetProvisional(int(i), true);
+            }
+            const auto Capture = [&](int i) { D.SetSurfelMaterial(i, std::vector<v3>(M[std::size_t(i)].m_Levels[0].size(), Pieces[i].m_Color), {}); if (Mode == 2) D.SetProvisional(i, false); };
+            if (Mode == 0) for (int i = 0; i < int(std::size(Pieces)); ++i) Capture(i);
+            D.m_Setup.m_FilterPasses = 2;
+            Mean.clear();
+            for (int u = 0; u < nUpdates; ++u)
+            {
+                if (Mode != 0 && u % 3 == 2 && u / 3 < int(std::size(Pieces))) Capture(u / 3);
+                D.Update(L, Eye, 1 << 30, 7000 + u);
+                double m = 0; std::size_t n = 0;
+                for (int i = 0; i < D.InstanceCount(); ++i) for (const auto& e : D.InstanceLight(i)) { m += Lum(e); ++n; }
+                Mean.push_back(m / double(n));
+            }
+            Final.clear();
+            for (int i = 0; i < D.InstanceCount(); ++i) for (const auto& e : D.InstanceLight(i)) Final.push_back(Lum(e));
+        };
+        std::vector<double> MR, MA, MB, MC, FR, FA, FB, FC;
+        Start(0, MR, FR, 800); Start(0, MA, FA, 200); Start(1, MB, FB, 200); Start(2, MC, FC, 200);
+        const double Ref = MR.back();
+        const auto Peak = [&](const std::vector<double>& m) { double p = 0; for (std::size_t u = 18; u < m.size(); ++u) p = std::max(p, m[u] / Ref); return p; };   // (after the last capture)
+        const auto Within = [&](const std::vector<double>& m, double Tol) { int Last = -1; for (int u = 0; u < int(m.size()); ++u) if (std::abs(m[std::size_t(u)] / Ref - 1) > Tol) Last = u; return Last + 1; };
+        const auto Rms = [&](const std::vector<double>& F) { double e = 0, t = 0; for (std::size_t k = 0; k < F.size(); ++k) { e += (F[k] - FR[k]) * (F[k] - FR[k]); t += FR[k]; } return std::sqrt(e / double(F.size())) / (t / double(F.size())); };
+        std::printf("the start, the room's colors captured over the first 18 updates, against the captured-first room after 800 updates:\n");
+        const auto P = [&](const char* pName, const std::vector<double>& m, const std::vector<double>& F)
+        { std::printf("  %-15s peak after the captures %.2fx, within 5%% from update %3d (of 200); at 200 its mean %.3fx, off by %.1f%% (rms)\n", pName, Peak(m), Within(m, 0.05), m.back() / Ref, 100 * Rms(F)); };
+        P("captured first", MA, FA); P("streamed", MB, FB); P("provisional", MC, FC);
+        CHECK(Peak(MC) < 1.05, "provisional materials: the light overshoots %.2fx after the captures", Peak(MC));
+        CHECK(Within(MC, 0.05) <= Within(MB, 0.05), "provisional materials: within 5%% from update %d, streamed from %d", Within(MC, 0.05), Within(MB, 0.05));
+        CHECK(std::abs(MC.back() / Ref - 1) <= std::abs(MA.back() / Ref - 1) + 0.02 && Rms(FC) <= Rms(FA) + 0.02, "provisional materials: at 200 updates the mean %.3fx and %.1f%% off (rms), captured first %.3fx and %.1f%%", MC.back() / Ref, 100 * Rms(FC), MA.back() / Ref, 100 * Rms(FA));
+    }
     std::printf("PASS\n");
     return 0;
 }
