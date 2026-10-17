@@ -1,15 +1,19 @@
 #version 450
-// Part II, G2 (documentation/gi_dynamic_master_plan.md): a surfel pass on the GPU. One invocation per work item traces its rays in
-// gi::world::TraceChunk's order and writes what TraceChunk accumulates before it finishes the pass (the light's sum, its share per basis
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+// Part II, G2 (documentation/gi_dynamic_master_plan.md): a surfel pass on the GPU. Each work item's rays (gi::world::TraceChunk's) are
+// traced by gi_lanes_v invocations, which write what TraceChunk accumulates before it finishes the pass (the light's sum, its share per basis
 // direction, the depth moments' sums, the back-face and hit counts). Every function mirrors its CPU twin in xlionrender_surfel_gi.h; the
 // data is gi::world::PackGPUSurfels's (its layout is written there) and PackGPU's
-layout(local_size_x = 32) in;
+layout(local_size_x = 64) in;                                // (gi::world::gpu_group_v)
+const int gi_lanes_v = 8;                                    // invocations per item (gi::world::gpu_lanes_v; the subgroup has 8 at least)
 
 struct GINode     { vec4 m_B[6]; ivec4 m_Child; };
 struct GITri4     { vec4 m_V0[3]; vec4 m_E1[3]; vec4 m_E2[3]; ivec4 m_Tri; };
 struct GIInstance { vec4 m_W2L[3]; ivec4 m_Info; };
 struct GIItem     { ivec4 m_Ids; vec4 m_Offsets; };          // instance, surfel, level, rays; off1, off2, shift (bits), -
-struct GIResult   { float m_V[68]; };                         // sum 3, basis 9, moments 48, back, back all, unsupported, hits (as floats), unsupported at 3, -
+struct GIResult   { float m_V[72]; };                         // sum 3, basis 9, moments 48, back, back all, unsupported, hits (int bits: gi::world::gpu_result), unsupported at 3, -
 
 layout(std430, set = 0, binding = 0) readonly  buffer nodes_b     { GINode     GIBvhNodes[]; };
 layout(std430, set = 0, binding = 1) readonly  buffer tri4_b      { GITri4     GIBvhTri4[]; };
@@ -19,7 +23,7 @@ layout(std430, set = 0, binding = 4) readonly  buffer data_b      { uint       G
 layout(std430, set = 0, binding = 5) readonly  buffer items_b     { GIItem     GIItems[]; };
 layout(std430, set = 0, binding = 6) writeonly buffer results_b   { GIResult   GIResults[]; };
 
-layout(push_constant) uniform push_t { int m_nItems, m_TlasRoot, m_PrimOffset, m_Pad; } Push;
+layout(push_constant) uniform push_t { int m_nItems, m_TlasRoot, m_PrimOffset, m_First; } Push;     // (m_First: this dispatch's first item, a slice of the batch)
 
 const uint  gi_none_v = 0xFFFFFFFFu;
 const uint  gi_inst_v = 41u;
@@ -39,6 +43,7 @@ bool GISeeThroughBits(int Inst, int Tri)
 #define GI_BVH_SEE_THROUGH
 bool GISeeThrough(int Inst, int Tri) { return GISeeThroughBits(Inst, Tri); }
 #include "xlionrender_gi_bvh.glsl"
+int g_Shadows = 0, g_ReadEntries = 0, g_Probes = 0;      // (diagnostics, with g_GIBvhVisits: gi::world::gpu_result::m_Work)
 
 // ---- an instance's placement
 vec3 ToWorld(uint R, vec3 P)  { return vec3(dot(GV(R + 16u), P) + GF(R + 19u), dot(GV(R + 20u), P) + GF(R + 23u), dot(GV(R + 24u), P) + GF(R + 27u)); }
@@ -106,11 +111,11 @@ vec3 SkyAt(vec3 D)
     const vec3 T00 = GV(O + 3u * uint(iy * 4 + ix)), T10 = GV(O + 3u * uint(iy * 4 + ix + 1)), T01 = GV(O + 3u * uint((iy + 1) * 4 + ix)), T11 = GV(O + 3u * uint((iy + 1) * 4 + ix + 1));
     return (T00 * (1.0 - tx) + T10 * tx) * (1.0 - ty) + (T01 * (1.0 - tx) + T11 * tx) * ty;
 }
-bool Occluded(vec3 O, vec3 D, float TMax)       // world::Occluded (see-through triangles block: as the CPU's shadow rays)
+bool Occluded(vec3 O, vec3 D, float TMax)       // world::Occluded: the first hit ends it (see-through triangles block: as the CPU's shadow rays)
 {
-    g_GIBvhSeeThrough = false;
+    g_GIBvhSeeThrough = false; g_GIBvhAnyHit = true; ++g_Shadows;
     const gi_hit H = GICast(O, D, TMax);
-    g_GIBvhSeeThrough = true;
+    g_GIBvhSeeThrough = true; g_GIBvhAnyHit = false;
     return H.m_Inst >= 0;
 }
 vec3 Direct(vec3 P, vec3 N)
@@ -208,6 +213,7 @@ int ReadEntry(uint M, vec3 P, vec3 N)
     const uint Tb = GD[M + 10u];
     for (uint n = 0u; n <= Mask; ++n, h = (h + 1u) & Mask)
     {
+        ++g_Probes;
         const uint E0 = GD[Tb + 4u * h], E1 = GD[Tb + 4u * h + 1u];
         if (E1 == 0xFFFFFFFFu) return -1;
         if (E0 == KLo && E1 == KHi) return int(h);
@@ -266,6 +272,7 @@ bool ReadPoint(int Id, vec3 P, vec3 N, out vec3 E)
     for (uint i = 0u; i < Count; ++i)
     {
         const uint e = GD[Lb + First + i];
+        ++g_ReadEntries;
         const int s = int(e & 0xFFFFu);
         const uint Sb = MSurfel(M, 0u, s);
         const float c = dot(GV(Sb + 3u), N);
@@ -401,63 +408,83 @@ void SurfaceAt(int Id, int Tri, float U, float V, out vec3 Albedo, out vec3 Emis
     Emission = SE * (GF(5u) / W);
 }
 
+// A work item's rays are spread over gi_lanes_v invocations (a cluster of its subgroup): lane l traces rays l, l + 8, ... and the
+// cluster adds what they found. One invocation per item traced its rays one after the other: a small batch was bound by the rays'
+// latency (Police: 426 items, 3.4k rays in 5 ms)
 void main()
 {
-    const int k = int(gl_GlobalInvocationID.x);
-    if (k >= Push.m_nItems) return;
+    const int  k     = Push.m_First + int(gl_GlobalInvocationID.x) / gi_lanes_v;
+    const int  Lane  = int(gl_GlobalInvocationID.x) % gi_lanes_v;
+    // (an invocation past the items still joins its cluster's sums, with nothing; so does an item whose instance is gone or changed level
+    // since the batch was picked: the world drops it)
+    const bool bItem = k < Push.m_nItems && GD[InstRec(GIItems[min(k, Push.m_nItems - 1)].m_Ids.x) + 40u] != 0u
+                    && GD[InstRec(GIItems[min(k, Push.m_nItems - 1)].m_Ids.x) + 1u] == uint(GIItems[min(k, Push.m_nItems - 1)].m_Ids.z);
     g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
-    const int Id = GIItems[k].m_Ids.x, s = GIItems[k].m_Ids.y, Rn = GIItems[k].m_Ids.w;
-    const float Off1 = GIItems[k].m_Offsets.x, Off2 = GIItems[k].m_Offsets.y;
-    const int Shift = floatBitsToInt(GIItems[k].m_Offsets.z);
-    const uint R = InstRec(Id), M = MeshOf(R), Level = GD[R + 1u];
-    const uint Sb = MSurfel(M, Level, s);
-    const vec3 Sc = GV(Sb), Sn = GV(Sb + 3u);
-    const float Reach = 2.0 * GF(Sb + 6u);
-    const vec3 C = ToWorld(R, Sc), N = NormalToWorld(R, Sn);
-    vec3 D0, D1, D2; BasisDirs(Sn, D0, D1, D2);
-    const bool bSpread = GD[6] != 0u && Level == 0u && GD[M + 14u] != gi_none_v;
-    const uint o0 = bSpread ? GD[GD[M + 14u] + uint(s)] : 0u, nO = bSpread ? GD[GD[M + 14u] + uint(s) + 1u] - o0 : 0u;
     vec3 Sum = vec3(0), BA0 = vec3(0), BA1 = vec3(0), BA2 = vec3(0), UnsAt = vec3(0);
     float MA[48]; for (int t = 0; t < 48; ++t) MA[t] = 0.0;
-    int nBack = 0, nBackAll = 0, nUns = 0, nHits = 0;
-    const float MeanScale = GF(R + 15u);
-    for (int r = 0; r < Rn; ++r)
+    int nBack = 0, nBackAll = 0, nUns = 0, nHits = 0, FirstUns = 0x7FFFFFFF;
+    if (bItem)
     {
-        vec3 Cr = C, Nr = N;
-        if (nO > 1u) { const uint o = o0 + uint(r + Shift) % nO; Cr = ToWorld(R, GV(GD[M + 15u] + 3u * o)); Nr = NormalToWorld(R, GV(GD[M + 16u] + 3u * o)); }
-        const vec3 D = StratifiedCosineDir(Nr, r, Rn, Off1, Off2);
-        const gi_hit H = GICast(Cr + Nr * 1e-3, D, 1e30);
-        vec3 Dm = DirToMesh(R, D);
-        const float Lm = length(Dm);
-        Dm = Dm * (1.0 / Lm);
-        const vec3 Pe = ToMesh(R, Cr + D * (H.m_Inst < 0 ? Reach / Lm : H.m_T)) - Sc;
-        const float Le = length(Pe);
-        const float dd = min(Le, Reach);
-        const int t = MomentTexel(Sn, Le > 1e-6 ? Pe * (1.0 / Le) : Dm);
-        MA[3 * t] += dd; MA[3 * t + 1] += dd * dd; MA[3 * t + 2] += 1.0;
-        const vec3 Bw = BasisWeights(D0, D1, D2, Dm);
-        if (H.m_Inst < 0) { const vec3 Sky = SkyAt(D); Sum += Sky; BA0 += Sky * Bw.x; BA1 += Sky * Bw.y; BA2 += Sky * Bw.z; continue; }
-        const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
-        const uvec3 HT = MTri(HM, H.m_Tri);
-        const float B0 = 1.0 - H.m_U - H.m_V;
-        const vec3 Nh = NormalToWorld(HR, MNrm(HM, HT.x) * B0 + MNrm(HM, HT.y) * H.m_U + MNrm(HM, HT.z) * H.m_V);
-        if (dot(Nh, D) > 0.0) { nBack += H.m_T < Reach * MeanScale ? 1 : 0; ++nBackAll; continue; }
-        vec3 Albedo, Emission;
-        SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
-        vec3 Q;
-        const bool bQ = Indirect(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Q);
-        const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
-        if (!bQ) { if (nUns == 0) UnsAt = Ph; ++nUns; }
-        ++nHits;
-        const vec3 In = Direct(Ph, Nh) + (bQ ? Q : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));
-        const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + (GD[7] != 0u ? Emission : vec3(0));
-        Sum += Lr; BA0 += Lr * Bw.x; BA1 += Lr * Bw.y; BA2 += Lr * Bw.z;
+        const int Id = GIItems[k].m_Ids.x, s = GIItems[k].m_Ids.y, Rn = GIItems[k].m_Ids.w;
+        const float Off1 = GIItems[k].m_Offsets.x, Off2 = GIItems[k].m_Offsets.y;
+        const int Shift = floatBitsToInt(GIItems[k].m_Offsets.z);
+        const uint R = InstRec(Id), M = MeshOf(R), Level = GD[R + 1u];
+        const uint Sb = MSurfel(M, Level, s);
+        const vec3 Sc = GV(Sb), Sn = GV(Sb + 3u);
+        const float Reach = 2.0 * GF(Sb + 6u);
+        const vec3 C = ToWorld(R, Sc), N = NormalToWorld(R, Sn);
+        vec3 D0, D1, D2; BasisDirs(Sn, D0, D1, D2);
+        const bool bSpread = GD[6] != 0u && Level == 0u && GD[M + 14u] != gi_none_v;
+        const uint o0 = bSpread ? GD[GD[M + 14u] + uint(s)] : 0u, nO = bSpread ? GD[GD[M + 14u] + uint(s) + 1u] - o0 : 0u;
+        const float MeanScale = GF(R + 15u);
+        for (int r = Lane; r < Rn; r += gi_lanes_v)
+        {
+            vec3 Cr = C, Nr = N;
+            if (nO > 1u) { const uint o = o0 + uint(r + Shift) % nO; Cr = ToWorld(R, GV(GD[M + 15u] + 3u * o)); Nr = NormalToWorld(R, GV(GD[M + 16u] + 3u * o)); }
+            const vec3 D = StratifiedCosineDir(Nr, r, Rn, Off1, Off2);
+            const gi_hit H = GICast(Cr + Nr * 1e-3, D, 1e30);
+            vec3 Dm = DirToMesh(R, D);
+            const float Lm = length(Dm);
+            Dm = Dm * (1.0 / Lm);
+            const vec3 Pe = ToMesh(R, Cr + D * (H.m_Inst < 0 ? Reach / Lm : H.m_T)) - Sc;
+            const float Le = length(Pe);
+            const float dd = min(Le, Reach);
+            const int t = MomentTexel(Sn, Le > 1e-6 ? Pe * (1.0 / Le) : Dm);
+            MA[3 * t] += dd; MA[3 * t + 1] += dd * dd; MA[3 * t + 2] += 1.0;
+            const vec3 Bw = BasisWeights(D0, D1, D2, Dm);
+            if (H.m_Inst < 0) { const vec3 Sky = SkyAt(D); Sum += Sky; BA0 += Sky * Bw.x; BA1 += Sky * Bw.y; BA2 += Sky * Bw.z; continue; }
+            const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
+            const uvec3 HT = MTri(HM, H.m_Tri);
+            const float B0 = 1.0 - H.m_U - H.m_V;
+            const vec3 Nh = NormalToWorld(HR, MNrm(HM, HT.x) * B0 + MNrm(HM, HT.y) * H.m_U + MNrm(HM, HT.z) * H.m_V);
+            if (dot(Nh, D) > 0.0) { nBack += H.m_T < Reach * MeanScale ? 1 : 0; ++nBackAll; continue; }
+            vec3 Albedo, Emission;
+            SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
+            vec3 Q;
+            const bool bQ = Indirect(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Q);
+            const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
+            if (!bQ) { if (nUns == 0) { UnsAt = Ph; FirstUns = r; } ++nUns; }
+            ++nHits;
+            const vec3 In = Direct(Ph, Nh) + (bQ ? Q : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));
+            const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + (GD[7] != 0u ? Emission : vec3(0));
+            Sum += Lr; BA0 += Lr * Bw.x; BA1 += Lr * Bw.y; BA2 += Lr * Bw.z;
+        }
     }
+    // the cluster's sums (the first unsupported ray's hit: the lane with the item's lowest such ray)
+    Sum = subgroupClusteredAdd(Sum, gi_lanes_v); BA0 = subgroupClusteredAdd(BA0, gi_lanes_v); BA1 = subgroupClusteredAdd(BA1, gi_lanes_v); BA2 = subgroupClusteredAdd(BA2, gi_lanes_v);
+    for (int t = 0; t < 48; ++t) MA[t] = subgroupClusteredAdd(MA[t], gi_lanes_v);
+    nBack = subgroupClusteredAdd(nBack, gi_lanes_v); nBackAll = subgroupClusteredAdd(nBackAll, gi_lanes_v);
+    nUns = subgroupClusteredAdd(nUns, gi_lanes_v); nHits = subgroupClusteredAdd(nHits, gi_lanes_v);
+    const int First = subgroupClusteredMin(FirstUns, gi_lanes_v);
+    UnsAt = subgroupClusteredAdd(FirstUns == First && First != 0x7FFFFFFF ? UnsAt : vec3(0), gi_lanes_v);
+    const ivec4 Work = subgroupClusteredAdd(ivec4(g_GIBvhVisits, g_Shadows, g_ReadEntries, g_Probes), gi_lanes_v);
+    if (!bItem || Lane != 0) return;
     GIResults[k].m_V[0] = Sum.x; GIResults[k].m_V[1] = Sum.y; GIResults[k].m_V[2] = Sum.z;
     GIResults[k].m_V[3] = BA0.x; GIResults[k].m_V[4] = BA0.y; GIResults[k].m_V[5] = BA0.z;
     GIResults[k].m_V[6] = BA1.x; GIResults[k].m_V[7] = BA1.y; GIResults[k].m_V[8] = BA1.z;
     GIResults[k].m_V[9] = BA2.x; GIResults[k].m_V[10] = BA2.y; GIResults[k].m_V[11] = BA2.z;
     for (int t = 0; t < 48; ++t) GIResults[k].m_V[12 + t] = MA[t];
-    GIResults[k].m_V[60] = float(nBack); GIResults[k].m_V[61] = float(nBackAll); GIResults[k].m_V[62] = float(nUns); GIResults[k].m_V[63] = float(nHits);
+    GIResults[k].m_V[60] = intBitsToFloat(nBack); GIResults[k].m_V[61] = intBitsToFloat(nBackAll); GIResults[k].m_V[62] = intBitsToFloat(nUns); GIResults[k].m_V[63] = intBitsToFloat(nHits);
     GIResults[k].m_V[64] = UnsAt.x; GIResults[k].m_V[65] = UnsAt.y; GIResults[k].m_V[66] = UnsAt.z; GIResults[k].m_V[67] = 0.0;
+    for (int w = 0; w < 4; ++w) GIResults[k].m_V[68 + w] = intBitsToFloat(Work[w]);
 }

@@ -7,6 +7,13 @@ namespace xlionrender
 {
     namespace
     {
+        constexpr std::uint32_t s_GISurfelPassComp[] = {
+            #include "xlionrender_gi_surfel_pass_comp.h"
+        };
+        constexpr std::uint32_t s_GIScatterComp[] = {
+            #include "xlionrender_gi_scatter_comp.h"
+        };
+
         // FNV-1a over a caster's identity and state: a different value is a different (or moved) caster
         std::uint64_t Hash(std::uint64_t H, const void* pData, std::size_t Size) noexcept
         {
@@ -80,7 +87,7 @@ namespace xlionrender
     // Surfel GI (features/gi/xlionrender_surfel_gi.h): the draws of meshes with surfels and a persistent id become world instances
     // (added, moved, removed when no longer drawn), the scene's lights its lights, one Update on the ray budget; then every drawn
     // instance's active-level light into this frame's region of the GI light ring (m_DrawGI: where, which level)
-    void instance::updateGI( const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
+    void instance::updateGI( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
     {
         m_DrawGI.assign(Scene.m_Draws.size(), { 0u, 0xFFFFFFFFu });
         if( !Scene.m_GI.m_bEnable ) return;
@@ -183,7 +190,28 @@ namespace xlionrender
             W.m_Setup.m_EmissiveScale = Scene.m_GI.m_EmissiveScale;
             W.DirtyAll();
         }
-        m_GIStats = W.Update(L, Eye, Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));
+        // G3 (gi_dynamic_master_plan.md): the rays on the GPU, over frames. The last frame's slice into the world, the update (it commits
+        // what came in, picks when the batch is all in), this frame's slice dispatched (the light the update committed uploaded first)
+        if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
+        {
+            m_pGITrace = std::make_unique<gi::gpu_trace>();
+            if( !m_pGITrace->Init(m_Device, s_GISurfelPassComp, s_GIScatterComp) ) { m_pGITrace.reset(); m_bGITraceFailed = true; }
+        }
+        const bool          bGPU  = Scene.m_GI.m_bGPUTrace && m_pGITrace;
+        const std::uint64_t GIFrame = m_Device.getFrameIndex();
+        W.m_Setup.m_bGPUTrace = bGPU;
+        const auto TCollect = std::chrono::steady_clock::now();
+        if( m_pGITrace ) m_pGITrace->Collect(W, GIFrame);         // (also after the GPU was turned off: what it traced is still delivered)
+        const double CollectMs = MsSince(TCollect);
+        m_GIStats = W.Update(L, Eye, bGPU ? m_pGITrace->BatchRays() : Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));
+        if( bGPU )
+        {
+            const auto TSubmit = std::chrono::steady_clock::now();
+            m_pGITrace->Submit(Window, W, L, GIFrame, std::max(Scene.m_GI.m_GPUBudgetMs, 0.05f));
+            m_GIStats.m_GPUTraceMs = m_pGITrace->LastMs(); m_GIStats.m_GPUPacks = m_pGITrace->Packs(); m_GIStats.m_GPUCpuMs = CollectMs + MsSince(TSubmit);
+            m_GIStats.m_GPUSliceRays = m_pGITrace->LastRays();
+            for( int w = 0; w < 4; ++w ) m_GIStats.m_GPUWork[w] = m_pGITrace->Work()[std::size_t(w)];
+        }
         const auto TUpload = std::chrono::steady_clock::now();
 
         // Phase 3 (documentation/gi_dynamic_master_plan.md): every frame slot of the rings keeps every instance at the same place (its mean,
@@ -1363,7 +1391,7 @@ namespace xlionrender
         if( !m_bShadowAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ShadowClearPass); m_bShadowAtlasReady = true; }
         updateEnvironment(Window, Scene);
         updateInstances(Window, Scene, Eye);
-        updateGI(Scene, Eye, ProjScale);                                   // CPU (getGIStats); the probes' captures read it too
+        updateGI(Window, Scene, Eye, ProjScale);                                   // CPU (getGIStats); the probes' captures read it too
         {
             const auto TCapture = std::chrono::steady_clock::now();
             processGICapture(Window);                           // the surfels' material colors (one mesh at a time)

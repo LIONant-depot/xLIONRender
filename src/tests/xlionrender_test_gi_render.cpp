@@ -99,7 +99,8 @@ int main()
     for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render with GI");
     const auto On = ReadRGB(Device, View, W, H);
     const auto& St = Renderer.getGIStats();
-    std::printf("GI: %d instances updated, %d surfels, %d rays, %.2f ms\n", St.m_Updated, St.m_Surfels, St.m_Rays, St.m_Ms);
+    std::printf("GI: %d instances updated, %d surfels, %d rays, %.2f ms; on the GPU (G3): a batch %.3f ms, the scene packed %d times\n", St.m_Updated, St.m_Surfels, St.m_Rays, St.m_Ms, St.m_GPUTraceMs, St.m_GPUPacks);
+    CHECK(St.m_GPUTraceMs > 0, "the GI did not trace on the GPU (scene::gi_settings::m_bGPUTrace is on by default)");
     DumpRGB("gi_off", Off, W, H);
     DumpRGB("gi_on", On, W, H);
 

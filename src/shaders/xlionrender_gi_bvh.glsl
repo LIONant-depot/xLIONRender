@@ -10,6 +10,7 @@
 
 int g_GIBvhTlasRoot   = 0;
 int g_GIBvhPrimOffset = 0;
+bool g_GIBvhAnyHit = false;        // the first hit before TMax ends the walk (a shadow ray: gi::world::Occluded), not the nearest
 bool g_GIBvhSeeThrough = false;     // the casts leave the see-through triangles out (GISeeThrough(world instance, triangle), the includer's when it
                                     // defines GI_BVH_SEE_THROUGH); the shadow rays do not, as gi::world::Occluded
 #ifndef GI_BVH_SEE_THROUGH
@@ -17,6 +18,7 @@ bool GISeeThrough(int Inst, int Tri) { return false; }
 #endif
 
 const int gi_bvh_stack_v = 64;
+int g_GIBvhVisits = 0;              // (diagnostics) the nodes and leaves the walks popped
 
 // Which of a node's 4 children the ray enters before TMax (a bit each), and where (TNear): bvh::Box4
 int GIBox4(int Node, vec3 O, vec3 Inv, ivec3 Near, float TMax, out vec4 TNear)
@@ -76,11 +78,12 @@ void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
         --n;
         const int c = Code[n];
         if (TS[n] > H.m_T) continue;
+        ++g_GIBvhVisits;
         if (c < 0)
         {
             float d, u, v;
             const int k = GIIntersectTri4(~c, Inst, O, D, H.m_T, d, u, v);
-            if (k >= 0) { H.m_T = d; H.m_U = u; H.m_V = v; H.m_Inst = Inst; H.m_Tri = GIBvhTri4[~c].m_Tri[k]; }
+            if (k >= 0) { H.m_T = d; H.m_U = u; H.m_V = v; H.m_Inst = Inst; H.m_Tri = GIBvhTri4[~c].m_Tri[k]; if (g_GIBvhAnyHit) return; }
             continue;
         }
         vec4 TNear;
@@ -111,6 +114,7 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
         --n;
         const int c = Code[n];
         if (TS[n] > H.m_T) continue;
+        ++g_GIBvhVisits;
         if (c < 0)
         {
             const int First = GIBvhTlasLeaves[2 * (~c)], Count = GIBvhTlasLeaves[2 * (~c) + 1];
@@ -121,6 +125,7 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
                 const vec3 MO = vec3(dot(R0.xyz, O) + R0.w, dot(R1.xyz, O) + R1.w, dot(R2.xyz, O) + R2.w);
                 const vec3 MD = vec3(dot(R0.xyz, D), dot(R1.xyz, D), dot(R2.xyz, D));
                 GIWalkMesh(GIBvhInstances[p].m_Info.x, MO, MD, GIBvhInstances[p].m_Info.y, H);
+                if (g_GIBvhAnyHit && H.m_Inst >= 0) return H;
             }
             continue;
         }

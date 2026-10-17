@@ -1305,6 +1305,38 @@ int main()
         CHECK(MaxChanged > 0 && MaxChanged < W.InstanceLight(iF).size() / 2, "a settled update made %zu floor surfels again (of %zu)", MaxChanged, W.InstanceLight(iF).size());
     }
 
+    // 6j19. Part II, G3: the GPU mode's plumbing on the CPU (TraceReference as the GPU: GPUWork, DeliverGPU; the update that commits a
+    //       batch picks the next), and the shown light's deadline when the frame's GI work outside Update (m_OverheadMs: the GPU's part,
+    //       the uploads) takes the whole allowance: the filter gets the token's block an update, not all of it (it was no limit at all)
+    {
+        surfel_mesh Floor;
+        AddQuad(Floor, { -12, 0, -12 }, { 0, 0, 24 }, { 24, 0, 0 }, 0.5f);
+        Floor.Bake(0.15f, 0.45f);
+        lights L; L.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = v3{ 2, 2, 2 }; L.m_Sky = v3{ 0.3f, 0.3f, 0.3f };
+        world W;
+        const int iF = W.Add(Floor, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        W.m_Setup.m_bGPUTrace = true; W.m_Setup.m_TraceAllowanceMs = 0.2f; W.m_Setup.m_OverheadMs = 5;
+        const std::size_t n = W.InstanceLight(iF).size();
+        std::size_t MaxShown = 0; int nCommitted = 0, nUpdates = 0;
+        for (int f = 0; f < 10; ++f)
+        {
+            const auto St = W.Update(L, { 0, 1, 4 }, 1 << 30, 27000 + f);
+            nCommitted += St.m_Surfels; ++nUpdates;
+            if (f > 0) MaxShown = std::max(MaxShown, W.ShownChanged(iF).size());
+            const auto Work = W.GPUWork();
+            const std::vector<world::gpu_item> Items(Work.begin(), Work.end());
+            std::vector<world::gpu_result> R;
+            W.TraceReference(Items, L, R);
+            W.DeliverGPU(Items, R);
+        }
+        std::printf("GPU mode on the CPU: %d surfels committed in %d updates (%zu a pass); the overhead taking the allowance, an update showed %zu at most\n", nCommitted, nUpdates, n, MaxShown);
+        CHECK(nCommitted == int(9 * n), "GPU mode: %d surfels committed, %zu expected (9 batches of the whole floor)", nCommitted, 9 * n);
+        CHECK(MaxShown < n, "with the allowance pre-charged an update showed all %zu surfels (the filter had no limit)", n);
+        W.m_Setup.m_OverheadMs = 0; W.m_Setup.m_TraceAllowanceMs = 0;              // no allowance: the backlog drains in one update
+        W.Update(L, { 0, 1, 4 }, 1 << 30, 27100);
+        CHECK(W.ShownChanged(iF).size() >= n && W.ShownChanged(iF).size() <= 2 * n, "without an allowance the shown light did not drain (%zu of %zu)", W.ShownChanged(iF).size(), n);
+    }
+
     // 6j13. Phase 4: a change lowers confidence, it does not restart. A wall on a floor in the sun, settled; the wall moves 30 cm.
     //       (a) no floor surfel restarts (confidence 0) and none takes more than half of a single pass: the first update after the move
     //       changes each finished surfel's light by at most half of its distance to the new sample; the surfels near the wall are lowered,

@@ -139,6 +139,8 @@ namespace xlionrender
         int             m_FilterPasses  = 4;        // the shown GI light's spatial filter: each pass blends every surfel with its neighbors (0: none)
         bool            m_bMoments      = true;     // the reads' depth-moment test (a surfel hidden from the point is faded); off: only the plane test
         float           m_TraceAllowanceMs = 1.0f;  // the GI trace's main-thread time per frame (documentation/gi_dynamic_master_plan.md, Phase 1); 0: no limit
+        bool            m_bGPUTrace     = true;     // the GI's rays on the GPU (Part II, G3: gi::gpu_trace); off, or no compute: on the CPU within m_TraceAllowanceMs
+        float           m_GPUBudgetMs   = 2.0f;     // the GPU time a frame's GI batch may take (its rays: the measured rays per ms times this)
         float           m_PixelsPerSurfel = 256;    // the screen area (pixels) an instance needs per fine surfel: below it the GI holds its parent surfels, whatever its shape
         float           m_Saturation    = 1;        // the shown GI light's saturation (1: as solved; luminance kept): the filter and the coarse surfels average its colors toward grey
         float           m_EmissiveScale = 100;      // self-illuminated materials are lights with no light entity, their emission a texture color (0..1): the GI takes it this many times brighter (their look on screen stays)

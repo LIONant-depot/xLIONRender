@@ -14,7 +14,7 @@
 #include "features/instances/xlionrender_instance_slots.h"
 #include "features/lights/xlionrender_light_cells.h"
 #include "features/culling/xlionrender_frustum.h"
-#include "features/gi/xlionrender_surfel_gi.h"
+#include "features/gi/xlionrender_surfel_gi_gpu.h"
 #include <memory>
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
@@ -266,6 +266,8 @@ namespace xlionrender
             std::array<std::vector<int>, ring_frames_v> m_Pending, m_MomPending;   // the surfels a slot has not had since they changed
         };
         std::unique_ptr<gi::world>  m_pGIWorld;
+        std::unique_ptr<gi::gpu_trace> m_pGITrace;              // G3: the GI's trace on the GPU (scene::gi_settings::m_bGPUTrace)
+        bool                        m_bGITraceFailed = false;   // its Init failed: the CPU traces
         std::unordered_map<std::uint32_t, int> m_GIIds;
         std::vector<gi_track>       m_GITrack;                          // per world instance
         std::vector<std::pair<std::uint32_t, std::uint32_t>> m_DrawGI;  // per draw: offset, level (0xFFFFFFFF: none)
@@ -281,7 +283,7 @@ namespace xlionrender
         int                         m_GIAllocTop = 0;                   // the places in a slot of the rings (gi_track::m_Offset): the top, the free blocks
         std::vector<std::pair<int, int>> m_GIFree;
         gi::world::stats            m_GIStats;
-        void                        updateGI        ( const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
+        void                        updateGI        ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
 
         // Shadow casters by persistent slot: what they were the last time they were seen, so an unchanged caster costs a compare,
         // not a hash, and a caster that stops being drawn is found from the list of the last render's slots

@@ -35,8 +35,7 @@ namespace
         }
     }
 
-    struct gpu_out { float m_V[68]; };
-    struct result { int m_Items = 0, m_Rays = 0, m_Mismatch = 0, m_CountDiff = 0; double m_Worst = 0, m_CpuRaysPerMs = 0, m_GpuRaysPerMs = 0; };
+    struct result { int m_Items = 0, m_Rays = 0, m_Mismatch = 0, m_CountDiff = 0; double m_Worst = 0, m_CpuRaysPerMs = 0, m_GpuRaysPerMs = 0; double m_Work[4] = {}; };
 
     // Every surfel of every instance (its level's), Rays each (Copies passes each: enough threads to fill the GPU), against the CPU
     int Run(app& App, xgpu::compute& Pass, world& W, const lights& L, int Rays, unsigned Seed, result& R, int Copies = 1)
@@ -60,7 +59,7 @@ namespace
         xgpu::buffer Nodes, Tri4, Inst, Tlas, DataB, ItemB, OutB;
         CHECK(MakeBuffer(App.m_Device, Nodes, G.m_Nodes) && MakeBuffer(App.m_Device, Tri4, G.m_Tri4) && MakeBuffer(App.m_Device, Inst, G.m_Instances)
               && MakeBuffer(App.m_Device, Tlas, G.m_TlasLeaves) && MakeBuffer(App.m_Device, DataB, Data) && MakeBuffer(App.m_Device, ItemB, Items)
-              && MakeBuffer(App.m_Device, OutB, std::vector<gpu_out>{}, Items.size()), "buffers");
+              && MakeBuffer(App.m_Device, OutB, std::vector<world::gpu_result>{}, Items.size()), "buffers");
         xgpu::timestamps Times;
         CHECK(!App.m_Device.Create(Times, { .m_Count = 2 }), "timestamps");
         const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_Pad; } Push{ R.m_Items, G.m_TlasRoot, G.m_PrimOffset, 0 };
@@ -70,7 +69,7 @@ namespace
         {
             while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
             App.m_Window.WriteTimestamp(Times, 0);
-            App.m_Window.Dispatch(Pass, Bufs, &Push, sizeof(Push), (R.m_Items + 31) / 32);
+            App.m_Window.Dispatch(Pass, Bufs, &Push, sizeof(Push), world::GPUGroups(Items.size()));
             App.m_Window.WriteTimestamp(Times, 1);
             { auto Cmd = App.m_Window.getCmdBuffer(); }
             App.m_Window.PageFlip();
@@ -78,21 +77,22 @@ namespace
             if (Times.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull) GpuMs = double(Ns[1] - Ns[0]) * 1e-6;
         }
         R.m_GpuRaysPerMs = GpuMs > 0 ? double(R.m_Rays) / GpuMs : 0;
-        std::vector<gpu_out> Gpu(Items.size());
-        CHECK(OutB.MemoryMap(0, int(Gpu.size()), [&](void* p) { std::memcpy(Gpu.data(), p, Gpu.size() * sizeof(gpu_out)); }) == nullptr, "read the results");
+        std::vector<world::gpu_result> Gpu(Items.size());
+        CHECK(OutB.MemoryMap(0, int(Gpu.size()), [&](void* p) { std::memcpy(Gpu.data(), p, Gpu.size() * sizeof(world::gpu_result)); }) == nullptr, "read the results");
 
         // Per surfel: the counts equal, the light's sums within 1e-3 of the item's light, the moments within 1e-3 of its largest. A ray
         // grazing an edge may hit another triangle (G1): a few surfels may differ
         for (std::size_t k = 0; k < Items.size(); ++k)
         {
-            const auto& C = Cpu[k]; const float* g = Gpu[k].m_V;
-            const bool bCounts = int(g[60]) == C.m_nBack && int(g[61]) == C.m_nBackAll && int(g[62]) == C.m_nUnsupported && int(g[63]) == C.m_nHits;
+            const auto& C = Cpu[k]; const auto& g = Gpu[k];
+            for (int w = 0; w < 4; ++w) R.m_Work[w] += double(g.m_Work[w]) / std::max(R.m_Rays, 1);
+            const bool bCounts = g.m_nBack == C.m_nBack && g.m_nBackAll == C.m_nBackAll && g.m_nUnsupported == C.m_nUnsupported && g.m_nHits == C.m_nHits;
             const double Ls = std::max({ double(std::abs(C.m_Sum[0])), double(std::abs(C.m_Sum[1])), double(std::abs(C.m_Sum[2])), 1e-6 });
             double Ms = 1e-6; for (const float m : C.m_Moments) Ms = std::max(Ms, double(std::abs(m)));
             double Err = 0;
-            for (int a = 0; a < 3; ++a)  Err = std::max(Err, std::abs(g[a] - C.m_Sum[a]) / Ls);
-            for (int a = 0; a < 9; ++a)  Err = std::max(Err, std::abs(g[3 + a] - C.m_Basis[a]) / Ls);
-            for (int a = 0; a < 48; ++a) Err = std::max(Err, std::abs(g[12 + a] - C.m_Moments[a]) / Ms);
+            for (int a = 0; a < 3; ++a)  Err = std::max(Err, std::abs(g.m_Sum[a] - C.m_Sum[a]) / Ls);
+            for (int a = 0; a < 9; ++a)  Err = std::max(Err, std::abs(g.m_Basis[a] - C.m_Basis[a]) / Ls);
+            for (int a = 0; a < 48; ++a) Err = std::max(Err, std::abs(g.m_Moments[a] - C.m_Moments[a]) / Ms);
             R.m_CountDiff += !bCounts;
             if (!bCounts || Err > 1e-3) ++R.m_Mismatch;
             else R.m_Worst = std::max(R.m_Worst, Err);
@@ -102,8 +102,8 @@ namespace
 
     int Report(const char* pName, const result& R)
     {
-        std::printf("GPU surfel pass, %s: %d surfels, %d rays; %d differ from the CPU (%d by their counts), the worst of the others %.1e; CPU %.0f rays/ms (one thread), GPU %.0f rays/ms\n",
-                    pName, R.m_Items, R.m_Rays, R.m_Mismatch, R.m_CountDiff, R.m_Worst, R.m_CpuRaysPerMs, R.m_GpuRaysPerMs);
+        std::printf("GPU surfel pass, %s: %d surfels, %d rays; %d differ from the CPU (%d by their counts), the worst of the others %.1e; CPU %.0f rays/ms (one thread), GPU %.0f rays/ms; per ray: %.0f BVH nodes, %.2f shadow rays, %.1f read entries, %.1f probes\n",
+                    pName, R.m_Items, R.m_Rays, R.m_Mismatch, R.m_CountDiff, R.m_Worst, R.m_CpuRaysPerMs, R.m_GpuRaysPerMs, R.m_Work[0], R.m_Work[1], R.m_Work[2], R.m_Work[3]);
         CHECK(R.m_Items > 0 && R.m_Mismatch * 100 <= R.m_Items, "%s: %d of %d surfels differ from the CPU", pName, R.m_Mismatch, R.m_Items);
         return 0;
     }

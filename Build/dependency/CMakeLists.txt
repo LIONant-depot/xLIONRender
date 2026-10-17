@@ -39,7 +39,7 @@ endforeach()
 # shaders include the shared library in src/shaders, hence -I.
 set(XLIONRENDER_LIB_SHADERS)
 foreach(STAGE_PAIR "vert:xlionrender_forward_vert" "frag:xlionrender_forward_standard_frag" "vert:xlionrender_fullscreen_vert"
-                   "frag:xlionrender_tonemap_frag" "frag:xlionrender_blit_frag" "frag:xlionrender_default_material_frag" "frag:xlionrender_depth_frag" "vert:xlionrender_clear_depth_vert" "frag:xlionrender_shadow_remap_frag" "frag:xlionrender_geom_standard_frag" "frag:xlionrender_env_sky_frag" "frag:xlionrender_env_prefilter_frag" "frag:xlionrender_env_dfg_frag" "frag:xlionrender_env_downsample_frag" "frag:xlionrender_env_cube_to_oct_frag" "frag:xlionrender_env_cubemap_frag" "frag:xlionrender_sky_background_frag" "frag:xlionrender_outline_mask_frag" "frag:xlionrender_outline_composite_frag" "vert:xlionrender_static_geom_vert" "vert:xlionrender_static_geom_gi_vert" "vert:xlionrender_skin_geom_vert" "vert:xlionrender_gi_capture_vert")
+                   "frag:xlionrender_tonemap_frag" "frag:xlionrender_blit_frag" "frag:xlionrender_default_material_frag" "frag:xlionrender_depth_frag" "vert:xlionrender_clear_depth_vert" "frag:xlionrender_shadow_remap_frag" "frag:xlionrender_geom_standard_frag" "frag:xlionrender_env_sky_frag" "frag:xlionrender_env_prefilter_frag" "frag:xlionrender_env_dfg_frag" "frag:xlionrender_env_downsample_frag" "frag:xlionrender_env_cube_to_oct_frag" "frag:xlionrender_env_cubemap_frag" "frag:xlionrender_sky_background_frag" "frag:xlionrender_outline_mask_frag" "frag:xlionrender_outline_composite_frag" "vert:xlionrender_static_geom_vert" "vert:xlionrender_static_geom_gi_vert" "vert:xlionrender_skin_geom_vert" "vert:xlionrender_gi_capture_vert" "comp:xlionrender_gi_surfel_pass_comp" "comp:xlionrender_gi_scatter_comp")
   string(REPLACE ":" ";" STAGE_PAIR_LIST ${STAGE_PAIR})
   list(GET STAGE_PAIR_LIST 0 STAGE)
   list(GET STAGE_PAIR_LIST 1 NAME)
@@ -47,7 +47,7 @@ foreach(STAGE_PAIR "vert:xlionrender_forward_vert" "frag:xlionrender_forward_sta
   file(GLOB XLIONRENDER_SHADER_LIBRARY CONFIGURE_DEPENDS "${XLIONRENDER_SHADER_DIR}/*")
   add_custom_command(
     OUTPUT ${SHADER_OUT}
-    COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=${STAGE} -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
+    COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=${STAGE} --target-env=vulkan1.2 -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
     DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
     COMMENT "Compiling xLIONRender ${STAGE} shader ${NAME}"
   )

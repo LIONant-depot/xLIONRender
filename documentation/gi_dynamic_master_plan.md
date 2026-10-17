@@ -729,6 +729,85 @@ moment). A GPU ray here is a whole ray of the pass: the cast, the shadow rays, t
 - **What it means for the target.** 66.7k full rays/ms is about 57 times one CPU thread. Police's roughly 8M rays are about
   0.12 s of GPU time, once G3 makes the pass resident and has it pick its own work.
 
+**G3 as built** (2026-10-17).
+- **The CPU keeps the pick and, in G3, the commit.** As "What stays" says, the policy (priority, fairness, urgency, roles,
+  tiers, adaptive rays) does not move.
+  - Committing on the CPU kept one code path for both traces, so a GPU world can be compared with a CPU world update by
+    update.
+  - The measurements below show that this decision is what limits G3, so G4 moves the commit.
+- **The scene is resident** (`gi::gpu_trace`, `features/gi/xlionrender_surfel_gi_gpu.h`).
+  - The BVH and `PackGPUSurfels`' data sit in **device-local** buffers. xGPU's `GPU_READ` usage copies them through staging.
+    At first they were host-visible, so Police's rays read the scene across PCIe and ran 70 times slower than the Cornell
+    box's, while doing less work per ray.
+  - Everything is packed again only when the world's structure changes (`world::GPUGen`: add, remove, move, material,
+    see-through, a level switch, the emitter set), or when the number of point lights changes. ponytail: a full repack costs
+    about 250 ms in the Debug editor, and the material captures at load cause seven of them; in-place material updates are
+    still to do.
+  - Per slice, the changed words (the surfels committed, the instances whose moments were reset or which hold a cube, the
+    means, the lights) go up as (index, value) pairs. A scatter compute shader writes them
+    (`shaders/xlionrender_gi_scatter_comp.glsl`). The first version used one `vkCmdCopyBuffer` region per run of words, and
+    the Debug validation layer compares every region with every other: 42 s for 7,000 surfels.
+- **Over time, as the CPU's trace was.** A batch is the world's pick: `BatchRays`, four frames of slices.
+  - Each frame traces the next slice of it that fits `m_GPUBudgetMs`.
+  - The frame after, the slice's sums go to `world::DeliverGPU`, and the next `Update` commits them.
+  - No frame has to finish a batch. The world picks again once the whole batch is delivered: `Update` picks when no item is
+    unfinished, so the update that commits the last slice also picks.
+- **The pass spreads a surfel's rays over 8 lanes** (a subgroup cluster, `subgroupClusteredAdd`; SPIR-V for Vulkan 1.2,
+  which xGPU requires). With one invocation per surfel, a small batch was bound by latency (426 items, 3.4k rays, 5 ms). Now
+  the full Cornell batch runs at 267k rays/ms, against 66.7k before.
+- **The budget is a controller on the slices' measured GPU time.**
+  - Within the budget it grows by at least a quarter (at most doubling); past it, it shrinks to the fit.
+  - A single rate for every batch kept the budget at a small batch's.
+- **Shadow rays are any-hit** (`g_GIBvhAnyHit`): the first hit ends the walk, as in `world::Occluded`.
+- **Fixed on the way.**
+  - The shown light's deadline: with the allowance all pre-charged (the GPU's part, the uploads), it was 0, which means no
+    limit, and the filter ran 6 ms a frame.
+  - `UpdateShown` with a quarter of an instance dirty or more: the whole filter replaces the dirty chunks' halos. Each chunk
+    made its own halo again: millions of surfels for one floor.
+  - Tests: 6j19 in `xlionrender_test_surfel_gi`.
+
+**G3 results** (RTX 4070 Ti SUPER):
+
+| Test | Result |
+|---|---|
+| `xlionrender_test_gi_trace`, Cornell box (point light; emissive panel through links), 8 updates, one slice per batch | 0 of 226 surfels differ from the CPU world, worst 2e-6; packed once |
+| The same, the budget at its floor (1,024 rays a slice), 40 batches | the instances' mean light within 0.8 % of the CPU world's |
+| `xlionrender_test_gi_render` | traces on the GPU by default; the GI images unchanged |
+| Police, Debug editor, 2 ms budget | 450–600k rays/s at 56–58 fps (the CPU trace: about 30k). The 8M rays take about 15 s, not 1 s. GI main thread 8 ms a frame |
+| Police, the same with an 8 ms budget (a measurement only) | 840k rays/s at 16 fps. The GI's main-thread work is 42 ms a frame: 25–29 ms is the per-surfel work of collect, commit and refresh, at 6.5k surfels a frame |
+| Police, the GPU's clocks during the editor runs | 210–450 MHz (P3, 25–35 % use; the maximum is 3,105). The editor never loads the GPU enough to clock it up, so Police gets 4.7k–6.6k rays/ms |
+
+- Per Police ray: 19.5 BVH nodes, 0.1 shadow rays and almost no read entries (`gpu_result::m_Work`, in the frame log). That is
+  less work than a Cornell ray does; the time is memory and clocks.
+- **Not met: "Police converges in about 1 s".** Two limits remain:
+  - The CPU's per-surfel work, about 4 µs a surfel in Debug. G4 removes it.
+  - A GPU that stays at low clocks in the editor. Nothing in the application can control that; a game that loads the GPU
+    runs at full clocks.
+
+**G4 design** (2026-10-17).
+- **The commit on the GPU.** A commit shader runs after each slice's pass. It is the port of `Update`'s commit loop and of
+  `FinishPass`: the emitted light from the links (`m_EmitB`, uploaded when it changes), E = π·mean(L), the validity, the
+  estimator (`estimator::Add`), the basis fractions, the moments, and the transparent surfels.
+- **The GPU owns the light; the CPU keeps a mirror.**
+  - The commit writes each surfel's whole state (E, validity, fractions, estimator, moments, moment counts) into a readback
+    record. `Collect` copies it into the world, and `Update` only does the bookkeeping: the means' deltas, the last pass,
+    the bad counts.
+  - The CPU's policy reads the mirror: the adaptive rays, the level switch, the cube.
+- **The events become ops.**
+  - A change that lowers estimators (`estimator::Lower`, at the pick and in `ApplyAffect`) is applied to the mirror, and it
+    also goes to the GPU as an op (instance or surfel, a), which a small shader applies. Both sides are deterministic, so
+    no state is uploaded for it.
+  - A new layout (a level switch, `Resize`, `ResetMoments`) repacks the instance from the mirror.
+  - A cube's expanded parents go up every update.
+- **The shown light on the GPU.**
+  - A filter shader makes every instance's shown basis from E, the fractions and the validity, in the passes of
+    `UpdateShown`, with the neighbor lists uploaded with the scene. It writes the result straight into the renderer's ring
+    slot for the frame, with the moments (as halves).
+  - The CPU's `UpdateShown` and the ring writes for those instances are skipped in GPU mode.
+  - ponytail: the whole filter of every instance with a change, every frame. That is about 2.5M neighbor reads for Police;
+    the dirty-only version can come when it shows.
+- **Mobile.** A budget is declared (`m_GPUBudgetMs`); there is no mobile device here to measure it on.
+
 **Risks.**
 - xGPU has no compute path yet. It declares a compute stage, but nothing creates a compute pipeline or dispatches one.
 - Debugging on the GPU means readbacks.

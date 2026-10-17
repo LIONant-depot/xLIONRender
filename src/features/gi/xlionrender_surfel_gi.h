@@ -1569,6 +1569,7 @@ namespace xlionrender::gi
             int     m_FilterPasses  = 4;
             float   m_ShowShare     = 0.2f;     // Phase 6b: the part of the allowance kept for the shown light while it has a backlog
             float   m_OverheadMs    = 0;        // Phase 6b: the GI work of the frame outside Update (the renderer's upload, by its last frames): taken from the allowance        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
+            bool    m_bGPUTrace     = false;    // G3 (gi_dynamic_master_plan.md): Update picks and commits, the GPU traces (gpu_trace: GPUWork, DeliverGPU)
             bool    m_bSpreadOrigins = true;    // the fine surfels' rays start across their patch (surfel_mesh::BuildOrigins), not at their center
             float   m_LodDistance   = 40;       // the priority's distance scale: an instance this far (eye to bounds) scores half as much (Update)
             float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
@@ -1646,6 +1647,11 @@ namespace xlionrender::gi
             std::size_t m_UploadBytes = 0;      // bytes written into the frame's GI regions
             int     m_nDropped      = 0;        // shown instances left without GI: the frame's region was full
             double  m_UpdateGIMs    = 0;        // the renderer's whole updateGI (instances, Update, upload)
+            double  m_GPUTraceMs    = 0;        // G3: the last batch's GPU time (gpu_trace), 0: the CPU traces
+            int     m_GPUPacks      = 0;        // G3: the times the GPU's scene was packed in full
+            double  m_GPUCpuMs      = 0;        // G3: the main thread's part of it (gpu_trace Collect and Submit: the packing, the uploads)
+            int     m_GPUSliceRays  = 0;        // G3: the last slice's rays, and its work (gpu_result::m_Work: BVH nodes, shadow rays, read entries, probes)
+            std::int64_t m_GPUWork[4] = {};
             double  m_CaptureMs     = 0;        // the material capture (processGICapture)
             double  m_LoadMs        = 0;        // meshes' GI made ready this frame (scene_renderer::MeshOf: decoding, the rays' BVH)
         };
@@ -1660,6 +1666,7 @@ namespace xlionrender::gi
 
         int Add(const surfel_mesh& Mesh, const xmath::fmat4& L2W, const v3& Albedo) noexcept
         {
+            ++m_GPUGen;                                    // G3: the GPU's copy of the scene is packed again (GPUGen)
             m_Instances.push_back({ &Mesh });
             auto& I = m_Instances.back();
             I.m_Albedo = Albedo;
@@ -1678,6 +1685,7 @@ namespace xlionrender::gi
         bool m_bEmitterLinks = true;            // false: emitters only through the rays' hits (tests compare the two)
         void SetSurfelMaterial(int Id, std::vector<v3> Albedo, std::vector<v3> Emission) noexcept
         {
+            ++m_GPUGen;
             auto& I = m_Instances[Id];
             const std::size_t n = I.m_pMesh->m_Levels[0].size();
             I.m_SurfAlbedo   = Albedo.size() == n ? std::move(Albedo) : std::vector<v3>{};
@@ -1692,6 +1700,7 @@ namespace xlionrender::gi
         // 0 or the full emission) and a surfel is not over-lit by it
         void SetTriangleEmission(int Id, std::size_t First, const std::vector<v3>& Emission) noexcept
         {
+            ++m_GPUGen;
             auto& I = m_Instances[Id];
             const std::size_t n = I.m_pMesh->m_Tris.size();
             if (I.m_TriEmission.size() != n) { I.m_TriEmission.assign(n, v3{ 0, 0, 0 }); I.m_bTriEmission = false; }
@@ -1708,6 +1717,7 @@ namespace xlionrender::gi
         // Without the triangles' emission (or the surfels' own capture): the surfels' sample at their center
         void ResolveSurfEmission(int Id) noexcept
         {
+            ++m_GPUGen;
             auto& I = m_Instances[Id];
             I.m_SurfEmission = I.m_SurfEmissionPoint;
             const auto& M = *I.m_pMesh;
@@ -1756,6 +1766,7 @@ namespace xlionrender::gi
         // color ends where its triangles do - a surfel's color spreads over its whole footprint (a door frame's brown onto the wall)
         void SetTriangleAlbedo(int Id, std::size_t First, const std::vector<v3>& Albedo) noexcept
         {
+            ++m_GPUGen;
             auto& I = m_Instances[Id];
             const std::size_t n = I.m_pMesh->m_Tris.size();
             if (I.m_TriAlbedo.size() != n) I.m_TriAlbedo.assign(n, I.m_Albedo);
@@ -1770,6 +1781,7 @@ namespace xlionrender::gi
         // (validity 0: the reads skip them) - a window lets the sky in, a glass pane does not bounce its own color
         void SetSeeThrough(int Id, const std::vector<bool>& SlotSeeThrough) noexcept
         {
+            ++m_GPUGen;
             auto& I = m_Instances[Id];
             const auto& M = *I.m_pMesh;
             const auto Slot = [&](std::size_t s) { return s < SlotSeeThrough.size() && SlotSeeThrough[s]; };
@@ -1812,6 +1824,7 @@ namespace xlionrender::gi
         // The instance stops casting, bouncing and updating (its id is not reused)
         void Remove(int Id) noexcept
         {
+            ++m_GPUGen;
             auto& I = m_Instances[Id];
             if (!I.m_bAlive) return;
             I.m_bAlive = false;
@@ -1844,6 +1857,7 @@ namespace xlionrender::gi
 
         void SetTransform(int Id, const xmath::fmat4& L2W) noexcept
         {
+            ++m_GPUGen;
             const auto T0 = std::chrono::steady_clock::now();
             auto& I = m_Instances[Id];
             const v3 OldLo = I.m_Lo, OldHi = I.m_Hi;
@@ -2001,7 +2015,13 @@ namespace xlionrender::gi
                 I.m_bFilterFull = false;
                 I.m_FullPass = bLayout ? 1 : 0; I.m_FullAt = 0;
             }
+            // a quarter of it or more dirty (a GPU batch: thousands a frame): the whole filter is less work than the dirty chunks' halos (each
+            // chunk makes its own halo again: a floor all dirty made millions of surfels per update)
+            // (checked again when a whole filter ends: what was dirtied while it ran)
             bool bDid = false;
+            for (int Round = 0; Round < 2; ++Round)
+            {
+            if (I.m_FullPass < 0 && I.m_FilterDirty.size() * 4 > std::size_t(n)) { I.m_FilterDirty.clear(); I.m_FullPass = 0; I.m_FullAt = 0; }
             // the whole filter, resumable: pass by pass (pass nP + 1: shown), blocks of 4096 surfels
             if (I.m_FullPass >= 0)
             {
@@ -2017,6 +2037,7 @@ namespace xlionrender::gi
                     if (s1 >= n) { I.m_FullAt = 0; if (++I.m_FullPass > nP + 1) I.m_FullPass = -1; }
                 }
                 if (I.m_FullPass >= 0) return bDid;          // the dirty surfels wait for the whole filter (they are made again after it)
+            }
             }
             if (I.m_FilterDirty.empty()) return bDid;
             // the halo work in chunks of 64 dirty surfels until the deadline; the rest waits for the next update
@@ -2242,6 +2263,8 @@ namespace xlionrender::gi
         //   lights:   sun direction 3, sun color 3, sky 3, sky oct 48, then per point position 3, color 3, radius
         // ponytail: the whole scene every call (G3 keeps it resident and uploads changes)
         static constexpr std::uint32_t gpu_mesh_v = 18, gpu_inst_v = 41, gpu_none_v = 0xFFFFFFFFu;
+        static constexpr int gpu_lanes_v = 8, gpu_group_v = 64;    // the pass: invocations per item, per group (a dispatch: GPUGroups)
+        static constexpr int GPUGroups(std::size_t nItems) noexcept { return int((nItems * gpu_lanes_v + gpu_group_v - 1) / gpu_group_v); }
         struct gpu_item { int m_Inst = 0, m_Surf = 0, m_Level = 0, m_Rays = 0; float m_Off1 = 0, m_Off2 = 0; int m_Shift = 0, m_Pad = 0; };
         struct gpu_result                       // per item: what TraceChunk accumulates, before it finishes the pass
         {
@@ -2250,6 +2273,7 @@ namespace xlionrender::gi
             float   m_Moments[3 * moment_texels_v];
             int     m_nBack, m_nBackAll, m_nUnsupported, m_nHits;
             float   m_UnsupportedAt[3], m_Pad;
+            int     m_Work[4];                  // (diagnostics) the GPU's work for it: BVH nodes popped, shadow rays, read list entries, read hash probes
         };
         void PackGPUSurfels(std::vector<std::uint32_t>& D, const lights& L) const noexcept
         {
@@ -2353,6 +2377,40 @@ namespace xlionrender::gi
 
         // The nearest hit before TMax (the instances as they are now: the TLAS is rebuilt after Add / SetTransform; not
         // thread safe across that rebuild - Update rebuilds before its parallel part)
+        // G3 (gi_dynamic_master_plan.md, gpu_trace): the picked items not yet handed to the GPU, handed now, in m_Pending's order
+        std::span<const gpu_item> GPUWork() noexcept
+        {
+            m_GPUOut.clear();
+            for (auto& W : m_Pending)
+                if (!W.m_bGPU && W.m_RaysDone < W.m_Rays) { W.m_bGPU = true; m_GPUOut.push_back({ W.m_Inst, W.m_Surf, W.m_Level, W.m_Rays, W.m_Off1, W.m_Off2, W.m_Shift, 0 }); }
+            return m_GPUOut;
+        }
+        // Their sums (Items: what GPUWork handed, or a slice of it, in order; R per item) into the passes, finished: the next Update commits them. An item dropped since
+        // (Update: its instance removed, its level changed) is skipped: m_Pending keeps its order, what is left of Items is in it in order
+        void DeliverGPU(std::span<const gpu_item> Items, std::span<const gpu_result> R) noexcept
+        {
+            std::size_t j = 0;
+            for (std::size_t k = 0; k < Items.size() && j < m_Pending.size(); ++k)
+            {
+                while (j < m_Pending.size() && m_Pending[j].m_bGPU && m_Pending[j].m_RaysDone >= m_Pending[j].m_Rays) ++j;     // (delivered by an earlier slice)
+                if (j >= m_Pending.size()) break;
+                auto& W = m_Pending[j];
+                if (!W.m_bGPU || W.m_Inst != Items[k].m_Inst || W.m_Surf != Items[k].m_Surf || W.m_Level != Items[k].m_Level) continue;
+                ++j;
+                const auto& G = R[k];
+                auto& I = m_Instances[W.m_Inst];
+                W.m_Sum = { G.m_Sum[0], G.m_Sum[1], G.m_Sum[2] };
+                for (int i = 0; i < 3; ++i) I.m_BasisAcc[W.m_Surf][i] = { G.m_Basis[3 * i], G.m_Basis[3 * i + 1], G.m_Basis[3 * i + 2] };
+                std::copy_n(G.m_Moments, 3 * moment_texels_v, I.m_MomAcc[W.m_Surf].begin());
+                W.m_nBack = G.m_nBack; W.m_nBackAll = G.m_nBackAll; W.m_nUnsupported = G.m_nUnsupported; W.m_nHits = G.m_nHits;
+                W.m_UnsupportedAt = { G.m_UnsupportedAt[0], G.m_UnsupportedAt[1], G.m_UnsupportedAt[2] };
+                W.m_RaysDone = W.m_Rays;
+                m_GPURays += W.m_Rays;
+                FinishPass(W);
+            }
+        }
+        std::uint64_t GPUGen() const noexcept { return m_GPUGen; }
+
         hit Cast(const v3& O, const v3& D, float TMax = 1e30f) const noexcept
         {
             BuildTlas();
@@ -2592,12 +2650,53 @@ namespace xlionrender::gi
             int     m_Rays = 0, m_RaysDone = 0;
             float   m_Off1 = 0, m_Off2 = 0;
             int     m_Shift = 0;
+            bool    m_bGPU = false;                                    // G3: handed to the GPU (GPUWork)
             v3      m_Sum{ 0, 0, 0 };
             int     m_nBack = 0, m_nBackAll = 0, m_nUnsupported = 0, m_nHits = 0;
             v3      m_UnsupportedAt{ 0, 0, 0 };
             float   m_UnitUs = 0;   int m_UnitRays = 0;           // this update's unit (instrumentation, the governor)
             float   m_CastUs = 0, m_DirectUs = 0, m_ReadUs = 0;
         };
+
+        // The policy's value per instance (Unsupported): its mean light of its valid surfels now; none valid: the world's
+        void UpdateMeans() noexcept
+        {
+            v3 WSum{ 0, 0, 0 }; float WW = 0;
+            for (auto& I : m_Instances)
+            {
+                if (!I.m_bAlive) { I.m_MeanS = v3{ 0, 0, 0 }; I.m_MeanW = 0; I.m_nBad = 0; I.m_bMeanDirty = false; }
+                else if (I.m_bMeanDirty)            // (Phase 3: only an instance whose light changed)
+                {
+                    v3 S{ 0, 0, 0 }; float W = 0; int nBad = 0;
+                    for (std::size_t s = 0; s < I.m_E.size(); ++s) { S = S + I.m_E[s] * I.m_Valid[s]; W += I.m_Valid[s]; nBad += BadSurfel(I.m_E[s], I.m_Valid[s]); }
+                    I.m_MeanS = S; I.m_MeanW = W; I.m_nBad = nBad; I.m_nMeanDeltas = 0; I.m_bMeanDirty = false;
+                }
+                I.m_MeanE = I.m_MeanW > 0 ? I.m_MeanS * (1.0f / I.m_MeanW) : v3{ -1, -1, -1 };
+                WSum = WSum + I.m_MeanS; WW += I.m_MeanW;
+            }
+            const v3 World = WW > 0 ? WSum * (1.0f / WW) : v3{ 0, 0, 0 };
+            for (auto& I : m_Instances) if (I.m_MeanE.m_X < 0) I.m_MeanE = World;
+        }
+
+        // A pass whose rays are all in (TraceChunk's last chunk, DeliverGPU): the emitted light from its links, the irradiance E = pi mean(L),
+        // its validity
+        void FinishPass(const work_item& W) noexcept
+        {
+            auto& I = m_Instances[W.m_Inst];
+            const int s = W.m_Surf, R = W.m_Rays;
+            auto& BA = I.m_BasisAcc[s];
+            v3 Sum = W.m_Sum;
+            if (s < I.m_EmitB.size())                                   // the emitters it sees (the links): deterministic, no rays
+                for (int i = 0; i < 3; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance
+            I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
+            // Buried -> validity 0, by either sign: back faces near it (within its reach: inside a wall or a frame they are centimeters
+            // away; full validity up to 20% of its rays, none from 50%), or back faces all around at any distance (inside a solid object;
+            // full up to 80%, none from 95%). A floor under a ceiling made to face out sees back faces metres away, in some directions
+            // only: it keeps its light (it was: any back face, 10%..25% - 2 rays of 8 - and 28% of the Police Station read nothing)
+            const float Near = std::clamp(1.0f - (float(W.m_nBack) / float(R) - 0.2f) / 0.3f, 0.0f, 1.0f);
+            const float All  = std::clamp(1.0f - (float(W.m_nBackAll) / float(R) - 0.8f) / 0.15f, 0.0f, 1.0f);
+            I.m_AccValid[s] = std::min(Near, All);
+        }
 
         // Rays [r0, r1) of a pending surfel's pass (the first chunk clears its accumulators, the last one finishes the pass: the emitted light
         // from its links, the irradiance E = pi mean(L), its validity). The rays are the same whatever the chunks: ray r of R of the pass
@@ -2668,19 +2767,7 @@ namespace xlionrender::gi
             }
             W.m_Sum = Sum; W.m_nBack = nBack; W.m_nBackAll = nBackAll; W.m_nUnsupported = nUnsupported; W.m_nHits = nHits;
             W.m_RaysDone = r1;
-            if (r1 >= R)
-            {
-                if (s < I.m_EmitB.size())                                   // the emitters it sees (the links): deterministic, no rays
-                    for (int i = 0; i < 3; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance
-                I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
-                // Buried -> validity 0, by either sign: back faces near it (within its reach: inside a wall or a frame they are centimeters
-                // away; full validity up to 20% of its rays, none from 50%), or back faces all around at any distance (inside a solid object;
-                // full up to 80%, none from 95%). A floor under a ceiling made to face out sees back faces metres away, in some directions
-                // only: it keeps its light (it was: any back face, 10%..25% - 2 rays of 8 - and 28% of the Police Station read nothing)
-                const float Near = std::clamp(1.0f - (float(nBack) / float(R) - 0.2f) / 0.3f, 0.0f, 1.0f);
-                const float All  = std::clamp(1.0f - (float(nBackAll) / float(R) - 0.8f) / 0.15f, 0.0f, 1.0f);
-                I.m_AccValid[s] = std::min(Near, All);
-            }
+            if (r1 >= R) FinishPass(W);
             const float u = Us(Tw, clock::now());
             W.m_UnitUs = std::max(W.m_UnitUs, u);
             W.m_UnitRays = r1 - r0;
@@ -2749,7 +2836,7 @@ namespace xlionrender::gi
                     for (std::size_t s = 0; s < M.m_ParentOf.size(); ++s) { E[M.m_ParentOf[s]] = E[M.m_ParentOf[s]] + I.m_E[s]; Valid[M.m_ParentOf[s]] += I.m_Valid[s]; ++Cnt[M.m_ParentOf[s]]; }
                     for (std::size_t p = 0; p < E.size(); ++p) if (Cnt[p]) { E[p] = E[p] * (1.0f / float(Cnt[p])); Valid[p] /= float(Cnt[p]); }
                 }
-                I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0;
+                I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0; ++m_GPUGen;
                 I.m_bEmitRelevel = true;
                 I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
                 ResetMoments(I);
@@ -2770,7 +2857,8 @@ namespace xlionrender::gi
             // made again) is dropped. A pick is made only when nothing is pending: one surfel is never in flight twice
             std::erase_if(m_Pending, [&](const work_item& W) { const auto& I = m_Instances[W.m_Inst]; return !I.m_bAlive || I.m_Level != W.m_Level || std::size_t(W.m_Surf) >= I.m_E.size(); });
             m_Work.clear();
-            if (m_Pending.empty())
+            // (G3: the items the GPU delivered are finished, not yet committed: the update that commits them picks the next ones)
+            if (std::none_of(m_Pending.begin(), m_Pending.end(), [](const work_item& W) { return W.m_RaysDone < W.m_Rays; }))
             {
                 m_Order.clear();
                 for (int i = 0; i < int(m_Instances.size()); ++i)
@@ -2864,28 +2952,11 @@ namespace xlionrender::gi
             Lap(St.m_LinksMs);
             // The emitters' light: made of the links, the emissions (SetSurfelMaterial: the links again) and the scale; a level switch
             // changes its layout. Nothing else: not every update
-            if (m_EmitScale != m_Setup.m_EmissiveScale) { m_bEmitDirty = true; m_EmitScale = m_Setup.m_EmissiveScale; }
+            if (m_EmitScale != m_Setup.m_EmissiveScale) { m_bEmitDirty = true; m_EmitScale = m_Setup.m_EmissiveScale; ++m_GPUGen; }
             UpdateEmittedLight(m_bEmitDirty); m_bEmitDirty = false;
             Lap(St.m_EmitMs);
 
-            // The policy's value per instance (Unsupported): this update's mean light of its valid surfels; none valid: the world's
-            {
-                v3 WSum{ 0, 0, 0 }; float WW = 0;
-                for (auto& I : m_Instances)
-                {
-                    if (!I.m_bAlive) { I.m_MeanS = v3{ 0, 0, 0 }; I.m_MeanW = 0; I.m_nBad = 0; I.m_bMeanDirty = false; }
-                    else if (I.m_bMeanDirty)            // (Phase 3: only an instance whose light changed)
-                    {
-                        v3 S{ 0, 0, 0 }; float W = 0; int nBad = 0;
-                        for (std::size_t s = 0; s < I.m_E.size(); ++s) { S = S + I.m_E[s] * I.m_Valid[s]; W += I.m_Valid[s]; nBad += BadSurfel(I.m_E[s], I.m_Valid[s]); }
-                        I.m_MeanS = S; I.m_MeanW = W; I.m_nBad = nBad; I.m_nMeanDeltas = 0; I.m_bMeanDirty = false;
-                    }
-                    I.m_MeanE = I.m_MeanW > 0 ? I.m_MeanS * (1.0f / I.m_MeanW) : v3{ -1, -1, -1 };
-                    WSum = WSum + I.m_MeanS; WW += I.m_MeanW;
-                }
-                const v3 World = WW > 0 ? WSum * (1.0f / WW) : v3{ 0, 0, 0 };
-                for (auto& I : m_Instances) if (I.m_MeanE.m_X < 0) I.m_MeanE = World;
-            }
+            UpdateMeans();
             Lap(St.m_MeanMs);
 
             // The trace (Phase 1): the pending surfels' rays in chunks (units of about m_UnitTargetUs), round after round, until every one is
@@ -2903,7 +2974,7 @@ namespace xlionrender::gi
             St.m_ChunkRays = Chunk; St.m_RayUsEst = RayUs;
             std::vector<int> Live;
             std::atomic<int> RaysDone{ 0 };
-            for (;;)
+            if (!m_Setup.m_bGPUTrace) for (;;)                         // (G3: the GPU traces them: GPUWork, DeliverGPU)
             {
                 Live.clear();
                 for (int k = 0; k < int(m_Pending.size()); ++k) if (m_Pending[k].m_RaysDone < m_Pending[k].m_Rays) Live.push_back(k);
@@ -2925,7 +2996,7 @@ namespace xlionrender::gi
                 });
                 if (Allow <= 0 || RaysDone.load() == Before) break;      // one round traces everything without an allowance; no unit fits any more
             }
-            St.m_Rays = RaysDone.load();
+            St.m_Rays = RaysDone.load() + std::exchange(m_GPURays, 0);
             if (AllowMs > 0) m_Starve[1] = !m_Pending.empty() && St.m_Rays == 0 ? m_Starve[1] + 1 : 0;
             m_UnsupportedAt.clear();
             // the governor's estimate of a ray's cost, from this update's units (the mean and the mean deviation, slowly)
@@ -3007,11 +3078,13 @@ namespace xlionrender::gi
                     m_Instances[i].m_bFilterFull = true; m_Instances[i].m_bMeanDirty = true;   // (36 parents or so)
                     ++St.m_nCubes; St.m_CubeParents += int(m_Instances[i].m_pMesh->m_Levels[1].size());
                 }
+            if (m_Setup.m_bGPUTrace) UpdateMeans();      // (G3: the batch dispatched after this update reads the light it committed, as the CPU's next trace would)
             Lap(St.m_CubeMs);
             ShownSettings();
             {
                 bool bShowToken = Token == 2, bShowDid = false;
-                const double ShowDeadline = AllowMs > 0 ? AllowMs - PreMs : 0.0;     // what is left of the allowance, measured from T0
+                const double ShowDeadline = AllowMs > 0 ? Grant(AllowMs - PreMs) : 0.0;     // what is left of the allowance, measured from T0 (none left: Grant's
+                                                                                            // tiny one, not 0 = no limit: the GPU's part pre-charged it all and the filter ran unbounded)
                 for (int i = 0; i < int(m_Instances.size()); ++i)
                     if (m_Instances[i].m_bAlive) bShowDid |= UpdateShown(i, ShowDeadline, AllowMs > 0 ? &T0 : nullptr, &bShowToken);
                     else { m_Instances[i].m_ShownChanged.clear(); m_Instances[i].m_bShownFull = false; }
@@ -3545,6 +3618,7 @@ namespace xlionrender::gi
 
         void RebuildEmitterList() noexcept
         {
+            ++m_GPUGen;
             m_Emitters.clear(); m_Em.clear();
             for (int i = 0; i < int(m_Instances.size()); ++i)
             {
@@ -3698,7 +3772,7 @@ namespace xlionrender::gi
             {
                 if (!m_Emitters.empty() || !m_LinkQueue.empty() || m_LinkCur.m_Inst >= 0)
                 {
-                    m_Emitters.clear(); m_Em.clear(); m_LinkQueue.clear(); m_LinkCur = {};
+                    m_Emitters.clear(); m_Em.clear(); m_LinkQueue.clear(); m_LinkCur = {}; ++m_GPUGen;
                     for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); I.m_bLinkQueued = false; I.m_bLinkHull = false; I.m_bEmitDirty = true; }
                 }
                 return 0;
@@ -3893,6 +3967,9 @@ namespace xlionrender::gi
         int                                     m_nMovesAcc = 0, m_MoveMarked = 0;     // (instrumentation) SetTransform since the last update
         double                                  m_MovesMsAcc = 0;
         std::vector<work_item>                  m_Pending;              // Phase 1: the surfels picked and not finished
+        std::uint64_t                           m_GPUGen = 1;           // G3: the structure's version (what PackGPU and PackGPUSurfels write)
+        std::vector<gpu_item>                   m_GPUOut;               // G3: GPUWork's list
+        int                                     m_GPURays = 0;          // G3: the rays delivered since the last update
         float                                   m_RayUsMean = 50, m_RayUsDev = 50, m_RayUsHi = 0;     // the governor's running cost of a ray (us), and the slowest seen lately
         int                                     m_nEmitters = 0;
         unsigned                                m_nUpdates = 0;
