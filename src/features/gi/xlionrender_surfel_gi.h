@@ -1571,6 +1571,9 @@ namespace xlionrender::gi
             float   m_OverheadMs    = 0;        // Phase 6b: the GI work of the frame outside Update (the renderer's upload, by its last frames): taken from the allowance        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
             bool    m_bGPUTrace     = false;    // G3 (gi_dynamic_master_plan.md): Update picks and commits, the GPU traces (gpu_trace: GPUWork, DeliverGPU)
             bool    m_bGPUShown     = false;    // G4: the shown light is the GPU's (gpu_trace::Show): Update makes none (UpdateShown, BasisLight)
+            bool    m_bGPUOwned     = false;    // G4c: the light lives on the GPU only (with m_bGPUTrace, m_bGPUShown): the pick hands out ranges
+                                                // (GPURanges), the GPU's expand makes the surfels' passes, the means come back (SetGPUMeans); the
+                                                // surfels' arrays here are stale (gpu_trace::ReadBack fills them)
             bool    m_bSpreadOrigins = true;    // the fine surfels' rays start across their patch (surfel_mesh::BuildOrigins), not at their center
             float   m_LodDistance   = 40;       // the priority's distance scale: an instance this far (eye to bounds) scores half as much (Update)
             float   m_ProjScale     = 0;        // the view's pixels per unit at distance 1 (height / 2 tan(fov / 2)): with it the level follows the area an instance covers on the screen (0: only the distance)
@@ -1651,8 +1654,9 @@ namespace xlionrender::gi
             double  m_GPUTraceMs    = 0;        // G3: the last batch's GPU time (gpu_trace), 0: the CPU traces
             int     m_GPUPacks      = 0;        // G3: the times the GPU's scene was packed in full
             double  m_GPUCpuMs      = 0;        // G3: the main thread's part of it (gpu_trace Collect and Submit: the packing, the uploads)
-            int     m_GPUSliceRays  = 0;        // G3: the last slice's rays, and its work (gpu_result::m_Work: BVH nodes, shadow rays, read entries, probes)
-            std::int64_t m_GPUWork[4] = {};
+            int     m_GPUSliceRays  = 0;        // G3: the last slice's rays
+            double  m_TimeMs        = 0;        // the renderer's time since its first GI frame (the frame log's clock: convergence over time)
+            float   m_MeanLum       = 0;        // the luminance of the world's mean light (its valid surfels'): how far it has converged
             double  m_CaptureMs     = 0;        // the material capture (processGICapture)
             double  m_LoadMs        = 0;        // meshes' GI made ready this frame (scene_renderer::MeshOf: decoding, the rays' BVH)
         };
@@ -1686,7 +1690,7 @@ namespace xlionrender::gi
         bool m_bEmitterLinks = true;            // false: emitters only through the rays' hits (tests compare the two)
         void SetSurfelMaterial(int Id, std::vector<v3> Albedo, std::vector<v3> Emission) noexcept
         {
-            ++m_GPUGen;
+            ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
             auto& I = m_Instances[Id];
             const std::size_t n = I.m_pMesh->m_Levels[0].size();
             I.m_SurfAlbedo   = Albedo.size() == n ? std::move(Albedo) : std::vector<v3>{};
@@ -1701,7 +1705,7 @@ namespace xlionrender::gi
         // 0 or the full emission) and a surfel is not over-lit by it
         void SetTriangleEmission(int Id, std::size_t First, const std::vector<v3>& Emission) noexcept
         {
-            ++m_GPUGen;
+            ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
             auto& I = m_Instances[Id];
             const std::size_t n = I.m_pMesh->m_Tris.size();
             if (I.m_TriEmission.size() != n) { I.m_TriEmission.assign(n, v3{ 0, 0, 0 }); I.m_bTriEmission = false; }
@@ -1718,7 +1722,7 @@ namespace xlionrender::gi
         // Without the triangles' emission (or the surfels' own capture): the surfels' sample at their center
         void ResolveSurfEmission(int Id) noexcept
         {
-            ++m_GPUGen;
+            ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
             auto& I = m_Instances[Id];
             I.m_SurfEmission = I.m_SurfEmissionPoint;
             const auto& M = *I.m_pMesh;
@@ -1767,7 +1771,7 @@ namespace xlionrender::gi
         // color ends where its triangles do - a surfel's color spreads over its whole footprint (a door frame's brown onto the wall)
         void SetTriangleAlbedo(int Id, std::size_t First, const std::vector<v3>& Albedo) noexcept
         {
-            ++m_GPUGen;
+            ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
             auto& I = m_Instances[Id];
             const std::size_t n = I.m_pMesh->m_Tris.size();
             if (I.m_TriAlbedo.size() != n) I.m_TriAlbedo.assign(n, I.m_Albedo);
@@ -1782,7 +1786,7 @@ namespace xlionrender::gi
         // (validity 0: the reads skip them) - a window lets the sky in, a glass pane does not bounce its own color
         void SetSeeThrough(int Id, const std::vector<bool>& SlotSeeThrough) noexcept
         {
-            ++m_GPUGen;
+            ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
             auto& I = m_Instances[Id];
             const auto& M = *I.m_pMesh;
             const auto Slot = [&](std::size_t s) { return s < SlotSeeThrough.size() && SlotSeeThrough[s]; };
@@ -1858,7 +1862,7 @@ namespace xlionrender::gi
 
         void SetTransform(int Id, const xmath::fmat4& L2W) noexcept
         {
-            ++m_GPUGen;
+            ++m_GPUXformGen;                                // (G4c: the GPU's TLAS and records again, not the scene: PackGPUTlas)
             const auto T0 = std::chrono::steady_clock::now();
             auto& I = m_Instances[Id];
             const v3 OldLo = I.m_Lo, OldHi = I.m_Hi;
@@ -2214,6 +2218,8 @@ namespace xlionrender::gi
             int                     m_TlasRoot   = 0;
             int                     m_PrimOffset = 0;
             bool                    m_bEmpty     = true;
+            int                     m_nMeshNodes = 0;   // G4c: the meshes' nodes come first, the TLAS's after them (PackGPUTlas)
+            std::unordered_map<const surfel_mesh*, int> m_MeshRoots;     // each mesh's root code
         };
         void PackGPU(gpu_scene& Out) const noexcept
         {
@@ -2221,27 +2227,32 @@ namespace xlionrender::gi
             Out = {};
             Out.m_bEmpty = m_Tlas.m_bEmpty;
             if (Out.m_bEmpty) return;
-            const auto Copy = [&](const bvh& B, int NodeBase, int LeafBase)        // its nodes, the child codes made global
+            for (const int i : m_TlasIds)             // the meshes' BVHs first (G4c: a move changes the TLAS only, at the end: PackGPUTlas)
             {
-                for (auto N : B.m_Nodes)
-                {
-                    for (int k = 0; k < 4; ++k) N.m_Child[k] = N.m_Child[k] >= 0 ? N.m_Child[k] + NodeBase : ~(~N.m_Child[k] + LeafBase);
-                    Out.m_Nodes.push_back(N);
-                }
-                return B.m_Root >= 0 ? B.m_Root + NodeBase : ~(~B.m_Root + LeafBase);
-            };
-            Out.m_TlasRoot = Copy(m_Tlas, 0, 0);
-            std::unordered_map<const surfel_mesh*, int> Roots;
+                const auto* pM = m_Instances[std::size_t(i)].m_pMesh;
+                auto [It, bNew] = Out.m_MeshRoots.try_emplace(pM, 0);
+                if (!bNew) continue;
+                It->second = CopyBvh(Out, pM->m_Bvh, int(Out.m_Nodes.size()), int(Out.m_Tri4.size()));
+                Out.m_Tri4.insert(Out.m_Tri4.end(), pM->m_Tri4.begin(), pM->m_Tri4.end());
+            }
+            Out.m_nMeshNodes = int(Out.m_Nodes.size());
+            PackGPUTlas(Out);
+        }
+        // G4c: the TLAS again (its nodes after the meshes', the instances' rows, its leaves): the instances moved, the meshes are the same
+        // (false: one is not in Out, PackGPU)
+        bool PackGPUTlas(gpu_scene& Out) const noexcept
+        {
+            BuildTlas();
+            Out.m_bEmpty = m_Tlas.m_bEmpty;
+            if (Out.m_bEmpty) return true;
+            Out.m_Nodes.resize(std::size_t(Out.m_nMeshNodes));
+            Out.m_Instances.clear(); Out.m_TlasLeaves.clear();
+            Out.m_TlasRoot = CopyBvh(Out, m_Tlas, Out.m_nMeshNodes, 0);
             for (const int i : m_TlasIds)
             {
-                const auto& I = m_Instances[i];
-                auto [It, bNew] = Roots.try_emplace(I.m_pMesh, 0);
-                if (bNew)
-                {
-                    const int NodeBase = int(Out.m_Nodes.size()), LeafBase = int(Out.m_Tri4.size());
-                    It->second = Copy(I.m_pMesh->m_Bvh, NodeBase, LeafBase);
-                    Out.m_Tri4.insert(Out.m_Tri4.end(), I.m_pMesh->m_Tri4.begin(), I.m_pMesh->m_Tri4.end());
-                }
+                const auto& I = m_Instances[std::size_t(i)];
+                const auto It = Out.m_MeshRoots.find(I.m_pMesh);
+                if (It == Out.m_MeshRoots.end()) return false;
                 gpu_scene::instance G;
                 for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) G.m_W2L[r][c] = I.m_W2L(r, c);
                 G.m_Root = It->second; G.m_Inst = i;
@@ -2250,6 +2261,24 @@ namespace xlionrender::gi
             for (const auto& L : m_Tlas.m_Leaves) { Out.m_TlasLeaves.push_back(L.m_First); Out.m_TlasLeaves.push_back(L.m_Count); }
             Out.m_PrimOffset = int(Out.m_TlasLeaves.size());
             Out.m_TlasLeaves.insert(Out.m_TlasLeaves.end(), m_Tlas.m_Prims.begin(), m_Tlas.m_Prims.end());
+            return true;
+        }
+        static int CopyBvh(gpu_scene& Out, const bvh& B, int NodeBase, int LeafBase) noexcept       // its nodes, the child codes made global
+        {
+            for (auto N : B.m_Nodes)
+            {
+                for (int k = 0; k < 4; ++k) N.m_Child[k] = N.m_Child[k] >= 0 ? N.m_Child[k] + NodeBase : ~(~N.m_Child[k] + LeafBase);
+                Out.m_Nodes.push_back(N);
+            }
+            return B.m_Root >= 0 ? B.m_Root + NodeBase : ~(~B.m_Root + LeafBase);
+        }
+        std::uint64_t GPUXformGen() const noexcept { return m_GPUXformGen; }      // G4c: the instances' placements' version (PackGPUTlas)
+        // G4c: an instance's placement words as the GPU's record has them (15 mean scale, 16..27 L2W rows, 28..39 W2L rows)
+        void GPUPlacement(int Id, std::uint32_t (&W)[25]) const noexcept
+        {
+            const auto& I = m_Instances[std::size_t(Id)];
+            W[0] = std::bit_cast<std::uint32_t>(I.m_MeanScale);
+            for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) { W[1 + 4 * r + c] = std::bit_cast<std::uint32_t>(I.m_L2W(r, c)); W[13 + 4 * r + c] = std::bit_cast<std::uint32_t>(I.m_W2L(r, c)); }
         }
 
         // Part II, G2: everything a surfel pass reads besides the rays' structures, for shaders/xlionrender_gi_surfel_pass_comp.glsl, as
@@ -2258,17 +2287,19 @@ namespace xlionrender::gi
         //   mesh:     0 nVerts 1 pos 2 nrm 3 tris 4 vertSurfels (2 per uint, 0xFFFF none) 5 level0 (7 floats: center, normal, radius)
         //             6 n0 7 level1 8 n1 9 parentOf 10 readTable (4 per entry) 11 its size 12 readList 13 readCell 14 originFirst
         //             15 originPos 16 originNrm 17 leak protection 18..20 level 0's neighbor lists (first, index, weight: the shown
-        //             light's filter; none) 21..23 level 1's
+        //             light's filter; none) 21..23 level 1's 24, 25 per parent its children (first: n1 + 1, index: the re-level)
         //   instance: 0 mesh 1 level 2 E 3 valid 4 moments (32 per surfel) 5..7 mean light 8..10 albedo 11 triAlbedo 12 surfAlbedo
         //             13 surfEmission 14 see-through bits 15 meanScale 16..27 L2W rows 28..39 W2L rows 40 alive   (~0u: none)
         //             G4 (the commit on the GPU): 41 fractions (9 per surfel) 42 estimators (gpu_est_v: PackEst) 43 moment counts (16)
         //             44 emitted light from the links (9, zeros: none) 45 transparent surfels' bits (level 0; none) 46 its first surfel
-        //             in the shown light's global order (gpu_trace writes it)
+        //             in the shown light's global order (gpu_trace writes it) 47 its material's flags (GPUMaterial: 11..14 and 45 are
+        //             always there, the flags say which hold its material)
         //   header:   0 instances 1 nInstances 2 lights 3 nPoints 4 sky oct (0/1) 5 emissive scale 6 spread origins 7 no emitters
-        //             8 the warm-up's least blend (m_MinBlend) 9 warmup_passes_v 10, 11 -
+        //             8 the warm-up's least blend (m_MinBlend) 9 warmup_passes_v 10 rays per surfel 11 flags (1 adaptive rays, 2 tiers)
+        //             12 the rays' uncertainty factor 13..15 -   (8, 10..12: PackGPUSetup)
         //   lights:   sun direction 3, sun color 3, sky 3, sky oct 48, then per point position 3, color 3, radius
         // ponytail: the whole scene every call (G3 keeps it resident and uploads changes)
-        static constexpr std::uint32_t gpu_mesh_v = 24, gpu_inst_v = 47, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 12, gpu_est_v = 21;
+        static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 48, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 21;
         static constexpr int gpu_lanes_v = 8, gpu_group_v = 64;    // the pass: invocations per item, per group (a dispatch: GPUGroups)
         static constexpr int GPUGroups(std::size_t nItems) noexcept { return int((nItems * gpu_lanes_v + gpu_group_v - 1) / gpu_group_v); }
         struct gpu_item { int m_Inst = 0, m_Surf = 0, m_Level = 0, m_Rays = 0; float m_Off1 = 0, m_Off2 = 0; int m_Shift = 0, m_Pad = 0; };
@@ -2324,6 +2355,16 @@ namespace xlionrender::gi
                     H[19 + 3 * Lv] = std::uint32_t(D.size()); D.insert(D.end(), Nb.m_Index.begin(), Nb.m_Index.end());
                     H[20 + 3 * Lv] = std::uint32_t(D.size()); for (const float w : Nb.m_Weight) D.push_back(F(w));
                 }
+                {   // per parent its children (the parents' order of m_ParentOf)
+                    const std::size_t n1 = M.m_Levels[1].size();
+                    std::vector<std::uint32_t> First(n1 + 1, 0);
+                    for (const int p : M.m_ParentOf) if (std::size_t(p) < n1) ++First[std::size_t(p) + 1];
+                    for (std::size_t p = 0; p < n1; ++p) First[p + 1] += First[p];
+                    std::vector<std::uint32_t> Index(First.back()), At(First.begin(), First.end() - 1);
+                    for (std::size_t c = 0; c < M.m_ParentOf.size(); ++c) if (std::size_t(M.m_ParentOf[c]) < n1) Index[At[std::size_t(M.m_ParentOf[c])]++] = std::uint32_t(c);
+                    H[24] = std::uint32_t(D.size()); D.insert(D.end(), First.begin(), First.end());
+                    H[25] = std::uint32_t(D.size()); D.insert(D.end(), Index.begin(), Index.end());
+                }
                 const std::uint32_t At = std::uint32_t(D.size());
                 D.insert(D.end(), H, H + gpu_mesh_v);
                 Meshes[&M] = At;
@@ -2343,14 +2384,11 @@ namespace xlionrender::gi
                 R[4] = std::uint32_t(D.size()); for (const auto& Mo : I.m_Moments) for (const float m : Mo) D.push_back(F(m));
                 R[5] = F(I.m_MeanE.m_X); R[6] = F(I.m_MeanE.m_Y); R[7] = F(I.m_MeanE.m_Z);
                 R[8] = F(I.m_Albedo.m_X); R[9] = F(I.m_Albedo.m_Y); R[10] = F(I.m_Albedo.m_Z);
-                if (!I.m_TriAlbedo.empty())   { R[11] = std::uint32_t(D.size()); for (const auto& a : I.m_TriAlbedo) PushV(a); }
-                if (!I.m_SurfAlbedo.empty())  { R[12] = std::uint32_t(D.size()); for (const auto& a : I.m_SurfAlbedo) PushV(a); }
-                if (!I.m_SurfEmission.empty()){ R[13] = std::uint32_t(D.size()); for (const auto& e : I.m_SurfEmission) PushV(e); }
-                if (!I.m_SeeThrough.empty())
-                {
-                    R[14] = std::uint32_t(D.size());
-                    D.resize(D.size() + (I.m_SeeThrough.size() + 31) / 32, 0u);
-                    for (std::size_t t = 0; t < I.m_SeeThrough.size(); ++t) if (I.m_SeeThrough[t]) D[R[14] + t / 32] |= 1u << (t % 32);
+                {   // its material, always there (changed in place: GPUMaterial)
+                    std::vector<std::uint32_t> A[5];
+                    R[47] = GPUMaterial(int(i), A);
+                    const std::uint32_t Word[5] = { 11, 12, 13, 14, 45 };
+                    for (int k = 0; k < 5; ++k) { R[Word[k]] = std::uint32_t(D.size()); D.insert(D.end(), A[k].begin(), A[k].end()); }
                 }
                 R[15] = F(I.m_MeanScale);
                 const std::size_t nS = I.m_E.size();
@@ -2360,12 +2398,6 @@ namespace xlionrender::gi
                 R[43] = std::uint32_t(D.size()); for (std::size_t k = 0; k < nS; ++k) for (int t = 0; t < moment_texels_v; ++t) D.push_back(k < I.m_MomCount.size() ? I.m_MomCount[k][std::size_t(t)] : 0u);
                 R[44] = std::uint32_t(D.size()); D.resize(D.size() + nS * 9, 0u);
                 for (std::size_t k = 0; k < nS && k < I.m_EmitB.size(); ++k) for (int i = 0; i < 3; ++i) { D[R[44] + 9 * k + 3 * i] = F(I.m_EmitB[k][i].m_X); D[R[44] + 9 * k + 3 * i + 1] = F(I.m_EmitB[k][i].m_Y); D[R[44] + 9 * k + 3 * i + 2] = F(I.m_EmitB[k][i].m_Z); }
-                if (I.m_Level == 0 && !I.m_SurfSeeThrough.empty())
-                {
-                    R[45] = std::uint32_t(D.size());
-                    D.resize(D.size() + (I.m_SurfSeeThrough.size() + 31) / 32, 0u);
-                    for (std::size_t k = 0; k < I.m_SurfSeeThrough.size(); ++k) if (I.m_SurfSeeThrough[k]) D[R[45] + k / 32] |= 1u << (k % 32);
-                }
                 for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) { R[16 + 4 * r + c] = F(I.m_L2W(r, c)); R[28 + 4 * r + c] = F(I.m_W2L(r, c)); }
             }
             D[0] = std::uint32_t(D.size()); D[1] = std::uint32_t(m_Instances.size());
@@ -2375,11 +2407,37 @@ namespace xlionrender::gi
             for (const auto& s : L.m_SkyOct) PushV(s);
             for (const auto& P : L.m_Points) { PushV(P.m_Position); PushV(P.m_Color); D.push_back(F(P.m_Radius)); }
             D[4] = L.m_bSkyOct ? 1u : 0u;
-            D[5] = F(m_Setup.m_EmissiveScale);
             D[6] = m_Setup.m_bSpreadOrigins ? 1u : 0u;
-            D[7] = m_Emitters.empty() ? 1u : 0u;
-            D[8] = F(m_Setup.m_MinBlend);
             D[9] = std::uint32_t(warmup_passes_v);
+            PackGPUSetup(D.data());
+        }
+        // G4c: an instance's material as the GPU has it (record words 11 triangle albedo 3 a triangle, 12 surfel albedo 3 a fine surfel, 13 surfel
+        // emission, 14 the triangles' see-through bits, 45 the fine surfels'): always their full size (zeros: none), the flags (bits 0..4)
+        // which hold its material, bit 5 whether it has links (m_EmitB)
+        std::uint32_t GPUMaterial(int Id, std::vector<std::uint32_t> (&A)[5]) const noexcept
+        {
+            const auto& I = m_Instances[std::size_t(Id)];
+            const std::size_t nT = I.m_pMesh->m_Tris.size(), nF = I.m_pMesh->m_Levels[0].size();
+            const auto F = [](float f) { return std::bit_cast<std::uint32_t>(f); };
+            const auto V = [&](std::vector<std::uint32_t>& Out, const std::vector<v3>& In, std::size_t n) { Out.assign(3 * n, 0u); for (std::size_t k = 0; k < In.size() && k < n; ++k) { Out[3 * k] = F(In[k].m_X); Out[3 * k + 1] = F(In[k].m_Y); Out[3 * k + 2] = F(In[k].m_Z); } };
+            const auto B = [&](std::vector<std::uint32_t>& Out, const std::vector<std::uint8_t>& In, std::size_t n) { Out.assign((n + 31) / 32, 0u); for (std::size_t k = 0; k < In.size() && k < n; ++k) if (In[k]) Out[k / 32] |= 1u << (k % 32); };
+            V(A[0], I.m_TriAlbedo, nT); V(A[1], I.m_SurfAlbedo, nF); V(A[2], I.m_SurfEmission, nF);
+            B(A[3], I.m_SeeThrough, nT); B(A[4], I.m_SurfSeeThrough, nF);
+            for (auto& a : A) if (a.empty()) a.push_back(0u);
+            return (I.m_TriAlbedo.empty() ? 0u : 1u) | (I.m_SurfAlbedo.empty() ? 0u : 2u) | (I.m_SurfEmission.empty() ? 0u : 4u) | (I.m_SeeThrough.empty() ? 0u : 8u) | (I.m_SurfSeeThrough.empty() ? 0u : 16u)
+                 | (I.m_EmitB.empty() ? 0u : 32u);     // (32: it has links: its rays' hits leave the emission out, the links bring it)
+        }
+        std::uint32_t MatGen(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_MatGen; }
+
+        // The setup the GPU's commit and expand read (header words 5, 7, 8, 10..12: the GPU's copy is refreshed every slice)
+        void PackGPUSetup(std::uint32_t* D) const noexcept
+        {
+            D[5]  = std::bit_cast<std::uint32_t>(m_Setup.m_EmissiveScale);
+            D[7]  = m_Emitters.empty() ? 1u : 0u;
+            D[8]  = std::bit_cast<std::uint32_t>(m_Setup.m_MinBlend);
+            D[10] = std::uint32_t(std::max(m_Setup.m_RaysPerSurfel, 1));
+            D[11] = (m_Setup.m_bAdaptiveRays ? 1u : 0u) | (m_Setup.m_bDistanceTiers ? 2u : 0u);
+            D[12] = std::bit_cast<std::uint32_t>(m_Setup.m_RayUncertainty);
         }
 
         // G4: an estimator as gpu_est_v words (the GPU's commit, shaders/xlionrender_gi_commit_comp.glsl): mean 3, short 3, variance 3, vbbr,
@@ -2401,17 +2459,6 @@ namespace xlionrender::gi
             E.m_Last = { F(p[15]), F(p[16]), F(p[17]) }; E.m_Ref = { F(p[18]), F(p[19]), F(p[20]) };
         }
 
-        // G4: a surfel's state after the GPU's commit (the world's copy: DeliverGPUState), and what the pass found (the update's stats)
-        struct gpu_state
-        {
-            float           m_E[3], m_Valid, m_Frac[9];
-            std::uint32_t   m_Est[gpu_est_v];
-            float           m_Moments[2 * moment_texels_v];
-            std::uint32_t   m_MomCount[moment_texels_v];
-            int             m_nUnsupported, m_nHits;
-            float           m_UnsupportedAt[3];
-            int             m_Work[4];          // (diagnostics) gpu_result::m_Work
-        };
         // G4: a change to the estimators the world made (estimator::Lower: at a dirty instance's pass, by ApplyAffect), for the GPU's
         // copy (shaders/xlionrender_gi_ops_comp.glsl): both apply it, the same way. Surf -1: all of the instance's; bMomCount: its moment
         // counts start again
@@ -2475,48 +2522,78 @@ namespace xlionrender::gi
         }
         std::uint64_t GPUGen() const noexcept { return m_GPUGen; }
 
-        // G4: the GPU committed them (Items: a slice of what GPUWork handed, in order; St per item): its state into the world's copy, the
-        // means and bad counts by their deltas; the next Update does the rest of the bookkeeping (Update: m_bCommitted). Then the
-        // estimator changes made since that slice was dispatched (Unapplied: what the GPU has not had yet; and this world's own, not taken
-        // yet) again on the copy: the GPU's state is from before them (a material captured after the dispatch lowered surfels whose
-        // commit then came back without it; the repack from the copy lost it for good). Lower and the counts' reset are the same applied twice
-        void DeliverGPUState(std::span<const gpu_item> Items, std::span<const gpu_state> St, std::span<const gpu_op> Unapplied = {}) noexcept
+        // G4c: a range of a surfel pass (GPURanges): the GPU's expand serves its surfels (shaders/xlionrender_gi_expand_comp.glsl). Flags:
+        // gpu_range_urgent_v (a change's surfel: no tier), gpu_range_settled_v (its instance is settled: the tiers apply). m_Start: its
+        // first item in the batch's global order (the sum of the counts before it)
+        static constexpr int gpu_range_urgent_v = 1, gpu_range_settled_v = 2;
+        struct gpu_range { int m_Inst = 0, m_Level = 0, m_First = 0, m_Count = 0, m_Flags = 0, m_History = 0; std::uint32_t m_Seed = 0; int m_Start = 0, m_Rays = 0; };   // (m_Rays: the estimate, the slices')
+        // what the GPU found for a range (its items' atomics): the rays, the surfels traced, unsupported, hits, the first unsupported hit
+        struct gpu_range_stats { int m_Rays = 0, m_Traced = 0, m_nUnsupported = 0, m_nHits = 0; float m_UnsupportedAt[3] = {}; int m_bAt = 0; };
+        std::span<const gpu_range> GPURanges() noexcept
+        {
+            m_GPURangesOut.clear();
+            int Start = 0;
+            for (auto& W : m_Pending)
+                if (!W.m_bGPU && W.m_RaysDone < W.m_Rays)
+                {
+                    W.m_bGPU = true;
+                    m_GPURangesOut.push_back({ W.m_Inst, W.m_Level, W.m_Surf, W.m_Count, W.m_Flags, W.m_History, W.m_Seed, Start, W.m_Rays });
+                    Start += W.m_Count;
+                }
+            return m_GPURangesOut;
+        }
+        // The ranges traced and committed (Ranges: a slice of what GPURanges handed, in order; St per range): finished, Update counts them.
+        // Each instance learns what a step of its cursor costs (the budget's estimate of its next ranges)
+        void DeliverGPURanges(std::span<const gpu_range> Ranges, std::span<const gpu_range_stats> St) noexcept
         {
             std::size_t j = 0;
-            for (std::size_t k = 0; k < Items.size() && j < m_Pending.size(); ++k)
+            for (std::size_t k = 0; k < Ranges.size() && j < m_Pending.size(); ++k)
             {
-                while (j < m_Pending.size() && m_Pending[j].m_bGPU && m_Pending[j].m_RaysDone >= m_Pending[j].m_Rays) ++j;     // (delivered by an earlier slice)
+                while (j < m_Pending.size() && m_Pending[j].m_bGPU && m_Pending[j].m_RaysDone >= m_Pending[j].m_Rays) ++j;
                 if (j >= m_Pending.size()) break;
                 auto& W = m_Pending[j];
-                if (!W.m_bGPU || W.m_Inst != Items[k].m_Inst || W.m_Surf != Items[k].m_Surf || W.m_Level != Items[k].m_Level) continue;
+                if (!W.m_bGPU || W.m_Inst != Ranges[k].m_Inst || W.m_Surf != Ranges[k].m_First || W.m_Level != Ranges[k].m_Level || W.m_Count != Ranges[k].m_Count) continue;
                 ++j;
                 const auto& G = St[k];
                 auto& I = m_Instances[W.m_Inst];
-                const std::size_t s = std::size_t(W.m_Surf);
-                I.m_MeanS = I.m_MeanS - I.m_E[s] * I.m_Valid[s]; I.m_MeanW -= I.m_Valid[s];
-                I.m_nBad -= BadSurfel(I.m_E[s], I.m_Valid[s]);
-                I.m_E[s] = { G.m_E[0], G.m_E[1], G.m_E[2] }; I.m_Valid[s] = G.m_Valid;
-                for (int i = 0; i < 3; ++i) I.m_Frac[s][i] = { G.m_Frac[3 * i], G.m_Frac[3 * i + 1], G.m_Frac[3 * i + 2] };
-                UnpackEst(G.m_Est, I.m_Est[s]);
-                std::copy_n(G.m_Moments, 2 * moment_texels_v, I.m_Moments[s].begin());
-                for (int t = 0; t < moment_texels_v; ++t) I.m_MomCount[s][std::size_t(t)] = std::uint16_t(G.m_MomCount[t]);
-                I.m_MeanS = I.m_MeanS + I.m_E[s] * I.m_Valid[s]; I.m_MeanW += I.m_Valid[s];
-                I.m_nBad += BadSurfel(I.m_E[s], I.m_Valid[s]);
-                if (++I.m_nMeanDeltas > I.m_E.size()) I.m_bMeanDirty = true;
-                W.m_nUnsupported = G.m_nUnsupported; W.m_nHits = G.m_nHits; W.m_UnsupportedAt = { G.m_UnsupportedAt[0], G.m_UnsupportedAt[1], G.m_UnsupportedAt[2] };
+                if (!(W.m_Flags & gpu_range_urgent_v) && W.m_Count > 0)
+                {
+                    const float r = float(G.m_Rays) / float(W.m_Count);
+                    I.m_RaysPerStep = I.m_RaysPerStep > 0 ? I.m_RaysPerStep + (r - I.m_RaysPerStep) * 0.25f : r;
+                }
+                W.m_nUnsupported = G.m_nUnsupported; W.m_nHits = G.m_nHits; W.m_Traced = G.m_Traced;
+                W.m_UnsupportedAt = { G.m_UnsupportedAt[0], G.m_UnsupportedAt[1], G.m_UnsupportedAt[2] };
                 W.m_RaysDone = W.m_Rays; W.m_bCommitted = true;
-                m_GPURays += W.m_Rays;
+                m_GPURays += G.m_Rays;
             }
-            const auto Again = [&](const gpu_op& O)
-            {
-                if (O.m_Inst < 0 || O.m_Inst >= int(m_Instances.size())) return;
-                auto& I = m_Instances[std::size_t(O.m_Inst)];
-                const std::size_t n = I.m_Est.size(), s0 = O.m_Surf < 0 ? 0 : std::size_t(O.m_Surf), s1 = O.m_Surf < 0 ? n : std::min(n, std::size_t(O.m_Surf) + 1);
-                for (std::size_t s = s0; s < s1; ++s) { I.m_Est[s].Lower(O.m_A); if (O.m_bMomCount && s < I.m_MomCount.size()) I.m_MomCount[s] = {}; }
-            };
-            for (const auto& O : Unapplied) Again(O);
-            for (const auto& O : m_GPUOps) Again(O);
         }
+        // The instances' means of their valid surfels' light, from the GPU (per instance 5 floats: the sum of E V, of V, the bad ones)
+        void SetGPUMeans(std::span<const float> M) noexcept
+        {
+            for (std::size_t i = 0; i < m_Instances.size() && 5 * i + 4 < M.size(); ++i)
+            {
+                auto& I = m_Instances[i];
+                if (!I.m_bAlive) continue;
+                I.m_MeanS = { M[5 * i], M[5 * i + 1], M[5 * i + 2] }; I.m_MeanW = M[5 * i + 3]; I.m_nBad = int(M[5 * i + 4]);
+                I.m_bMeanDirty = false; I.m_nMeanDeltas = 0;
+            }
+        }
+        // (G4c: gpu_trace::ReadBack) the GPU's state of an instance's surfels into this world's arrays: E, validity, moments, fractions,
+        // estimators, moment counts (the layouts of PackGPUSurfels)
+        void SetGPUState(int Id, const std::uint32_t* E, const std::uint32_t* V, const std::uint32_t* Mo, const std::uint32_t* Fr, const std::uint32_t* Es, const std::uint32_t* Mc) noexcept
+        {
+            auto& I = m_Instances[std::size_t(Id)];
+            const auto F = [](std::uint32_t u) { return std::bit_cast<float>(u); };
+            for (std::size_t s = 0; s < I.m_E.size(); ++s)
+            {
+                I.m_E[s] = { F(E[3 * s]), F(E[3 * s + 1]), F(E[3 * s + 2]) }; I.m_Valid[s] = F(V[s]);
+                for (int t = 0; t < 2 * moment_texels_v; ++t) I.m_Moments[s][std::size_t(t)] = F(Mo[2 * moment_texels_v * s + std::size_t(t)]);
+                for (int k = 0; k < 3; ++k) I.m_Frac[s][k] = { F(Fr[9 * s + 3 * k]), F(Fr[9 * s + 3 * k + 1]), F(Fr[9 * s + 3 * k + 2]) };
+                UnpackEst(Es + gpu_est_v * s, I.m_Est[s]);
+                for (int t = 0; t < moment_texels_v; ++t) I.m_MomCount[s][std::size_t(t)] = std::uint16_t(Mc[moment_texels_v * s + std::size_t(t)]);
+            }
+        }
+
         // G4: the estimator changes since the last call (gpu_trace applies them to the GPU's copy)
         std::vector<gpu_op> TakeGPUOps() noexcept { return std::exchange(m_GPUOps, {}); }
         std::uint32_t EmitGen(int Id) const noexcept { return m_Instances[Id].m_EmitGen; }       // its emitted light's version (m_EmitB)
@@ -2765,7 +2842,9 @@ namespace xlionrender::gi
             float   m_Off1 = 0, m_Off2 = 0;
             int     m_Shift = 0;
             bool    m_bGPU = false;                                    // G3: handed to the GPU (GPUWork)
-            bool    m_bCommitted = false;                              // G4: the GPU committed it (DeliverGPUState): Update only does the bookkeeping
+            bool    m_bCommitted = false;                              // G4c: the GPU traced and committed it (DeliverGPURanges): Update counts it
+            int     m_Count = 1, m_Flags = 0, m_History = 0, m_Traced = 0;     // G4c: a range of m_Count surfels from m_Surf (flags: gpu_range_*), its instance's
+            unsigned m_Seed = 0;                                       //      history and the update's seed (the GPU's expand: the tiers, the offsets)
             v3      m_Sum{ 0, 0, 0 };
             int     m_nBack = 0, m_nBackAll = 0, m_nUnsupported = 0, m_nHits = 0;
             v3      m_UnsupportedAt{ 0, 0, 0 };
@@ -2780,7 +2859,7 @@ namespace xlionrender::gi
             for (auto& I : m_Instances)
             {
                 if (!I.m_bAlive) { I.m_MeanS = v3{ 0, 0, 0 }; I.m_MeanW = 0; I.m_nBad = 0; I.m_bMeanDirty = false; }
-                else if (I.m_bMeanDirty)            // (Phase 3: only an instance whose light changed)
+                else if (I.m_bMeanDirty && !m_Setup.m_bGPUOwned)     // (Phase 3: only an instance whose light changed; G4c: the GPU's, SetGPUMeans)
                 {
                     v3 S{ 0, 0, 0 }; float W = 0; int nBad = 0;
                     for (std::size_t s = 0; s < I.m_E.size(); ++s) { S = S + I.m_E[s] * I.m_Valid[s]; W += I.m_Valid[s]; nBad += BadSurfel(I.m_E[s], I.m_Valid[s]); }
@@ -2791,6 +2870,54 @@ namespace xlionrender::gi
             }
             const v3 World = WW > 0 ? WSum * (1.0f / WW) : v3{ 0, 0, 0 };
             for (auto& I : m_Instances) if (I.m_MeanE.m_X < 0) I.m_MeanE = World;
+            m_MeanLum = 0.2126f * World.m_X + 0.7152f * World.m_Y + 0.0722f * World.m_Z;
+        }
+
+        // G4c: an instance's share of the pick as ranges: its urgent surfels (one each, the full rays), then the pass from its cursor, as many
+        // steps as the budget's estimate allows (what a step cost, else the full rays), split around the urgent ones (a cube: its set's
+        // surfels one each). The GPU's expand applies the tiers and the adaptive rays to each surfel
+        void PickRanges(int i, int Cap, bool bSettled, unsigned Seed, int& Took, int& TookRays, stats& St) noexcept
+        {
+            auto& I = m_Instances[std::size_t(i)];
+            const int R = std::max(m_Setup.m_RaysPerSurfel, 1);
+            const auto Range = [&](int First, int Count, int Flags, float Rays)
+            {
+                work_item W;
+                W.m_Inst = i; W.m_Surf = First; W.m_Count = Count; W.m_Level = I.m_Level; W.m_Flags = Flags | (bSettled ? gpu_range_settled_v : 0);
+                W.m_History = I.m_History; W.m_Seed = Seed; W.m_Rays = std::max(1, int(std::ceil(Rays)));
+                m_Pending.push_back(W);
+            };
+            std::vector<int> Urgent;
+            while (!I.m_Urgent.empty() && TookRays < Cap)
+            {
+                const int Surf = I.m_Urgent.back(); I.m_Urgent.pop_back();
+                if (std::size_t(Surf) >= I.m_E.size() || I.m_UrgentMark[Surf] == 2) continue;
+                I.m_UrgentMark[Surf] = 2; Urgent.push_back(Surf);
+                Range(Surf, 1, gpu_range_urgent_v, float(R)); ++Took; TookRays += R; ++St.m_UrgentSurfels;
+            }
+            const int n = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
+            const float Step = I.m_RaysPerStep > 0 ? I.m_RaysPerStep : float(R);
+            const int Steps = TookRays >= Cap ? 0 : std::min(n - I.m_Cursor, std::max(1, int(std::ceil(float(Cap - TookRays) / Step))));
+            const int c0 = I.m_Cursor, c1 = c0 + Steps;
+            if (I.m_bCube) { for (int c = c0; c < c1; ++c) if (I.m_UrgentMark[I.m_CubeSet[std::size_t(c)]] != 2) Range(I.m_CubeSet[std::size_t(c)], 1, 0, Step); }
+            else
+            {
+                std::sort(Urgent.begin(), Urgent.end());
+                int a = c0;
+                for (const int u : Urgent) if (u >= a && u < c1) { if (u > a) Range(a, u - a, 0, Step * float(u - a)); a = u + 1; }
+                if (a < c1) Range(a, c1 - a, 0, Step * float(c1 - a));
+            }
+            I.m_Cursor = c1; Took += Steps; TookRays += int(std::ceil(Step * float(Steps)));
+            for (const int u : Urgent) I.m_UrgentMark[u] = 0;
+        }
+
+        // A pass' random offsets (the rotation of its stratified set, the pairing of its origins and strata) from the update's seed and the
+        // surfel: a hash, the same on the GPU (shaders/xlionrender_gi_expand_comp.glsl), so its pick and the CPU's draw the same rays
+        static std::uint32_t Hash32(std::uint32_t x) noexcept { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+        static void PassOffsets(unsigned Seed, int Inst, int Surf, float& Off1, float& Off2, int& Shift) noexcept
+        {
+            const std::uint32_t h1 = Hash32(Seed * 0x9E3779B9u ^ std::uint32_t(Inst) * 0x85EBCA6Bu ^ std::uint32_t(Surf) * 0xC2B2AE35u), h2 = Hash32(h1), h3 = Hash32(h2);
+            Off1 = float(h1 >> 8) * (1.0f / 16777216.0f); Off2 = float(h2 >> 8) * (1.0f / 16777216.0f); Shift = int(h3 >> 26);
         }
 
         // A pass whose rays are all in (TraceChunk's last chunk, DeliverGPU): the emitted light from its links, the irradiance E = pi mean(L),
@@ -2876,7 +3003,7 @@ namespace xlionrender::gi
                 const auto Tu = clock::now();
                 const v3 In = Dl + (Q.m_bSupported ? Q.m_E : Unsupported(H));
                 W.m_ReadUs += Us(Tu, clock::now());
-                const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (m_Emitters.empty() ? Emission : v3{ 0, 0, 0 });     // with emitters the links bring their light
+                const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (I.m_EmitB.empty() ? Emission : v3{ 0, 0, 0 });     // with its links the links bring the emitters' light; without (none, or not built yet: a minute for Police) the hits do
                 Sum = Sum + Lr;
                 for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Lr * Bw[i];
             }
@@ -2971,7 +3098,7 @@ namespace xlionrender::gi
             // Items picked by an earlier update and not finished keep going; one whose instance was removed or changed level (its arrays were
             // made again) is dropped. A pick is made only when nothing is pending: one surfel is never in flight twice
             std::erase_if(m_Pending, [&](const work_item& W) { const auto& I = m_Instances[W.m_Inst]; return !I.m_bAlive || I.m_Level != W.m_Level || std::size_t(W.m_Surf) >= I.m_E.size(); });
-            m_Work.clear(); m_WorkGPU.clear();
+            m_Work.clear();
             // (G3: the items the GPU delivered are finished, not yet committed: the update that commits them picks the next ones)
             if (std::none_of(m_Pending.begin(), m_Pending.end(), [](const work_item& W) { return W.m_RaysDone < W.m_Rays; }))
             {
@@ -2985,7 +3112,7 @@ namespace xlionrender::gi
                     m_Order.push_back({ Priority(I, Eye), i });
                 }
                 std::sort(m_Order.begin(), m_Order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-                m_Work.clear(); m_WorkGPU.clear();
+                m_Work.clear();
                 int RaysLeft = std::max(RayBudget, 1);          // (Phase 6: in rays, each surfel what it asks for: RequestedRays)
                 // Fairness (Phase 1): the instance that has waited longest gets m_FairShare of the update first, whatever its score; the rest
                 // goes by score. An instance is visited once per pick (two visits would trace a surfel twice in one pass)
@@ -3011,6 +3138,16 @@ namespace xlionrender::gi
                     }
                     const bool bSettled = I.m_History > warmup_passes_v;
                     int Took = 0, TookRays = 0;
+                    if (m_Setup.m_bGPUOwned)        // G4c: ranges, sized by what a step costs; the GPU's expand serves them surfel by surfel
+                    {
+                        PickRanges(i, Cap, bSettled, Seed, Took, TookRays, St);
+                        if (I.m_Cursor >= n) { I.m_Cursor = 0; I.m_Age = 0; }
+                        RaysLeft -= TookRays;
+                        if (i == Fair) St.m_FairSurfels = Took;
+                        ++St.m_Updated;
+                        I.m_bPicked = true;
+                        continue;
+                    }
                     // Phase 4: the surfels a change affected first (its urgent list), then the pass (which skips them this pick)
                     const std::size_t UrgentAt = m_Work.size();
                     while (!I.m_Urgent.empty() && TookRays < Cap)
@@ -3043,14 +3180,13 @@ namespace xlionrender::gi
                 for (std::size_t w = 0; w < m_Work.size(); ++w)
                 {
                     const auto [pi, ps] = m_Work[w];
-                    rng Rng(Seed * 2654435761u + unsigned(w) * 7919u);       // the pass' random offsets, as the trace drew them in one go
                     work_item W;
                     W.m_Inst = pi; W.m_Surf = ps; W.m_Level = m_Instances[pi].m_Level; W.m_Rays = RequestedRays(m_Instances[pi], ps);
-                    W.m_Off1 = Rng.Next(); W.m_Off2 = Rng.Next(); W.m_Shift = int(Rng.Next() * 64.0f);
+                    PassOffsets(Seed, pi, ps, W.m_Off1, W.m_Off2, W.m_Shift);     // the pass' random offsets (the GPU's pick draws the same)
                     if (auto& PI = m_Instances[pi]; std::size_t(ps) < PI.m_LastOff.size()) PI.m_LastOff[ps] = { W.m_Off1, W.m_Off2 };
                     m_Pending.push_back(W);
                 }
-                m_Work.clear(); m_WorkGPU.clear();      // from here m_Work lists the surfels finished this update (LastUpdated)
+                m_Work.clear();      // from here m_Work lists the surfels finished this update (LastUpdated)
             }
             Lap(St.m_PickMs);
 
@@ -3061,13 +3197,13 @@ namespace xlionrender::gi
             const double ShowReserve = AllowMs > 0 && bShowBacklog ? AllowMs * double(m_Setup.m_ShowShare) : 0.0;
             const bool   bLinkWork   = m_LinkCur.m_Inst >= 0 || !m_LinkQueue.empty();
             const int    LinkSurfels0 = St.m_LinkSurfels;
-            const double LinkUsedMs = PumpLinks(AllowMs > 0 ? Grant((Left() - ShowReserve) * (m_Pending.empty() ? 1.0 : double(m_Setup.m_LinkShare))) : 0.0, St, Token == 0);   // the trace waits for nothing: all of it
+            const double LinkUsedMs = PumpLinks(AllowMs > 0 ? Grant((Left() - ShowReserve) * (m_Pending.empty() || m_Setup.m_bGPUTrace ? 1.0 : double(m_Setup.m_LinkShare))) : 0.0, St, Token == 0);   // the trace waits for nothing (or the GPU traces): all of it
             (void)LinkUsedMs;
             if (AllowMs > 0) m_Starve[0] = bLinkWork && St.m_LinkSurfels == LinkSurfels0 ? m_Starve[0] + 1 : 0;
             Lap(St.m_LinksMs);
             // The emitters' light: made of the links, the emissions (SetSurfelMaterial: the links again) and the scale; a level switch
             // changes its layout. Nothing else: not every update
-            if (m_EmitScale != m_Setup.m_EmissiveScale) { m_bEmitDirty = true; m_EmitScale = m_Setup.m_EmissiveScale; ++m_GPUGen; }
+            if (m_EmitScale != m_Setup.m_EmissiveScale) { m_bEmitDirty = true; m_EmitScale = m_Setup.m_EmissiveScale; }
             UpdateEmittedLight(m_bEmitDirty); m_bEmitDirty = false;
             Lap(St.m_EmitMs);
 
@@ -3130,30 +3266,28 @@ namespace xlionrender::gi
             {
                 St.m_CastMs += W.m_CastUs * 1e-3; St.m_DirectMs += W.m_DirectUs * 1e-3; St.m_ReadMs += W.m_ReadUs * 1e-3;
                 if (W.m_RaysDone < W.m_Rays) continue;
+                if (m_Setup.m_bGPUOwned && W.m_bCommitted)      // G4c: a range: its surfels stay on the GPU
+                {
+                    St.m_Surfels += W.m_Traced; St.m_nUnsupported += W.m_nUnsupported; St.m_Hits += W.m_nHits;
+                    if (W.m_nUnsupported && m_UnsupportedAt.size() < 4096) m_UnsupportedAt.push_back(W.m_UnsupportedAt);
+                    continue;
+                }
                 m_Work.push_back({ W.m_Inst, W.m_Surf });
-                m_WorkGPU.push_back(W.m_bCommitted ? 1 : 0);
                 St.m_nUnsupported += W.m_nUnsupported;
                 if (W.m_nUnsupported && m_UnsupportedAt.size() < 4096) m_UnsupportedAt.push_back(W.m_UnsupportedAt);
                 St.m_Hits += W.m_nHits;
             }
             for (auto& W : m_Pending) { St.m_TraceCpuMs += W.m_UnitUs * 1e-3; W.m_UnitUs = 0; W.m_UnitRays = 0; W.m_CastUs = W.m_DirectUs = W.m_ReadUs = 0; }
             std::erase_if(m_Pending, [](const work_item& W) { return W.m_RaysDone >= W.m_Rays; });
-            St.m_Surfels = int(m_Work.size());
+            St.m_Surfels += int(m_Work.size());
             St.m_Pending = int(m_Pending.size());
             for (const auto& W : m_Pending) St.m_PendingRays += W.m_Rays - W.m_RaysDone;
 
             St.m_TraceMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
             TPrev = std::chrono::steady_clock::now();
-            for (std::size_t w = 0; w < m_Work.size(); ++w)       // the surfels finished this update
+            for (const auto& [i, s] : m_Work)       // the surfels finished this update
             {
-                const auto [i, s] = m_Work[w];
                 auto& I = m_Instances[i];
-                if (m_WorkGPU[w])                   // G4: committed on the GPU (its state, the means: DeliverGPUState)
-                {
-                    if (std::size_t(s) < I.m_LastPass.size()) I.m_LastPass[s] = m_nUpdates;
-                    if (!m_Setup.m_bGPUShown) I.m_FilterDirty.push_back(s);
-                    continue;
-                }
                 // The light: the estimator (it warms up after a change, settles, and still follows one). The validity and the depth
                 // moments: their own slow blends (they weigh the reads: noise there swims too)
                 auto& Es = I.m_Est[s];
@@ -3197,7 +3331,7 @@ namespace xlionrender::gi
             for (int i = 0; i < int(m_Instances.size()); ++i)
                 if (m_Instances[i].m_bAlive && m_Instances[i].m_bCube)
                 {
-                    ExpandCube(i);
+                    if (!m_Setup.m_bGPUOwned) ExpandCube(i);           // (G4c: the GPU's, gpu_trace)
                     m_Instances[i].m_bFilterFull = true; m_Instances[i].m_bMeanDirty = true;   // (36 parents or so)
                     ++St.m_nCubes; St.m_CubeParents += int(m_Instances[i].m_pMesh->m_Levels[1].size());
                 }
@@ -3258,6 +3392,7 @@ namespace xlionrender::gi
                 St.m_FilterBytes += I.m_Shown.capacity() * sizeof(basis) + (I.m_RevFirst.capacity() + I.m_RevIndex.capacity()) * sizeof(std::uint32_t);
             }
             Lap(St.m_StatsMs);
+            St.m_MeanLum = m_MeanLum;
             St.m_TotalMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
             return St;
         }
@@ -3341,6 +3476,8 @@ namespace xlionrender::gi
             std::vector<std::array<std::uint16_t, moment_texels_v>> m_MomCount; // per texel the samples it has had (its blend: 1 / n, then slow)
             std::vector<estimator>  m_Est;                      // per surfel of the active level: its light over time
             std::uint32_t           m_EmitGen   = 0;            // G4: m_EmitB's version (the GPU's copy)
+            std::uint32_t           m_MatGen    = 0;            // G4c: its material's version (albedo, emission, see-through: GPUMaterial)
+            float                   m_RaysPerStep = 0;          // G4c: the rays a step of its cursor cost on the GPU (its ranges' mean; 0: not known)
             int                     m_Level     = 0;
             bool                    m_bCube     = false;        // level 1 as an ambient cube: only m_CubeSet is traced, the other parents blend from them (ExpandCube)
             std::vector<int>        m_CubeSet;                  // the parents traced: for each axis direction the one facing it best
@@ -3409,7 +3546,7 @@ namespace xlionrender::gi
             const v3 Third{ 1.0f / 3, 1.0f / 3, 1.0f / 3 };
             I.m_Frac.assign(L.size(), basis{ Third, Third, Third });
             I.m_BasisAcc.assign(L.size(), basis{});
-            I.m_Est.resize(L.size());
+            I.m_Est.assign(L.size(), estimator{});                     // (all new, as the GPU's re-level: G4c)
             for (std::size_t s = 0; s < L.size(); ++s) I.m_Est[s].Seed(I.m_E[s]);
             for (std::size_t s = 0; s < L.size(); ++s)
             {
@@ -3744,7 +3881,6 @@ namespace xlionrender::gi
 
         void RebuildEmitterList() noexcept
         {
-            ++m_GPUGen;
             m_Emitters.clear(); m_Em.clear();
             for (int i = 0; i < int(m_Instances.size()); ++i)
             {
@@ -3899,7 +4035,7 @@ namespace xlionrender::gi
             {
                 if (!m_Emitters.empty() || !m_LinkQueue.empty() || m_LinkCur.m_Inst >= 0)
                 {
-                    m_Emitters.clear(); m_Em.clear(); m_LinkQueue.clear(); m_LinkCur = {}; ++m_GPUGen;
+                    m_Emitters.clear(); m_Em.clear(); m_LinkQueue.clear(); m_LinkCur = {};
                     for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); I.m_bLinkQueued = false; I.m_bLinkHull = false; I.m_bEmitDirty = true; }
                 }
                 return 0;
@@ -4096,10 +4232,12 @@ namespace xlionrender::gi
         double                                  m_MovesMsAcc = 0;
         std::vector<work_item>                  m_Pending;              // Phase 1: the surfels picked and not finished
         std::uint64_t                           m_GPUGen = 1;           // G3: the structure's version (what PackGPU and PackGPUSurfels write)
+        std::uint64_t                           m_GPUXformGen = 0;      // G4c: the placements' version (PackGPUTlas, the records' rows)
         std::vector<gpu_item>                   m_GPUOut;               // G3: GPUWork's list
+        std::vector<gpu_range>                  m_GPURangesOut;         // G4c: GPURanges' list
         int                                     m_GPURays = 0;          // G3: the rays delivered since the last update
+        float                                   m_MeanLum = 0;          // UpdateMeans: the world's mean light's luminance (stats)
         std::vector<gpu_op>                     m_GPUOps;               // G4: the estimator changes for the GPU's copy (TakeGPUOps)
-        std::vector<std::uint8_t>               m_WorkGPU;              // G4: per m_Work entry, the GPU committed it
         float                                   m_RayUsMean = 50, m_RayUsDev = 50, m_RayUsHi = 0;     // the governor's running cost of a ray (us), and the slowest seen lately
         int                                     m_nEmitters = 0;
         unsigned                                m_nUpdates = 0;

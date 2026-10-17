@@ -1,7 +1,8 @@
-// Part II, G3 (documentation/gi_dynamic_master_plan.md): the solver with its trace on the GPU (gi::gpu_trace, world::m_Setup.m_bGPUTrace).
-// A world whose batches the GPU traces (the scene resident, the light the commits change uploaded between batches, the sums delivered
-// the frame after) must hold the light of the same world traced on the CPU, update for update: the Cornell box (a point light), and a
-// room lit by an emissive panel through its emitter links. The CPU's main-thread time per update in GPU mode is printed
+// Part II, G3 and G4 (documentation/gi_dynamic_master_plan.md): the solver on the GPU (gi::gpu_trace, world::m_Setup.m_bGPUOwned: the pick
+// as ranges, the light living on the GPU). A world whose light the GPU makes (expanded, traced, committed, its changes as ops, moved and
+// re-levelled when the scene is packed again) must hold, read back, the light of the same world on the CPU, update for update: the
+// Cornell box (a point light; an emissive panel through its links; events), the GI render test's room, and its shown light against the
+// CPU's filter. The CPU's main-thread time per update in GPU mode is printed
 #include "xlionrender_test_common.h"
 #include "features/gi/xlionrender_surfel_gi_gpu.h"
 
@@ -25,6 +26,36 @@ namespace
     constexpr std::uint32_t s_FilterComp[] = {
         #include "xlionrender_gi_filter_comp.h"
     };
+    constexpr std::uint32_t s_ExpandComp[] = {
+        #include "xlionrender_gi_expand_comp.h"
+    };
+    constexpr std::uint32_t s_MeansComp[] = {
+        #include "xlionrender_gi_means_comp.h"
+    };
+    constexpr std::uint32_t s_CubeComp[] = {
+        #include "xlionrender_gi_cube_comp.h"
+    };
+    constexpr std::uint32_t s_MigrateComp[] = {
+        #include "xlionrender_gi_migrate_comp.h"
+    };
+    constexpr std::uint32_t s_ReadBackComp[] = {
+        #include "xlionrender_gi_readback_comp.h"
+    };
+    const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp };
+
+    // The GPU's light into the world's arrays: the last slice delivered, the read back copied, then in (two frames)
+    void Sync(app& App, gpu_trace& T, world& W)
+    {
+        for (int f = 0; f < 2; ++f)
+        {
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            const std::uint64_t Frame = App.m_Device.getFrameIndex();
+            T.Collect(W, Frame);
+            if (f == 0) (void)T.ReadBack(App.m_Window, Frame);
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+        }
+    }
 
     void AddQuad(surfel_mesh& M, v3 C, v3 U, v3 V, float Split)        // (xlionrender_test_surfel_gi.cpp's)
     {
@@ -92,26 +123,25 @@ namespace
         world Wc, Wg;
         if (bRoom) { MakeRoom(Mc, Wc); MakeRoom(Mg, Wg); }
         else { MakeCornell(Mc, Wc, bPanel); MakeCornell(Mg, Wg, bPanel); }
-        Wg.m_Setup.m_bGPUTrace = true;
+        Wg.m_Setup.m_bGPUTrace = Wg.m_Setup.m_bGPUOwned = true;
         gpu_trace T;
-        CHECK(T.Init(App.m_Device, s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp), "gpu_trace::Init");
+        CHECK(T.Init(App.m_Device, s_Shaders), "gpu_trace::Init");
         const auto Event = [&](world& W, std::vector<surfel_mesh>& M, int u)
         {
             if (!bEvents) return;
             if (u == 6) W.SetSurfelMaterial(4, std::vector<v3>(M[4].m_Levels[0].size(), v3{ 0.2f, 0.6f, 0.7f }), {});
             if (u == 8 || u == 9) W.SetTriangleAlbedo(5, u == 8 ? 0 : M[5].m_Tris.size() / 2, std::vector<v3>(M[5].m_Tris.size() / 2, v3{ 0.7f, 0.5f, 0.1f }));     // (a capture in two chunks)
-            if (u == 10) W.SetTransform(6, xmath::fmat4::fromTranslation({ 0.2f, -0.6f, 0.1f }) * xmath::fmat4::fromRotationY(xmath::radian{ 0.9f }));
+            if (u >= 10 && u <= 13) W.SetTransform(6, xmath::fmat4::fromTranslation({ 0.2f + 0.05f * float(u - 10), -0.6f, 0.1f }) * xmath::fmat4::fromRotationY(xmath::radian{ 0.9f + 0.1f * float(u - 10) }));     // (dragged: the TLAS only)
             if (u == 14) { W.m_Setup.m_ProjScale = 300; }
         };
-        // between the slice's dispatch and its delivery (as the renderer's material captures come): the GPU's state comes back without
-        // the change, the world's copy must keep it (DeliverGPUState's Unapplied)
+        // between the slice's dispatch and its delivery (as the renderer's material captures come): its ops reach the GPU with the next slice
         const auto Late = [&](world& W, std::vector<surfel_mesh>& M, int u)
         {
             if (bEvents && u == 7) W.SetSurfelMaterial(2, std::vector<v3>(M[2].m_Levels[0].size(), v3{ 0.9f, 0.9f, 0.4f }), {});
         };
         const auto EyeAt = [&](int u) { return bEvents && u >= 14 ? v3{ 0, 0, -60 } : bRoom ? v3{ 0, 1.6f, -1.9f } : v3{ 0, 0, -0.9f }; };
         for (int u = 0; u < Updates; ++u) { Event(Wc, Mc, u); Wc.Update(L, EyeAt(u), 1 << 30, 100 + u); Late(Wc, Mc, u); }
-        for (int u = 0; u <= Updates; ++u)
+        for (int u = 0; u < Updates; ++u)       // (the GPU commits a batch in the frame it traces it: the same updates)
         {
             while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
             const std::uint64_t Frame = App.m_Device.getFrameIndex();
@@ -119,7 +149,7 @@ namespace
             T.Collect(Wg, Frame);
             Event(Wg, Mg, u);
             Wg.Update(L, EyeAt(u), 1 << 30, 100 + u);
-            T.Submit(App.m_Window, Wg, L, Frame, 1000.0f);     // (a budget for all of a batch: one slice, the CPU's order)
+            T.Submit(App.m_Window, Wg, L, Frame, 1000.0f, EyeAt(u));     // (a budget for all of a batch: one slice, the CPU's order)
             Late(Wg, Mg, u);
             if (u > 0) R.m_UpdateMs = std::max(R.m_UpdateMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count());
             { auto Cmd = App.m_Window.getCmdBuffer(); }
@@ -127,6 +157,7 @@ namespace
             if (u > 0) R.m_TraceMs = std::max(R.m_TraceMs, T.LastMs());
         }
         R.m_Packs = T.Packs();
+        Sync(App, T, Wg);
         // per surfel: its light within 1e-3 of the instance's brightest (the sums' float order differs; the passes compound it)
         for (int i = 0; i < Wc.InstanceCount(); ++i)
         {
@@ -154,7 +185,6 @@ namespace
             CHECK(!App.m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 3 * nRing })
                && !App.m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = 16 * nRing }), "rings");
             while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
-            T.Collect(Wg, App.m_Device.getFrameIndex());           // (the last slice: the world's copy is then the GPU's state)
             CHECK(T.Show(App.m_Window, Places, Light, Moments, 0, Wg.m_Setup.m_FilterPasses, Wg.m_Setup.m_Saturation), "Show");
             { auto Cmd = App.m_Window.getCmdBuffer(); }
             App.m_Window.PageFlip();
@@ -216,9 +246,10 @@ int main()
         lights L; L.m_Points = { { { 0.2f, 0.4f, -0.3f }, { 1.5f, 1.5f, 1.5f }, 4.0f } };
         result R;
         if (Compare(App, L, false, 24, R, true)) return 1;
-        std::printf("GPU trace with events (a wall recolored, another's triangles captured, one recolored while a slice is in flight, the box moved, the coarse level), 24 updates: %d surfels, %d differ from the CPU world, the worst of the others %.1e; packed %d times\n",
+        std::printf("GPU trace with events (a wall recolored, another's triangles captured, one recolored while a slice is in flight, the box dragged, the coarse level), 24 updates: %d surfels, %d differ from the CPU world, the worst of the others %.1e; packed %d times\n",
                     R.m_Surfels, R.m_Mismatch, R.m_Worst, R.m_Packs);
         CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "with events: %d of %d surfels differ from the CPU world", R.m_Mismatch, R.m_Surfels);
+        CHECK(R.m_Packs == 2, "with events the scene was packed %d times (the first, the coarse level; the material and the drag in place)", R.m_Packs);
     }
     // Over time: a GPU budget far too small for a batch (it is traced in slices over frames, the slices' surfels committed as they come
     // in, so later slices read newer light than the CPU's pass did): the converged light is still the CPU world's, instance by instance
@@ -227,22 +258,23 @@ int main()
         std::vector<surfel_mesh> Mc, Mg;
         world Wc, Wg;
         MakeCornell(Mc, Wc, false); MakeCornell(Mg, Wg, false);
-        Wg.m_Setup.m_bGPUTrace = true;
+        Wg.m_Setup.m_bGPUTrace = Wg.m_Setup.m_bGPUOwned = true;
         gpu_trace T;
-        CHECK(T.Init(App.m_Device, s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp), "gpu_trace::Init");
+        CHECK(T.Init(App.m_Device, s_Shaders), "gpu_trace::Init");
         const v3 Eye{ 0, 0, -0.9f };
-        for (int u = 0; u < 40; ++u) Wc.Update(L, Eye, 1 << 30, 500 + u);
+        for (int u = 0; u < 80; ++u) Wc.Update(L, Eye, 1 << 30, 500 + u);
         int Frames = 0;
-        for (; Frames < 2000 && T.Batches() <= 40; ++Frames)
+        for (; Frames < 2000 && !(T.Batches() >= 80 && T.BatchDone()); ++Frames)     // (80 batches, all their slices)
         {
             while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
             const std::uint64_t Frame = App.m_Device.getFrameIndex();
             T.Collect(Wg, Frame);
             Wg.Update(L, Eye, 1 << 30, 500 + Frames);
-            T.Submit(App.m_Window, Wg, L, Frame, 0.001f);           // (1024 rays a slice: the smallest)
+            T.Submit(App.m_Window, Wg, L, Frame, 0.001f, Eye);      // (1024 rays a slice: the smallest)
             { auto Cmd = App.m_Window.getCmdBuffer(); }
             App.m_Window.PageFlip();
         }
+        Sync(App, T, Wg);
         double Worst = 0;
         for (int i = 0; i < Wc.InstanceCount(); ++i)
         {
@@ -251,7 +283,7 @@ int main()
             for (const auto& e : Wg.InstanceLight(i)) g += 0.2126 * e.m_X + 0.7152 * e.m_Y + 0.0722 * e.m_Z;
             Worst = std::max(Worst, std::abs(g - c) / std::max(c, 1e-6));
         }
-        std::printf("GPU trace over time: %d batches in %d slices over %d frames; the instances' mean light off the CPU world's by %.1f%% at most (40 passes each)\n",
+        std::printf("GPU trace over time: %d batches in %d slices over %d frames; the instances' mean light off the CPU world's by %.1f%% at most (80 passes each: near converged; the slices commit as they come, a little ahead of the CPU before)\n",
                     T.Batches(), T.Slices(), Frames, 100 * Worst);
         CHECK(2 * T.Slices() >= 3 * T.Batches(), "the batches were not sliced (the budget starts at 32k rays: the first ones are whole) (%d batches, %d slices)", T.Batches(), T.Slices());
         CHECK(Worst < 0.03, "over time the GPU world's light is %.1f%% off the CPU world's", 100 * Worst);

@@ -2,7 +2,8 @@
 // Part II, G4 (documentation/gi_dynamic_master_plan.md): the commit on the GPU. After a slice's pass (xlionrender_gi_surfel_pass_comp.glsl)
 // each of its items' sums become the surfel's light, as gi::world does it on the CPU: FinishPass (the links' emitted light, E = pi mean(L),
 // the validity from the back faces) and Update's commit (estimator::Add, the validity's blend, the basis fractions, the depth moments).
-// The surfel's whole state is written back into the resident data and into the world's copy (gi::world::gpu_state, DeliverGPUState)
+// The surfel's whole state is written back into the resident data (G4c: the GPU's only), what its pass found added to its range's stats
+// (gi::world::gpu_range_stats: atomics)
 layout(local_size_x = 64) in;
 
 struct GIItem   { ivec4 m_Ids; vec4 m_Offsets; };
@@ -11,14 +12,14 @@ struct GIResult { float m_V[72]; };
 layout(std430, set = 0, binding = 0)           buffer data_b    { uint     GD[]; };
 layout(std430, set = 0, binding = 1) readonly  buffer items_b   { GIItem   GIItems[]; };
 layout(std430, set = 0, binding = 2) readonly  buffer results_b { GIResult GIResults[]; };
-layout(std430, set = 0, binding = 3) writeonly buffer states_b  { uint     GS[]; };
+layout(std430, set = 0, binding = 3)           buffer stats_b   { int      GIStats[]; };     // per range 8: rays, traced, unsupported, hits, at 3, at's flag
+layout(std430, set = 0, binding = 4) readonly  buffer count_b   { uint     GICount[]; };
 
 layout(push_constant) uniform push_t { int m_nItems, m_First, m_Count, m_Pad; } Push;
 
-const uint  gi_inst_v  = 47u;        // gi::world::gpu_inst_v
+const uint  gi_inst_v  = 48u;        // gi::world::gpu_inst_v
 const uint  gi_none_v  = 0xFFFFFFFFu;
 const uint  gi_est_v   = 21u;        // gi::world::gpu_est_v (PackEst)
-const uint  gi_state_v = 91u;        // sizeof(gi::world::gpu_state) / 4
 const float gi_pi_v    = 3.14159265;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
@@ -30,7 +31,7 @@ float Luma(vec3 c) { return 0.299 * c.x + 0.587 * c.y + 0.114 * c.z; }
 void main()
 {
     const int j = int(gl_GlobalInvocationID.x);
-    if (j >= Push.m_Count) return;
+    if (j >= min(Push.m_Count, int(GICount[0]))) return;
     const int  k = Push.m_First + j;
     const int  Id = GIItems[k].m_Ids.x, Level = GIItems[k].m_Ids.z, R = GIItems[k].m_Ids.w;
     const uint u = uint(GIItems[k].m_Ids.y);
@@ -106,7 +107,7 @@ void main()
     const float av = max(Conf, 0.05);
     float Valid = GF(Va) * (1.0 - av) + AccValid * av;
     const uint St = GD[Rec + 45u];
-    if (Level == 0 && St != gi_none_v && ((GD[St + u / 32u] >> (u % 32u)) & 1u) != 0u) Valid = 0.0;
+    if (Level == 0 && (GD[Rec + 47u] & 16u) != 0u && ((GD[St + u / 32u] >> (u % 32u)) & 1u) != 0u) Valid = 0.0;
     const vec3 Tot = BA[0] + BA[1] + BA[2];
     const float af = max(Conf, 0.1);
     const uint Fo = GD[Rec + 41u] + 9u * u;
@@ -131,15 +132,13 @@ void main()
     if (Valid < 1e-6) Valid = 0.0;
     PF(Va, Valid);
 
-    // the world's copy (gi::world::gpu_state): E 3, validity, fractions 9, estimator, moments 32, moment counts 16, unsupported, hits, where
-    // the first unsupported hit was 3, the pass' work 4
-    const uint O = uint(j) * gi_state_v;
-    GS[O] = floatBitsToUint(Mean.x); GS[O + 1u] = floatBitsToUint(Mean.y); GS[O + 2u] = floatBitsToUint(Mean.z); GS[O + 3u] = floatBitsToUint(Valid);
-    for (uint i = 0u; i < 9u; ++i)  GS[O + 4u + i]  = GD[Fo + i];
-    for (uint i = 0u; i < 21u; ++i) GS[O + 13u + i] = GD[Eo + i];
-    for (uint i = 0u; i < 32u; ++i) GS[O + 34u + i] = GD[Mo + i];
-    for (uint i = 0u; i < 16u; ++i) GS[O + 66u + i] = GD[Mc + i];
-    GS[O + 82u] = floatBitsToUint(V[62]); GS[O + 83u] = floatBitsToUint(V[63]);
-    GS[O + 84u] = floatBitsToUint(V[64]); GS[O + 85u] = floatBitsToUint(V[65]); GS[O + 86u] = floatBitsToUint(V[66]);
-    for (uint w = 0u; w < 4u; ++w) GS[O + 87u + w] = floatBitsToUint(V[68u + w]);
+    // its range's stats
+    const int Rg = floatBitsToInt(GIItems[k].m_Offsets.w);
+    atomicAdd(GIStats[8 * Rg], R); atomicAdd(GIStats[8 * Rg + 1], 1);
+    const int nUns = floatBitsToInt(V[62]);
+    atomicAdd(GIStats[8 * Rg + 2], nUns); atomicAdd(GIStats[8 * Rg + 3], floatBitsToInt(V[63]));
+    if (nUns > 0 && atomicCompSwap(GIStats[8 * Rg + 7], 0, 1) == 0)
+    {
+        GIStats[8 * Rg + 4] = floatBitsToInt(V[64]); GIStats[8 * Rg + 5] = floatBitsToInt(V[65]); GIStats[8 * Rg + 6] = floatBitsToInt(V[66]);
+    }
 }

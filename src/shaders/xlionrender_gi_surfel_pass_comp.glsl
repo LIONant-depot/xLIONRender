@@ -22,11 +22,12 @@ layout(std430, set = 0, binding = 3) readonly  buffer tlas_b      { int        G
 layout(std430, set = 0, binding = 4) readonly  buffer data_b      { uint       GD[]; };
 layout(std430, set = 0, binding = 5) readonly  buffer items_b     { GIItem     GIItems[]; };
 layout(std430, set = 0, binding = 6) writeonly buffer results_b   { GIResult   GIResults[]; };
+layout(std430, set = 0, binding = 7) readonly  buffer count_b     { uint       GICount[]; };    // the items there are (G4c: the expand's count; at most m_nItems)
 
 layout(push_constant) uniform push_t { int m_nItems, m_TlasRoot, m_PrimOffset, m_First; } Push;     // (m_First: this dispatch's first item, a slice of the batch)
 
 const uint  gi_none_v = 0xFFFFFFFFu;
-const uint  gi_inst_v = 47u;                 // gi::world::gpu_inst_v
+const uint  gi_inst_v = 48u;                 // gi::world::gpu_inst_v
 const float gi_pi_v   = 3.14159265;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
@@ -38,7 +39,7 @@ uint  MeshOf(uint R)  { return GD[R]; }
 bool GISeeThroughBits(int Inst, int Tri)
 {
     const uint R = InstRec(Inst), At = GD[R + 14u];
-    return At != gi_none_v && ((GD[At + uint(Tri) / 32u] >> (uint(Tri) % 32u)) & 1u) != 0u;
+    return (GD[R + 47u] & 8u) != 0u && ((GD[At + uint(Tri) / 32u] >> (uint(Tri) % 32u)) & 1u) != 0u;     // (47: the material's flags)
 }
 #define GI_BVH_SEE_THROUGH
 bool GISeeThrough(int Inst, int Tri) { return GISeeThroughBits(Inst, Tri); }
@@ -380,10 +381,10 @@ vec3 Unsupported(int Id, int Tri, float U, float V)
 void SurfaceAt(int Id, int Tri, float U, float V, out vec3 Albedo, out vec3 Emission)
 {
     const uint R = InstRec(Id), M = MeshOf(R);
-    const bool bTri = GD[R + 11u] != gi_none_v;
+    const bool bTri = (GD[R + 47u] & 1u) != 0u;           // (47: the material's flags, world::GPUMaterial)
     Albedo = bTri ? GV(GD[R + 11u] + 3u * uint(Tri)) : GV(R + 8u);
     Emission = vec3(0);
-    const bool bSA = GD[R + 12u] != gi_none_v, bSE = GD[R + 13u] != gi_none_v;
+    const bool bSA = (GD[R + 47u] & 2u) != 0u, bSE = (GD[R + 47u] & 4u) != 0u;
     if (!bSA && !bSE) return;
     const uvec3 T = MTri(M, Tri);
     const float Bc[3] = float[3](1.0 - U - V, U, V);
@@ -417,8 +418,9 @@ void main()
     const int  Lane  = int(gl_GlobalInvocationID.x) % gi_lanes_v;
     // (an invocation past the items still joins its cluster's sums, with nothing; so does an item whose instance is gone or changed level
     // since the batch was picked: the world drops it)
-    const bool bItem = k < Push.m_nItems && GD[InstRec(GIItems[min(k, Push.m_nItems - 1)].m_Ids.x) + 40u] != 0u
-                    && GD[InstRec(GIItems[min(k, Push.m_nItems - 1)].m_Ids.x) + 1u] == uint(GIItems[min(k, Push.m_nItems - 1)].m_Ids.z);
+    const int  nItems = min(Push.m_nItems, int(GICount[0]));
+    const int  kk     = clamp(k, 0, max(nItems - 1, 0));
+    const bool bItem = k < nItems && GD[InstRec(GIItems[kk].m_Ids.x) + 40u] != 0u && GD[InstRec(GIItems[kk].m_Ids.x) + 1u] == uint(GIItems[kk].m_Ids.z);
     g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
     vec3 Sum = vec3(0), BA0 = vec3(0), BA1 = vec3(0), BA2 = vec3(0), UnsAt = vec3(0);
     float MA[48]; for (int t = 0; t < 48; ++t) MA[t] = 0.0;
@@ -466,7 +468,7 @@ void main()
             if (!bQ) { if (nUns == 0) { UnsAt = Ph; FirstUns = r; } ++nUns; }
             ++nHits;
             const vec3 In = Direct(Ph, Nh) + (bQ ? Q : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));
-            const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + (GD[7] != 0u ? Emission : vec3(0));
+            const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + ((GD[R + 47u] & 32u) == 0u ? Emission : vec3(0));     // (it has no links: the hits bring the emitters' light)
             Sum += Lr; BA0 += Lr * Bw.x; BA1 += Lr * Bw.y; BA2 += Lr * Bw.z;
         }
     }

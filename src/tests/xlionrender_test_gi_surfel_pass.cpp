@@ -56,14 +56,14 @@ namespace
         W.TraceReference(Items, L, Cpu);
         R.m_CpuRaysPerMs = double(R.m_Rays) / std::max(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count(), 1e-6);
 
-        xgpu::buffer Nodes, Tri4, Inst, Tlas, DataB, ItemB, OutB;
+        xgpu::buffer Nodes, Tri4, Inst, Tlas, DataB, ItemB, OutB, CountB;
         CHECK(MakeBuffer(App.m_Device, Nodes, G.m_Nodes) && MakeBuffer(App.m_Device, Tri4, G.m_Tri4) && MakeBuffer(App.m_Device, Inst, G.m_Instances)
               && MakeBuffer(App.m_Device, Tlas, G.m_TlasLeaves) && MakeBuffer(App.m_Device, DataB, Data) && MakeBuffer(App.m_Device, ItemB, Items)
-              && MakeBuffer(App.m_Device, OutB, std::vector<world::gpu_result>{}, Items.size()), "buffers");
+              && MakeBuffer(App.m_Device, OutB, std::vector<world::gpu_result>{}, Items.size()) && MakeBuffer(App.m_Device, CountB, std::vector<std::uint32_t>{ std::uint32_t(Items.size()) }), "buffers");
         xgpu::timestamps Times;
         CHECK(!App.m_Device.Create(Times, { .m_Count = 2 }), "timestamps");
         const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_Pad; } Push{ R.m_Items, G.m_TlasRoot, G.m_PrimOffset, 0 };
-        xgpu::buffer* Bufs[] = { &Nodes, &Tri4, &Inst, &Tlas, &DataB, &ItemB, &OutB };
+        xgpu::buffer* Bufs[] = { &Nodes, &Tri4, &Inst, &Tlas, &DataB, &ItemB, &OutB, &CountB };
         double GpuMs = 0;
         for (int Frame = 0; Frame < 4; ++Frame)
         {
@@ -116,7 +116,7 @@ int main()
     xgpu::shader Shader;
     CHECK(!App.m_Device.Create(Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_PassComp, std::size(s_PassComp) } } }), "the pass shader");
     xgpu::compute Pass;
-    CHECK(!App.m_Device.Create(Pass, { .m_pShader = &Shader, .m_nBuffers = 7, .m_PushConstantsSize = 16 }), "the pass compute");
+    CHECK(!App.m_Device.Create(Pass, { .m_pShader = &Shader, .m_nBuffers = 8, .m_PushConstantsSize = 16 }), "the pass compute");
 
     // (1, 2) The Cornell box of the GI lab (the box an instance, rotated), lit by a point light, after a few updates (its surfels hold
     //        light, validity and moments to read): with its read grid (world::ReadPoint) and without (ReadVertex)

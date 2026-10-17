@@ -824,18 +824,64 @@ moment). A GPU ray here is a whole ray of the pass: the cast, the shadow rays, t
 - For 1 s, the GPU must commit about 20k surfels a frame. The CPU's remaining work is per surfel (the pick, the list, the
   copy), at about 2 µs a surfel in Debug: 40 ms. So it must go.
 
-**G4c design.** No per-surfel work on the CPU.
-- **The pick hands out instance ranges.** The CPU keeps the policy per instance: order, fairness, budget, cursor, the urgent
-  lists, which are few. An expand shader turns the ranges into the batch's items: the tiers, the adaptive rays and the
-  buried surfels' period from the GPU's estimators and validity. The item seeds become a hash of (update seed, instance,
-  surfel); the CPU's pick uses the same hash, so the two worlds still compare.
-- **The world's copy goes.**
-  - The means come from a GPU reduction per instance (read back: 4 words an instance).
-  - The bad counts come from the same reduction.
-  - A repack moves each instance's state on the GPU from the old layout to the new one (a migrate shader). A level switch
-    remaps it (children from their parent; a parent the mean of its children). The cube is expanded there.
-  - The accessors the tests and DumpGI use (`InstanceLight`, `Estimator`, …) read the GPU's state back on demand.
-- **Mobile.** The budget is declared (`m_GPUBudgetMs`). There is no mobile device here to measure it on.
+**G4c as built** (2026-10-17). No per-surfel work on the CPU; the light lives only on the GPU (`m_Setup.m_bGPUOwned`).
+- **The pick hands out instance ranges** (`world::PickRanges`, `GPURanges`): an instance's urgent surfels one each, then its
+  pass from the cursor, sized by what a step of it cost (`m_RaysPerStep`, from the ranges' stats).
+  - The expand shader (`xlionrender_gi_expand_comp.glsl`) makes the surfels' items: the tiers (`TracePeriod`), the adaptive
+    rays (`RequestedRays`) from the GPU's estimators, and the offsets.
+  - The offsets are a hash of (update seed, instance, surfel) on both sides (`world::PassOffsets`), so the CPU's pick draws
+    the same rays.
+  - The commit adds each item to its range's stats with atomics (rays, surfels traced, unsupported, hits), and
+    `DeliverGPURanges` hands them to the world.
+- **The world's copy is gone.**
+  - The means and the bad counts come from a reduction per instance (`_means_comp`, `SetGPUMeans`).
+  - The cubes are expanded on the GPU (`_cube_comp`).
+  - A repack moves the light from the old layout into the new one (`_migrate_comp`): arrays copied at the same level,
+    re-levelled at another (a child takes its parent's light, a parent its children's mean, the rest new as `ResetMoments`
+    makes it). `ResetMoments` now makes the estimators all new on the CPU too.
+  - `ReadBack` fills the world's arrays on request: the tests, `DumpGI` (written a frame or two later), the CPU taking over
+    when the GPU is turned off.
+- **No repack for a material or a move.**
+  - A material (the renderer's captures) is changed in place: the arrays are always allocated, record word 47 holds the
+    flags, and `world::GPUMaterial` and `MatGen` say what changed. The arrays go up as runs of words.
+  - A move (`GPUXformGen`) rebuilds the TLAS only. The meshes' BVHs now come first and the TLAS after them, with a reserve
+    in the node buffer (`PackGPUTlas`, `Retlas`); the records' placements are refreshed.
+  - The emissive scale and the "no emitters" flag are setup words refreshed every slice.
+  - Repacks are left for add, remove and a level switch. ponytail: a level switch still repacks; both levels' arrays
+    allocated per instance would remove that.
+- **The emitters' light before an instance's links are built** comes from its rays' hits, on the CPU and the GPU alike
+  (`I.m_EmitB.empty()`; record word 47's bit 5). Before, it was missing until the links came: for Police, a minute.
+  - In GPU mode the link pump gets everything left of the allowance, since the CPU trace needs none.
+- **Tests** (`xlionrender_test_gi_trace`, through `ReadBack`). The GPU world matches the CPU world on every surfel:
+  - the Cornell box (24 updates, the adaptive rays and the tiers on);
+  - the box with an emissive panel;
+  - the events: a recolor, a triangle capture, a change made in flight, a four-update drag through the TLAS only, the coarse
+    level through the migration. Packed twice: the first pack and the level switch;
+  - the render test's room;
+  - and the shown light against the CPU's filter: 4e-7, 0 moment words differ.
+  - Over time, at the smallest budget (sliced; the slices commit as they come), the GPU world is within 1.8 % at 80 passes.
+
+**G4c results** (Police, Debug editor, RTX 4070 Ti SUPER, `m_GPUBudgetMs` 2 ms; times from the first GI frame, from its frame
+log's new `TimeMs` and `MeanLum`):
+
+| | CPU trace (Phases 0–7) | G3 | G4a + G4b | G4c |
+|---|---|---|---|---|
+| Rays per second | about 30k | 450–600k | 900k | **4.2–5.3M** (85–94k a frame) |
+| GI main thread per frame | 1.84 ms (median) | 8 ms | 4.6 ms | **0.8–0.9 ms**; 1.6 ms while the links build (they use the rest of the allowance) |
+| A drag (the puppy, p0_drag) | 2.45 ms mean, 5.8 max | | | **1.89 ms mean, 3.7 max**; 0.9 before and after |
+| Scene packs at load | | 8 | 8 | 3 |
+| 8M rays | a few minutes | about 15 s | about 9 s | **2.6 s** |
+
+- The light is within 10 % at 3.3 s and within 5 % at 4.4 s, of the level it holds before the links. The material captures
+  end at 2 s (24 frames).
+- Before the links the hits' light is biased low: at 2–8 adaptive rays a surfel the estimator's outlier clamp cuts the rare
+  bright hit on a small lamp. Police's links (250k, 350 emitters) are published at about 25 s, and the light rises 40 % to
+  its level (0.021 to 0.030).
+- **The link build is now what Police waits for.** It is 63k receivers × 350 emitters of visibility tests on the CPU,
+  under the main thread's allowance. On the GPU that is about 22M shadow rays, a fraction of a second.
+- The first 2 s are the Debug editor's load: three packs at about 350 ms each, the captures.
+- **Mobile:** declared (`m_GPUBudgetMs`); not measured, there is no device here.
+- The GPU ran at P3 (about 400 MHz) in these runs.
 
 **Risks.**
 - xGPU has no compute path yet. It declares a compute stage, but nothing creates a compute pipeline or dispatches one.

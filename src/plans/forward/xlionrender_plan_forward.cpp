@@ -22,6 +22,21 @@ namespace xlionrender
         constexpr std::uint32_t s_GIFilterComp[] = {
             #include "xlionrender_gi_filter_comp.h"
         };
+        constexpr std::uint32_t s_GIExpandComp[] = {
+            #include "xlionrender_gi_expand_comp.h"
+        };
+        constexpr std::uint32_t s_GIMeansComp[] = {
+            #include "xlionrender_gi_means_comp.h"
+        };
+        constexpr std::uint32_t s_GICubeComp[] = {
+            #include "xlionrender_gi_cube_comp.h"
+        };
+        constexpr std::uint32_t s_GIMigrateComp[] = {
+            #include "xlionrender_gi_migrate_comp.h"
+        };
+        constexpr std::uint32_t s_GIReadBackComp[] = {
+            #include "xlionrender_gi_readback_comp.h"
+        };
 
         // FNV-1a over a caster's identity and state: a different value is a different (or moved) caster
         std::uint64_t Hash(std::uint64_t H, const void* pData, std::size_t Size) noexcept
@@ -108,15 +123,31 @@ namespace xlionrender
         if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
         {
             m_pGITrace = std::make_unique<gi::gpu_trace>();
-            if( !m_pGITrace->Init(m_Device, s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp) ) { m_pGITrace.reset(); m_bGITraceFailed = true; }
+            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp }) )
+                { m_pGITrace.reset(); m_bGITraceFailed = true; }
         }
-        const bool          bGPU    = Scene.m_GI.m_bGPUTrace && m_pGITrace;
+        // The light lives on the GPU (m_bGPUOwned). Turned off, the GPU's light comes back into the world first (a read back: one frame
+        // more on the GPU), then the CPU takes over
+        if( m_pGITrace && !Scene.m_GI.m_bGPUTrace && !m_bGIToCPU && W.m_Setup.m_bGPUOwned ) m_bGIToCPU = true;
+        bool                bGPU    = m_pGITrace && (Scene.m_GI.m_bGPUTrace || m_bGIToCPU);
         const std::uint64_t GIFrame = m_Device.getFrameIndex();
         W.m_Setup.m_bGPUTrace = bGPU;
         W.m_Setup.m_bGPUShown = bGPU;                               // (G4: the shown light too: Show below, straight into the ring)
+        W.m_Setup.m_bGPUOwned = bGPU;                               // (G4c: the light lives there: the pick hands out ranges)
         const auto TCollect = std::chrono::steady_clock::now();
-        if( m_pGITrace ) m_pGITrace->Collect(W, GIFrame);         // (the GPU's last slice: also after the GPU was turned off, what it traced is still delivered)
+        if( m_pGITrace ) m_pGITrace->Collect(W, GIFrame);         // (the GPU's last slice; a read back asked for: into the world's arrays)
         const double CollectMs = MsSince(TCollect);
+        if( m_bGIToCPU && m_bGIToCPUAsked && m_pGITrace && !m_pGITrace->ReadBackPending() )        // the world has the GPU's light: the CPU's now
+        {
+            m_pGITrace.reset(); m_bGIToCPU = m_bGIToCPUAsked = false; bGPU = false;
+            W.m_Setup.m_bGPUTrace = W.m_Setup.m_bGPUShown = W.m_Setup.m_bGPUOwned = false;
+            W.DirtyAll();                                           // (its passes in flight are dropped: traced again)
+        }
+        if( !m_GIDumpPath.empty() && m_bGIDumpAsked && (!m_pGITrace || !m_pGITrace->ReadBackPending()) )        // DumpGI: the GPU's light came back
+        {
+            (void)W.Dump(m_GIDumpPath.c_str()); (void)DumpGIFrames((m_GIDumpPath + ".frames.csv").c_str());
+            m_GIDumpPath.clear(); m_bGIDumpAsked = false;
+        }
 
         std::vector<int> DrawId(Scene.m_Draws.size(), -1);
         for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
@@ -218,10 +249,11 @@ namespace xlionrender
         if( bGPU )
         {
             const auto TSubmit = std::chrono::steady_clock::now();
-            m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs);
+            m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
+            if( (m_bGIToCPU && !m_bGIToCPUAsked) || (!m_GIDumpPath.empty() && !m_bGIDumpAsked) )     // the GPU's light back into the world (the next Collect)
+                if( m_pGITrace->ReadBack(Window, GIFrame) ) { if( m_bGIToCPU ) m_bGIToCPUAsked = true; if( !m_GIDumpPath.empty() ) m_bGIDumpAsked = true; }
             m_GIStats.m_GPUTraceMs = m_pGITrace->LastMs(); m_GIStats.m_GPUPacks = m_pGITrace->Packs(); m_GIStats.m_GPUCpuMs = CollectMs + MsSince(TSubmit);
             m_GIStats.m_GPUSliceRays = m_pGITrace->LastRays();
-            for( int w = 0; w < 4; ++w ) m_GIStats.m_GPUWork[w] = m_pGITrace->Work()[std::size_t(w)];
         }
         const auto TUpload = std::chrono::steady_clock::now();
 
@@ -365,6 +397,8 @@ namespace xlionrender
         m_GIStats.m_MomentsMs += MsSince(TMomentsCopy);
         m_GIStats.m_UploadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TUpload).count();
         m_GIStats.m_UpdateGIMs = MsSince(TGI);
+        if( m_GIStart.time_since_epoch().count() == 0 ) m_GIStart = TGI;
+        m_GIStats.m_TimeMs = std::chrono::duration<double, std::milli>(TGI - m_GIStart).count();
         m_GIOverheadMs += (std::max(m_GIStats.m_UpdateGIMs - m_GIStats.m_TotalMs, 0.0) - m_GIOverheadMs) * 0.2;      // (the outside part, slowly)
         m_GIStats.m_LoadMs = m_GILoadMsAcc; m_GILoadMsAcc = 0;
         m_GIFrames.push_back({ m_Device.getFrameIndex(), m_GIStats });

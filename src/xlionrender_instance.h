@@ -268,6 +268,10 @@ namespace xlionrender
         std::unique_ptr<gi::world>  m_pGIWorld;
         std::unique_ptr<gi::gpu_trace> m_pGITrace;              // G3: the GI's trace on the GPU (scene::gi_settings::m_bGPUTrace)
         bool                        m_bGITraceFailed = false;   // its Init failed: the CPU traces
+        bool                        m_bGIToCPU = false, m_bGIToCPUAsked = false;     // the GPU turned off: its light read back first (updateGI)
+        mutable std::string         m_GIDumpPath;               // DumpGI with the light on the GPU: written when it is read back (updateGI)
+        mutable bool                m_bGIDumpAsked = false;
+        std::chrono::steady_clock::time_point m_GIStart{};      // the first GI frame (the frame log's clock)
         std::unordered_map<std::uint32_t, int> m_GIIds;
         std::vector<gi_track>       m_GITrack;                          // per world instance
         std::vector<std::pair<std::uint32_t, std::uint32_t>> m_DrawGI;  // per draw: offset, level (0xFFFFFFFF: none)
