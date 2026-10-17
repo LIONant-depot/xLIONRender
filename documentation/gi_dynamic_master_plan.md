@@ -1507,6 +1507,18 @@ guarding it.
 - A shader restored with `Copy-Item` keeps its old timestamp and is **not** rebuilt: `touch` it.
 - Bash heredocs eat backslashes. Write patch scripts with the Write tool.
 
+**0. Reaction time: the biggest gap (the user's call, 2026-10-17).** A light changes and our bounce light takes seconds. Lumen's
+screen probes settle what is on screen within frames.
+- **0a. Measure it first.** Toggle a light, and also dim one, in the room (`gi_flicker`) and in Police: frames until the bounce
+  light is within 10 % and within 5 %. So far we have measured only cold starts. The change detector and the catch-up
+  (`estimator::Add`, `Lower`) have never been timed.
+- **0b. A fast path for confirmed changes on screen.** When fresh samples confirm a change (the detector's take), visible surfels
+  get full rays every pass and a short averaging window until they have caught up, then the long window again. That buys reaction
+  in frames for a little noise, only where the user looks. Guard it with the flicker tests (settled scenes unchanged) and the
+  toggle measurement.
+- **0c. Only if 0b is not enough:** a short screen-space trace per pixel on top of the cache, for near-field light the surfels have
+  not caught yet (Lumen-style screen detail).
+
 **1. E in RGB9E5 inside the GPU world (compression step 2; the passes' cost per ray)**
 - Today: E is 3 floats per surfel at `GD[R + 2u] + 3u * s`, read at every ray hit. Make it one RGB9E5 word per surfel (12 → 4 B).
 - Readers and writers, found with `grep "R + 2u\]" src/shaders/xlionrender_gi_*.glsl`:
@@ -1535,8 +1547,14 @@ read goes from about 68 B to about 52 B per surfel.
 (`xmaterial_compiler.cpp`), probably not rebuilt when the shaders change. Find how to recompile them (ask the user), then take
 before and after pictures from a view with a rough surface near colored light (`CaptureWindow`).
 
-**5. Reflections layer 2: medium roughness.** GGX-sampled rays from the pixel's surfel (or the screen) that end on the surfel cache
-(SurfelPlus). Reuse the BVH traversal and stay under the same budget. Compare against the path-tracer reference.
+**5. Reflections layer 2: the hybrid (as Lumen layers it).**
+1. Screen-space reflections first, for glossy and mirror surfaces where the reflected point is on screen.
+2. Then the reflection probes. They exist (box-projected, `EnvLighting`) but are barely placed in our scenes; use them where the
+   screen has no answer.
+3. Then the surfel cache for rough surfaces (layer 1) and for what neither covers.
+
+Blend by roughness and the screen trace's confidence. Rays ending on the cache (SurfelPlus) only if a gap remains. Compare against
+the path-tracer reference.
 
 **6. A reference that is allowed to converge** (no dormancy, long, several seeds). Use it for every future "within 5 %" claim.
 The 60 s dumps are suspected under-converged.
