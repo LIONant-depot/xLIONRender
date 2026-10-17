@@ -76,7 +76,7 @@ namespace xlionrender::gi
             { auto Ops = W.TakeGPUOps(); m_Ops.insert(m_Ops.end(), Ops.begin(), Ops.end()); }
             if (m_InFlight != ~0ull) return false;
             m_OldDataB = {};                                            // (the last pack's old layout: its frame is done)
-            if (W.GPUGen() != m_Gen || L.m_Points.size() != m_nPoints || m_Data.empty()) { if (!Pack(Window, W, L)) return false; }
+            if (W.GPUGen() != m_Gen || L.m_Points.size() != m_nPoints || m_Data.empty() || W.EmitterCount() > m_EmRoom) { if (!Pack(Window, W, L)) return false; }     // (the emitter table past its room too)
             else if (W.GPUXformGen() != m_XformGen && !Retlas(Window, W) && !Pack(Window, W, L)) return false;     // (moved: the TLAS; its reserve full: all)
             if (!ApplyOps(Window, W) || !Refresh(Window, W, L)) return false;
             bool bSlice = false;
@@ -271,6 +271,7 @@ namespace xlionrender::gi
             ++m_nPacks;
             m_OldDataB = std::move(m_DataB);
             m_XformGen = W.GPUXformGen();
+            m_EmRoom = world::GPUEmitterRoom(m_Data[15]);
             {   // the nodes with a reserve after the TLAS's (a move rebuilds it there: Retlas)
                 auto Nodes = m_Scene.m_Nodes;
                 Nodes.resize(Nodes.size() + 2 * (Nodes.size() - std::size_t(m_Scene.m_nMeshNodes)) + 64);
@@ -399,7 +400,18 @@ namespace xlionrender::gi
             }
             std::uint32_t Setup[world::gpu_header_v] = {};
             W.PackGPUSetup(Setup);
-            for (const std::uint32_t w : { 5u, 7u, 8u, 10u, 11u, 12u }) PutU(w, Setup[w]);
+            for (const std::uint32_t w : { 5u, 7u, 8u, 10u, 11u, 12u, 13u }) PutU(w, Setup[w]);
+            {   // G5: the emitter table (where they are, their radiance now: the light sampling's), one run
+                std::vector<std::uint32_t> Em;
+                W.GPUEmitters(Em);
+                PutU(15, std::uint32_t(Em.size() / world::gpu_emitter_v));
+                if (!Em.empty())
+                {
+                    m_RunJobs.push_back({ 0, int(m_RunStage.size()), int(D[14]), int(Em.size()) });
+                    std::copy(Em.begin(), Em.end(), m_Data.begin() + D[14]);
+                    m_RunStage.insert(m_RunStage.end(), Em.begin(), Em.end());
+                }
+            }
             // the lights (the same count: PackGPUSurfels' layout), the sky's flag
             std::uint32_t At = D[2];
             const auto V = [&](const v3& v) { Put(At, v.m_X); Put(At + 1, v.m_Y); Put(At + 2, v.m_Z); At += 3; };
@@ -460,6 +472,7 @@ namespace xlionrender::gi
         xgpu::buffer                        m_RunB, m_RunJobB, m_TlasStageB, m_TlasJobB;
         std::uint64_t                       m_XformGen = 0;
         std::size_t                         m_NodeCap = 0;      // the nodes' buffer: the meshes', the TLAS's, its reserve
+        std::size_t                         m_EmRoom = 0;       // the emitter table's room (world::GPUEmitterRoom)
         bool                                m_bPlaced = false;  // Retlas: the records' placements go up (Refresh)
         int                                 m_nRetlas = 0;
         std::uint64_t                       m_Gen = 0, m_InFlight = ~0ull, m_ReadFrame = ~0ull;

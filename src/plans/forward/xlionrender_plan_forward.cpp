@@ -134,6 +134,7 @@ namespace xlionrender
         W.m_Setup.m_bGPUTrace = bGPU;
         W.m_Setup.m_bGPUShown = bGPU;                               // (G4: the shown light too: Show below, straight into the ring)
         W.m_Setup.m_bGPUOwned = bGPU;                               // (G4c: the light lives there: the pick hands out ranges)
+        W.m_Setup.m_bEmitterSampling = Scene.m_GI.m_bEmitterSampling;      // (G5: no links)
         const auto TCollect = std::chrono::steady_clock::now();
         if( m_pGITrace ) m_pGITrace->Collect(W, GIFrame);         // (the GPU's last slice; a read back asked for: into the world's arrays)
         const double CollectMs = MsSince(TCollect);

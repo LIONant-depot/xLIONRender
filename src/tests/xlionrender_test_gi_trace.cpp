@@ -116,13 +116,14 @@ namespace
     // Updates of the CPU world against the GPU world's (it commits a batch one update later: one update more). bEvents: on both at the
     // same updates, a wall recolored (its material: the scene packed again), the box moved (estimator ops: Lower, the changes near it),
     // the eye far away (the coarse level: the light carried over)
-    int Compare(app& App, const lights& L, bool bPanel, int Updates, result& R, bool bEvents = false, bool bRoom = false)
+    int Compare(app& App, const lights& L, bool bPanel, int Updates, result& R, bool bEvents = false, bool bRoom = false, bool bSample = false)
     {
         R = {};
         std::vector<surfel_mesh> Mc, Mg;
         world Wc, Wg;
         if (bRoom) { MakeRoom(Mc, Wc); MakeRoom(Mg, Wg); }
         else { MakeCornell(Mc, Wc, bPanel); MakeCornell(Mg, Wg, bPanel); }
+        Wc.m_Setup.m_bEmitterSampling = Wg.m_Setup.m_bEmitterSampling = bSample;
         Wg.m_Setup.m_bGPUTrace = Wg.m_Setup.m_bGPUOwned = true;
         gpu_trace T;
         CHECK(T.Init(App.m_Device, s_Shaders), "gpu_trace::Init");
@@ -230,13 +231,14 @@ int main()
 {
     app App;
     CHECK(App.Init(), "Init");
-    for (const bool bPanel : { false, true })
+    for (const int Case : { 0, 1, 2 })
     {
+        const bool bPanel = Case > 0;
         lights L;
         if (!bPanel) L.m_Points = { { { 0.2f, 0.4f, -0.3f }, { 1.5f, 1.5f, 1.5f }, 4.0f } };
         result R;
-        if (Compare(App, L, bPanel, 24, R)) return 1;
-        const char* pName = bPanel ? "Cornell box lit by an emissive panel (links)" : "Cornell box, a point light";
+        if (Compare(App, L, bPanel, 24, R, false, false, Case == 2)) return 1;
+        const char* pName = Case == 2 ? "Cornell box lit by an emissive panel (light sampling: G5)" : bPanel ? "Cornell box lit by an emissive panel (links)" : "Cornell box, a point light";
         std::printf("GPU trace, %s, 24 updates (the estimators settled, the adaptive rays on): %d surfels, %d differ from the CPU world, the worst of the others %.1e; the scene packed %d times; "
                     "an update in GPU mode (collect, Update, submit) %.2f ms at most, a batch %.3f ms on the GPU\n", pName, R.m_Surfels, R.m_Mismatch, R.m_Worst, R.m_Packs, R.m_UpdateMs, R.m_TraceMs);
         CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "%s: %d of %d surfels differ from the CPU world", pName, R.m_Mismatch, R.m_Surfels);

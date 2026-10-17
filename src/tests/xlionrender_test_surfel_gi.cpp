@@ -835,10 +835,11 @@ int main()
         AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
         AddQuad(Sign,   { -0.1f, 1, -0.1f }, { 0.2f, 0, 0 }, { 0, 0, 0.2f }, 0.1f);   // facing down
         Ground.Bake(0.3f, 0.9f); Sign.Bake(0.05f, 0.15f);
-        const auto Run = [&](bool bLinks, int Rays, int Updates, double& Spread)
+        const auto Run = [&](bool bLinks, int Rays, int Updates, double& Spread, bool bSample = false)
         {
             world D;
             D.m_bEmitterLinks = bLinks;
+            D.m_Setup.m_bEmitterSampling = bSample;
             D.m_Setup.m_RaysPerSurfel = Rays;
             const int iG = D.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
             const int iS = D.Add(Sign, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
@@ -860,6 +861,12 @@ int main()
                    , Ref, 100 * SRef, Links, 100 * SLinks, Hits, 100 * SHits);
         CHECK(std::abs(Links - Ref) < 0.25 * Ref, "the emitter lists' light is off: %.3f vs the reference %.3f", Links, Ref);
         CHECK(SLinks < 0.5 * SHits, "the emitter lists are no less noisy than the hits (%.0f%% vs %.0f%%)", 100 * SLinks, 100 * SHits);
+        // G5: the light sampling instead of the links (8 samples a pass, a shadow ray each): the same light, about as quiet, nothing built
+        double SSample;
+        const double Sample = Run(true, 8, 20, SSample, true);
+        std::printf("light sampling, 8 rays: %.3f (spread %.0f%%)\n", Sample, 100 * SSample);
+        CHECK(std::abs(Sample - Ref) < 0.1 * Ref, "the sampled emitters' light is off: %.3f vs the reference %.3f", Sample, Ref);
+        CHECK(SSample < 0.5 * SHits, "the light sampling is no less noisy than the hits (%.0f%% vs %.0f%%)", 100 * SSample, 100 * SHits);
     }
 
     // 6j2. A light smaller than its surfels (SetTriangleEmission): a surfel's emission is the mean over its patch, so the emitted power

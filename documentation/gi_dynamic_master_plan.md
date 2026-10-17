@@ -883,6 +883,38 @@ log's new `TimeMs` and `MeanLum`):
 - **Mobile:** declared (`m_GPUBudgetMs`); not measured, there is no device here.
 - The GPU ran at P3 (about 400 MHz) in these runs.
 
+**G5 design: the emitters' light by light sampling** (2026-10-17; replaces the CPU link build for the solve).
+- **What it estimates.** It is the links' sum for a surfel: over the emitters it sees, L_e·w_e, with w_e = A·cos_r·cos_e / (d² + A).
+  That sum is split into the basis by the direction to each emitter (3·Bw_i), and goes where the links' `EmitB` went in the
+  pass' finish.
+- **How.** Each pass, each of a surfel's 8 lanes takes one sample:
+  - an emitter picked by weighted reservoir sampling over the emitter table (weight w_e·lum(L_e)), with one shadow ray to it;
+  - the estimate is L_e·Q/lum(L_e) if the emitter is visible, Q being the sum of the weights;
+  - the 8 samples' mean is added to the pass.
+  - The random numbers are hashes of the pass' offsets, the lane and the emitter, so the CPU (`TraceChunk`) and the GPU pass
+    draw the same emitters. The estimator averages the samples over passes.
+- **The links are not built** (`m_Setup.m_bEmitterSampling`), and the rays' hits leave the emission out (the sampling brings
+  it).
+  - The emitter list is made again every update: it is small, and it follows moved emitters.
+  - On the GPU it is a table in the data, with its count and capacity in the header (words 13..15), refreshed every slice.
+- **The renderer turns it on** (`scene::gi_settings::m_bEmitterSampling`). The world's default stays off, so the links'
+  tests still test the links.
+- **Done when.** The GPU world equals the CPU world with sampling, the sampled light equals the links' and a many-ray
+  reference within its noise, and Police no longer waits for the links.
+
+**G5 results** (2026-10-17):
+- **Tests.**
+  - `xlionrender_test_surfel_gi` 6j: under a 20 cm sign the light sampling gives 0.637 (spread 11 %). The links give 0.637
+    (11 %), the reference 0.636, the hits 0.161 (141 %).
+  - `xlionrender_test_gi_surfel_pass`: the sign by sampling, the GPU's pass = the CPU's (1e-6).
+  - `xlionrender_test_gi_trace`: the Cornell panel by sampling, the GPU world = the CPU world after 24 updates (5e-7).
+- **Police** (Debug editor, 2 ms GPU budget):
+  - No links are built. The light settles at 0.0334; the links reached 0.030 after 25 s, their caps on the emitters a
+    surfel takes losing some.
+  - The light is within 10 % at 3.65 s and within 5 % at 5 s from the first GI frame. The material captures end at 2.9 s
+    (24 frames: the Debug editor's start), and the light is within 10 % 0.7 s after them.
+  - GI main thread 0.57 ms a frame; 85–90k rays a frame.
+
 **Risks.**
 - xGPU has no compute path yet. It declares a compute stage, but nothing creates a compute pipeline or dispatches one.
 - Debugging on the GPU means readbacks.

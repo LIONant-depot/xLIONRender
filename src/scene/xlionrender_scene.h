@@ -140,6 +140,7 @@ namespace xlionrender
         bool            m_bMoments      = true;     // the reads' depth-moment test (a surfel hidden from the point is faded); off: only the plane test
         float           m_TraceAllowanceMs = 1.0f;  // the GI trace's main-thread time per frame (documentation/gi_dynamic_master_plan.md, Phase 1); 0: no limit
         bool            m_bGPUTrace     = true;     // the GI's rays on the GPU (Part II, G3: gi::gpu_trace); off, or no compute: on the CPU within m_TraceAllowanceMs
+        bool            m_bEmitterSampling = true;  // the emitters' light by light sampling in each pass (G5), not the links the CPU builds (a minute for Police)
         float           m_GPUBudgetMs   = 2.0f;     // the GPU time a frame's GI slice may take (its rays: the measured rays per ms times this); 0: no limit, every batch (m_RayBudget) in one slice
         float           m_PixelsPerSurfel = 256;    // the screen area (pixels) an instance needs per fine surfel: below it the GI holds its parent surfels, whatever its shape
         float           m_Saturation    = 1;        // the shown GI light's saturation (1: as solved; luminance kept): the filter and the coarse surfels average its colors toward grey

@@ -182,6 +182,22 @@ int main()
         result R; if (Run(App, Pass, W, Dark, 32, 13, R)) return 1;
         if (Report("emissive sign, no links", R)) return 1;
     }
+    // (5) G5: the same sign by light sampling (the emitter table, 8 samples a pass with a shadow ray each, drawn alike: world::SampleEmitters)
+    {
+        surfel_mesh Ground, Sign;
+        AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
+        AddQuad(Sign, { -0.5f, 1, -0.5f }, { 1, 0, 0 }, { 0, 0, 1 }, 0.1f);
+        Ground.Bake(0.3f, 0.9f); Sign.Bake(0.05f, 0.15f);
+        world W;
+        W.m_Setup.m_bEmitterSampling = true;
+        W.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        const int iS = W.Add(Sign, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        W.SetSurfelMaterial(iS, std::vector<v3>(Sign.m_Levels[0].size(), v3{ 0.3f, 0.6f, 0.3f }), std::vector<v3>(Sign.m_Levels[0].size(), v3{ 20, 20, 20 }));
+        lights Dark;
+        for (int u = 0; u < 4; ++u) W.Update(Dark, { 0, 1, 0 }, 1 << 30, 400 + u);
+        result R; if (Run(App, Pass, W, Dark, 8, 14, R)) return 1;
+        if (Report("emissive sign, light sampling", R)) return 1;
+    }
     std::printf("PASS\n");
     return 0;
 }

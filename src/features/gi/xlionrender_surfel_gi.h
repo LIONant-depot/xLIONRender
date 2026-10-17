@@ -1571,6 +1571,8 @@ namespace xlionrender::gi
             float   m_OverheadMs    = 0;        // Phase 6b: the GI work of the frame outside Update (the renderer's upload, by its last frames): taken from the allowance        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
             bool    m_bGPUTrace     = false;    // G3 (gi_dynamic_master_plan.md): Update picks and commits, the GPU traces (gpu_trace: GPUWork, DeliverGPU)
             bool    m_bGPUShown     = false;    // G4: the shown light is the GPU's (gpu_trace::Show): Update makes none (UpdateShown, BasisLight)
+            bool    m_bEmitterSampling = false; // G5 (gi_dynamic_master_plan.md): the emitters' light by light sampling in each pass (SampleEmitters: 8
+                                                // samples, one shadow ray each), not the links (not built); the rays' hits leave the emission out
             bool    m_bGPUOwned     = false;    // G4c: the light lives on the GPU only (with m_bGPUTrace, m_bGPUShown): the pick hands out ranges
                                                 // (GPURanges), the GPU's expand makes the surfels' passes, the means come back (SetGPUMeans); the
                                                 // surfels' arrays here are stale (gpu_trace::ReadBack fills them)
@@ -2296,7 +2298,8 @@ namespace xlionrender::gi
         //             always there, the flags say which hold its material)
         //   header:   0 instances 1 nInstances 2 lights 3 nPoints 4 sky oct (0/1) 5 emissive scale 6 spread origins 7 no emitters
         //             8 the warm-up's least blend (m_MinBlend) 9 warmup_passes_v 10 rays per surfel 11 flags (1 adaptive rays, 2 tiers)
-        //             12 the rays' uncertainty factor 13..15 -   (8, 10..12: PackGPUSetup)
+        //             12 the rays' uncertainty factor 13 light sampling (G5: 1, 0) 14 the emitter table (GPUEmitters) 15 its count
+        //             (5, 7, 8, 10..13: PackGPUSetup)
         //   lights:   sun direction 3, sun color 3, sky 3, sky oct 48, then per point position 3, color 3, radius
         // ponytail: the whole scene every call (G3 keeps it resident and uploads changes)
         static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 48, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 21;
@@ -2406,6 +2409,13 @@ namespace xlionrender::gi
             PushV(L.m_SunDirection); PushV(L.m_SunColor); PushV(L.m_Sky);
             for (const auto& s : L.m_SkyOct) PushV(s);
             for (const auto& P : L.m_Points) { PushV(P.m_Position); PushV(P.m_Color); D.push_back(F(P.m_Radius)); }
+            {   // G5: the emitter table, with room (gpu_trace writes it every slice; past its room: packed again)
+                std::vector<std::uint32_t> Em;
+                GPUEmitters(Em);
+                D[14] = std::uint32_t(D.size()); D[15] = std::uint32_t(Em.size() / gpu_emitter_v);
+                D.insert(D.end(), Em.begin(), Em.end());
+                D.resize(D.size() + std::size_t(GPUEmitterRoom(D[15]) - D[15]) * gpu_emitter_v, 0u);
+            }
             D[4] = L.m_bSkyOct ? 1u : 0u;
             D[6] = m_Setup.m_bSpreadOrigins ? 1u : 0u;
             D[9] = std::uint32_t(warmup_passes_v);
@@ -2429,6 +2439,24 @@ namespace xlionrender::gi
         }
         std::uint32_t MatGen(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_MatGen; }
 
+        // G5: the emitter list as the GPU's light sampling reads it: per emitter (gpu_emitter_v words) its world center 3, normal 3, area,
+        // radiance now 3 (the emissive scale in it), instance, surfel. Room: what the table is packed with for Count of them
+        static constexpr std::uint32_t gpu_emitter_v = 12;
+        std::size_t EmitterCount() const noexcept { return m_Em.size(); }
+        static constexpr std::uint32_t GPUEmitterRoom(std::uint32_t Count) noexcept { return std::max<std::uint32_t>(64, 2 * Count); }
+        void GPUEmitters(std::vector<std::uint32_t>& Out) const noexcept
+        {
+            Out.clear(); Out.reserve(m_Em.size() * gpu_emitter_v);
+            const auto F = [](float f) { return std::bit_cast<std::uint32_t>(f); };
+            for (std::size_t k = 0; k < m_Em.size(); ++k)
+            {
+                const auto& E = m_Em[k]; const v3 Le = EmitterRadiance(k);
+                const std::uint32_t W[gpu_emitter_v] = { F(E.m_C.m_X), F(E.m_C.m_Y), F(E.m_C.m_Z), F(E.m_N.m_X), F(E.m_N.m_Y), F(E.m_N.m_Z), F(E.m_A)
+                                                       , F(Le.m_X), F(Le.m_Y), F(Le.m_Z), std::uint32_t(m_Emitters[k].first), std::uint32_t(m_Emitters[k].second) };
+                Out.insert(Out.end(), W, W + gpu_emitter_v);
+            }
+        }
+
         // The setup the GPU's commit and expand read (header words 5, 7, 8, 10..12: the GPU's copy is refreshed every slice)
         void PackGPUSetup(std::uint32_t* D) const noexcept
         {
@@ -2438,6 +2466,7 @@ namespace xlionrender::gi
             D[10] = std::uint32_t(std::max(m_Setup.m_RaysPerSurfel, 1));
             D[11] = (m_Setup.m_bAdaptiveRays ? 1u : 0u) | (m_Setup.m_bDistanceTiers ? 2u : 0u);
             D[12] = std::bit_cast<std::uint32_t>(m_Setup.m_RayUncertainty);
+            D[13] = m_Setup.m_bEmitterSampling ? 1u : 0u;
         }
 
         // G4: an estimator as gpu_est_v words (the GPU's commit, shaders/xlionrender_gi_commit_comp.glsl): mean 3, short 3, variance 3, vbbr,
@@ -2920,6 +2949,70 @@ namespace xlionrender::gi
             Off1 = float(h1 >> 8) * (1.0f / 16777216.0f); Off2 = float(h2 >> 8) * (1.0f / 16777216.0f); Shift = int(h3 >> 26);
         }
 
+        // G5: an emitter's weight for a receiver at C facing N (the links' small disk: A cos cos / (d^2 + A); false: it faces away, or too
+        // little) and its radiance now
+        bool EmitterWeight(std::size_t k, const v3& C, const v3& N, float& w) const noexcept
+        {
+            const v3 D = m_Em[k].m_C - C;
+            const float d2 = D.Dot(D);
+            if (d2 < 1e-10f) return false;
+            const v3 Dn = D * (1.0f / std::sqrt(d2));
+            const float cr = N.Dot(Dn), ce = -m_Em[k].m_N.Dot(Dn);
+            if (cr <= 0 || ce <= 0) return false;
+            w = m_Em[k].m_A * cr * ce / (d2 + m_Em[k].m_A);
+            return w >= 1e-5f;
+        }
+        v3 EmitterRadiance(std::size_t k) const noexcept
+        {
+            const auto& [i, e] = m_Emitters[k];
+            const auto& SE = m_Instances[std::size_t(i)].m_SurfEmission;
+            return std::size_t(e) < SE.size() ? SE[std::size_t(e)] * m_Setup.m_EmissiveScale : v3{ 0, 0, 0 };
+        }
+        static float Lum(const v3& c) noexcept { return 0.2126f * c.m_X + 0.7152f * c.m_Y + 0.0722f * c.m_Z; }
+
+        // G5: the emitters' light of a pass by light sampling (the GPU's pass draws the same: shaders/xlionrender_gi_surfel_pass_comp.glsl).
+        // gpu_lanes_v samples: each an emitter picked by weighted reservoir sampling (weight w lum(L), its random numbers hashes of the
+        // pass' offsets, the sample, the emitter), its shadow ray, L Q / lum(L) when it is seen (Q: the weights' sum). Their mean is what
+        // the links' sum was (FinishPass: the basis split by the direction to the emitter), added to the pass' sums
+        void SampleEmitters(work_item& W) noexcept
+        {
+            auto& I = m_Instances[std::size_t(W.m_Inst)];
+            const int s = W.m_Surf;
+            const auto& S = I.m_pMesh->m_Levels[I.m_Level][std::size_t(s)];
+            const v3 C = I.m_L2W * S.m_Center, N = NormalToWorld(I, S.m_Normal);
+            const basis Dirs = BasisDirs(S.m_Normal);
+            const std::uint32_t Base = Hash32(std::bit_cast<std::uint32_t>(W.m_Off1) ^ Hash32(std::bit_cast<std::uint32_t>(W.m_Off2)));
+            basis E{};
+            for (int l = 0; l < gpu_lanes_v; ++l)
+            {
+                const std::uint32_t Seed = Hash32(Base ^ std::uint32_t(l + 1) * 0x9E3779B9u);
+                float Q = 0; int Pick = -1;
+                for (std::size_t k = 0; k < m_Em.size(); ++k)
+                {
+                    if (I.m_Level == 0 && m_Emitters[k].first == W.m_Inst && m_Emitters[k].second == s) continue;
+                    float w;
+                    if (!EmitterWeight(k, C, N, w)) continue;
+                    const float q = w * Lum(EmitterRadiance(k));
+                    if (q <= 0) continue;
+                    Q += q;
+                    const float u = float(Hash32(Seed ^ std::uint32_t(k) * 0x85EBCA6Bu) >> 8) * (1.0f / 16777216.0f);
+                    if (u * Q < q) Pick = int(k);
+                }
+                if (Pick < 0) continue;
+                const v3 D = m_Em[std::size_t(Pick)].m_C - C;
+                const float d = D.Length();
+                if (Occluded(C + N * 1e-3f, D * (1.0f / d), d * 0.98f)) continue;      // stops short of the emitter's own surface (as the links)
+                const v3 Le = EmitterRadiance(std::size_t(Pick)), c = Le * (Q / Lum(Le));
+                v3 Dm = I.m_W2L.TransformDirection(D * (1.0f / d));
+                Dm = Dm * (1.0f / std::max(Dm.Length(), 1e-12f));
+                const auto Bw = BasisWeights(Dirs, Dm);
+                for (int i = 0; i < 3; ++i) E[i] = E[i] + c * (3.0f * Bw[i] / float(gpu_lanes_v));
+            }
+            const float f = float(W.m_Rays) / (3.0f * pi_v);       // (as FinishPass adds the links': the pass' sums are of R rays)
+            auto& BA = I.m_BasisAcc[std::size_t(s)];
+            for (int i = 0; i < 3; ++i) { const v3 e = E[i] * f; W.m_Sum = W.m_Sum + e; BA[i] = BA[i] + e; }
+        }
+
         // A pass whose rays are all in (TraceChunk's last chunk, DeliverGPU): the emitted light from its links, the irradiance E = pi mean(L),
         // its validity
         void FinishPass(const work_item& W) noexcept
@@ -3003,12 +3096,13 @@ namespace xlionrender::gi
                 const auto Tu = clock::now();
                 const v3 In = Dl + (Q.m_bSupported ? Q.m_E : Unsupported(H));
                 W.m_ReadUs += Us(Tu, clock::now());
-                const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (I.m_EmitB.empty() ? Emission : v3{ 0, 0, 0 });     // with its links the links bring the emitters' light; without (none, or not built yet: a minute for Police) the hits do
+                const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (I.m_EmitB.empty() && !m_Setup.m_bEmitterSampling ? Emission : v3{ 0, 0, 0 });     // with its links (or the sampling) they bring the emitters' light; without (none, or not built yet: a minute for Police) the hits do
                 Sum = Sum + Lr;
                 for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Lr * Bw[i];
             }
             W.m_Sum = Sum; W.m_nBack = nBack; W.m_nBackAll = nBackAll; W.m_nUnsupported = nUnsupported; W.m_nHits = nHits;
             W.m_RaysDone = r1;
+            if (r1 >= R && m_Setup.m_bEmitterSampling) SampleEmitters(W);
             if (r1 >= R) FinishPass(W);
             const float u = Us(Tw, clock::now());
             W.m_UnitUs = std::max(W.m_UnitUs, u);
@@ -4031,15 +4125,17 @@ namespace xlionrender::gi
         {
             const auto T0 = std::chrono::steady_clock::now();
             const auto Elapsed = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count(); };
-            if (!m_bEmitterLinks)
+            if (!m_bEmitterLinks || m_Setup.m_bEmitterSampling)
             {
-                if (!m_Emitters.empty() || !m_LinkQueue.empty() || m_LinkCur.m_Inst >= 0)
+                if ((!m_Setup.m_bEmitterSampling && !m_Emitters.empty()) || !m_LinkQueue.empty() || m_LinkCur.m_Inst >= 0 || m_bLinksExist)
                 {
-                    m_Emitters.clear(); m_Em.clear(); m_LinkQueue.clear(); m_LinkCur = {};
+                    m_Emitters.clear(); m_Em.clear(); m_LinkQueue.clear(); m_LinkCur = {}; m_bLinksExist = false;
                     for (auto& I : m_Instances) { I.m_Links.clear(); I.m_LinkFirst.clear(); I.m_bLinkQueued = false; I.m_bLinkHull = false; I.m_bEmitDirty = true; }
                 }
+                if (m_Setup.m_bEmitterSampling) RebuildEmitterList();      // (G5: small; it follows the emitters that moved)
                 return 0;
             }
+            m_bLinksExist = true;
             if (m_bEmittersDirty) { RebuildEmitterList(); m_bEmittersDirty = false; }
             for (;;)
             {
@@ -4237,6 +4333,7 @@ namespace xlionrender::gi
         std::vector<gpu_range>                  m_GPURangesOut;         // G4c: GPURanges' list
         int                                     m_GPURays = 0;          // G3: the rays delivered since the last update
         float                                   m_MeanLum = 0;          // UpdateMeans: the world's mean light's luminance (stats)
+        bool                                    m_bLinksExist = false;  // G5: the link pump ran (with sampling turned on: its links cleared once)
         std::vector<gpu_op>                     m_GPUOps;               // G4: the estimator changes for the GPU's copy (TakeGPUOps)
         float                                   m_RayUsMean = 50, m_RayUsDev = 50, m_RayUsHi = 0;     // the governor's running cost of a ray (us), and the slowest seen lately
         int                                     m_nEmitters = 0;

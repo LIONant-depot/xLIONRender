@@ -31,6 +31,7 @@ const uint  gi_inst_v = 48u;                 // gi::world::gpu_inst_v
 const float gi_pi_v   = 3.14159265;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
+uint  Hash32(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }     // (gi::world::Hash32)
 vec3  GV(uint i) { return vec3(uintBitsToFloat(GD[i]), uintBitsToFloat(GD[i + 1u]), uintBitsToFloat(GD[i + 2u])); }
 
 uint  InstRec(int i)  { return GD[0] + uint(i) * gi_inst_v; }
@@ -468,8 +469,51 @@ void main()
             if (!bQ) { if (nUns == 0) { UnsAt = Ph; FirstUns = r; } ++nUns; }
             ++nHits;
             const vec3 In = Direct(Ph, Nh) + (bQ ? Q : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));
-            const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + ((GD[R + 47u] & 32u) == 0u ? Emission : vec3(0));     // (it has no links: the hits bring the emitters' light)
+            const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + (GD[13] == 0u && (GD[R + 47u] & 32u) == 0u ? Emission : vec3(0));     // (no light sampling, no links: the hits bring the emitters' light)
             Sum += Lr; BA0 += Lr * Bw.x; BA1 += Lr * Bw.y; BA2 += Lr * Bw.z;
+        }
+        // G5: the emitters' light by light sampling (gi::world::SampleEmitters: this lane's sample of gi_lanes_v): an emitter by weighted
+        // reservoir sampling over the table (w lum(L), the same hashes), its shadow ray, L Q / lum(L) split into the basis as the links'
+        if (GD[13] != 0u)
+        {
+            const uint Seed = Hash32(Hash32(floatBitsToUint(Off1) ^ Hash32(floatBitsToUint(Off2))) ^ uint(Lane + 1) * 0x9E3779B9u);
+            const uint Tb = GD[14], nE = GD[15];
+            float Q = 0.0; int Pick = -1;
+            for (uint k = 0u; k < nE; ++k)
+            {
+                const uint e = Tb + 12u * k;
+                if (Level == 0u && int(GD[e + 10u]) == Id && int(GD[e + 11u]) == s) continue;
+                const vec3 D = GV(e) - C;
+                const float d2 = dot(D, D);
+                if (d2 < 1e-10) continue;
+                const vec3 Dn = D * (1.0 / sqrt(d2));
+                const float cr = dot(N, Dn), ce = -dot(GV(e + 3u), Dn);
+                if (cr <= 0.0 || ce <= 0.0) continue;
+                const float A = GF(e + 6u), w = A * cr * ce / (d2 + A);
+                if (w < 1e-5) continue;
+                const vec3 Le = GV(e + 7u);
+                const float q = w * (0.2126 * Le.x + 0.7152 * Le.y + 0.0722 * Le.z);
+                if (q <= 0.0) continue;
+                Q += q;
+                const float u = float(Hash32(Seed ^ k * 0x85EBCA6Bu) >> 8) * (1.0 / 16777216.0);
+                if (u * Q < q) Pick = int(k);
+            }
+            if (Pick >= 0)
+            {
+                const uint e = Tb + 12u * uint(Pick);
+                const vec3 D = GV(e) - C;
+                const float d = length(D);
+                if (!Occluded(C + N * 1e-3, D * (1.0 / d), d * 0.98))
+                {
+                    const vec3 Le = GV(e + 7u), c = Le * (Q / (0.2126 * Le.x + 0.7152 * Le.y + 0.0722 * Le.z));
+                    vec3 Dm = DirToMesh(R, D * (1.0 / d));
+                    Dm = Dm * (1.0 / max(length(Dm), 1e-12));
+                    const vec3 Bw = BasisWeights(D0, D1, D2, Dm);
+                    const float f = float(Rn) / (3.0 * gi_pi_v);
+                    const vec3 e0 = c * (3.0 * Bw.x / float(gi_lanes_v)) * f, e1 = c * (3.0 * Bw.y / float(gi_lanes_v)) * f, e2 = c * (3.0 * Bw.z / float(gi_lanes_v)) * f;
+                    Sum += e0 + e1 + e2; BA0 += e0; BA1 += e1; BA2 += e2;
+                }
+            }
         }
     }
     // the cluster's sums (the first unsupported ray's hit: the lane with the item's lowest such ray)
