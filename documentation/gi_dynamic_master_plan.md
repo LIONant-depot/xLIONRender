@@ -1486,3 +1486,90 @@ agreement". The measurements below found simpler causes to fix first.
    - neighboring atlas slots;
    - GI on/off with unchanged reflection inputs;
    - a probe recaptured while the light changes.
+
+## 8. TODO, in priority order (2026-10-17, for the next session)
+
+The goal is to beat the references on performance and quality together. Measure before and after every item, and leave a test
+guarding it.
+
+**How to work here**
+- Commit locally only when asked (explicit paths). Never push. Everything goes on main.
+- Ask before building anything that touches several files: a short design first, then wait for the yes.
+- Never drive the user's editor. Use the smoke harness's own (`harness.Editor`), and only when no other `xLION.exe` is running.
+- Build the editor with MSBuild `Build/xLION.vs2022/xLION.vcxproj` (Debug); never `Game.vcxproj` by hand.
+- Unit tests: `dependencies/xLIONRender/Build/test`, `cmake --build vs2022 --config Release --target xlionrender_test_gi_*`.
+  - The GI set: `gi_trace` (CPU = GPU), `gi_surfel_pass`, `gi_flicker`, `gi_render`, `surfel_gi` (slow, about 10 min).
+  - Run what the change touches; no smoke tests unless asked.
+- Measuring Police (`EF31687D49834DD9`):
+  - `source/Editors/LevelEditor/smoke/gi_startup.py run <tag> [--captures-first] [--at ...]`, then `analyse <tag>`.
+  - The frame log (`DumpGI` writes `<file>.frames.csv`) has `SceneGpuMs` and `GPUTraceMs`.
+  - Each `DumpGI` freezes Debug for about 0.9 s: keep dumps few. The tool already removes the frozen frames.
+- A shader restored with `Copy-Item` keeps its old timestamp and is **not** rebuilt: `touch` it.
+- Bash heredocs eat backslashes. Write patch scripts with the Write tool.
+
+**1. E in RGB9E5 inside the GPU world (compression step 2; the passes' cost per ray)**
+- Today: E is 3 floats per surfel at `GD[R + 2u] + 3u * s`, read at every ray hit. Make it one RGB9E5 word per surfel (12 → 4 B).
+- Readers and writers, found with `grep "R + 2u\]" src/shaders/xlionrender_gi_*.glsl`:
+  - the pass (`_surfel_pass_comp.glsl`: the hit's light, the means, the vertex fallback);
+  - `_filter_comp`, `_means_comp`, `_cube_comp` (reads and writes);
+  - wherever the commit and `_migrate_comp` write E, and `_readback_comp`.
+- On the CPU: the layout in `world::PackGPU` (the E array's size per instance), the read back (`SetGPUState` / `ReadBack`), and
+  the `gpu_inst_v` record words if any size is stored.
+- Codec: `gi::PackRGB9E5` / `UnpackRGB9E5` (`features/gi/xlionrender_surfel_gi.h`); the GLSL copies are in `_filter_comp.glsl`
+  and `xlionrender_surfel_gi.glsl`. Same integer steps, so the same bits.
+- Parity: the CPU world quantizes its published E through the same round trip at the same point (where the commit publishes the
+  estimator's mean), so CPU = GPU stays exact. The estimator's mean stays float.
+- Tests: `gi_trace` and `gi_surfel_pass` stay surfel-for-surfel equal; `gi_flicker` and `surfel_gi` must pass.
+- Measure the GI slice time (`GPUTraceMs`) in settled Police before and after.
+
+**2. The shadow ray's cost.** It is 0.61 ms of the 2.15 ms pass (§7a, "the slices' cost").
+- Check that `Occluded` is any-hit (it stops at the first hit).
+- Try stopping short of the emitter's tile, not 0.98 of the distance to its center.
+- Done when the pass is faster and the 64-lamp exact-light test still holds (`gi_flicker`).
+
+**3. A 16 B surfel record (compression).** Octahedral normal (`GIOctDecode` exists), center unorm16 against the mesh bounds, half
+radius, u16 parent plus the patch bit. In the pixels' `GIMesh` (`surfel_mesh` GPU layout) and the passes' level arrays. The pixel
+read goes from about 68 B to about 52 B per surfel.
+
+**4. Check reflections layer 1 in Police (§7b).** Police's materials are SPIR-V from the material compiler
+(`xmaterial_compiler.cpp`), probably not rebuilt when the shaders change. Find how to recompile them (ask the user), then take
+before and after pictures from a view with a rough surface near colored light (`CaptureWindow`).
+
+**5. Reflections layer 2: medium roughness.** GGX-sampled rays from the pixel's surfel (or the screen) that end on the surfel cache
+(SurfelPlus). Reuse the BVH traversal and stay under the same budget. Compare against the path-tracer reference.
+
+**6. A reference that is allowed to converge** (no dormancy, long, several seeds). Use it for every future "within 5 %" claim.
+The 60 s dumps are suspected under-converged.
+
+**7. The review's probe items (§7b list).**
+- Make the specular occlusion an option with a comparison.
+- Make the blending policy explicit.
+- Make probe fading fall back to the room, not the sky.
+- Separate diffuse and specular AO.
+- Check the atlas conventions and the capture contract.
+- For the probes' diffuse: an ambient cube (6 colors, Half-Life 2's, as the GI's far instances already use) rather than SH9.
+
+**8. Further compression (the survey).**
+- The estimator state, 96 → about 40 B: everything but the mean quantized, behind `gi_flicker`.
+- Moments as an atlas read with one bilinear sample.
+- A compressed wide BVH: the most bytes per ray, the most work.
+
+**9. Smaller items.**
+- Constant-color materials could skip being provisional (their base color is their capture).
+- The level switch's repack: rare, deferred (§7 item 3).
+- Faster captures: a small lever now, about 1.2 s in Debug.
+
+**State at the end of 2026-10-17 (local commits, none pushed)**
+- xLIONRender:
+  - `b9544bc` diagnostics
+  - `472ba7a` material readiness
+  - `11cc81c` reflections layer 1
+  - `2f962a8` the 7a correction
+  - `57f5c61` the running mean
+  - `660a247` the slice leftover
+  - `50a1a82` the RGB9E5 shown light
+- xLION:
+  - `ca8efeb`, `3a957cf` `gi_startup.py`
+- Police (Debug, streamed start, effective GI time), between and within groups:
+  - this morning: 34 %, 17 % at 5.2 s;
+  - now: 11 %, 12 % at 3.9 s and 5.6 %, 7.8 % at 8 s.
