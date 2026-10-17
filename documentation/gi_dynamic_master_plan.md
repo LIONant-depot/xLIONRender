@@ -1318,6 +1318,34 @@ agreement". The measurements below found simpler causes to fix first.
 - A trade-off to decide: a constant-color material's base color is already its capture, so it could skip being provisional
   and not be dark for the first seconds. Not done; it needs the host to know which materials are constant.
 
+**Correction (2026-10-17, after step 1): the dumps froze the GI, and there is no service stall**
+- What was wrong: each `DumpGI` is a frame of about 0.9 s in Debug (the read-back and the CSV), and the GI makes no progress in it.
+  The GI times above include those frames. The captures-first run dumped at 4, 5, 6, 7 and 8 s, so its "flat from 3 to 7 s" was
+  0.27 s of real GI time: 2.99 s to 3.26 s.
+- `gi_startup.py` now reports the time without the frames the dumps froze. Corrected (between groups, within groups):
+
+  | Effective GI time | Today | Readiness | Captures first |
+  |---|---|---|---|
+  | about 1 s | 287 %, 195 % (0.80 s) | 207 %, 71 % (0.86 s) | |
+  | about 2 s | 76 %, 40 % (2.1 s) | 38 %, 23 % (2.25 s) | |
+  | 3 s | | | 12.0 %, 14.5 % |
+  | about 5 s | 34 %, 17 % (5.2 s) | 19 %, 13 % (5.3 s) | 10.2 %, 13.0 % (4.3 s) |
+  | 7.4 s | | | 7.2 %, 10.0 % |
+  | about 10 s | 12 %, 10 % (10.3 s) | 13 %, 10 % (10.4 s) | 5.5 %, 8.1 % (12.5 s) |
+
+- What changes:
+  - The captures end at 1.2–1.4 s, not 4.3–4.7 s. Faster captures are a small lever.
+  - With stable inputs, the error falls steadily but slowly: 12 % at 3 s, 5.5 % at 12.5 s, at 4–5 M rays/s.
+  - About a third of the frames trace about 1.1k rays (the batch's tail: 0.9 ms of the 2 ms GPU budget), against about 80k on
+    the others. That is roughly 20–25 % of the throughput.
+  - The room test agrees: captured first and every surfel traced every update, it is still 8 % off at 200 updates, while the run
+    whose history was lowered once is at 4.4 %. The slow part is the estimator's history over the bounces' build-up, not the
+    service.
+- The order after step 1 is therefore:
+  1. the estimator's lag as the bounces build up (the room test is the clean case: stable inputs, full service);
+  2. the batch's tail (frames that leave the GPU budget unused);
+  3. a reference allowed to converge.
+
 ## 7b. Reflections (2026-10-17)
 
 **Layer 1 done: rough reflections from the surfel cache**
