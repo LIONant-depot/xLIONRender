@@ -14,6 +14,9 @@ layout(binding = 10) uniform sampler2D SamplerProbes;
 // Surfel GI (features/gi/xlionrender_surfel_gi.h): the diffuse irradiance at this pixel, set by the fragment shaders that have it
 // (xlionrender_geom_standard_frag.glsl); w > 0.5: it replaces the probes' and the sky's diffuse (it holds the sky and the bounces)
 vec4 g_GI = vec4(0.0);
+#ifndef XLIONRENDER_SURFEL_GI_GLSL
+vec4 g_GIRefl = vec4(0.0);  // (xlionrender_surfel_gi.glsl: the surfels' light around the reflection direction; w > 0.5: read)
+#endif
 uint g_GISource = 0u;      // which read set g_GI (the COVERAGE debug view): 0 none (the ambient, as without GI), 1 the vertex read, 2 the pixel read
 
 const vec2 kProbeAtlas = vec2(3072.0, 1024.0);          // 8 x 4 slots of the sky atlas' layout (384 x 256) - instance::probe_slots_v
@@ -47,10 +50,11 @@ float ProbeWeight(in const LocalLightData Pr, in const vec3 P)
 vec3 ProbeBoxProject(in const LocalLightData Pr, in const vec3 P, in const vec3 R)
 {
     const vec3 Lo = Pr.Color.xyz, Hi = Pr.DirCosOuter.xyz;
-    const vec3 Inv = 1.0 / max(abs(R), vec3(1e-6)) * sign(R + 1e-12);
-    const vec3 T  = max((Lo - P) * Inv, (Hi - P) * Inv);
-    const float t = min(T.x, min(T.y, T.z));
-    return normalize(P + R * t - Pr.PosRadius.xyz);
+    float t = 1e30;
+    for (int a = 0; a < 3; ++a)                                 // the exit face per axis; an axis the ray runs along has none
+        if (abs(R[a]) > 1e-6) t = min(t, ((R[a] > 0.0 ? Hi[a] : Lo[a]) - P[a]) / R[a]);
+    const vec3 D = P + R * t - Pr.PosRadius.xyz;
+    return t > 0.0 && t < 1e29 && dot(D, D) > 1e-12 ? normalize(D) : R;     // (outside the box, degenerate: the plain reflection)
 }
 
 // One probe into the running sums (its weight times what the earlier, inner probes left)
@@ -60,7 +64,7 @@ void ProbeAdd(in const int Record, in const vec3 P, in const vec3 N, in const ve
     const float w = ProbeWeight(Pr, P) * (1.0 - Covered);
     if (w <= 0.0) return;
     Spec    += w * AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, ProbeBoxProject(Pr, P, R), PerceptualRoughness);
-    Diff    += w * AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, N, 1.0);
+    Diff    += w * AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, g_GIRefl.w > 0.5 ? ProbeBoxProject(Pr, P, R) : N, 1.0);
     Covered += w;
 }
 
@@ -93,7 +97,7 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         if (UBOLight.EnvParams.x > 0.5)
         {
             Spec += Rest * EnvSample(R, PerceptualRoughness) * UBOLight.EnvParams.y;
-            Diff += Rest * EnvSample(N, 1.0) * UBOLight.EnvParams.y;
+            Diff += Rest * EnvSample(g_GIRefl.w > 0.5 ? R : N, 1.0) * UBOLight.EnvParams.y;
         }
         else
         {
@@ -102,8 +106,23 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         }
     }
 
-    if (g_GI.w > 0.5)
+    if (g_GI.w > 0.5 && g_GIRefl.w > 0.5)
     {
+        // Reflections layer 1 (gi_dynamic_master_plan.md): the surfels' light around the reflection direction. Against the probes' and the
+        // sky's roughest level along it (Diff, sampled along R above), it says how much of what they show there reaches this point: their
+        // reflection scaled down by it (a capture's normalization, as Unreal 4 scales its captures by the local GI - here per direction:
+        // a dark corner facing a bright doorway keeps the doorway). Rough surfaces (their lobe about the basis' width) take the surfels'
+        // light itself: the bounce colors the cache holds (a red wall in a rough floor), not the probes' view
+        const vec3  GIRefl = g_GIRefl.rgb / 3.14159265359;        // irradiance around R -> its radiance
+        const float EnvLum = dot(Diff, vec3(0.2126, 0.7152, 0.0722));
+        const float GILum  = dot(GIRefl, vec3(0.2126, 0.7152, 0.0722));
+        Spec *= EnvLum > 1e-4 ? clamp(GILum / EnvLum, 0.0, 1.0) : 1.0;
+        Spec  = mix(Spec, GIRefl, smoothstep(0.3, 0.7, PerceptualRoughness));
+        Diff  = g_GI.rgb / 3.14159265359;
+    }
+    else if (g_GI.w > 0.5)
+    {
+        // (no read along R - the vertex read: the heuristic below. Not a visibility: the diffuse light's ratio, all directions alike)
         // The GI knows how much light reaches this point: where it gets a small part of what the sky alone would give (an arcade, a corner) the
         // sky and probe reflection (Spec) is mostly occluded too. Without this, the Fresnel bias of the split-sum (large at grazing angles) times an
         // unoccluded sky is a veil that washes out a wall the GI shows as dark (specular occlusion, from the ratio of the GI light to the open sky's)

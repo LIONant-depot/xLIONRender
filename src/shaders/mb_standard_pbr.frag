@@ -266,10 +266,17 @@ vec3 PBRLighting
 		const vec3 GN = normalize(InGINormal), GT = normalize(InGITangent.xyz);
 		const vec3 GNmap = normalize(inNormal.x * GT + inNormal.y * (InGITangent.w * cross(GN, GT)) + inNormal.z * GN);     // as TransformNotmalToWorld, in mesh space
 		g_GIMoments = (InGIRef.y & gi_no_moments_v) == 0u;
+		// The reflection direction in mesh space (through the two tangent frames: the world's and the mesh's), for the rough reflection's read
+		{
+			const vec3 Rw = reflect(-V, N), Tw = normalize(In.Tangent.xyz - In.Normal.xyz * dot(In.Normal.xyz, In.Tangent.xyz)), Nw = normalize(In.Normal.xyz), Bw = In.Tangent.w * cross(Nw, Tw);
+			const vec3 Tm = normalize(GT - GN * dot(GN, GT)), Bm = InGITangent.w * cross(GN, Tm);
+			g_GIReflDir = normalize(dot(Rw, Tw) * Tm + dot(Rw, Bw) * Bm + dot(Rw, Nw) * GN);
+		}
 		// The policy for a read (GIQueryResult): the pixel read where it is supported - a low confidence (the surfels near are mostly out of
 		// sight) blends into the vertex read where that one is supported (no edge); unsupported, the vertex read where it is; else no GI
 		const GIQueryResult Q = SurfelGIQuery(InGIPos, GFace, GNmap, InGIRef.x, InGIRef.y & 0xFFu);
 		if (Q.bSupported) { g_GI = vec4(g_GI.w > 0.5 ? mix(g_GI.rgb, Q.Irradiance, smoothstep(0.0, 0.25, Q.Confidence)) : Q.Irradiance, 1.0); g_GISource = 2u; }
+		if (!Q.bSupported || Q.Confidence < 0.25) g_GIRefl = vec4(0.0);      // (a weak read: the reflection stays the probes')
 	}
 	// Neither read supported (no surfel reaches the point, or only invalid ones): its cell's mean light (SurfelGILocalMean), not the no-GI
 	// ambient (a scene lit by its GI is black without it). COVERAGE still shows it unsupported

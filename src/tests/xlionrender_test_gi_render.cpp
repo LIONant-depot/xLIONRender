@@ -119,6 +119,26 @@ int main()
     CHECK(OnR > OnL * 1.15, "no color bleeding with GI (near red %.2f, near green %.2f)", OnR, OnL);
     CHECK(MOn[1] > MOff[1] * 1.05, "GI adds no light");
 
+    // Reflections layer 1 (gi_dynamic_master_plan.md): the floor as a rough metal (no diffuse: what it shows is its reflection). The surfels'
+    // light around the reflection direction colors it - redder by the red wall than by the green one; without GI (the flat ambient) not
+    {
+        const auto Floor = Scene.m_Draws[0].m_Material;
+        Scene.m_Draws[0].m_Material = { .m_BaseColor = { 0.9f, 0.9f, 0.9f }, .m_Metallic = 1.0f, .m_Roughness = 0.9f };
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the rough metal floor");
+        const auto Metal = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bEnable = false;
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the rough metal floor without GI");
+        const auto MetalOff = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bEnable = true;
+        Scene.m_Draws[0].m_Material = Floor;
+        DumpRGB("gi_metal_floor", Metal, W, H);
+        const double ML = Ratio(Metal, 0.15f, 0.3f), MR = Ratio(Metal, 0.7f, 0.85f), MLo = Ratio(MetalOff, 0.15f, 0.3f), MRo = Ratio(MetalOff, 0.7f, 0.85f);
+        std::printf("a rough metal floor, red/green - with GI: by the green wall %.2f, by the red %.2f; without: %.2f, %.2f\n", ML, MR, MLo, MRo);
+        CHECK(MR > ML * 1.15, "the rough metal floor does not reflect the red wall's light (%.2f by it, %.2f by the green)", MR, ML);
+        CHECK(std::abs(MLo - MRo) < 0.1, "without GI the rough metal floor's sides differ (%.2f, %.2f)", MLo, MRo);
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the floor again");
+    }
+
     // The per-pixel read (the mesh's read grid, scene::m_GI.m_bPerPixel, on above): on these dense meshes it matches the vertex read; on the
     // same room with 2 triangles a face it stays near the dense image, where the vertex read (the corners only) does not
     const auto Luma = [](const std::array<float, 3>& c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };

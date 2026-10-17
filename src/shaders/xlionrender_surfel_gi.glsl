@@ -200,10 +200,18 @@ vec3 SurfelDebugColor(in const uint s)
 // sum(w E), sum(w) of the level 0 surfels that reach a point (mesh space position and normal): its cell of the read grid lists them.
 // The weight of the vertex read (falloff over 2 radii squared, times the normal match, times the validity). 0: no grid, or off the
 // surface's cells (the caller falls back to the vertex read)
+// Reflections (gi_dynamic_master_plan.md, reflections layer 1): with g_GIReflDir set (mesh space, unit; 0: none) the read also weighs the
+// same surfels' basis toward it - the light around the reflection direction, the rough reflection's (SurfelGIQuery: g_GIRefl)
+vec3 g_GIReflDir = vec3(0.0);
+vec4 g_GIRefl    = vec4(0.0);           // w > 0.5: g_GIReflDir's read (an irradiance, as g_GI's), for EnvLighting
+vec3 g_GIReflSum = vec3(0.0), g_GIReflRelaxed = vec3(0.0);
+
 vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level, in const uint First, in const uint Count, in const vec3 PatchN, out vec4 Relaxed)
 {
     vec4 Sum = vec4(0.0);
     Relaxed = vec4(0.0);                                            // the same without the moments' test (SurfelGIQuery's second tier)
+    g_GIReflSum = vec3(0.0); g_GIReflRelaxed = vec3(0.0);
+    const bool bRefl = dot(g_GIReflDir, g_GIReflDir) > 0.5;
     for (uint i = 0u; i < Count; ++i)
     {
         const uint  e = GIMesh[GIMesh[5] + First + i], s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
@@ -220,10 +228,11 @@ vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const
         const float w0 = f * f * c * cn * GIReadWeight(e, P, N, PatchN) * GIValidity(LightOffset + sl);
         if (w0 <= 0.0) continue;
         const vec3  B = GIBasisRead(LightOffset + sl, GISurfelNormal(bl), Nmap);           // the normal-mapped normal reads the basis
-        Relaxed += vec4(B * w0, w0);
+        const vec3  Br = bRefl ? GIBasisRead(LightOffset + sl, GISurfelNormal(bl), g_GIReflDir) : vec3(0.0);
+        Relaxed += vec4(B * w0, w0); g_GIReflRelaxed += Br * w0;
         const float w = w0 * GIVisibility(P, GISurfelCenter(bl), GISurfelNormal(bl), uintBitsToFloat(GIMesh[bl + 3u]), LightOffset + sl);
         if (w <= 0.0) continue;
-        Sum += vec4(B * w, w);
+        Sum += vec4(B * w, w); g_GIReflSum += Br * w;
     }
     return Sum;
 }
@@ -281,9 +290,10 @@ GIQueryResult SurfelGIQuery(in const vec3 P, in const vec3 N, in const vec3 Nmap
     // The moments' test rejects every surfel (next to a wall's foot: their rays met the wall just past the point): its own surfels without
     // it - the corner weights (the bake's line of sight, the patch split at walls) still keep the other side out. Not the mean light: a
     // whole building's in a dark closet was a bright patch
-    if (Sum.w <= 1e-6) Sum = Relaxed;
+    if (Sum.w <= 1e-6) { Sum = Relaxed; g_GIReflSum = g_GIReflRelaxed; }
     if (Sum.w <= 1e-6) return R;
     R.Irradiance = Sum.rgb / Sum.w; R.Confidence = Sum.w; R.bSupported = true;
+    if (dot(g_GIReflDir, g_GIReflDir) > 0.5) g_GIRefl = vec4(g_GIReflSum / Sum.w, 1.0);
     return R;
 }
 

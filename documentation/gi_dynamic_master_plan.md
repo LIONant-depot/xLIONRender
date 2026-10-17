@@ -1317,3 +1317,64 @@ agreement". The measurements below found simpler causes to fix first.
     before the service step.
 - A trade-off to decide: a constant-color material's base color is already its capture, so it could skip being provisional
   and not be dark for the first seconds. Not done; it needs the host to know which materials are constant.
+
+## 7b. Reflections (2026-10-17)
+
+**Layer 1 done: rough reflections from the surfel cache**
+- The read:
+  - The per-pixel GI read also weighs each surfel's 3 basis colors toward the reflection direction R (`g_GIReflDir`, R in mesh
+    space through the two tangent frames). These are the values it already fetched.
+  - The result is `g_GIRefl`, the light around R. A weak read (confidence under 0.25) keeps the probes' reflection.
+- `EnvLighting` (`shaders/xlionrender_environment.glsl`):
+  - The probes' and the sky's reflection is scaled by min(1, the cache's light around R / their roughest level along R). That is
+    a directional normalization, as Unreal 4 scales its captures by the local GI, so a dark corner facing a bright doorway keeps
+    the doorway.
+  - From roughness 0.3 to 0.7, the cache's light takes over, so a rough floor reflects the red wall's bounce.
+  - Their second sample, which was along N for a diffuse the GI replaces anyway, is now along R: the denominator, at no extra
+    cost.
+  - The vertex read path keeps the old scalar ratio, labelled as a heuristic, not visibility.
+- Box projection: the exit distance per axis only where the ray is not parallel to it. The plain reflection when the projection
+  fails (outside the box, degenerate).
+- Test: `xlionrender_test_gi_render`, a rough metal floor. Red/green is 1.22 by the red wall and 0.85 by the green with GI, 1.00 and
+  1.00 without. The old shaders fail it (1.00 and 1.00 with GI).
+- Not seen in Police yet:
+  - Its materials are SPIR-V from the material compiler (`xmaterial_compiler.cpp`), which includes the shaders when it compiles,
+    so they probably still hold the old code.
+  - The two camera views tried were in a wall or in the dark. The "1 error" in the editor's log was there before the change too.
+  - To check it there: recompile the materials, and pick a view with a rough surface near colored light.
+- The limit: 3 basis directions is a cosine-wide lobe. Medium roughness needs layer 2 (rays ending on the cache, SurfelPlus' GGX
+  candidates); mirrors stay on the probes and the sky.
+
+**The review's remaining probe items (not done)**
+1. **Specular occlusion.** Keep the scalar GI ratio as a labelled option. Compare no occlusion, the ratio, and a roughness- and
+   view-dependent specular AO from a real occlusion input (Filament treats diffuse AO and specular occlusion apart). The
+   split-sum's grazing term is Fresnel, not the bug: a washed-out wall more likely comes from the sky fallback, probe fading,
+   captures or normalization.
+2. **Order-dependent blending.** `w = weight × (1 − covered)` is front-to-back. Make the policy explicit: nested override probes
+   versus peers blended within a priority class, a stable order, and the same order from the cell list and the full list. Review
+   the `Covered < 0.999` early exit against a bright HDR sky.
+3. **Probe fading lets the sky back in** at a room probe's walls. Separate the capture origin, the projection box and the
+   influence volume. An enclosing room probe under smaller local ones, so fading falls back to the room, not the outdoor sky.
+4. **The diffuse from the roughest specular level** is not Lambertian irradiance. SH9 per probe and for the sky (fits the light
+   buffer), or a small cosine-convolved map.
+5. **One AO for everything.** Split it into diffuse AO and specular AO, and settle what AO means (material, SSAO) and how much
+   visibility the surfel GI already has.
+6. **Atlas and conventions:** octahedral seams and borders, isolation between roughness levels and between probe slots, the
+   smallest levels, the same roughness mapping in the prefilter, the sampling and the DFG LUT, linear HDR storage. Test with
+   neighboring slots of very different HDR colors, the reflection turned through every seam, and the roughness swept.
+7. **The capture contract:** HDR before tone mapping, pre-exposure, a defined origin, never sampling the probe being written, a
+   policy for other probes during capture, versioned publication, and the six faces captured at different times declared.
+8. **Smaller items:**
+   - typed accessors for the probe records (not `Color`, `DirCosOuter`, `Shadow`);
+   - a probe weighs nothing until its slot holds a published capture of it (generation);
+   - test the `g_GI.w > 0.5` support switch (initialization, a level change, missing support), and never smooth it with an
+     unsupported read as black.
+9. **Tests to add:**
+   - a constant white environment;
+   - a bright doorway reflected by a surface with low diffuse GI;
+   - a dark room probe next to a bright sky;
+   - two equal overlapping colored probes;
+   - axis-aligned and near-parallel reflections;
+   - neighboring atlas slots;
+   - GI on/off with unchanged reflection inputs;
+   - a probe recaptured while the light changes.
