@@ -100,8 +100,9 @@ namespace xlionrender::gi
                 // the slice: the ranges from m_NextRange whose estimated rays fit this frame's budget (one at least; no budget: all of them)
                 const int Rays = BudgetMs > 0 ? Budget(BudgetMs) : std::numeric_limits<int>::max();
                 m_SliceFirst = m_NextRange;
-                int Est = 0, nThreads = 0;
-                while (m_NextRange < m_Ranges.size() && (m_NextRange == m_SliceFirst || Est + m_Ranges[m_NextRange].m_Rays <= Rays)) { Est += m_Ranges[m_NextRange].m_Rays; nThreads += m_Ranges[m_NextRange].m_Count; ++m_NextRange; }
+                m_NextRange = SliceEnd(m_Ranges, m_SliceFirst, Rays);
+                int nThreads = 0;
+                for (std::size_t k = m_SliceFirst; k < m_NextRange; ++k) nThreads += m_Ranges[k].m_Count;
                 m_SliceCount = m_NextRange - m_SliceFirst;
                 const std::uint32_t Zero[4] = {};
                 if (!FitLocal(m_ItemB, int(sizeof(world::gpu_item)), std::size_t(nThreads)) || !FitLocal(m_Results, int(sizeof(world::gpu_result)), std::size_t(nThreads))
@@ -147,6 +148,19 @@ namespace xlionrender::gi
                 if (m_InFlight == ~0ull) m_InFlight = Frame;             // (the means come back the frame after, as a slice)
             }
             return bSlice;
+        }
+
+        // A slice: the ranges from First whose estimated rays fit Rays (one at least); the end. What is left of the batch after it, when
+        // under a quarter of Rays, goes in it too (up to 25% over this frame): a slice costs a fixed part whatever its size, and the next
+        // batch is picked only once this one is all in - the leftover took a frame of its own (Police: ~1.1k rays every third frame)
+        static std::size_t SliceEnd(std::span<const world::gpu_range> Ranges, std::size_t First, int Rays) noexcept
+        {
+            std::size_t End = First;
+            int Est = 0;
+            while (End < Ranges.size() && (End == First || Est + Ranges[End].m_Rays <= Rays)) Est += Ranges[End++].m_Rays;
+            int Rest = 0;
+            for (std::size_t k = End; k < Ranges.size(); ++k) Rest += Ranges[k].m_Rays;
+            return Rest > 0 && Rest <= Rays / 4 ? Ranges.size() : End;
         }
 
         // The rays the world may pick for a batch: batch_frames_v frames of slices

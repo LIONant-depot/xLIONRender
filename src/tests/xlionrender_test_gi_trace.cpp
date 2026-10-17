@@ -255,6 +255,21 @@ int main()
         CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "with events: %d of %d surfels differ from the CPU world", R.m_Mismatch, R.m_Surfels);
         CHECK(R.m_Packs == 2, "with events the scene was packed %d times (the first, the coarse level; the material and the drag in place)", R.m_Packs);
     }
+    // The slices of a batch (gpu_trace::SliceEnd): whole ranges up to the budget; a leftover under a quarter of it goes in the slice before
+    // (it took a frame of its own: a third of Police's frames all but idle), a larger one is a slice of its own
+    {
+        const auto Slices = [](std::initializer_list<int> Rays, int Budget)
+        {
+            std::vector<world::gpu_range> R;
+            for (const int r : Rays) { world::gpu_range g; g.m_Rays = r; R.push_back(g); }
+            int n = 0;
+            for (std::size_t k = 0; k < R.size(); k = gpu_trace::SliceEnd(R, k, Budget)) ++n;
+            return n;
+        };
+        const int a = Slices({ 40, 40, 40, 40, 1 }, 80), b = Slices({ 40, 40, 40, 40, 30 }, 80), c = Slices({ 200 }, 80), d = Slices({ 10, 10 }, 80);
+        std::printf("the slices of a batch: 161 rays at 80 a slice in %d (the leftover in the last), 190 in %d, one range over the budget in %d, a batch under it in %d\n", a, b, c, d);
+        CHECK(a == 2 && b == 3 && c == 1 && d == 1, "the slices of a batch: %d, %d, %d, %d (2, 3, 1, 1 expected)", a, b, c, d);
+    }
     // Over time: a GPU budget far too small for a batch (it is traced in slices over frames, the slices' surfels committed as they come
     // in, so later slices read newer light than the CPU's pass did): the converged light is still the CPU world's, instance by instance
     {
@@ -263,6 +278,7 @@ int main()
         world Wc, Wg;
         MakeCornell(Mc, Wc, false); MakeCornell(Mg, Wg, false);
         Wg.m_Setup.m_bGPUTrace = Wg.m_Setup.m_bGPUOwned = true;
+        Wc.m_Setup.m_RaysPerSurfel = Wg.m_Setup.m_RaysPerSurfel = 24;     // (a batch of several 1024-ray slices: at 8 it was just over one, and SliceEnd takes such a leftover whole)
         gpu_trace T;
         CHECK(T.Init(App.m_Device, s_Shaders), "gpu_trace::Init");
         const v3 Eye{ 0, 0, -0.9f };

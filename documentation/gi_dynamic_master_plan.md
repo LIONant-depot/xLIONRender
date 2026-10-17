@@ -1378,6 +1378,29 @@ agreement". The measurements below found simpler causes to fix first.
   - the compression survey's top items (light in RGB9E5, a 16 B surfel record);
   - a reference allowed to converge.
 
+**The batch's tail done (2026-10-17)**
+- The cause: a batch is one pass over the scene (the pick visits each instance once), about 160k rays in settled Police, against
+  slices of about 80k. The slices took 80k, then 79k, then a 1.1k leftover in a frame of its own: the next batch is picked only once
+  this one is all in. That leftover slice still cost about 0.9 ms (each slice has a fixed part), so a third of the frames traced
+  1.4 % of the rays.
+- The fix: `gpu_trace::SliceEnd`. A leftover under a quarter of the budget goes in the slice before it, up to 25 % over the budget
+  for that frame. The pick and the order are unchanged, and CPU = GPU holds.
+- Tests (`xlionrender_test_gi_trace`):
+  - the rule: 161 rays at 80 a slice take 2 slices, 190 take 3;
+  - the over-time comparison now runs at 24 rays a surfel, so its batches still span several slices (295 slices for 80 batches,
+    0.5 % off the CPU world).
+- Police (`gi_startup.py`, effective GI time, between and within groups; the running-mean runs in brackets):
+
+  | Run | About 2 s | About 4 s | About 8 s | Rays by 5 s | Frames under 5k rays |
+  |---|---|---|---|---|---|
+  | Streamed with readiness | 35.5 %, 30.2 % | **11.3 %, 11.6 %** (34.1 %, 18.5 %) | **5.6 %, 7.8 %** (14.6 %, 10.6 %) | 26.3 M (19.5 M) | 2 / 398 (129 / 367) |
+  | Captures first | 10.5 %, 13.9 % (14.6 %, 16.1 %) | 7.0 %, 9.6 % (8.9 %, 11.8 %) | 5.1 %, 7.6 % (5.6 %, 8.7 %) | 28.6 M (20.9 M) | 0 / 406 (146 / 405) |
+
+  - About +37 % rays by 5 s.
+  - Against the morning's startup (34 % at 5.2 s, 12 % at 10.3 s), Police's streamed start is now at 11 % by 3.9 s and 5.6 % by
+    8 s.
+- Next: about 0.8 ms of each slice looks fixed (dispatches, cubes, means). Measure it, and consider fewer and larger slices.
+
 ## 7b. Reflections (2026-10-17)
 
 **Layer 1 done: rough reflections from the surfel cache**
