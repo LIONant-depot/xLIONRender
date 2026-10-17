@@ -915,6 +915,24 @@ log's new `TimeMs` and `MeanLum`):
     (24 frames: the Debug editor's start), and the light is within 10 % 0.7 s after them.
   - GI main thread 0.57 ms a frame; 85–90k rays a frame.
 
+**The flicker** (2026-10-17, measured: `xlionrender_test_gi_flicker`, and Police's light dumped 0.5 s apart once settled).
+- **Cause.** The change detector (`estimator::Lower`, then `Add` while watching) compared the samples with the light the surfel
+  had when the change came, and never moved that reference. Two samples 50 % off it the same way replaced the light with their
+  mean. So a noisy surfel took a "change" every few passes, and its light was a two-sample mean for ever.
+  - In Police, two thirds of the surfels were still watching after 25 s, at 2–5 samples, and the worst 1 % jumped 30–40 % in
+    half a second. The material captures had lowered them.
+- **Fix** (the CPU estimator and the GPU commit alike).
+  - A change must be beyond 3 times the samples' noise, measured from the steps between samples that did not deviate (for
+    noise a step is about √2 σ, for a ramp small, for a change of level one jump).
+  - The two samples must agree with each other.
+  - After a take, the reference is the warm-up's mean, so a ramp is still followed.
+- **Results.**
+  - Police: the lit surfels' p99 change over half a second went from 31 % to 0.3 %, and no surfel is left watching.
+  - 6j18: noise makes 0 takes (it made 8 with only the reference moving), and the ramp reaches 4.90.
+  - The convergence: within 10 % at 2.9 s; the last 5 % now takes about 9 s, since small changes are followed by the
+    estimator's averaging rather than by takes.
+
+
 **Risks.**
 - xGPU has no compute path yet. It declares a compute stage, but nothing creates a compute pipeline or dispatches one.
 - Debugging on the GPU means readbacks.
