@@ -422,8 +422,11 @@ namespace xlionrender::gi
         std::int8_t     m_Streak        = 0;        // Lower: the sign of the last sample's large difference to the mean (0: none)
         std::uint16_t   m_nTaken        = 0;        // (tests) the changes it took (two large differences: their mean replaced it)
         bool            m_bWatch        = false;    // Lower: watching for a real change (two large differences the same way)
+        bool            m_bTook         = false;    // a change taken since the Lower: what the next one differs from follows the mean
         v3              m_Last{ 0, 0, 0 };          // the last sample, while watching
         v3              m_Ref{ 0, 0, 0 };           // the light when the change came (what a real change differs from)
+        float           m_PrevLuma = 0, m_DiffSq = 0;   // while watching: the last sample's luminance, the sum of the squared steps between
+        std::uint16_t   m_nDiff = 0;                    // samples that did not deviate, and their count (the samples' noise: a change is beyond it)
 
         // A value carried over (a level switch, a new layout): it continues as settled light
         void Seed(const v3& E) noexcept { m_Mean = m_Short = E; m_Variance = { 0, 0, 0 }; m_Vbbr = 1; m_Inconsistency = 0; m_N = warmup_passes_v; }
@@ -437,7 +440,7 @@ namespace xlionrender::gi
         {
             const int k = std::max(1, int((1.0f - std::clamp(a, 0.0f, 1.0f)) * float(warmup_passes_v)));
             if (m_N > k) m_N = std::uint16_t(k);
-            if (m_N > 0) { m_bWatch = true; m_Streak = 0; m_Ref = m_Mean; }
+            if (m_N > 0) { m_bWatch = true; m_bTook = false; m_Streak = 0; m_Ref = m_Mean; m_DiffSq = 0; m_nDiff = 0; m_PrevLuma = -1; }
         }
 
         // MinBlend: the warm-up's blend never below it (1: every sample replaces, no history)
@@ -447,11 +450,21 @@ namespace xlionrender::gi
             if (m_bWatch)
             {
                 const auto Luma = [](const v3& c) { return 0.299f * c.m_X + 0.587f * c.m_Y + 0.114f * c.m_Z; };
-                const float D = Luma(y) - Luma(m_Ref);
-                const std::int8_t Sign = std::abs(D) > 0.5f * std::max(Luma(m_Ref), 1e-3f) ? (D > 0 ? 1 : -1) : 0;
-                if (Sign != 0 && Sign == m_Streak)
+                // a change differs from the light by half of it and by three times the samples' noise (from the steps between those
+                // that did not deviate: a step is about sqrt(2) noise for noise, small for a ramp, one jump for a change of level)
+                const float Ly = Luma(y), D = Ly - Luma(m_Ref);
+                const float Noise = m_nDiff >= 3 ? std::sqrt(m_DiffSq / (2.0f * float(m_nDiff))) : 0.0f;
+                const std::int8_t Sign = std::abs(D) > std::max(0.5f * std::max(Luma(m_Ref), 1e-3f), 3.0f * Noise) ? (D > 0 ? 1 : -1) : 0;
+                if (Sign == 0 && m_PrevLuma >= 0) { m_DiffSq += (Ly - m_PrevLuma) * (Ly - m_PrevLuma); ++m_nDiff; }
+                m_PrevLuma = Ly;
+                // two in a row the same way that agree with each other (a new level, not noise: a noisy surfel's samples rarely agree).
+                // Taken, what the next one differs from is the warm-up's mean from there (it follows a ramp, take by take). It used to
+                // stay the light before the change: a noisy surfel took a "change" every few passes, its light two samples' mean for
+                // ever - the flicker (Police: 2/3 of its surfels)
+                if (Sign != 0 && Sign == m_Streak && std::abs(Luma(y) - Luma(m_Last)) < 0.5f * std::abs(D) && (!m_bTook || m_N >= 4))     // (after a take, 4 samples of its mean first)
                 {
                     m_Mean = m_Short = (m_Last + y) * 0.5f; m_Variance = { 0, 0, 0 }; m_N = 2; m_Streak = 0; m_Last = y; ++m_nTaken;
+                    m_bTook = true; m_Ref = m_Mean;
                     return;
                 }
                 m_Streak = Sign; m_Last = y;
@@ -464,6 +477,7 @@ namespace xlionrender::gi
                 // the multiscale blend starts from no variance (as before the merge): the light is still building up (each bounce
                 // lights the next), and a large variance measured from 8-ray samples would make it slow to follow
                 m_Short = m_Mean; m_Variance = { 0, 0, 0 }; m_Vbbr = 1; m_Inconsistency = 0;
+                if (m_bTook) m_Ref = m_Mean;
                 if (m_N >= warmup_passes_v) m_bWatch = false;
                 return;
             }
@@ -2119,7 +2133,7 @@ namespace xlionrender::gi
             if (f == nullptr) return -1;
             std::fprintf(f, "# RaysPerSurfel=%d FilterPasses=%d EmissiveScale=%g SpreadOrigins=%d LodDistance=%g\n"
                         , m_Setup.m_RaysPerSurfel, m_Setup.m_FilterPasses, m_Setup.m_EmissiveScale, int(m_Setup.m_bSpreadOrigins), m_Setup.m_LodDistance);
-            std::fprintf(f, "inst,level,surfel,px,py,pz,nx,ny,nz,radius,er,eg,eb,fr,fg,fb,valid,ar,ag,ab,xr,xg,xb\n");      // x: the captured emission (before EmissiveScale)
+            std::fprintf(f, "inst,level,surfel,px,py,pz,nx,ny,nz,radius,er,eg,eb,fr,fg,fb,valid,ar,ag,ab,xr,xg,xb,n,watch,short,dev\n");      // x: the captured emission (before EmissiveScale)
             int n = 0;
             for (int Id = 0; Id < InstanceCount(); ++Id)
             {
@@ -2133,10 +2147,12 @@ namespace xlionrender::gi
                     const v3 A = I.m_Level == 0 && s < I.m_SurfAlbedo.size() ? I.m_SurfAlbedo[s] : I.m_Albedo;
                     const v3 Fs = s < F.size() ? F[s] : v3{ 0, 0, 0 };
                     const v3 X  = I.m_Level == 0 && s < I.m_SurfEmission.size() ? I.m_SurfEmission[s] : v3{ 0, 0, 0 };
-                    std::fprintf(f, "%d,%d,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g\n"
+                    std::fprintf(f, "%d,%d,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%d,%d,%.6g,%.6g\n"
                                 , Id, I.m_Level + (I.m_bCube ? 1 : 0), s, P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z, L[s].m_Radius * I.m_MeanScale
                                 , I.m_E[s].m_X, I.m_E[s].m_Y, I.m_E[s].m_Z, Fs.m_X, Fs.m_Y, Fs.m_Z
-                                , s < I.m_Valid.size() ? I.m_Valid[s] : 0.0f, A.m_X, A.m_Y, A.m_Z, X.m_X, X.m_Y, X.m_Z);
+                                , s < I.m_Valid.size() ? I.m_Valid[s] : 0.0f, A.m_X, A.m_Y, A.m_Z, X.m_X, X.m_Y, X.m_Z
+                                , s < I.m_Est.size() ? int(I.m_Est[s].m_N) : -1, s < I.m_Est.size() ? int(I.m_Est[s].m_bWatch) : 0     // (its estimator: samples, watching, short mean, deviation: luminance)
+                                , s < I.m_Est.size() ? Lum(I.m_Est[s].m_Short) : 0.0f, s < I.m_Est.size() ? std::sqrt(std::max(0.0f, Lum(I.m_Est[s].m_Variance))) : 0.0f);
                 }
             }
             std::fclose(f);
@@ -2302,7 +2318,7 @@ namespace xlionrender::gi
         //             (5, 7, 8, 10..13: PackGPUSetup)
         //   lights:   sun direction 3, sun color 3, sky 3, sky oct 48, then per point position 3, color 3, radius
         // ponytail: the whole scene every call (G3 keeps it resident and uploads changes)
-        static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 48, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 21;
+        static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 48, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 24;
         static constexpr int gpu_lanes_v = 8, gpu_group_v = 64;    // the pass: invocations per item, per group (a dispatch: GPUGroups)
         static constexpr int GPUGroups(std::size_t nItems) noexcept { return int((nItems * gpu_lanes_v + gpu_group_v - 1) / gpu_group_v); }
         struct gpu_item { int m_Inst = 0, m_Surf = 0, m_Level = 0, m_Rays = 0; float m_Off1 = 0, m_Off2 = 0; int m_Shift = 0, m_Pad = 0; };
@@ -2504,22 +2520,24 @@ namespace xlionrender::gi
         }
 
         // G4: an estimator as gpu_est_v words (the GPU's commit, shaders/xlionrender_gi_commit_comp.glsl): mean 3, short 3, variance 3, vbbr,
-        // inconsistency, n, streak, taken, watch, last 3, ref 3
+        // inconsistency, n, streak, taken, watch (bit 0) and took (bit 1), last 3, ref 3, the noise's last luminance, sum, count
         static void PackEst(const estimator& E, std::uint32_t* p) noexcept
         {
             const auto F = [](float f) { return std::bit_cast<std::uint32_t>(f); };
             const v3* V[] = { &E.m_Mean, &E.m_Short, &E.m_Variance };
             for (int k = 0; k < 3; ++k) { p[3 * k] = F(V[k]->m_X); p[3 * k + 1] = F(V[k]->m_Y); p[3 * k + 2] = F(V[k]->m_Z); }
-            p[9] = F(E.m_Vbbr); p[10] = F(E.m_Inconsistency); p[11] = E.m_N; p[12] = std::uint32_t(std::int32_t(E.m_Streak)); p[13] = E.m_nTaken; p[14] = E.m_bWatch ? 1u : 0u;
+            p[9] = F(E.m_Vbbr); p[10] = F(E.m_Inconsistency); p[11] = E.m_N; p[12] = std::uint32_t(std::int32_t(E.m_Streak)); p[13] = E.m_nTaken; p[14] = (E.m_bWatch ? 1u : 0u) | (E.m_bTook ? 2u : 0u);
             p[15] = F(E.m_Last.m_X); p[16] = F(E.m_Last.m_Y); p[17] = F(E.m_Last.m_Z); p[18] = F(E.m_Ref.m_X); p[19] = F(E.m_Ref.m_Y); p[20] = F(E.m_Ref.m_Z);
+            p[21] = F(E.m_PrevLuma); p[22] = F(E.m_DiffSq); p[23] = E.m_nDiff;
         }
         static void UnpackEst(const std::uint32_t* p, estimator& E) noexcept
         {
             const auto F = [](std::uint32_t u) { return std::bit_cast<float>(u); };
             v3* V[] = { &E.m_Mean, &E.m_Short, &E.m_Variance };
             for (int k = 0; k < 3; ++k) *V[k] = { F(p[3 * k]), F(p[3 * k + 1]), F(p[3 * k + 2]) };
-            E.m_Vbbr = F(p[9]); E.m_Inconsistency = F(p[10]); E.m_N = std::uint16_t(p[11]); E.m_Streak = std::int8_t(std::int32_t(p[12])); E.m_nTaken = std::uint16_t(p[13]); E.m_bWatch = p[14] != 0;
+            E.m_Vbbr = F(p[9]); E.m_Inconsistency = F(p[10]); E.m_N = std::uint16_t(p[11]); E.m_Streak = std::int8_t(std::int32_t(p[12])); E.m_nTaken = std::uint16_t(p[13]); E.m_bWatch = (p[14] & 1u) != 0; E.m_bTook = (p[14] & 2u) != 0;
             E.m_Last = { F(p[15]), F(p[16]), F(p[17]) }; E.m_Ref = { F(p[18]), F(p[19]), F(p[20]) };
+            E.m_PrevLuma = F(p[21]); E.m_DiffSq = F(p[22]); E.m_nDiff = std::uint16_t(p[23]);
         }
 
         // G4: a change to the estimators the world made (estimator::Lower: at a dirty instance's pass, by ApplyAffect), for the GPU's

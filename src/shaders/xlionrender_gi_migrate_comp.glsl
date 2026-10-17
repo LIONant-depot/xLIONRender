@@ -10,7 +10,7 @@ layout(std430, set = 0, binding = 0) readonly buffer old_b  { uint GO[]; };
 layout(std430, set = 0, binding = 1)          buffer new_b  { uint GD[]; };
 layout(std430, set = 0, binding = 2) readonly buffer jobs_b { ivec4 GIJobs[]; };       // kind 0: old word, new word, count; kind 1: old record, new record
 
-const uint gi_est_v = 21u;
+const uint gi_est_v = 24u;
 
 vec3 OV(uint i) { return vec3(uintBitsToFloat(GO[i]), uintBitsToFloat(GO[i + 1u]), uintBitsToFloat(GO[i + 2u])); }
 void PV(uint i, vec3 v) { GD[i] = floatBitsToUint(v.x); GD[i + 1u] = floatBitsToUint(v.y); GD[i + 2u] = floatBitsToUint(v.z); }
@@ -51,6 +51,6 @@ void main()
         for (uint q = 0u; q < 9u; ++q) GD[GD[Rn + 41u] + 9u * s + q] = floatBitsToUint(1.0 / 3.0);
         const uint Eo = GD[Rn + 42u] + gi_est_v * s;          // estimator::Seed of a new one
         PV(Eo, E); PV(Eo + 3u, E); PV(Eo + 6u, vec3(0)); GD[Eo + 9u] = floatBitsToUint(1.0); GD[Eo + 10u] = 0u;
-        GD[Eo + 11u] = GD[9]; GD[Eo + 12u] = 0u; GD[Eo + 13u] = 0u; GD[Eo + 14u] = 0u; PV(Eo + 15u, vec3(0)); PV(Eo + 18u, vec3(0));
+        GD[Eo + 11u] = GD[9]; GD[Eo + 12u] = 0u; GD[Eo + 13u] = 0u; GD[Eo + 14u] = 0u; PV(Eo + 15u, vec3(0)); PV(Eo + 18u, vec3(0)); GD[Eo + 21u] = 0u; GD[Eo + 22u] = 0u; GD[Eo + 23u] = 0u;
     }
 }

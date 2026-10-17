@@ -17,7 +17,7 @@ layout(push_constant) uniform push_t { int m_RangeFirst, m_nRanges, m_nThreads, 
 
 const uint  gi_inst_v = 48u;
 const int   gi_range_urgent_v = 1, gi_range_settled_v = 2;
-const uint  gi_est_v  = 21u;
+const uint  gi_est_v  = 24u;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
 vec3  GV(uint i) { return vec3(uintBitsToFloat(GD[i]), uintBitsToFloat(GD[i + 1u]), uintBitsToFloat(GD[i + 2u])); }
@@ -58,7 +58,7 @@ void main()
     if ((GD[11] & 1u) != 0u)
     {
         const uint Eo = GD[R + 42u] + gi_est_v * u;
-        if (GD[Eo + 11u] >= GD[9] && GD[Eo + 14u] == 0u)
+        if (GD[Eo + 11u] >= GD[9] && (GD[Eo + 14u] & 1u) == 0u)     // (settled, not watching: word 14's bit 0)
         {
             const vec3 Mn = GV(Eo), Vr = GV(Eo + 6u);
             const float Mean = 0.299 * Mn.x + 0.587 * Mn.y + 0.114 * Mn.z;

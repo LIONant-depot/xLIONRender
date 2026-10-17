@@ -11,7 +11,7 @@ layout(std430, set = 0, binding = 1) readonly buffer ops_b  { ivec4 GIOps[]; }; 
 layout(push_constant) uniform push_t { int m_nOps, m_Pad0, m_Pad1, m_Pad2; } Push;
 
 const uint gi_inst_v = 48u;          // gi::world::gpu_inst_v
-const uint gi_est_v  = 21u;
+const uint gi_est_v  = 24u;
 
 void main()
 {
@@ -24,6 +24,7 @@ void main()
     const uint  k = uint(max(1, int((1.0 - a) * float(GD[9]))));
     const uint Eo = GD[Rec + 42u] + gi_est_v * u;
     const uint Old = atomicMin(GD[Eo + 11u], k);
-    if (Old > 0u) { GD[Eo + 14u] = 1u; GD[Eo + 12u] = 0u; GD[Eo + 18u] = GD[Eo]; GD[Eo + 19u] = GD[Eo + 1u]; GD[Eo + 20u] = GD[Eo + 2u]; }
+    if (Old > 0u) { GD[Eo + 14u] = 1u; GD[Eo + 12u] = 0u; GD[Eo + 18u] = GD[Eo]; GD[Eo + 19u] = GD[Eo + 1u]; GD[Eo + 20u] = GD[Eo + 2u];
+                    GD[Eo + 21u] = floatBitsToUint(-1.0); GD[Eo + 22u] = 0u; GD[Eo + 23u] = 0u; }     // (the noise's measure again)
     if (Op.w != 0) { const uint Mc = GD[Rec + 43u] + 16u * u; for (uint t = 0u; t < 16u; ++t) GD[Mc + t] = 0u; }
 }

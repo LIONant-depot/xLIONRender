@@ -19,7 +19,7 @@ layout(push_constant) uniform push_t { int m_nItems, m_First, m_Count, m_Pad; } 
 
 const uint  gi_inst_v  = 48u;        // gi::world::gpu_inst_v
 const uint  gi_none_v  = 0xFFFFFFFFu;
-const uint  gi_est_v   = 21u;        // gi::world::gpu_est_v (PackEst)
+const uint  gi_est_v   = 24u;        // gi::world::gpu_est_v (PackEst)
 const float gi_pi_v    = 3.14159265;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
@@ -54,8 +54,9 @@ void main()
     const uint Eo = GD[Rec + 42u] + gi_est_v * u;
     vec3 Mean = GV(Eo), Short = GV(Eo + 3u), Var = GV(Eo + 6u);
     float Vbbr = GF(Eo + 9u), Inc = GF(Eo + 10u);
-    uint  N = GD[Eo + 11u]; int Streak = int(GD[Eo + 12u]); uint nTaken = GD[Eo + 13u]; bool bWatch = GD[Eo + 14u] != 0u;
+    uint  N = GD[Eo + 11u]; int Streak = int(GD[Eo + 12u]); uint nTaken = GD[Eo + 13u]; bool bWatch = (GD[Eo + 14u] & 1u) != 0u, bTook = (GD[Eo + 14u] & 2u) != 0u;
     vec3  Last = GV(Eo + 15u), Ref = GV(Eo + 18u);
+    float PrevL = GF(Eo + 21u), DiffSq = GF(Eo + 22u); uint nDiff = GD[Eo + 23u];
     const float MinBlend = GF(8u);
     const uint  Warm     = GD[9];
     const float Conf = max(1.0 / float(N + 1u), MinBlend);
@@ -66,9 +67,12 @@ void main()
         bool bDone = false;
         if (bWatch)
         {
-            const float D = Luma(y) - Luma(Ref);
-            const int Sign = abs(D) > 0.5 * max(Luma(Ref), 1e-3) ? (D > 0.0 ? 1 : -1) : 0;
-            if (Sign != 0 && Sign == Streak) { Mean = (Last + y) * 0.5; Short = Mean; Var = vec3(0); N = 2u; Streak = 0; Last = y; ++nTaken; bDone = true; }
+            const float Ly = Luma(y), D = Ly - Luma(Ref);          // (estimator::Add: beyond half the light and 3 times the samples' noise)
+            const float Noise = nDiff >= 3u ? sqrt(DiffSq / (2.0 * float(nDiff))) : 0.0;
+            const int Sign = abs(D) > max(0.5 * max(Luma(Ref), 1e-3), 3.0 * Noise) ? (D > 0.0 ? 1 : -1) : 0;
+            if (Sign == 0 && PrevL >= 0.0) { DiffSq += (Ly - PrevL) * (Ly - PrevL); ++nDiff; }
+            PrevL = Ly;
+            if (Sign != 0 && Sign == Streak && abs(Luma(y) - Luma(Last)) < 0.5 * abs(D) && (!bTook || N >= 4u)) { Mean = (Last + y) * 0.5; Short = Mean; Var = vec3(0); N = 2u; Streak = 0; Last = y; ++nTaken; bTook = true; Ref = Mean; bDone = true; }     // (estimator::Add: they agree; the next differs from the mean)
             else { Streak = Sign; Last = y; }
         }
         if (!bDone && N < Warm)
@@ -77,6 +81,7 @@ void main()
             const float a = max(1.0 / float(N), MinBlend);
             Mean = Mean + (y - Mean) * a;
             Short = Mean; Var = vec3(0); Vbbr = 1.0; Inc = 0.0;
+            if (bTook) Ref = Mean;
             if (N >= Warm) bWatch = false;
             bDone = true;
         }
@@ -99,7 +104,7 @@ void main()
         }
     }
     PV(Eo, Mean); PV(Eo + 3u, Short); PV(Eo + 6u, Var); PF(Eo + 9u, Vbbr); PF(Eo + 10u, Inc);
-    GD[Eo + 11u] = N; GD[Eo + 12u] = uint(Streak); GD[Eo + 13u] = nTaken; GD[Eo + 14u] = bWatch ? 1u : 0u; PV(Eo + 15u, Last); PV(Eo + 18u, Ref);
+    GD[Eo + 11u] = N; GD[Eo + 12u] = uint(Streak); GD[Eo + 13u] = nTaken; GD[Eo + 14u] = (bWatch ? 1u : 0u) | (bTook ? 2u : 0u); PV(Eo + 15u, Last); PV(Eo + 18u, Ref); PF(Eo + 21u, PrevL); PF(Eo + 22u, DiffSq); GD[Eo + 23u] = nDiff;
 
     // the light, the validity (on a transparent material: none), the fractions per basis direction, the moments
     PV(GD[Rec + 2u] + 3u * u, Mean);
