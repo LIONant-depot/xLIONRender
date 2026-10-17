@@ -100,7 +100,8 @@ void main()
             const float x = clamp(Relative * max(0.02, Inc - 0.2), 0.0, 1.0);
             const float CatchUp = clamp(x * x * (3.0 - 2.0 * x), 1.0 / 256.0, 1.0) * Vbbr;
             Vbbr += (VbbrT - Vbbr) * 0.1;
-            Mean = Mean + (y - Mean) * clamp(CatchUp, 0.0, 1.0);
+            if (N < 256u) ++N;                                      // (gi::running_cap_v: the running mean under the blend)
+            Mean = Mean + (y - Mean) * clamp(max(CatchUp, 1.0 / float(N)), 0.0, 1.0);
         }
     }
     PV(Eo, Mean); PV(Eo + 3u, Short); PV(Eo + 6u, Var); PF(Eo + 9u, Vbbr); PF(Eo + 10u, Inc);

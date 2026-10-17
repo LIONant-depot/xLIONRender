@@ -255,6 +255,8 @@ int main()
         const auto P = [&](const char* pName, const std::vector<double>& m, const std::vector<double>& F)
         { std::printf("  %-15s peak after the captures %.2fx, within 5%% from update %3d (of 200); at 200 its mean %.3fx, off by %.1f%% (rms)\n", pName, Peak(m), Within(m, 0.05), m.back() / Ref, 100 * Rms(F)); };
         P("captured first", MA, FA); P("streamed", MB, FB); P("provisional", MC, FC);
+        // (the estimator's running mean, gi::running_cap_v: without it the captured-first room was 8.0 % off at 200 updates, its light frozen short)
+        CHECK(Rms(FA) < 0.07, "captured first: the light is %.1f%% off the 800 updates' after 200 (rms)", 100 * Rms(FA));
         CHECK(Peak(MC) < 1.05, "provisional materials: the light overshoots %.2fx after the captures", Peak(MC));
         CHECK(Within(MC, 0.05) <= Within(MB, 0.05), "provisional materials: within 5%% from update %d, streamed from %d", Within(MC, 0.05), Within(MB, 0.05));
         CHECK(std::abs(MC.back() / Ref - 1) <= std::abs(MA.back() / Ref - 1) + 0.02 && Rms(FC) <= Rms(FA) + 0.02, "provisional materials: at 200 updates the mean %.3fx and %.1f%% off (rms), captured first %.3fx and %.1f%%", MC.back() / Ref, 100 * Rms(FC), MA.back() / Ref, 100 * Rms(FA));

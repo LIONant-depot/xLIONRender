@@ -409,6 +409,7 @@ namespace xlionrender::gi
     // catches up). Samples far above the noise are clipped (fireflies).
     enum class role : std::uint8_t { ASSET = 0, RECEIVER = 1, FULL = 2 };     // Phase 5: scene::gi_role (an instance's transport, over its mesh's m_bBounce)
     constexpr int warmup_passes_v = 16;     // after a change: the estimator's first samples are averaged (1 / n), its multiscale blend after
+    constexpr int running_cap_v   = 256;    // the multiscale blend never below 1 / n of the samples since the change, up to this (estimator::Add)
 
     // A surfel's light over time: one estimator for both regimes (documentation/gi_dynamic_master_plan.md, Phase 2b). After a change
     // (Restart) the first warmup_passes_v samples are averaged exactly (1 / n: the fastest unbiased start), then the multiscale blend
@@ -498,7 +499,12 @@ namespace xlionrender::gi
             const float x = std::clamp(Relative * std::max(0.02f, m_Inconsistency - 0.2f), 0.0f, 1.0f);
             const float CatchUp = std::clamp(x * x * (3 - 2 * x), 1.0f / 256, 1.0f) * m_Vbbr;
             m_Vbbr += (Vbbr - m_Vbbr) * 0.1f;
-            m_Mean = m_Mean + (y - m_Mean) * std::clamp(CatchUp, 0.0f, 1.0f);
+            // The running mean under the blend (gi_dynamic_master_plan.md 7a): the samples keep counting past the warm-up, up to
+            // running_cap_v, and the mean follows each by 1 / n at least. The multiscale blend alone fell to 1 / 256 x Vbbr (as low as
+            // 1 / 8192) while the bounces still built up below the samples' noise: the light froze short of its level (the room 8 % off
+            // after 200 updates, 5.8 % with this; the flicker test's limits hold)
+            if (m_N < running_cap_v) ++m_N;
+            m_Mean = m_Mean + (y - m_Mean) * std::clamp(std::max(CatchUp, 1.0f / float(m_N)), 0.0f, 1.0f);
         }
     };
     constexpr int link_unit_first_v = 16;   // the link build's first chunk of receiver surfels, before their cost is measured

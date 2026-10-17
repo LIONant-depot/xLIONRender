@@ -1346,6 +1346,38 @@ agreement". The measurements below found simpler causes to fix first.
   2. the batch's tail (frames that leave the GPU budget unused);
   3. a reference allowed to converge.
 
+**The estimator's lag done (2026-10-17): the running mean under the blend**
+- The cause:
+  - After the warm-up, the multiscale blend followed new samples at `CatchUp × Vbbr`, as low as 1/256 × 1/32.
+  - While the bounces still built up below the samples' noise, the light froze short of its level.
+  - The 64-lamp floor's light rose with any floor put under the blend (1.63 → 1.68 → 1.73): it had settled low.
+- The fix: the sample count keeps counting past the warm-up up to `running_cap_v` (256), and the mean follows each sample by
+  1/n at least. The multiscale catch-up still takes over for real changes, and `Lower` resets the count. The CPU estimator and
+  the GPU commit shader do the same.
+- The variants measured (`xlionrender_test_gi_flicker`, the room captured first, against 800 updates):
+
+  | Variant | Rms at 200 updates | Within 5 % from update | Sampling flicker, p90 |
+  |---|---|---|---|
+  | today | 8.0 % | 183 | 0.35 % |
+  | floor 1/64 | | | 1.26 % (fails) |
+  | floor 1/32 | | | 2.39 % (fails) |
+  | warm-up floor 1/8 | 7.1 % | 140 | 0.34 % |
+  | running mean, cap 128 | 6.6 % | 126 | 0.68 % |
+  | **running mean, cap 256** | **5.8 %** | **108** | **0.54 %** |
+  | running mean, cap 64 | | | 1.26 % (fails) |
+
+  - With cap 256, the room's shown light is unchanged (p90 0.08 %), and the exact emitters' light is 5.9 % off at 120 updates
+    (7.8 % before).
+  - The test now checks the captured-first room under 7 % at 200 updates.
+- Police (`gi_startup.py`, effective GI time, between and within groups):
+  - Captures first: 14.6 %, 16.1 % at 1.9 s; 8.9 %, 11.8 % at 4.0 s; 5.6 %, 8.7 % at 8.1 s. Before: 10.2 %, 13.0 % at 4.3 s and
+    5.5 %, 8.1 % at 12.5 s. The same error about a third sooner.
+  - Streamed with readiness: 14.6 %, 10.6 % at 7.7 s (before: 19 % at 5.3 s, 13 % at 10.4 s).
+- Next in this line:
+  - the batch's tail (about a third of the frames use 0.9 ms of the 2 ms GPU budget);
+  - the compression survey's top items (light in RGB9E5, a 16 B surfel record);
+  - a reference allowed to converge.
+
 ## 7b. Reflections (2026-10-17)
 
 **Layer 1 done: rough reflections from the surfel cache**
