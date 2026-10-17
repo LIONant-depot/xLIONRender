@@ -784,29 +784,58 @@ moment). A GPU ray here is a whole ray of the pass: the cast, the shadow rays, t
   - A GPU that stays at low clocks in the editor. Nothing in the application can control that; a game that loads the GPU
     runs at full clocks.
 
-**G4 design** (2026-10-17).
-- **The commit on the GPU.** A commit shader runs after each slice's pass. It is the port of `Update`'s commit loop and of
-  `FinishPass`: the emitted light from the links (`m_EmitB`, uploaded when it changes), E = π·mean(L), the validity, the
-  estimator (`estimator::Add`), the basis fractions, the moments, and the transparent surfels.
-- **The GPU owns the light; the CPU keeps a mirror.**
-  - The commit writes each surfel's whole state (E, validity, fractions, estimator, moments, moment counts) into a readback
-    record. `Collect` copies it into the world, and `Update` only does the bookkeeping: the means' deltas, the last pass,
-    the bad counts.
-  - The CPU's policy reads the mirror: the adaptive rays, the level switch, the cube.
-- **The events become ops.**
-  - A change that lowers estimators (`estimator::Lower`, at the pick and in `ApplyAffect`) is applied to the mirror, and it
-    also goes to the GPU as an op (instance or surfel, a), which a small shader applies. Both sides are deterministic, so
-    no state is uploaded for it.
-  - A new layout (a level switch, `Resize`, `ResetMoments`) repacks the instance from the mirror.
-  - A cube's expanded parents go up every update.
-- **The shown light on the GPU.**
-  - A filter shader makes every instance's shown basis from E, the fractions and the validity, in the passes of
-    `UpdateShown`, with the neighbor lists uploaded with the scene. It writes the result straight into the renderer's ring
-    slot for the frame, with the moments (as halves).
-  - The CPU's `UpdateShown` and the ring writes for those instances are skipped in GPU mode.
-  - ponytail: the whole filter of every instance with a change, every frame. That is about 2.5M neighbor reads for Police;
-    the dirty-only version can come when it shows.
-- **Mobile.** A budget is declared (`m_GPUBudgetMs`); there is no mobile device here to measure it on.
+**G4a, G4b as built** (2026-10-17).
+- **The commit on the GPU** (`shaders/xlionrender_gi_commit_comp.glsl`). It runs after each slice's pass and ports `FinishPass`
+  and `Update`'s commit loop, `estimator::Add` included. The record grew to 47 words: fractions, estimators (`PackEst`, 21
+  words), moment counts, the links' emitted light (re-sent when `EmitGen` changes), the transparent surfels' bits.
+- **The world's copy.** Each committed surfel's state comes back (`gpu_state`, 91 words) and `DeliverGPUState` copies it
+  in. `Update` only does the bookkeeping for those (`m_bCommitted`).
+- **The estimator changes as ops** (`TakeGPUOps`; `shaders/xlionrender_gi_ops_comp.glsl`): `Lower` at a dirty instance's
+  pass and in `ApplyAffect`, with the moment counts' reset.
+  - The world applies an op to its copy at once; the GPU applies it before the next slice.
+  - A change made while a slice is in flight (the renderer's material captures come after the dispatch) comes back without
+    the op, so `DeliverGPUState` applies the ops the GPU has not had yet again (both are the same applied twice).
+    Without that, the repack from the copy lost them: the render test's light was 3 % darker and asked for 18 % fewer rays.
+- **The shown light on the GPU** (`shaders/xlionrender_gi_filter_comp.glsl`, `gpu_trace::Show`).
+  - Pass 0, the filter passes (the meshes' neighbor lists, packed with the scene), then saturated.
+  - It is written straight into the renderer's ring with the moments (the CPU's `Half`, bit for bit). The CPU writes only
+    each instance's mean entry.
+  - `m_Setup.m_bGPUShown` skips `UpdateShown`.
+  - ponytail: every instance's whole filter every frame. The dirty-only version can come when it shows.
+- **`m_GPUBudgetMs = 0`** means no limit: every batch in one slice, as `m_TraceAllowanceMs = 0` does for the CPU (the render
+  test uses it).
+- **Tests** (`xlionrender_test_gi_trace`). In each, the GPU world matches the CPU world on every surfel (light, validity,
+  estimator):
+  - the Cornell box after 24 updates, with the adaptive rays and the tiers on;
+  - the Cornell box with events: a wall recolored, another's triangles captured in two chunks, one recolored while a slice
+    is in flight, the box moved, the coarse level. Without the re-applied ops, 44 of 48 surfels differ;
+  - the render test's room;
+  - and the GPU's shown light against the CPU's filter of the same state: 3e-7, and 0 moment words differ.
+
+**G4a, G4b results** (Police, Debug editor, 2 ms budget):
+
+| | G3 | G4a + G4b |
+|---|---|---|
+| Rays per second | 450–600k | 890–910k |
+| GI main thread per frame | 8 ms | 4.6 ms: the pick 1.9, `Collect` + `Submit` 2.2, the filter 0 |
+| Surfels committed per frame | 1,150–1,300 | 2,300 |
+
+- 8M rays are now about 9 s.
+- For 1 s, the GPU must commit about 20k surfels a frame. The CPU's remaining work is per surfel (the pick, the list, the
+  copy), at about 2 µs a surfel in Debug: 40 ms. So it must go.
+
+**G4c design.** No per-surfel work on the CPU.
+- **The pick hands out instance ranges.** The CPU keeps the policy per instance: order, fairness, budget, cursor, the urgent
+  lists, which are few. An expand shader turns the ranges into the batch's items: the tiers, the adaptive rays and the
+  buried surfels' period from the GPU's estimators and validity. The item seeds become a hash of (update seed, instance,
+  surfel); the CPU's pick uses the same hash, so the two worlds still compare.
+- **The world's copy goes.**
+  - The means come from a GPU reduction per instance (read back: 4 words an instance).
+  - The bad counts come from the same reduction.
+  - A repack moves each instance's state on the GPU from the old layout to the new one (a migrate shader). A level switch
+    remaps it (children from their parent; a parent the mean of its children). The cube is expanded there.
+  - The accessors the tests and DumpGI use (`InstanceLight`, `Estimator`, …) read the GPU's state back on demand.
+- **Mobile.** The budget is declared (`m_GPUBudgetMs`). There is no mobile device here to measure it on.
 
 **Risks.**
 - xGPU has no compute path yet. It declares a compute stage, but nothing creates a compute pipeline or dispatches one.

@@ -26,7 +26,7 @@ layout(std430, set = 0, binding = 6) writeonly buffer results_b   { GIResult   G
 layout(push_constant) uniform push_t { int m_nItems, m_TlasRoot, m_PrimOffset, m_First; } Push;     // (m_First: this dispatch's first item, a slice of the batch)
 
 const uint  gi_none_v = 0xFFFFFFFFu;
-const uint  gi_inst_v = 41u;
+const uint  gi_inst_v = 47u;                 // gi::world::gpu_inst_v
 const float gi_pi_v   = 3.14159265;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }

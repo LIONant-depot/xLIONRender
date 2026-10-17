@@ -13,6 +13,15 @@ namespace xlionrender
         constexpr std::uint32_t s_GIScatterComp[] = {
             #include "xlionrender_gi_scatter_comp.h"
         };
+        constexpr std::uint32_t s_GICommitComp[] = {
+            #include "xlionrender_gi_commit_comp.h"
+        };
+        constexpr std::uint32_t s_GIOpsComp[] = {
+            #include "xlionrender_gi_ops_comp.h"
+        };
+        constexpr std::uint32_t s_GIFilterComp[] = {
+            #include "xlionrender_gi_filter_comp.h"
+        };
 
         // FNV-1a over a caster's identity and state: a different value is a different (or moved) caster
         std::uint64_t Hash(std::uint64_t H, const void* pData, std::size_t Size) noexcept
@@ -96,6 +105,18 @@ namespace xlionrender
         if( !m_pGIWorld ) m_pGIWorld = std::make_unique<gi::world>();
         auto& W = *m_pGIWorld;
         ++m_GIRender;
+        if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
+        {
+            m_pGITrace = std::make_unique<gi::gpu_trace>();
+            if( !m_pGITrace->Init(m_Device, s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp) ) { m_pGITrace.reset(); m_bGITraceFailed = true; }
+        }
+        const bool          bGPU    = Scene.m_GI.m_bGPUTrace && m_pGITrace;
+        const std::uint64_t GIFrame = m_Device.getFrameIndex();
+        W.m_Setup.m_bGPUTrace = bGPU;
+        W.m_Setup.m_bGPUShown = bGPU;                               // (G4: the shown light too: Show below, straight into the ring)
+        const auto TCollect = std::chrono::steady_clock::now();
+        if( m_pGITrace ) m_pGITrace->Collect(W, GIFrame);         // (the GPU's last slice: also after the GPU was turned off, what it traced is still delivered)
+        const double CollectMs = MsSince(TCollect);
 
         std::vector<int> DrawId(Scene.m_Draws.size(), -1);
         for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
@@ -190,24 +211,14 @@ namespace xlionrender
             W.m_Setup.m_EmissiveScale = Scene.m_GI.m_EmissiveScale;
             W.DirtyAll();
         }
-        // G3 (gi_dynamic_master_plan.md): the rays on the GPU, over frames. The last frame's slice into the world, the update (it commits
-        // what came in, picks when the batch is all in), this frame's slice dispatched (the light the update committed uploaded first)
-        if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
-        {
-            m_pGITrace = std::make_unique<gi::gpu_trace>();
-            if( !m_pGITrace->Init(m_Device, s_GISurfelPassComp, s_GIScatterComp) ) { m_pGITrace.reset(); m_bGITraceFailed = true; }
-        }
-        const bool          bGPU  = Scene.m_GI.m_bGPUTrace && m_pGITrace;
-        const std::uint64_t GIFrame = m_Device.getFrameIndex();
-        W.m_Setup.m_bGPUTrace = bGPU;
-        const auto TCollect = std::chrono::steady_clock::now();
-        if( m_pGITrace ) m_pGITrace->Collect(W, GIFrame);         // (also after the GPU was turned off: what it traced is still delivered)
-        const double CollectMs = MsSince(TCollect);
-        m_GIStats = W.Update(L, Eye, bGPU ? m_pGITrace->BatchRays() : Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));
+        // G3, G4 (gi_dynamic_master_plan.md): the rays on the GPU, over frames. This frame's slice dispatched after the update (it commits
+        // what came in, picks when the batch is all in); the last frame's slice into the world before it (Collect, at the top: before
+        // anything here changes the world, whose copy of the GPU's state must be current first)
+        m_GIStats = W.Update(L, Eye, bGPU && Scene.m_GI.m_GPUBudgetMs > 0 ? m_pGITrace->BatchRays() : Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));     // (no GPU budget: the scene's rays, a slice each)
         if( bGPU )
         {
             const auto TSubmit = std::chrono::steady_clock::now();
-            m_pGITrace->Submit(Window, W, L, GIFrame, std::max(Scene.m_GI.m_GPUBudgetMs, 0.05f));
+            m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs);
             m_GIStats.m_GPUTraceMs = m_pGITrace->LastMs(); m_GIStats.m_GPUPacks = m_pGITrace->Packs(); m_GIStats.m_GPUCpuMs = CollectMs + MsSince(TSubmit);
             m_GIStats.m_GPUSliceRays = m_pGITrace->LastRays();
             for( int w = 0; w < 4; ++w ) m_GIStats.m_GPUWork[w] = m_pGITrace->Work()[std::size_t(w)];
@@ -223,7 +234,7 @@ namespace xlionrender
             for( int t = 0; t < gi::moment_texels_v; ++t ) pOut[t] = details::Half(M[2 * t]) | (std::uint32_t(details::Half(M[2 * t + 1])) << 16);
         };
         const auto TMoments = std::chrono::steady_clock::now();
-        for( const auto& [i, s] : W.LastUpdated() )
+        if( !bGPU ) for( const auto& [i, s] : W.LastUpdated() )     // (on the GPU: Show writes them)
         {
             if( std::size_t(i) >= m_GITrack.size() ) continue;
             auto& T = m_GITrack[i];
@@ -270,6 +281,7 @@ namespace xlionrender
         for( const auto& [ID, Id] : m_GIIds )
         {
             auto& T = m_GITrack[Id];
+            if( bGPU ) { T.m_bFull.fill(true); T.m_bMomFull.fill(true); T.m_MomentsReset = ~0u; continue; }     // (the GPU writes them; back on the CPU: all of them again)
             const auto& M = W.InstanceMoments(Id);
             if( T.m_MomentsReset != W.MomentsReset(Id) || T.m_Moments.size() != M.size() * gi::moment_texels_v )     // all of them again
             {
@@ -312,7 +324,8 @@ namespace xlionrender
                 const auto& Mean = W.MeanLight(Id);
                 for( int r = 0; r < 3; ++r ) pOut[3 * std::size_t(T.m_Offset) + r] = xmath::fvec4(Mean, 1);
                 ++Entries;
-                if( T.m_bFull[Slot] ) { for( std::size_t k = 0; k < E.size(); ++k ) Write(k); Entries += E.size(); T.m_bFull[Slot] = false; }
+                if( bGPU ) {}                                       // (its surfels: Show)
+                else if( T.m_bFull[Slot] ) { for( std::size_t k = 0; k < E.size(); ++k ) Write(k); Entries += E.size(); T.m_bFull[Slot] = false; }
                 else { for( const int k : T.m_Pending[Slot] ) if( std::size_t(k) < E.size() ) Write(std::size_t(k)); Entries += T.m_Pending[Slot].size(); }
                 T.m_Pending[Slot].clear();
                 m_DrawGI[i] = { std::uint32_t(Base + T.m_Offset + 1), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
@@ -322,7 +335,7 @@ namespace xlionrender
         const auto TMomentsCopy = std::chrono::steady_clock::now();
 
         // The surfels' depth moments at the same index (gi::moment_texels_v per surfel, each a mean and a mean^2 in two 16-bit floats)
-        (void)m_GIMomentRing.MemoryMap(std::size_t(Base) * gi::moment_texels_v, std::size_t(gi_light_region_v) * gi::moment_texels_v, [&](void* pMemory)
+        if( !bGPU ) (void)m_GIMomentRing.MemoryMap(std::size_t(Base) * gi::moment_texels_v, std::size_t(gi_light_region_v) * gi::moment_texels_v, [&](void* pMemory)
         {
             auto* pOut = static_cast<std::uint32_t*>(pMemory);
             for( const auto& [ID, Id] : m_GIIds )
@@ -340,6 +353,14 @@ namespace xlionrender
                 T.m_MomPending[Slot].clear();
             }
         });
+        // G4: on the GPU the shown light of every drawn instance into this frame's region (its places: the means written above)
+        if( bGPU )
+        {
+            std::vector<int> Places(std::size_t(W.InstanceCount()), -1);
+            for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
+                if( const int Id = DrawId[i]; Id >= 0 && m_GITrack[Id].m_Offset >= 0 ) Places[std::size_t(Id)] = m_GITrack[Id].m_Offset;
+            (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation);
+        }
         m_GIStats.m_UploadBytes += Entries * 3 * sizeof(xmath::fvec4) + MomentUints * sizeof(std::uint32_t);
         m_GIStats.m_MomentsMs += MsSince(TMomentsCopy);
         m_GIStats.m_UploadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TUpload).count();
