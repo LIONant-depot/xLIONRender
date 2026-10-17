@@ -246,6 +246,11 @@ namespace xlionrender
         // G3, G4 (gi_dynamic_master_plan.md): the rays on the GPU, over frames. This frame's slice dispatched after the update (it commits
         // what came in, picks when the batch is all in); the last frame's slice into the world before it (Collect, at the top: before
         // anything here changes the world, whose copy of the GPU's state must be current first)
+        // Diagnostic (gi_dynamic_master_plan.md 7a, smoke/gi_startup.py --captures-first): with XLION_GI_HOLD_CAPTURES set, no solve until
+        // the material captures have been done for 10 frames (the control: the solve never sees an uncaptured material)
+        static const bool s_bHold = std::getenv("XLION_GI_HOLD_CAPTURES") != nullptr;
+        m_GICapturesQuiet = m_GICaptures.empty() ? m_GICapturesQuiet + 1 : 0;
+        if( s_bHold && m_GICapturesQuiet < 10 ) return;
         m_GIStats = W.Update(L, Eye, bGPU && Scene.m_GI.m_GPUBudgetMs > 0 ? m_pGITrace->BatchRays() : Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));     // (no GPU budget: the scene's rays, a slice each)
         if( bGPU )
         {

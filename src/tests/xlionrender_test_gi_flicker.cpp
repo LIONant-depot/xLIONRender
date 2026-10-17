@@ -137,6 +137,85 @@ int main()
         CHECK(cL.m_Watching < 0.01 && cSm.m_Watching < 0.01, "settled, %.1f%% / %.1f%% of the surfels still watch for a change (at a few samples: the flicker)", 100 * cL.m_Watching, 100 * cSm.m_Watching);
         CHECK(cSm.m_P90 < 0.01, "the light sampling's light moves %.2f%% an update (p90)", 100 * cSm.m_P90);
     }
+    // The emitters' light against the exact one: the same 64 lamps, no bounces (every albedo 0), so a floor surfel's light is the sum over
+    // the emitter surfels it sees of L w (world::EmitterWeight, the shadow ray as the sampling's). The sampling, the links (their caps).
+    // (G5b, ReSTIR's temporal reuse of an emitter reservoir per surfel, was measured here and dropped: 19.6% error after 16 updates against
+    // 14.8% without; the 8 candidates are all shadow tested already, so carrying the reservoir over only correlates the passes)
+    {
+        surfel_mesh Floor, Slab, Tile;
+        const auto Quad = [](surfel_mesh& Q, v3 C, v3 U, v3 V, float Split)
+        {
+            const int nu = std::max(1, int(std::ceil(U.Length() / Split))), nv = std::max(1, int(std::ceil(V.Length() / Split)));
+            const v3 Nq = U.Cross(V).NormalizeCopy(); const int Base = int(Q.m_Pos.size());
+            for (int j = 0; j <= nv; ++j) for (int i = 0; i <= nu; ++i) { Q.m_Pos.push_back(C + U * (float(i) / nu) + V * (float(j) / nv)); Q.m_Nrm.push_back(Nq); }
+            for (int j = 0; j < nv; ++j) for (int i = 0; i < nu; ++i) { const int a = Base + j * (nu + 1) + i, b = a + 1, c = a + nu + 1, d = c + 1; Q.m_Tris.push_back({ a, b, d }); Q.m_Tris.push_back({ a, d, c }); }
+        };
+        Quad(Floor, { -4, 0, -4 }, { 0, 0, 8 }, { 8, 0, 0 }, 0.5f);
+        Quad(Slab, { -8, 1.5f, -8 }, { 16, 0, 0 }, { 0, 0, 16 }, 1.0f);
+        Quad(Tile, { -0.15f, 0, -0.15f }, { 0.3f, 0, 0 }, { 0, 0, 0.3f }, 0.1f);
+        Floor.Bake(0.3f, 0.9f); Slab.Bake(0.3f, 0.9f); Tile.Bake(0.08f, 0.24f);
+        // 0 links, 1 sampling: the floor's mean light; Exact: the exact mean; Err: the floor's error (rms over its surfels, of the exact
+        // mean) after 4, 16 and 120 updates
+        const auto Run = [&](int Mode, double& Exact, double (&Err)[3]) -> double
+        {
+            world D;
+            D.m_Setup.m_bEmitterSampling = Mode == 1;
+            D.Add(Floor, xmath::fmat4::fromIdentity(), { 0, 0, 0 });
+            std::vector<v3> At;
+            for (int z = 0; z < 8; ++z) for (int x = 0; x < 8; ++x)
+            {
+                const bool bSeen = (x == 3 || x == 4) && (z == 3 || z == 4);
+                At.push_back({ float(x) * 2 - 7, bSeen ? 1.2f : 3.0f, float(z) * 2 - 7 });
+                const int t = D.Add(Tile, xmath::fmat4::fromTranslation({ At.back().m_X, At.back().m_Y, At.back().m_Z }), { 0, 0, 0 });
+                D.SetSurfelMaterial(t, {}, std::vector<v3>(Tile.m_Levels[0].size(), v3{ 10, 10, 10 }));
+            }
+            D.Add(Slab, xmath::fmat4::fromIdentity(), { 0, 0, 0 });
+            lights Dark;
+            const auto& L0 = Floor.m_Levels[0];
+            std::vector<double> X(L0.size(), 0.0);
+            int iErr = 0;
+            for (int u = 0; u < 120; ++u)
+            {
+                D.Update(Dark, { 0, 1, 0 }, 1 << 30, 5000 + u);
+                if (u == 0)
+                    for (std::size_t s = 0; s < L0.size(); ++s)
+                    {
+                        const v3 C = L0[s].m_Center, Nn = L0[s].m_Normal;
+                        for (int t = 1; t <= 64; ++t)
+                            for (const auto& T : Tile.m_Levels[0])
+                            {
+                                const v3 Ce = At[std::size_t(t - 1)] + T.m_Center, Ne{ 0, -1, 0 }, Dv = Ce - C;
+                                const float d2 = Dv.Dot(Dv), A = 1.47f * T.m_Radius * T.m_Radius;
+                                const v3 Dn = Dv * (1.0f / std::sqrt(d2));
+                                const float cr = Nn.Dot(Dn), ce = -Ne.Dot(Dn);
+                                if (cr <= 0 || ce <= 0) continue;
+                                const float w = A * cr * ce / (d2 + A);
+                                if (w < 1e-5f) continue;
+                                if (D.Occluded(C + Nn * 1e-3f, Dn, std::sqrt(d2) * 0.98f)) continue;
+                                X[s] += 10.0 * w;
+                            }
+                    }
+                if (u == 3 || u == 15 || u == 119)
+                {
+                    double e2 = 0, xm = 0;
+                    for (std::size_t s = 0; s < L0.size(); ++s) { const double d = Lum(D.InstanceLight(0)[s]) - X[s]; e2 += d * d; xm += X[s]; }
+                    xm /= double(L0.size());
+                    Err[iErr++] = std::sqrt(e2 / double(L0.size())) / std::max(xm, 1e-12);
+                }
+            }
+            double m = 0, e = 0;
+            for (std::size_t s = 0; s < L0.size(); ++s) { m += Lum(D.InstanceLight(0)[s]); e += X[s]; }
+            Exact = e / double(L0.size());
+            return m / double(L0.size());
+        };
+        double X0, X1, E0[3], E1[3];
+        const double Links = Run(0, X0, E0), Samp = Run(1, X1, E1);
+        std::printf("the emitters' light under 64 lamps, no bounces: exact %.4f; light sampling %.4f (%+.1f%%); links %.4f (%+.1f%%)\n", X1, Samp, 100 * (Samp / X1 - 1), Links, 100 * (Links / X0 - 1));
+        std::printf("  the floor's error (rms, of the mean) after 4 / 16 / 120 updates: light sampling %.1f%% / %.1f%% / %.1f%%; links %.1f%% / %.1f%% / %.1f%%\n",
+                    100 * E1[0], 100 * E1[1], 100 * E1[2], 100 * E0[0], 100 * E0[1], 100 * E0[2]);
+        CHECK(std::abs(Samp / X1 - 1) < 0.03, "the sampled emitters' light is %.1f%% off the exact one", 100 * (Samp / X1 - 1));
+        CHECK(E1[2] < 0.12, "the sampled emitters' light is %.1f%% off the exact one per surfel after 120 updates (rms)", 100 * E1[2]);
+    }
     std::printf("PASS\n");
     return 0;
 }

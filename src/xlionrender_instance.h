@@ -220,6 +220,7 @@ namespace xlionrender
         xgpu::device::error*        createMeshGI( mesh_slot& M, std::span<const std::uint32_t> Data ) noexcept;      // the GPU buffer of PackMeshGI's data     // M.m_GIBuffer from M.m_pGI (+ its triangles' colors)
         static constexpr int        gi_capture_w_v = 1024, gi_capture_h_v = 512, gi_capture_max_v = (gi_capture_w_v / 2) * (gi_capture_h_v / 4);   // 65536 surfels
         std::deque<gi_capture_job>  m_GICaptures;
+        int                         m_GICapturesQuiet = 0;      // frames since the captures were last pending (updateGI: XLION_GI_HOLD_CAPTURES)
         xgpu::texture               m_GICaptureTex;
         xgpu::renderpass            m_GICapturePass;
         xgpu::buffer                m_GICaptureVB, m_GICaptureIB;

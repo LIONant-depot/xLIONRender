@@ -999,8 +999,8 @@ How to read this section:
   last 5 % is slow because the estimator follows small changes by its averaging (the price of the flicker fix). The 1 s target
   is not met. Lumen's screen probes and radiance cache react within frames for what is on screen.
 - **Variance with hidden emitters.** The emitter pick weighs each emitter by its unoccluded weight, so behind walls most samples
-  pick hidden lamps. It is unbiased but noisy; the estimator hides it at the cost of convergence. ReSTIR-style reuse
-  (visibility-aware, temporal) is the known answer.
+  pick hidden lamps. It is unbiased but noisy; the estimator hides it at the cost of convergence. ReSTIR-style temporal reuse
+  was tried and measured worse (section 7, item 1).
 - **Diffuse only.** Glossy indirect comes from the reflection probes and the sky. Lumen and SVOGI do glossy indirect.
 - **Detail is bounded by surfel size.** The per-pixel read grid helps at edges and walls, but features smaller than a surfel
   are averaged. Lumen's screen traces keep small detail on screen.
@@ -1169,6 +1169,28 @@ Each is measured before and after on Police and guarded by a test, as G1–G5 we
    - Same hashes on the CPU and the GPU, so the comparisons hold.
    - Done when: under 64 lamps with 60 hidden, the per-pass noise drops by half or more; in Police, within 5 % sooner, with
      no flicker regression.
+   - **Tried and rejected (2026-10-17). Do not rebuild it under another name without meeting the conditions at the end.**
+     - Tested on xLIONRender dcc2be7 plus an uncommitted patch, never committed.
+     - The patch: a reservoir per surfel (emitter, W, M capped at 80, the emitter list's version), merged each pass with the
+       pass' 8 candidates, each of them shadow tested. The CPU world and the GPU pass were equal surfel for surfel
+       (`xlionrender_test_gi_trace`).
+     - The scene: `xlionrender_test_gi_flicker`, 64 lamps with 60 hidden behind a slab, no bounces (every albedo 0), so the
+       exact light is known per surfel. The same rays and shadow rays a pass with and without the reuse.
+     - Measured, the floor's rms error against the exact light after 4 / 16 / 120 updates:
+       - with the reuse 35.5 / 19.6 / 8.2 %;
+       - without it 29.4 / 14.8 / 7.8 % (the bias −0.2 % with it, −0.8 % without);
+       - the flicker p90 an update 0.54 % with it, 0.35 % without.
+     - Why it lost:
+       - ReSTIR's gain comes from shadow testing only the winner. Our pass already tests all 8 candidates, and its estimate
+         already uses all 8 results (the visible share of the weight).
+       - Carrying the reservoir over adds no information. It averages over about 10 passes, and the estimator then
+         averages those correlated passes as if they were independent.
+     - Revisit only if:
+       - a design shadow-tests fewer rays than candidates (the real ReSTIR trade: about the same noise for fewer shadow
+         rays); or
+       - a scene where a surfel sees only 1–5 % of its emitters' weight shows the estimator's clipping, or flicker, from the
+         rare visible samples.
+     - The test now guards the sampling's per-surfel error: under 12 % rms after 120 updates, 7.8 % measured.
 2. **The convergence tail.**
    - Split "a change of level" from "noise" in the estimator's settled blend: a confidence-aware catch-up once the samples'
      mean has moved beyond their noise for several passes.
@@ -1185,3 +1207,71 @@ Each is measured before and after on Police and guarded by a test, as G1–G5 we
    separate plan.
 7. **An optional hardware RT path** for the cast and the shadow rays, behind the same interface. Then mobile: declare and
    measure the budget on a device.
+
+## 7a. The startup diagnosis, and the order after it (2026-10-17)
+
+Items 2 (the convergence tail) and 3 (the level switch) of section 7 are paused by this diagnosis. So are two ideas that grew out of
+item 2: "representatives first" (one fine surfel per parent group traced first, seeding its siblings) and "catch-up by group
+agreement". The measurements below found simpler causes to fix first.
+
+**How it was measured (reproducible)**
+- The tool: `source/Editors/LevelEditor/smoke/gi_startup.py` (`run <tag> [--captures-first]`, then `analyse <tag>`; the metric
+  definitions are in its docstring). Dumps go to `Build/gi_startup/`.
+- The build: xLION 4a913ea, xLIONRender dcc2be7 plus this diagnostic commit. The Debug editor, the harness's own (never one the
+  user runs). RTX 4070 Ti SUPER. The GI GPU-owned, the scene's GI settings as saved, one run each.
+- The scene: Police (63,285 level 0 surfels in 23,221 parent groups, 350 emitters), the fixed orbit camera of the script.
+- The control: `--captures-first` sets `XLION_GI_HOLD_CAPTURES`. The renderer then solves nothing until the material captures
+  have been done for 10 frames (`plans/forward/xlionrender_plan_forward.cpp`, updateGI).
+- The error: the solver light (the dump's `e`) against the last dump (about 60 s), area weighted (radius²), split into
+  between groups (each parent group's mean error) and within groups (each surfel's error less its group's).
+
+**Results**
+
+| GI time | Today: mean / ref | Today: between, within | Captures first: mean / ref | Captures first: between, within |
+|---|---|---|---|---|
+| 1 s | 1.98 | 287 %, 195 % | ≈1.03 (the frame log) | (no dump) |
+| 3 s | 1.83 | 383 %, 405 % | 1.009 | 12.0 %, 14.5 % |
+| 5 s | 1.17 | 76 %, 40 % | 1.009 | 11.8 %, 14.2 % |
+| 9 s | 1.07 | 34 %, 17 % | 1.007 | 10.2 %, 13.0 % |
+| 15–19 s | 1.02 (15 s) | 12 %, 10 % | 1.002 (19 s) | 5.5 %, 8.1 % |
+
+- Rays by 1 / 3 / 5 / 9 s: today 1.1 / 1.6 / 6.2 / 19.2 M; captures first 5.1 / 14.3 / 15.1 / 18.0 M.
+- The captures end at 4.3 s of GI time today. With nothing solving, they take about 1 s.
+- Between 2 and 15 s, about 30 % of the frames trace under 5,000 rays (about 1,150), against about 85,000 on the others.
+- The parent groups average 2.7 children, and 10 % of them have normals more than about 37° apart.
+
+**What it establishes**
+- The startup's brightness error comes from provisional material input. Before its capture, an instance's surfels use its
+  material's base color factor (`world::Add`), usually white for textured materials. A 2× overshoot follows, and the
+  estimator takes about 15 s to work it off.
+- With final materials, the global mean is within about 3 % at 1 s, but a spatial error of 12–15 % remains at 3 s.
+- That error then stays flat from 3 to 7 s. Every surfel is out of warm-up and none is watching, so the service drops to about
+  1k rays a frame while the surfels are still about 12 % off. Low variation here is not convergence: a surfel that barely
+  updates barely changes.
+
+**What it does not establish**
+- That the remaining error is the estimator's inertia.
+- That the reference is accurate. The 60 s dump changes by only 0.2–0.3 % in 0.5 s because settled surfels are barely served;
+  it is suspected of being under-converged.
+- That a group-level mechanism is needed. Groups are small, and some are incoherent.
+
+**The order now**
+1. **Material readiness.**
+   - Before its first surfel capture, an instance stays in the ray scene for occlusion. It gets a provisional lower-energy
+     response: zero diffuse and no emission.
+   - Each instance gets a material revision. The GI reads the surfel capture; the triangle captures feed only the
+     SURFACE_COLOR view.
+   - Once all initial captures are done and GPU-visible, one scene-wide confidence transition. The means stay as a prior, the
+     history's weight is lowered by the tested policy (no count to zero, so the flicker fix holds), and the geometry moments
+     are kept.
+   - It happens at a batch boundary without blocking: frames go on, and work picked before it commits under the old revision.
+   - A test: streamed captures against captures ready from the start.
+2. **Service, measured first.**
+   - Per frame: the work requested, admitted and executed, the GPU time, the unused budget, the eligible surfels skipped and
+     why, and the time since each surfel's last fresh evaluation.
+   - Then one control with the estimator unchanged: today's adaptive policy against fixed service (no dormancy) at the same
+     GPU budget.
+3. **A reference that is allowed to converge.** A test mode with final materials, no dormancy, fair service, several
+   checkpoints and more than one seed, until regional values stop drifting. The next "within 5 %" claim uses it.
+4. **The dormancy or service rule**, if 2 points at it.
+5. **The estimator's catch-up**, only if a tail remains after 1–4.

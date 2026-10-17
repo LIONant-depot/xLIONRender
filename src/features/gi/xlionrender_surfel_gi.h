@@ -2133,7 +2133,7 @@ namespace xlionrender::gi
             if (f == nullptr) return -1;
             std::fprintf(f, "# RaysPerSurfel=%d FilterPasses=%d EmissiveScale=%g SpreadOrigins=%d LodDistance=%g\n"
                         , m_Setup.m_RaysPerSurfel, m_Setup.m_FilterPasses, m_Setup.m_EmissiveScale, int(m_Setup.m_bSpreadOrigins), m_Setup.m_LodDistance);
-            std::fprintf(f, "inst,level,surfel,px,py,pz,nx,ny,nz,radius,er,eg,eb,fr,fg,fb,valid,ar,ag,ab,xr,xg,xb,n,watch,short,dev\n");      // x: the captured emission (before EmissiveScale)
+            std::fprintf(f, "inst,level,surfel,px,py,pz,nx,ny,nz,radius,er,eg,eb,fr,fg,fb,valid,ar,ag,ab,xr,xg,xb,n,watch,short,dev,parent\n");      // x: the captured emission (before EmissiveScale); parent: its level 1 surfel (level 1: itself)
             int n = 0;
             for (int Id = 0; Id < InstanceCount(); ++Id)
             {
@@ -2147,12 +2147,13 @@ namespace xlionrender::gi
                     const v3 A = I.m_Level == 0 && s < I.m_SurfAlbedo.size() ? I.m_SurfAlbedo[s] : I.m_Albedo;
                     const v3 Fs = s < F.size() ? F[s] : v3{ 0, 0, 0 };
                     const v3 X  = I.m_Level == 0 && s < I.m_SurfEmission.size() ? I.m_SurfEmission[s] : v3{ 0, 0, 0 };
-                    std::fprintf(f, "%d,%d,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%d,%d,%.6g,%.6g\n"
+                    std::fprintf(f, "%d,%d,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g,%.6g,%d,%d,%.6g,%.6g,%d\n"
                                 , Id, I.m_Level + (I.m_bCube ? 1 : 0), s, P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z, L[s].m_Radius * I.m_MeanScale
                                 , I.m_E[s].m_X, I.m_E[s].m_Y, I.m_E[s].m_Z, Fs.m_X, Fs.m_Y, Fs.m_Z
                                 , s < I.m_Valid.size() ? I.m_Valid[s] : 0.0f, A.m_X, A.m_Y, A.m_Z, X.m_X, X.m_Y, X.m_Z
                                 , s < I.m_Est.size() ? int(I.m_Est[s].m_N) : -1, s < I.m_Est.size() ? int(I.m_Est[s].m_bWatch) : 0     // (its estimator: samples, watching, short mean, deviation: luminance)
-                                , s < I.m_Est.size() ? Lum(I.m_Est[s].m_Short) : 0.0f, s < I.m_Est.size() ? std::sqrt(std::max(0.0f, Lum(I.m_Est[s].m_Variance))) : 0.0f);
+                                , s < I.m_Est.size() ? Lum(I.m_Est[s].m_Short) : 0.0f, s < I.m_Est.size() ? std::sqrt(std::max(0.0f, Lum(I.m_Est[s].m_Variance))) : 0.0f
+                                , I.m_Level == 0 && s < I.m_pMesh->m_ParentOf.size() ? I.m_pMesh->m_ParentOf[s] : int(s));
                 }
             }
             std::fclose(f);
