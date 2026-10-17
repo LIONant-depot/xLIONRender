@@ -411,6 +411,27 @@ namespace xlionrender::gi
     constexpr int warmup_passes_v = 16;     // after a change: the estimator's first samples are averaged (1 / n), its multiscale blend after
     constexpr int running_cap_v   = 256;    // the multiscale blend never below 1 / n of the samples since the change, up to this (estimator::Add)
 
+    // A color in 32 bits (RGB9E5: three 9-bit mantissas, a shared 5-bit exponent; VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, as Godot's probes): the
+    // shown light the pixels read (gi_dynamic_master_plan.md 7a, the compression survey). Steps of 2^-9 of the largest channel; 0 to 65408;
+    // negative and NaN are 0. Every step is exact in float (powers of two, +0.5, floor), so the shaders' (xlionrender_gi_filter_comp.glsl,
+    // xlionrender_surfel_gi.glsl) give the same bits
+    inline std::uint32_t PackRGB9E5(const v3& c) noexcept
+    {
+        const auto Clamp = [](float x) { return x > 0 ? std::min(x, 65408.0f) : 0.0f; };       // (NaN > 0 is false)
+        const float r = Clamp(c.m_X), g = Clamp(c.m_Y), b = Clamp(c.m_Z), m = std::max(r, std::max(g, b));
+        const int Floor = m > 0 ? int((std::bit_cast<std::uint32_t>(m) >> 23) & 0xFFu) - 127 : -16;     // floor(log2(m)) (a denormal: very small)
+        int e = std::max(-16, Floor) + 16;                                                    // the shared exponent (bias 15) + 1
+        float s = std::bit_cast<float>(std::uint32_t(127 - (e - 24)) << 23);                  // 2^-(e - 15 - 9)
+        if (std::floor(m * s + 0.5f) >= 512.0f) { ++e; s *= 0.5f; }
+        const auto M = [&](float x) { return std::uint32_t(std::floor(x * s + 0.5f)); };
+        return M(r) | (M(g) << 9) | (M(b) << 18) | (std::uint32_t(e) << 27);
+    }
+    inline v3 UnpackRGB9E5(std::uint32_t p) noexcept
+    {
+        const float s = std::bit_cast<float>(std::uint32_t(127 + int(p >> 27) - 24) << 23);
+        return v3{ float(p & 511u) * s, float((p >> 9) & 511u) * s, float((p >> 18) & 511u) * s };
+    }
+
     // A surfel's light over time: one estimator for both regimes (documentation/gi_dynamic_master_plan.md, Phase 2b). After a change
     // (Restart) the first warmup_passes_v samples are averaged exactly (1 / n: the fastest unbiased start), then the multiscale blend
     // (GIBS's MultiscaleMeanEstimator) takes over from that mean

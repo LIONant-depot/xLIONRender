@@ -250,7 +250,7 @@ namespace xlionrender
         // Uniforms (dynamic UBO rings) - layouts in shaders/xlionrender_forward_standard_frag.glsl
         if( auto Err = Device.Create(m_LightUBO,    { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_lighting), .m_EntryCount = 16 }); Err ) return Err;
         if( auto Err = Device.Create(m_LightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_light_data), .m_EntryCount = ring_frames_v * light_region_v }); Err ) return Err;
-        if( auto Err = Device.Create(m_GILightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * gi_light_region_v * 3 }); Err ) return Err;     // 3 vec4 a surfel: the HL2 basis
+        if( auto Err = Device.Create(m_GILightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * gi_light_region_v }); Err ) return Err;     // a uvec4 a surfel: the HL2 basis' 3 colors in RGB9E5, the validity
         if( auto Err = Device.Create(m_GIMomentRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * gi_light_region_v * gi::moment_texels_v }); Err ) return Err;
         {
             const std::uint32_t Zeros[8] = {};     // a GIMesh header: no surfels, no read grid
@@ -969,15 +969,15 @@ namespace xlionrender
         if( f == nullptr ) return -1;
         std::fprintf(f, "# GI frame log (documentation/gi_dynamic_master_plan.md, Phase 0): times in ms (main thread), LongestSurfelUs in us; the trace's worker time is TraceMs (the main thread waits for it); Hits evaluate the direct light (shadow rays)\n");
         std::fprintf(f, "frame,UpdateGIMs,TotalMs,TlasLightsMs,LevelsMs,PickMs,LinksMs,EmitMs,MeanMs,TraceMs,CommitMs,CubeMs,StatsMs,FilterMs,RingCopyMs,MomentsMs,CaptureMs,LoadMs,"
-                       "Updated,Surfels,Rays,Hits,LongestSurfelUs,LinkRebuilds,Links,Emitters,Moves,MovesMs,MarkedDirty,HistoryResets,Dirty,UploadBytes,Dropped,LinkBytes,LightBytes,FilterBytes,Unsupported,Bad,Cubes,CubeParents,Pending,PendingRays,ChunkRays,RayUsEst,Rounds,CastMs,DirectMs,ReadMs,FairSurfels,LinkPending,LinkSurfels,UrgentSurfels,PreMs,OverAllowMs,TraceCpuMs,LinkCpuMs,LinkLongestUs,TokenUnits,GPUTraceMs,GPUPacks,GPUCpuMs,GPUSliceRays,TimeMs,MeanLum\n");
+                       "Updated,Surfels,Rays,Hits,LongestSurfelUs,LinkRebuilds,Links,Emitters,Moves,MovesMs,MarkedDirty,HistoryResets,Dirty,UploadBytes,Dropped,LinkBytes,LightBytes,FilterBytes,Unsupported,Bad,Cubes,CubeParents,Pending,PendingRays,ChunkRays,RayUsEst,Rounds,CastMs,DirectMs,ReadMs,FairSurfels,LinkPending,LinkSurfels,UrgentSurfels,PreMs,OverAllowMs,TraceCpuMs,LinkCpuMs,LinkLongestUs,TokenUnits,GPUTraceMs,GPUPacks,GPUCpuMs,GPUSliceRays,TimeMs,MeanLum,SceneGpuMs\n");
         for( const auto& F : m_GIFrames )
         {
             const auto& S = F.m_Stats;
-            std::fprintf(f, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%lld,%.1f,%d,%d,%d,%d,%.3f,%d,%d,%d,%zu,%d,%zu,%zu,%zu,%d,%d,%d,%d,%d,%d,%d,%.1f,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.1f,%d,%.3f,%d,%.3f,%d,%.1f,%.6g\n"
+            std::fprintf(f, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%lld,%.1f,%d,%d,%d,%d,%.3f,%d,%d,%d,%zu,%d,%zu,%zu,%zu,%d,%d,%d,%d,%d,%d,%d,%.1f,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.1f,%d,%.3f,%d,%.3f,%d,%.1f,%.6g,%.3f\n"
                 , (unsigned long long)F.m_Frame, S.m_UpdateGIMs, S.m_TotalMs, S.m_TlasLightsMs, S.m_LevelsMs, S.m_PickMs, S.m_LinksMs, S.m_EmitMs, S.m_MeanMs, S.m_TraceMs, S.m_CommitMs, S.m_CubeMs, S.m_StatsMs
                 , S.m_FilterMs, S.m_RingCopyMs, S.m_MomentsMs, S.m_CaptureMs, S.m_LoadMs
                 , S.m_Updated, S.m_Surfels, S.m_Rays, S.m_Hits, S.m_LongestSurfelUs, S.m_nLinkRebuilds, S.m_nLinks, S.m_nEmitters, S.m_nMoves, S.m_MovesMs, S.m_nMarkedDirty, S.m_nHistoryResets, S.m_Dirty
-                , S.m_UploadBytes, S.m_nDropped, S.m_LinkBytes, S.m_LightBytes, S.m_FilterBytes, S.m_nUnsupported, S.m_nBad, S.m_nCubes, S.m_CubeParents, S.m_Pending, S.m_PendingRays, S.m_ChunkRays, double(S.m_RayUsEst), S.m_Rounds, S.m_CastMs, S.m_DirectMs, S.m_ReadMs, S.m_FairSurfels, S.m_LinkPending, S.m_LinkSurfels, S.m_UrgentSurfels, S.m_PreMs, S.m_OverAllowMs, S.m_TraceCpuMs, S.m_LinkCpuMs, S.m_LinkLongestUs, S.m_TokenUnits, S.m_GPUTraceMs, S.m_GPUPacks, S.m_GPUCpuMs, S.m_GPUSliceRays, S.m_TimeMs, double(S.m_MeanLum));
+                , S.m_UploadBytes, S.m_nDropped, S.m_LinkBytes, S.m_LightBytes, S.m_FilterBytes, S.m_nUnsupported, S.m_nBad, S.m_nCubes, S.m_CubeParents, S.m_Pending, S.m_PendingRays, S.m_ChunkRays, double(S.m_RayUsEst), S.m_Rounds, S.m_CastMs, S.m_DirectMs, S.m_ReadMs, S.m_FairSurfels, S.m_LinkPending, S.m_LinkSurfels, S.m_UrgentSurfels, S.m_PreMs, S.m_OverAllowMs, S.m_TraceCpuMs, S.m_LinkCpuMs, S.m_LinkLongestUs, S.m_TokenUnits, S.m_GPUTraceMs, S.m_GPUPacks, S.m_GPUCpuMs, S.m_GPUSliceRays, S.m_TimeMs, double(S.m_MeanLum), F.m_SceneGpuMs);
         }
         std::fclose(f);
         return int(m_GIFrames.size());

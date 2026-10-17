@@ -185,14 +185,14 @@ namespace
             int nRing = 0;
             for (int i = 0; i < Wg.InstanceCount(); ++i) { Places[std::size_t(i)] = nRing; nRing += int(Wg.InstanceLight(i).size()) + 1; }
             xgpu::buffer Light, Moments;
-            CHECK(!App.m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 3 * nRing })
+            CHECK(!App.m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = nRing })
                && !App.m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = 16 * nRing }), "rings");
             while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
             CHECK(T.Show(App.m_Window, Places, Light, Moments, 0, Wg.m_Setup.m_FilterPasses, Wg.m_Setup.m_Saturation), "Show");
             { auto Cmd = App.m_Window.getCmdBuffer(); }
             App.m_Window.PageFlip();
-            std::vector<std::array<float, 4>> L4(std::size_t(3 * nRing)); std::vector<std::uint32_t> M4(std::size_t(16 * nRing));
-            CHECK(!Light.MemoryMap(0, 3 * nRing, [&](void* q) { std::memcpy(L4.data(), q, L4.size() * 16); }) && !Moments.MemoryMap(0, 16 * nRing, [&](void* q) { std::memcpy(M4.data(), q, M4.size() * 4); }), "read the rings");
+            std::vector<std::array<std::uint32_t, 4>> L4(static_cast<std::size_t>(nRing)); std::vector<std::uint32_t> M4(std::size_t(16 * nRing));
+            CHECK(!Light.MemoryMap(0, nRing, [&](void* q) { std::memcpy(L4.data(), q, L4.size() * 16); }) && !Moments.MemoryMap(0, 16 * nRing, [&](void* q) { std::memcpy(M4.data(), q, M4.size() * 4); }), "read the rings");
             Wg.ShowAllAgain();
             R.m_ShownWorst = 0; R.m_MomentWorst = 0;
             const auto Half = [](float f) -> std::uint32_t       // (plans/forward/xlionrender_plan_forward.h, details::Half)
@@ -213,10 +213,10 @@ namespace
                     const std::size_t At = std::size_t(Places[std::size_t(i)] + 1) + q;
                     for (int k = 0; k < 3; ++k)
                     {
-                        const auto& g = L4[3 * At + std::size_t(k)];
-                        R.m_ShownWorst = std::max({ R.m_ShownWorst, std::abs(g[0] - B[q][k].m_X) / Top, std::abs(g[1] - B[q][k].m_Y) / Top, std::abs(g[2] - B[q][k].m_Z) / Top });
+                        const v3 g = UnpackRGB9E5(L4[At][std::size_t(k)]);        // (RGB9E5: steps of 2^-9 of the largest channel)
+                        R.m_ShownWorst = std::max({ R.m_ShownWorst, std::abs(g.m_X - B[q][k].m_X) / Top, std::abs(g.m_Y - B[q][k].m_Y) / Top, std::abs(g.m_Z - B[q][k].m_Z) / Top });
                     }
-                    R.m_ShownWorst = std::max(R.m_ShownWorst, double(std::abs(L4[3 * At][3] - V[q])));
+                    R.m_ShownWorst = std::max(R.m_ShownWorst, double(std::abs(std::bit_cast<float>(L4[At][3]) - V[q])));
                     for (int t = 0; t < 16; ++t)
                     {
                         const std::uint32_t w = M4[16 * At + std::size_t(t)];
@@ -254,6 +254,23 @@ int main()
                     R.m_Surfels, R.m_Mismatch, R.m_Worst, R.m_Packs);
         CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "with events: %d of %d surfels differ from the CPU world", R.m_Mismatch, R.m_Surfels);
         CHECK(R.m_Packs == 2, "with events the scene was packed %d times (the first, the coarse level; the material and the drag in place)", R.m_Packs);
+    }
+    // The shown light's RGB9E5 (gi::PackRGB9E5, the filter shader's the same steps): a channel within 2^-9 of the color's largest, over
+    // 1e-4..1e4; 0, negative and NaN 0; past the range its top
+    {
+        double Worst = 0; unsigned h = 12345;
+        const auto Rnd = [&] { h = h * 1664525u + 1013904223u; return float(h >> 8) * (1.0f / 16777216.0f); };
+        for (int k = 0; k < 20000; ++k)
+        {
+            const float Scale = std::pow(10.0f, -4.0f + 8.0f * Rnd());
+            const v3 c{ Rnd() * Scale, Rnd() * Scale, Rnd() * Scale }, d = UnpackRGB9E5(PackRGB9E5(c));
+            const float m = std::max({ c.m_X, c.m_Y, c.m_Z });
+            if (m < 1e-4f) continue;                                    // (below the format's 9 bits: its smallest step is 2^-24)
+            Worst = std::max({ Worst, double(std::abs(d.m_X - c.m_X) / m), double(std::abs(d.m_Y - c.m_Y) / m), double(std::abs(d.m_Z - c.m_Z) / m) });
+        }
+        const v3 Z = UnpackRGB9E5(PackRGB9E5({ 0, -1, std::numeric_limits<float>::quiet_NaN() })), Big = UnpackRGB9E5(PackRGB9E5({ 1e9f, 1, 0 }));
+        std::printf("RGB9E5: the worst channel %.2e of its color's largest (20000 colors over 1e-4..1e4); 0, -1, NaN -> %g %g %g; 1e9 -> %g\n", Worst, Z.m_X, Z.m_Y, Z.m_Z, Big.m_X);
+        CHECK(Worst <= 1.0 / 512 && Z.m_X == 0 && Z.m_Y == 0 && Z.m_Z == 0 && Big.m_X == 65408.0f, "RGB9E5: %.2e off; %g %g %g; %g", Worst, Z.m_X, Z.m_Y, Z.m_Z, Big.m_X);
     }
     // The slices of a batch (gpu_trace::SliceEnd): whole ranges up to the budget; a leftover under a quarter of it goes in the slice before
     // (it took a frame of its own: a third of Police's frames all but idle), a larger one is a slice of its own
@@ -315,7 +332,8 @@ int main()
         std::printf("GPU trace, the GI render test's room, 24 updates: %d surfels, %d differ from the CPU world, the worst of the others %.1e; the GPU's shown light off the CPU's filter by %.1e (of the brightest), %.0f moment words not the CPU's\n",
                     R.m_Surfels, R.m_Mismatch, R.m_Worst, R.m_ShownWorst, R.m_MomentWorst);
         CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "the room: %d of %d surfels differ from the CPU world", R.m_Mismatch, R.m_Surfels);
-        CHECK(R.m_ShownWorst >= 0 && R.m_ShownWorst < 1e-4 && R.m_MomentWorst == 0, "the GPU's shown light is off the CPU's filter (%.1e; %.0f moment words differ)", R.m_ShownWorst, R.m_MomentWorst);
+        CHECK(R.m_ShownWorst >= 0 && R.m_ShownWorst < 2.5e-3 && R.m_MomentWorst == 0,      // (the light in RGB9E5: 2^-9 steps)
+              "the GPU's shown light is off the CPU's filter (%.1e; %.0f moment words differ)", R.m_ShownWorst, R.m_MomentWorst);
     }
     std::printf("PASS\n");
     return 0;

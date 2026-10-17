@@ -4,15 +4,16 @@
 //          [4] its cell size (float bits), [5] its lists, [6] the table's longest probe; from 8: per vertex 2 uints (4 x 16-bit level 0 surfel indices, 0xFFFF none);
 //          per surfel 8 floats: center xyz, radius, normal xyz, parent index (uint bits; level 0); the grid (surfel_mesh::BuildReadGrid):
 //          per table entry 4 uints { key low, key high (0xFFFFFFFF: empty), first, count }, the lists of level 0 surfel indices
-//  GILight: per surfel of the instance's active level 3 vec4: its light around the 3 directions of the HL2 basis (GIBasisRead), the first
-//          one's w its validity (0: buried)
+//  GILight: per surfel of the instance's active level a uvec4: its light around the 3 directions of the HL2 basis (GIBasisRead), each in
+//          RGB9E5 (gi::PackRGB9E5), and the bits of its validity (0: buried)
 //  GIMoment: per GILight surfel its depth moments (gi::MomentTexel): 16 hemi-octahedral texels of the mean and mean^2 distance its rays
 //          travel (mesh units, capped at its reach)
 #ifndef XLIONRENDER_SURFEL_GI_GLSL
 #define XLIONRENDER_SURFEL_GI_GLSL
 
 layout(std430, set = 1, binding = 5) readonly buffer GIMeshBuffer  { uint GIMesh[]; };
-layout(std430, set = 1, binding = 6) readonly buffer GILightBuffer { vec4 GILight[]; };
+layout(std430, set = 1, binding = 6) readonly buffer GILightBuffer { uvec4 GILight[]; };
+vec3 UnpackRGB9E5(in const uint p) { return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * uintBitsToFloat(uint(127 + int(p >> 27) - 24) << 23); }     // (gi::UnpackRGB9E5)
 layout(std430, set = 1, binding = 7) readonly buffer GIMomentBuffer { uint GIMoment[]; };    // per GILight surfel 16 texels: half mean, half mean^2
 
 // The GI reference a vertex shader passes on (giLevel of the push constants): the level in the low 8 bits, gi_per_pixel_v when the
@@ -42,9 +43,10 @@ vec3 GIBasisRead(in const uint LightIndex, in const vec3 SurfelNormal, in const 
     const vec3  w = pow(max(vec3(dot(n, T * -a + B * b + SurfelNormal * c), dot(n, T * -a - B * b + SurfelNormal * c), dot(n, T * d + SurfelNormal * c)), vec3(0.0)), vec3(2.0));
     const float s = w.x + w.y + w.z;
     const vec3  wn = s > 1e-12 ? w / s : vec3(1.0 / 3.0);
-    return GILight[3u * LightIndex].rgb * wn.x + GILight[3u * LightIndex + 1u].rgb * wn.y + GILight[3u * LightIndex + 2u].rgb * wn.z;
+    const uvec4 L = GILight[LightIndex];
+    return UnpackRGB9E5(L.x) * wn.x + UnpackRGB9E5(L.y) * wn.y + UnpackRGB9E5(L.z) * wn.z;
 }
-float GIValidity(in const uint LightIndex) { return GILight[3u * LightIndex].w; }
+float GIValidity(in const uint LightIndex) { return uintBitsToFloat(GILight[LightIndex].w); }
 
 // The anti-leak terms of a read (Wicked Engine's surfel GI), times the falloff and normal weight:
 //  - the plane distance: a point off the surfel's plane (across a corner, the far side of a seam) fades within 0.7 of its reach
@@ -248,7 +250,7 @@ struct GIQueryResult
     bool  bSupported;
 };
 // An instance's mean light (the slot before its first surfel, the renderer's upload)
-vec3 SurfelGIMean(in const uint LightOffset) { return GILight[3u * (LightOffset - 1u)].rgb; }
+vec3 SurfelGIMean(in const uint LightOffset) { return UnpackRGB9E5(GILight[LightOffset - 1u].x); }
 
 // What a point no read supports shows (the last of the policy; gi::world::Unsupported the same): the mean light of the valid surfels its
 // cell lists (every patch: by their reach and validity only - no sight, no facing), else the instance's mean. Not black, and local: the
@@ -270,8 +272,8 @@ vec3 SurfelGILocalMean(in const vec3 P, in const vec3 N, in const uint LightOffs
             const uint  sl = Level == 1u ? (GIMesh[b + 7u] & 0xFFFFu) : s;
             const float w  = f * GIValidity(LightOffset + sl);
             if (w <= 0.0) continue;
-            const uint  l  = 3u * (LightOffset + sl);
-            Sum += vec4((GILight[l].rgb + GILight[l + 1u].rgb + GILight[l + 2u].rgb) * (w / 3.0), w);
+            const uvec4 L  = GILight[LightOffset + sl];
+            Sum += vec4((UnpackRGB9E5(L.x) + UnpackRGB9E5(L.y) + UnpackRGB9E5(L.z)) * (w / 3.0), w);
         }
     }
     return Sum.w > 1e-6 ? Sum.rgb / Sum.w : SurfelGIMean(LightOffset);

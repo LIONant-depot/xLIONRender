@@ -3,7 +3,7 @@
 // invocation per surfel of every instance (in the shown light's global order: the owners' table, and each instance's first in its record,
 // word 46). Mode 0: pass 0, the surfel's light split by its basis fractions (E f 3). Mode 1: a filter pass, each surfel with its neighbors
 // (the mesh's neighbor lists of the instance's level, weighted by their validity; none: copied). Mode 2: shown, saturated (SaturateOne),
-// written into the renderer's ring for this frame (3 vec4 a surfel: the basis, the validity in w), with the depth moments (two halves a texel,
+// written into the renderer's ring for this frame (a uvec4 a surfel: the basis' 3 colors in RGB9E5, the validity's bits), with the depth moments (two halves a texel,
 // rounded as the CPU's Half)
 layout(local_size_x = 64) in;
 
@@ -11,13 +11,26 @@ layout(std430, set = 0, binding = 0) readonly buffer data_b    { uint  GD[]; };
 layout(std430, set = 0, binding = 1) readonly buffer owners_b  { uint  GIOwner[]; };
 layout(std430, set = 0, binding = 2)          buffer scratch_b { float GIPass[]; };     // two arrays of 9 floats a surfel: [0, 9N), [9N, 18N)
 layout(std430, set = 0, binding = 3) readonly buffer places_b  { int   GIPlace[]; };    // per instance its place in the ring region (-1: not drawn)
-layout(std430, set = 0, binding = 4)          buffer light_b   { vec4  GILight[]; };
+layout(std430, set = 0, binding = 4)          buffer light_b   { uvec4 GILight[]; };
 layout(std430, set = 0, binding = 5)          buffer moment_b  { uint  GIMoment[]; };
 
 layout(push_constant) uniform push_t { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push;
 
 const uint gi_inst_v = 48u;          // gi::world::gpu_inst_v
 const uint gi_none_v = 0xFFFFFFFFu;
+
+// gi::PackRGB9E5, step for step (the same bits)
+uint PackRGB9E5(vec3 c)
+{
+    c = vec3(c.x > 0.0 ? min(c.x, 65408.0) : 0.0, c.y > 0.0 ? min(c.y, 65408.0) : 0.0, c.z > 0.0 ? min(c.z, 65408.0) : 0.0);
+    const float m = max(c.x, max(c.y, c.z));
+    const int Floor = m > 0.0 ? int((floatBitsToUint(m) >> 23) & 0xFFu) - 127 : -16;
+    int e = max(-16, Floor) + 16;
+    float s = uintBitsToFloat(uint(127 - (e - 24)) << 23);
+    if (floor(m * s + 0.5) >= 512.0) { ++e; s *= 0.5; }
+    const uvec3 M = uvec3(floor(c * s + 0.5));
+    return M.x | (M.y << 9) | (M.z << 18) | (uint(e) << 27);
+}
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
 vec3  GV(uint i) { return vec3(uintBitsToFloat(GD[i]), uintBitsToFloat(GD[i + 1u]), uintBitsToFloat(GD[i + 2u])); }
@@ -76,6 +89,7 @@ void main()
     if (Place < 0) return;
     const uint At = uint(Push.m_Base + Place + 1) + s;
     const float Valid = GF(GD[R + 3u] + s);
+    uint P[3];
     for (uint i = 0u; i < 3u; ++i)
     {
         vec3 C = vec3(GIPass[Src + 9u * g + 3u * i], GIPass[Src + 9u * g + 3u * i + 1u], GIPass[Src + 9u * g + 3u * i + 2u]);
@@ -84,8 +98,9 @@ void main()
             const float Y = 0.2126 * C.x + 0.7152 * C.y + 0.0722 * C.z;
             C = max(vec3(Y) + (C - vec3(Y)) * Push.m_Saturation, vec3(0.0));
         }
-        GILight[3u * At + i] = vec4(C, i == 0u ? Valid : 0.0);
+        P[i] = PackRGB9E5(C);
     }
+    GILight[At] = uvec4(P[0], P[1], P[2], floatBitsToUint(Valid));
     const uint Mo = GD[R + 4u] + 32u * s;
     for (uint t = 0u; t < 16u; ++t) GIMoment[16u * At + t] = Half(GF(Mo + 2u * t)) | (Half(GF(Mo + 2u * t + 1u)) << 16);
 }

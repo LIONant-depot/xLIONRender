@@ -251,7 +251,7 @@ namespace xlionrender
         std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
 
         // Surfel GI: the CPU world, draw id -> world instance, per draw this render's (first surfel in the light ring, level)
-        static constexpr int        gi_light_region_v       = 1 << 17;  // surfels per frame (3 vec4: the HL2 basis' colors, the first's w the validity)
+        static constexpr int        gi_light_region_v       = 1 << 17;  // surfels per frame (a uvec4: the HL2 basis' colors in RGB9E5, the validity)
         struct gi_track
         {
             xmath::fmat4            m_L2W;
@@ -281,7 +281,7 @@ namespace xlionrender
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
         std::uint64_t               m_GIRender = 0;
         double                      m_GIOverheadMs = 0;         // the GI's main-thread work in updateGI outside gi::world::Update (the upload), smoothed: its allowance's pre-charge
-        struct gi_frame { std::uint64_t m_Frame; gi::world::stats m_Stats; };
+        struct gi_frame { std::uint64_t m_Frame; gi::world::stats m_Stats; double m_SceneGpuMs = -1; };     // (SceneGpuMs: the scene pass' GPU time, getGPUTimes: -1 not known)
         static constexpr std::size_t gi_frame_log_v = 1200;     // about 20 s at 60 FPS
         std::vector<gi_frame>       m_GIFrames;                 // DumpGIFrames
         double                      m_GILoadMsAcc = 0;

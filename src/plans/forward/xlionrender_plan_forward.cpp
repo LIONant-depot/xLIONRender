@@ -347,9 +347,9 @@ namespace xlionrender
                                         | (Scene.m_GI.m_bMoments ? 0u : 0x4000u);                   // gi_no_moments_v
         const auto TRing = std::chrono::steady_clock::now();
         std::size_t Entries = 0, MomentUints = 0;
-        (void)m_GILightRing.MemoryMap(std::size_t(Base) * 3, std::size_t(gi_light_region_v) * 3, [&](void* pMemory)     // 3 vec4 a surfel
+        (void)m_GILightRing.MemoryMap(std::size_t(Base), std::size_t(gi_light_region_v), [&](void* pMemory)     // a uvec4 a surfel: 3 colors in RGB9E5, the validity's bits
         {
-            auto* pOut = static_cast<xmath::fvec4*>(pMemory);
+            auto* pOut = static_cast<std::array<std::uint32_t, 4>*>(pMemory);
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
             {
                 const int Id = DrawId[i];
@@ -360,13 +360,12 @@ namespace xlionrender
                 const auto& V = W.InstanceValid(Id);
                 const auto Write = [&](std::size_t k)
                 {
-                    xmath::fvec4* p = pOut + 3 * (std::size_t(T.m_Offset) + 1 + k);
-                    p[0] = xmath::fvec4(E[k][0], V[k]); p[1] = xmath::fvec4(E[k][1], 0); p[2] = xmath::fvec4(E[k][2], 0);
+                    pOut[std::size_t(T.m_Offset) + 1 + k] = { gi::PackRGB9E5(E[k][0]), gi::PackRGB9E5(E[k][1]), gi::PackRGB9E5(E[k][2]), std::bit_cast<std::uint32_t>(V[k]) };
                 };
                 // The slot before its surfels: its mean light, what a pixel no read supports shows (SurfelGIMean: the solver's policy too,
                 // gi::world::Unsupported). Then its surfels
                 const auto& Mean = W.MeanLight(Id);
-                for( int r = 0; r < 3; ++r ) pOut[3 * std::size_t(T.m_Offset) + r] = xmath::fvec4(Mean, 1);
+                { const std::uint32_t m = gi::PackRGB9E5(Mean); pOut[std::size_t(T.m_Offset)] = { m, m, m, std::bit_cast<std::uint32_t>(1.0f) }; }
                 ++Entries;
                 if( bGPU ) {}                                       // (its surfels: Show)
                 else if( T.m_bFull[Slot] ) { for( std::size_t k = 0; k < E.size(); ++k ) Write(k); Entries += E.size(); T.m_bFull[Slot] = false; }
@@ -413,7 +412,7 @@ namespace xlionrender
         m_GIStats.m_TimeMs = std::chrono::duration<double, std::milli>(TGI - m_GIStart).count();
         m_GIOverheadMs += (std::max(m_GIStats.m_UpdateGIMs - m_GIStats.m_TotalMs, 0.0) - m_GIOverheadMs) * 0.2;      // (the outside part, slowly)
         m_GIStats.m_LoadMs = m_GILoadMsAcc; m_GILoadMsAcc = 0;
-        m_GIFrames.push_back({ m_Device.getFrameIndex(), m_GIStats });
+        { gpu_times T; m_GIFrames.push_back({ m_Device.getFrameIndex(), m_GIStats, getGPUTimes(T) ? T.m_SceneMs : -1.0 }); }     // (the scene pass' GPU time: the per-pixel GI read is in it)
         if( m_GIFrames.size() > gi_frame_log_v ) m_GIFrames.erase(m_GIFrames.begin(), m_GIFrames.begin() + std::ptrdiff_t(m_GIFrames.size() - gi_frame_log_v));
     }
 

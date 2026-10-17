@@ -1401,6 +1401,31 @@ agreement". The measurements below found simpler causes to fix first.
     8 s.
 - Next: about 0.8 ms of each slice looks fixed (dispatches, cubes, means). Measure it, and consider fewer and larger slices.
 
+**The slices' cost measured (2026-10-17): no controller change**
+- Per slice in settled Police (GPU timestamps): expand 0.014 ms, pass 2.15 ms, commit 0.06 ms, cubes and means 0.08 ms.
+- The pass at fixed slice sizes: 1.2k rays 0.65–0.72 ms, 19k 0.93 ms, 40k 1.13–1.27 ms, 80k 1.98 ms, 86k (a whole pass of the
+  scene, today's) 2.11–2.14 ms. That fits 0.7 ms + 0.017 ms per 1k rays: about 41k rays per ms at 80k and more.
+- Settled Police already traces the whole scene each frame, and the pick never takes more than one pass, so a latency-aware
+  controller would gain about 15 % at most. Not built.
+- Light sampling is 0.61 ms of the pass, mostly its shadow ray (with the loop kept and the shadow ray skipped, it costs about the
+  same as no sampling at all). The 350-emitter loop is about 0.1 ms.
+- The levers are the cost per ray (the compression survey's items, the shadow ray) and the 0.7 ms latency floor.
+
+**The shown light in RGB9E5 done (2026-10-17): step 1 of the compression survey**
+- GILight, the shown light every pixel reads, is one `uvec4` per surfel: the 3 basis colors in RGB9E5 (`gi::PackRGB9E5`, the
+  format `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32` uses, as Godot's probes) and the validity's bits. It was 3 `vec4` (48 B), now 16 B. The ring
+  is a third of its size.
+- The writers: the filter shader and the CPU upload, with the same integer steps, so the same bits. The readers are in
+  `xlionrender_surfel_gi.glsl`.
+- Precision: steps of 2^-9 of a color's largest channel (worst round trip 1.94e-3 over 1e-4..1e4). 0, negative and NaN become
+  0, and values clamp at 65408. The GPU's shown light against the CPU filter: 1.4e-3 of the brightest (it was 4e-7 in float).
+- Tests (`xlionrender_test_gi_trace`): the round trip, and the shown-light comparison at 2.5e-3. The render test's bleeding and
+  metal floor move by 0.01.
+- Police, the scene pass' GPU time (`SceneGpuMs`, a new column of the GI frame log): 0.478 → 0.423 ms in the close view (−11.5 %,
+  two runs alike), 0.965 → 0.57–0.78 ms in the wide view (noisy, the "before" one run). The GI slice is unchanged.
+- Next, step 2: E inside the GPU world (12 → 4 B per hit, the passes' per-ray cost), with the CPU world quantizing the same way so
+  CPU = GPU stays exact. The estimator's mean stays float.
+
 ## 7b. Reflections (2026-10-17)
 
 **Layer 1 done: rough reflections from the surfel cache**
