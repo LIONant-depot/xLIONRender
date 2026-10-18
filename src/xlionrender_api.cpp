@@ -112,6 +112,14 @@ namespace xlionrender
                 auto* pSystem = FindSystem(pWorld);
                 return pSystem ? pSystem->GITraceMs() : 0.0f;
             }
+            int           NotDrawnBoxes(const void* pWorld, wire_box* pOut, int MaxBoxes) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                if (!pSystem || !pSystem->m_pScene) return 0;
+                const auto Boxes = pSystem->m_pScene->m_Renderer.getNotDrawn();
+                if (pOut && MaxBoxes > 0) std::copy_n(Boxes.begin(), std::min<std::size_t>(Boxes.size(), static_cast<std::size_t>(MaxBoxes)), pOut);
+                return static_cast<int>(Boxes.size());
+            }
             int           DumpGI(const void* pWorld, const char* pPath) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);

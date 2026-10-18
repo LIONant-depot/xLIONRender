@@ -44,6 +44,12 @@ namespace xlionrender
             for( auto* p = static_cast<const std::uint8_t*>(pData); Size--; ++p ) H = (H ^ *p) * 1099511628211ull;
             return H;
         }
+
+        // A planned cluster draw's identity (instance::m_ClusterPlanKey): its mesh and entity (never 0: not planned)
+        std::uint64_t ClusterPlanKey(const draw& D) noexcept
+        {
+            return Hash(Hash(1469598103934665603ull, &D.m_Mesh, sizeof(D.m_Mesh)), &D.m_UserID, sizeof(D.m_UserID)) | 1;
+        }
     }
 
     // Every draw's slot in the instance buffer this frame: a draw with an instance id keeps its persistent slot (written only
@@ -770,7 +776,7 @@ namespace xlionrender
         // The casters and what changed since the last render: new and gone casters, moved or re-materialed ones, and skinned
         // ones (old and new bounds). Draws with an instance id compare against their slot's last state (no hashing, bounds kept
         // while unchanged); draws without one go through a hash of their state.
-        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; };
+        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; };     // m_BoxedBase: in m_ClusterSkip (~0: none)
         std::vector<draw_caster>                         Draws;
         std::vector<xmath::fbbox>                        Changed;
         std::unordered_map<std::uint64_t, xmath::fbbox>  Now;
@@ -789,6 +795,22 @@ namespace xlionrender
             const std::uint32_t Slot = m_DrawSlot[iDraw];
             if( pMesh->m_bCluster && Slot == instance_slots::none_v ) continue;
 
+            // The editor's view of huge meshes. Boxes only: a cluster mesh casts no shadow (gone from the casters, its tiles re-render, and again when it is back).
+            // A budget: the clusters the last scene pass drew as their boxes cast none either (the same draw: m_ClusterPlanKey); BoxedHash is part of the caster's
+            // state, so the tiles under it re-render when they change, and when the budget is turned on or off
+            if( pMesh->m_bCluster && m_bBoxesOnly ) { m_DrawWorld[iDraw] = WorldOf(*pMesh, D); continue; }
+            std::uint32_t BoxedBase = ~0u;
+            std::uint64_t BoxedHash = 0;
+            if( pMesh->m_bCluster && m_FrameBudgetMs > 0 && iDraw < m_ClusterBase.size() && m_ClusterBase[iDraw] != ~0u && m_ClusterPlanKey[iDraw] == ClusterPlanKey(D)
+             && std::size_t(m_ClusterBase[iDraw]) + pMesh->m_Geom.m_Clusters.size() <= m_ClusterSkip.size() )
+            {
+                const std::uint32_t Base = m_ClusterBase[iDraw];
+                std::uint64_t H = 1469598103934665603ull;
+                for( std::uint32_t c = 0, n = std::uint32_t(pMesh->m_Geom.m_Clusters.size()); c < n; ++c )
+                    if( m_ClusterSkip[Base + c] == cluster_boxed_v ) { H = Hash(H, &c, sizeof(c)); BoxedBase = Base; }
+                if( BoxedBase != ~0u ) BoxedHash = H;
+            }
+
             const bool   bSkin = pMesh->m_bCluster && pMesh->m_Geom.m_Kind == geom_kind::SKIN;
             xmath::fbbox World;
             if( Slot < std::uint32_t(max_instances_v) )
@@ -796,11 +818,11 @@ namespace xlionrender
                 auto&               C     = m_SlotCasters[Slot];
                 const std::uint64_t MHash = MaterialsHash(D);
                 const bool bChanged = m_DrawChanged[iDraw] || !C.m_bValid || bSkin || C.m_Mesh.m_Index != D.m_Mesh.m_Index
-                                   || C.m_Mesh.m_Generation != D.m_Mesh.m_Generation || C.m_MaterialsHash != MHash;
+                                   || C.m_Mesh.m_Generation != D.m_Mesh.m_Generation || C.m_MaterialsHash != MHash || C.m_BoxedHash != BoxedHash;
                 if( bChanged )
                 {
                     if( C.m_bValid ) Changed.push_back(C.m_World);
-                    C = { WorldOf(*pMesh, D), D.m_Mesh, MHash, Pass, true };
+                    C = { WorldOf(*pMesh, D), D.m_Mesh, MHash, BoxedHash, Pass, true };
                     Changed.push_back(C.m_World);
                 }
                 C.m_Seen = Pass;
@@ -813,6 +835,7 @@ namespace xlionrender
                 Key = Hash(Key, &D.m_Mesh, sizeof(D.m_Mesh));
                 Key = Hash(Key, &D.m_L2W, sizeof(D.m_L2W));
                 Key = Hash(Key, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id));
+                Key = Hash(Key, &BoxedHash, sizeof(BoxedHash));
                 World = WorldOf(*pMesh, D);
                 Now.emplace(Key, World);
                 const auto It = m_PrevCasters.find(Key);
@@ -820,7 +843,7 @@ namespace xlionrender
                 if( It != m_PrevCasters.end() && bSkin ) Changed.push_back(It->second);
             }
             m_DrawWorld[iDraw] = World;
-            Draws.push_back({ &D, pMesh, World, Slot });
+            Draws.push_back({ &D, pMesh, World, Slot, BoxedBase });
         }
         for( const auto& [Key, World] : m_PrevCasters ) if( !Now.contains(Key) ) Changed.push_back(World);
         m_PrevCasters = std::move(Now);
@@ -880,6 +903,7 @@ namespace xlionrender
                 for( const auto& Sub : G.m_Submeshes )
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {
+                        if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
                         const auto& C = G.m_Clusters[c];
                         if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot });
                         else        Cmd.setPushConstants(details::push_static_geom{ c, Draws[i].m_Slot });
@@ -1076,6 +1100,19 @@ namespace xlionrender
             });
             m_nDrawsRendered = int(m_Visible.size());
 
+            // The editor's view of huge meshes (m_bBoxesOnly, m_FrameBudgetMs): the clusters left out, and their boxes
+            const bool bPlan = bMain && (m_bBoxesOnly || m_FrameBudgetMs > 0);
+            if( bMain )
+            {
+                m_NotDrawn.clear();
+                m_ClusterSkip.clear();
+                m_ClusterBase.assign(Scene.m_Draws.size(), ~0u);
+                m_ClusterPlanKey.assign(Scene.m_Draws.size(), 0);
+                m_BudgetStats.m_nClusters = m_BudgetStats.m_nDrawn = 0;
+                m_BudgetStats.m_Allowance = std::uint64_t(m_IndexAllowance);
+                if( bPlan ) planClusters(Scene, Eye, Frustum);
+            }
+
             const xgpu::pipeline_instance* pBound     = nullptr;      // the state the last cluster draw left bound
             const cluster_geom*            pBoundGeom = nullptr;
             for( const auto& Vis : m_Visible )
@@ -1114,6 +1151,8 @@ namespace xlionrender
                 const auto& G     = pMesh->m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
                 if( Slot == instance_slots::none_v ) continue;
+                if( bPlan && m_bBoxesOnly ) continue;                    // its box instead (planClusters)
+                const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
                 std::array<xgpu::buffer*, 8> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 8>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing }
                                                                    : std::array<xgpu::buffer*, 8>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr, nullptr, nullptr, nullptr };
                 const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{8} : std::size_t{4} };       // SKIN: the GI bindings of the material fragment (no surfels)
@@ -1143,6 +1182,7 @@ namespace xlionrender
 
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {
+                        if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
                         const auto& C = G.m_Clusters[c];
                         if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot });
                         else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second });
@@ -1200,6 +1240,116 @@ namespace xlionrender
 #endif
 
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 2);
+        }
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    // The editor's view of huge meshes (m_bBoxesOnly, m_FrameBudgetMs): per visible cluster draw, which of its clusters the scene pass leaves out (m_ClusterSkip) and the boxes
+    // the editor draws instead (m_NotDrawn). Boxes only: every cluster mesh is its box. A budget: the clusters in the view, the biggest on the screen first (the size of their
+    // box over its distance to the eye), while they fit the allowance of indices (updateBudget); the others are their boxes. Clusters outside the view: left out, no box
+    void instance::planClusters( const scene& Scene, const xmath::fvec3& Eye, const frustum& Frustum ) noexcept
+    {
+        constexpr std::size_t kMaxBoxes = 8192;                 // the editor draws them as lines: the most important ones (a budget's are in order of size on the screen)
+        const auto AddBox = [&]( const xmath::fmat4& L2W, const xmath::fbbox& B, std::uint64_t Entity )
+        {
+            if( m_NotDrawn.size() >= kMaxBoxes ) return;
+            const xmath::fvec3 C = B.getCenter(), E = B.m_Max - B.m_Min;
+            wire_box Box;
+            for( int r = 0; r < 3; ++r )
+            {
+                for( int k = 0; k < 3; ++k ) Box.m_Rows[r][k] = L2W(r, k) * E[k];
+                Box.m_Rows[r][3] = L2W(r, 0) * C.m_X + L2W(r, 1) * C.m_Y + L2W(r, 2) * C.m_Z + L2W(r, 3);
+            }
+            Box.m_Entity = Entity;
+            m_NotDrawn.push_back(Box);
+        };
+
+        m_ClusterPicks.clear();
+        std::uint64_t Visible = 0;
+        const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
+        for( const auto& Vis : m_Visible )
+        {
+            if( Vis.m_pMesh->m_bCluster == false ) continue;
+            const auto& D = Scene.m_Draws[Vis.m_iDraw];
+            const auto& G = Vis.m_pMesh->m_Geom;
+            const std::uint32_t Base = std::uint32_t(m_ClusterSkip.size());
+            m_ClusterBase[Vis.m_iDraw] = Base;
+            m_ClusterPlanKey[Vis.m_iDraw] = ClusterPlanKey(D);
+            m_ClusterSkip.resize(m_ClusterSkip.size() + G.m_Clusters.size(), m_bBoxesOnly ? cluster_boxed_v : std::uint8_t(0));
+            if( m_bBoxesOnly ) { AddBox(D.m_L2W, G.m_BBox, D.m_UserID); continue; }
+
+            const xmath::fmat4 L2w = ToEye * D.m_L2W;           // camera-centered, as the frustum
+            for( const auto& Sub : G.m_Submeshes )
+                for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                {
+                    const auto& B = G.m_Clusters[c].m_BBox;
+                    xmath::fbbox W;
+                    for( int i = 0; i < 8; ++i )
+                    {
+                        const xmath::fvec3 P = L2w * xmath::fvec3( i & 1 ? B.m_Max.m_X : B.m_Min.m_X, i & 2 ? B.m_Max.m_Y : B.m_Min.m_Y, i & 4 ? B.m_Max.m_Z : B.m_Min.m_Z );
+                        if( i == 0 ) W.m_Min = W.m_Max = P;
+                        else { W.m_Min = xmath::fvec3::Min(W.m_Min, P); W.m_Max = xmath::fvec3::Max(W.m_Max, P); }
+                    }
+                    if( !Frustum.Overlaps(W) ) { m_ClusterSkip[Base + c] = cluster_culled_v; continue; }
+                    const xmath::fvec3 Center = (W.m_Min + W.m_Max) * 0.5f, Half = (W.m_Max - W.m_Min) * 0.5f;
+                    const float R2 = Half.m_X * Half.m_X + Half.m_Y * Half.m_Y + Half.m_Z * Half.m_Z;
+                    const float D2 = std::max(Center.m_X * Center.m_X + Center.m_Y * Center.m_Y + Center.m_Z * Center.m_Z, 1.0e-6f);
+                    m_ClusterPicks.push_back({ R2 / D2, Base + c, G.m_Clusters[c].m_nIndices, Vis.m_iDraw, c, &G });
+                    Visible += G.m_Clusters[c].m_nIndices;
+                }
+        }
+        m_IndicesVisible          = Visible;
+        m_BudgetStats.m_nClusters = int(m_ClusterPicks.size());
+        m_BudgetStats.m_nDrawn    = int(m_ClusterPicks.size());
+        if( m_bBoxesOnly ) { m_BudgetStats.m_nDrawn = 0; return; }
+        if( m_IndexAllowance <= 0 || double(Visible) <= m_IndexAllowance ) return;
+
+        // Over the allowance: the biggest on the screen first, until the next one does not fit (the first one always does)
+        std::sort(m_ClusterPicks.begin(), m_ClusterPicks.end(), []( const cluster_pick& a, const cluster_pick& b ) { return a.m_Priority > b.m_Priority; });
+        std::uint64_t Drawn  = 0;
+        int           nDrawn = 0;
+        bool          bFull  = false;
+        for( const auto& P : m_ClusterPicks )
+        {
+            if( !bFull && (nDrawn == 0 || double(Drawn + P.m_nIndices) <= m_IndexAllowance) ) { Drawn += P.m_nIndices; ++nDrawn; continue; }
+            bFull = true;                                       // the first that does not fit: it and every one after it are their boxes
+            m_ClusterSkip[P.m_iSkip] = cluster_boxed_v;
+            const auto& D = Scene.m_Draws[P.m_iDraw];
+            AddBox(D.m_L2W, P.m_pGeom->m_Clusters[P.m_iCluster].m_BBox, D.m_UserID);
+        }
+        m_BudgetStats.m_nDrawn = nDrawn;
+    }
+
+    // The frame budget's allowance (planClusters), decided over a few frames at a time (what the last change did is in them): while the frames are slower than the budget it
+    // shrinks with them (to a floor: something is always drawn, whatever else makes the frame slow), while they are well under it grows back, to no limit once all fits
+    void instance::updateBudget( void ) noexcept
+    {
+        const auto   Now = std::chrono::steady_clock::now();
+        const double Ms  = m_LastRender == std::chrono::steady_clock::time_point{} ? 0.0 : std::chrono::duration<double, std::milli>(Now - m_LastRender).count();
+        m_LastRender = Now;
+        if( m_FrameBudgetMs <= 0 || m_bBoxesOnly ) { m_IndexAllowance = 0; m_BudgetWindowMs = 0; m_BudgetWindowFrames = 0; return; }
+        if( Ms <= 0 || Ms > 1000 ) return;                      // the first frame, or a stall (a load, a breakpoint): not the geometry's doing
+
+        m_BudgetWindowMs += Ms;
+        if( ++m_BudgetWindowFrames < 4 ) return;
+        const double FrameMs = m_BudgetWindowMs / m_BudgetWindowFrames;
+        m_BudgetWindowMs     = 0;
+        m_BudgetWindowFrames = 0;
+        m_BudgetStats.m_FrameMs = float(FrameMs);
+
+        constexpr double kMinIndices = 3.0 * 250000;           // 250K triangles
+        const double     Budget      = double(m_FrameBudgetMs);
+        const double     Visible     = double(m_IndicesVisible);
+        if( FrameMs > Budget * 1.05 )
+        {
+            const double From = m_IndexAllowance > 0 ? std::min(m_IndexAllowance, Visible) : Visible;
+            m_IndexAllowance  = std::max(kMinIndices, From * std::clamp(Budget / FrameMs, 0.5, 0.9));
+        }
+        else if( m_IndexAllowance > 0 && FrameMs < Budget * 0.8 )
+        {
+            m_IndexAllowance *= 1.2;
+            if( m_IndexAllowance >= Visible ) m_IndexAllowance = 0;
         }
     }
 
@@ -1361,6 +1511,7 @@ namespace xlionrender
         const auto& D     = Scene.m_Draws[iDraw];
         const auto* pMesh = findMesh(D.m_Mesh);
         if( pMesh == nullptr || (pMesh->m_bCluster && m_DrawSlot[iDraw] == instance_slots::none_v) ) return;
+        if( pMesh->m_bCluster && m_bBoxesOnly ) return;                 // drawn as its box (the editor draws it in the selection's color)
         if( createOutlineTargets(View) ) return;
 
         // The object's bounds on the screen (the world box's 8 corners): where the composite has anything to do. A corner behind the eye: the whole view
@@ -1411,6 +1562,7 @@ namespace xlionrender
                 for( const auto& Sub : G.m_Submeshes )
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {
+                        if( isClusterSkipped(iDraw, c) ) continue;              // the scene pass left it out (its box, or outside the view)
                         const auto& C = G.m_Clusters[c];
                         if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot });
                         else        Cmd.setPushConstants(details::push_static_geom{ c, Slot });
@@ -1469,6 +1621,7 @@ namespace xlionrender
         updateProbes(Window, Scene, Eye);
         const auto T2 = clock::now();
 
+        updateBudget();
         renderScenePass(Window, Scene, View, W2C, Eye, true);
 
         // HDR -> exposure -> LionMapper -> sRGB output (alpha = coverage)

@@ -25,6 +25,7 @@ namespace xlionrender
             std::uint32_t   m_iIndex;
             std::uint32_t   m_nIndices;
             std::uint32_t   m_iVertex;
+            xmath::fbbox    m_BBox;                 // local bounds (the resource's cluster bounds): the editor's frame budget draws a cluster not drawn as its box
         };
 
         struct submesh
@@ -51,7 +52,7 @@ namespace xlionrender
     {
         cluster_geom G{ .m_pStreams = &Geom.IndexBuffer(), .m_pClusterData = &Geom.ClusterBuffer(), .m_BBox = Geom.m_BBox };
 
-        for( auto& C : Geom.getClusters() ) G.m_Clusters.push_back({ C.m_iIndex, C.m_nIndices, C.m_iVertex });
+        for( auto& C : Geom.getClusters() ) G.m_Clusters.push_back({ C.m_iIndex, C.m_nIndices, C.m_iVertex, C.m_BBox });
         for( auto& M : Geom.getMeshes() )
         {
             if( M.m_nLODs == 0 ) continue;

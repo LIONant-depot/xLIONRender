@@ -15,6 +15,8 @@
 #include "features/lights/xlionrender_light_cells.h"
 #include "features/culling/xlionrender_frustum.h"
 #include "features/gi/xlionrender_surfel_gi_gpu.h"
+#include "xlionrender_view.h"
+#include <chrono>
 #include <memory>
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
 #include <span>
@@ -139,6 +141,37 @@ namespace xlionrender
         bool                                       m_bFrustumCull = true;
         // How many of the scene's draws the last Render drew in the scene pass
                       int                  getDrawsRendered( void ) const                                       noexcept { return m_nDrawsRendered; }
+
+        // The editor's view of huge meshes (view_options::m_bBoxesOnly, m_FrameBudgetMs), in Render's scene pass. Boxes only: no cluster mesh is drawn. A frame budget (> 0, ms;
+        // the frame is the time from one Render to the next): only the clusters in the view are drawn, the biggest on the screen first, as many as fit the allowance of indices;
+        // the allowance shrinks while the frames are slower than the budget and grows back (to no limit) while they are faster. What was not drawn: getNotDrawn, the boxes the
+        // editor draws instead (the clusters outside the view have none)
+        bool                                       m_bBoxesOnly    = false;
+        float                                      m_FrameBudgetMs = 0;
+        struct budget_stats
+        {
+            int             m_nClusters = 0;        // the clusters of the visible cluster draws, in the view
+            int             m_nDrawn    = 0;        // of them, the ones drawn
+            std::uint64_t   m_Allowance = 0;        // indices (0: no limit)
+            float           m_FrameMs   = 0;        // the frame time the allowance was last decided on
+        };
+                      std::span<const wire_box> getNotDrawn( void ) const                                      noexcept { return m_NotDrawn; }
+                      const budget_stats&  getBudgetStats( void ) const                                         noexcept { return m_BudgetStats; }
+        // Whether the last scene pass left cluster iCluster (an index into its cluster_geom::m_Clusters) of scene draw iDraw out (its box is drawn, or it is outside the view)
+                      bool                 isClusterSkipped( std::size_t iDraw, std::uint32_t iCluster ) const  noexcept
+                      {
+                          if( iDraw >= m_ClusterBase.size() || m_ClusterBase[iDraw] == ~0u ) return false;
+                          const std::size_t i = std::size_t(m_ClusterBase[iDraw]) + iCluster;
+                          return i < m_ClusterSkip.size() && m_ClusterSkip[i] != 0;
+                      }
+        // Whether it was left out as its box (Boxes only, or over the budget; not for being outside the view): the shadows leave it out too (what is left out of the
+        // view still casts into it)
+                      bool                 isClusterBoxed( std::size_t iDraw, std::uint32_t iCluster ) const    noexcept
+                      {
+                          if( iDraw >= m_ClusterBase.size() || m_ClusterBase[iDraw] == ~0u ) return false;
+                          const std::size_t i = std::size_t(m_ClusterBase[iDraw]) + iCluster;
+                          return i < m_ClusterSkip.size() && m_ClusterSkip[i] == cluster_boxed_v;
+                      }
 
         // true when a newer frame's timings arrived since the last call
                       bool                 getGPUTimes  ( gpu_times& Times )                                    noexcept;
@@ -297,6 +330,7 @@ namespace xlionrender
             xmath::fbbox            m_World;
             mesh_id                 m_Mesh;
             std::uint64_t           m_MaterialsHash = 0;
+            std::uint64_t           m_BoxedHash     = 0;        // its clusters left out as boxes (renderShadows' BoxedHash): the shadow changes with them
             std::uint64_t           m_Seen          = 0;
             bool                    m_bValid        = false;
         };
@@ -307,6 +341,22 @@ namespace xlionrender
         struct visible_draw { const mesh_slot* m_pMesh; std::uint32_t m_Material; std::uint32_t m_iDraw; };
         std::vector<visible_draw>   m_Visible;              // this view's visible draws, sorted by state
         int                         m_nDrawsRendered        = 0;
+        // The editor's view of huge meshes (m_bBoxesOnly, m_FrameBudgetMs): planClusters, updateBudget
+        void                        planClusters    ( const scene& Scene, const xmath::fvec3& Eye, const frustum& Frustum ) noexcept;
+        void                        updateBudget    ( void ) noexcept;
+        struct cluster_pick { float m_Priority; std::uint32_t m_iSkip; std::uint32_t m_nIndices; std::uint32_t m_iDraw; std::uint32_t m_iCluster; const cluster_geom* m_pGeom; };
+        std::vector<cluster_pick>   m_ClusterPicks;
+        std::vector<wire_box>       m_NotDrawn;             // the last scene pass's boxes of what it did not draw
+        static constexpr std::uint8_t cluster_culled_v = 1, cluster_boxed_v = 2;
+        std::vector<std::uint8_t>   m_ClusterSkip;          // per cluster of each visible cluster draw (from m_ClusterBase): 0 drawn, cluster_culled_v outside the view, cluster_boxed_v its box
+        std::vector<std::uint32_t>  m_ClusterBase;          // per scene draw: its first entry in m_ClusterSkip (~0: not planned, every cluster drawn)
+        std::vector<std::uint64_t>  m_ClusterPlanKey;       // per scene draw planned: its mesh and entity, so the next frame's renderShadows (before the plan) finds it is the same draw
+        double                      m_IndexAllowance        = 0;        // indices a frame may draw (0: no limit)
+        std::uint64_t               m_IndicesVisible        = 0;        // the indices of the clusters in the view, last scene pass
+        std::chrono::steady_clock::time_point m_LastRender{};
+        double                      m_BudgetWindowMs        = 0;        // the frames since the allowance was last decided on
+        int                         m_BudgetWindowFrames    = 0;
+        budget_stats                m_BudgetStats;
         xmath::fvec3                m_Origin                {};
         bool                        m_bOriginSet            = false;
         std::uint64_t               m_InstanceFrame         = ~0ull;

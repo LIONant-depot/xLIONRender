@@ -21,7 +21,20 @@ namespace xlionrender
         bool        m_bNoPerPixel = false;      // the vertex read only (the Environment's GIPerPixel off)
         bool        m_bNoMoments  = false;      // the reads without the depth-moment visibility test (the Environment's GIMoments off)
         float       m_GITraceAllowanceMs = -1;  // < 0: the scene's own; else this frame's grant of the host's shared allowance (version 9)
+        // Huge meshes (version 10): the Meshes are not drawn, only their boxes (xRenderEditor::NotDrawnBoxes); or, with a frame budget (> 0, ms), only as many of their
+        // clusters as the frame time allows, the biggest on the screen first, the others as their boxes (the allowance shrinks while the frames are slower than the budget
+        // and grows back as they are faster)
+        bool        m_bBoxesOnly    = false;
+        float       m_FrameBudgetMs = 0;
         bool operator==(const view_options&) const noexcept = default;
+    };
+
+    // A box a render did not draw the inside of (view_options::m_bBoxesOnly, m_FrameBudgetMs): a Mesh or one of its clusters, as the unit cube (-0.5 .. 0.5) placed in the
+    // world (the rows of the affine matrix), and the entity it is of (raw value). Version 10.
+    struct wire_box
+    {
+        float           m_Rows[3][4];
+        std::uint64_t   m_Entity;
     };
 
     // The roles of the entities of a world in an editing session (documentation/Editors/prefabs_plan.md, 3.7 and phase 7). The host knows which scene an entity is in, the render does not: it is told which
