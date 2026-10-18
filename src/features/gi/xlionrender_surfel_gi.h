@@ -1055,6 +1055,67 @@ namespace xlionrender::gi
             return { Best[0].second, Best[1].second, Best[2].second, Best[3].second };
         }
 
+        // Bake's candidates: about 4 per Radius^2 of each triangle and at least one per half Radius of its longest edge, each with its
+        // triangle's normal (to the smoothed normal's side); per candidate its triangle, u, v when asked (pCT)
+        void Candidates(float Radius, std::vector<v3>& CP, std::vector<v3>& CN, std::vector<std::array<float, 3>>* pCT) const noexcept
+        {
+            rng Sample(0xBA4Eu);
+            const float PerArea = 4.0f / (Radius * Radius);
+            for (const auto& T : m_Tris)
+            {
+                const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], C = m_Pos[T[2]];
+                const float Area = 0.5f * (B - A).Cross(C - A).Length();
+                const float Long = std::max({ (B - A).Length(), (C - B).Length(), (A - C).Length() });
+                const int   n    = std::min(1 << 16, std::max({ 1, int(std::ceil(Area * PerArea)), int(std::ceil(Long / (0.5f * Radius))) }));     // by area, and along a thin strip by length
+                for (int k = 0; k < n; ++k)
+                {
+                    float u = Sample.Next(), v = Sample.Next();
+                    if (u + v > 1) { u = 1 - u; v = 1 - v; }
+                    CP.push_back(A + (B - A) * u + (C - A) * v);
+                    // The triangle's own normal (to the smoothed normal's side): the GI's geometry tests use the surface as it is. A box
+                    // with averaged corner normals would tilt its surfels near the corners, and the reads step along its triangles
+                    const v3 Ns = m_Nrm[T[0]] * (1 - u - v) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * v;
+                    v3 Nn = (B - A).Cross(C - A);
+                    if (Nn.Length() < 1e-12f) Nn = Ns;
+                    else if (Nn.Dot(Ns) < 0) Nn = Nn * -1.0f;
+                    CN.push_back(Nn.NormalizeCopy());
+                    if (pCT) pCT->push_back({ float(&T - m_Tris.data()), u, v });
+                }
+            }
+        }
+
+        // How many surfels Bake(Radius) keeps (its step 2 alone: its candidates in its order, its acceptance, the rays it needs built once),
+        // stopping past Stop (Stop + 1): over a limit it ends as soon as the limit is passed. A surface whose area alone asks for more (its
+        // R-disks: the visibility test only ever keeps more) returns that before any candidate is made (a mesh in cm: gigabytes of them).
+        // bRays false: without the visibility test (no BVH, no rays: much cheaper), a lower bound (that test only ever keeps more)
+        std::size_t CountSurfels(float Radius, std::size_t Stop = ~std::size_t(0), bool bRays = true) noexcept
+        {
+            double Area = 0;
+            for (const auto& T : m_Tris) Area += 0.5 * double((m_Pos[T[1]] - m_Pos[T[0]]).Cross(m_Pos[T[2]] - m_Pos[T[0]]).Length());
+            if (const double Disks = Area / (3.14159265 * double(Radius) * double(Radius)); Disks > double(Stop)) return std::size_t(Disks);
+
+            if (bRays && m_Tri4.empty()) BuildRays();
+            std::vector<v3> CP, CN;
+            Candidates(Radius, CP, CN, nullptr);
+            std::vector<int> Order(CP.size());
+            for (std::size_t i = 0; i < Order.size(); ++i) Order[i] = int(i);
+            rng Shuffle(0x5EEDu);
+            for (std::size_t i = Order.size(); i > 1; --i) std::swap(Order[i - 1], Order[std::size_t(Shuffle.Next() * float(i)) % i]);
+            surfel_grid G{ Radius, {} };
+            std::vector<surfel> Kept;
+            for (int i : Order)
+            {
+                bool bTaken = false;
+                G.Near(CP[i], 1, [&](int s) { bTaken = bTaken || ((CP[i] - Kept[s].m_Center).Length() < Radius && Kept[s].m_Normal.Dot(CN[i]) > 0.8f
+                                                                && std::abs((Kept[s].m_Center - CP[i]).Dot(CN[i])) < 0.1f * Radius && (!bRays || Sees(CP[i], CN[i], Kept[s]))); });
+                if (bTaken) continue;
+                G.Add(CP[i], int(Kept.size()));
+                Kept.push_back({ CP[i], CN[i], Radius });
+                if (Kept.size() > Stop) break;
+            }
+            return Kept.size();
+        }
+
         // The bake (the GeomStatic compiler's job: its surfels are saved in the geometry, see SurfelsFromXGeomStatic):
         //  - candidates sampled on the surface by area (about 4 per Radius^2 of each triangle, and at least one per half Radius of its longest
         //    edge: a thin strip - a frame, a sill - has little area but its whole length needs surfels), each with the
@@ -1065,14 +1126,15 @@ namespace xlionrender::gi
         //  - the parents: the same over the surfels' centers with ParentRadius; each surfel's parent is its nearest compatible one
         //  - the BVH and the 4-triangle rows for the rays
         // Deterministic (fixed seeds): the same mesh bakes the same surfels.
-        void Bake(float Radius, float ParentRadius, std::span<const std::pair<v3, v3>> Forced = {}) noexcept
+        // Past MaxSurfels surfels it stops (m_Levels[0] has MaxSurfels + 1 of them, nothing else is made): the caller drops the GI.
+        void Bake(float Radius, float ParentRadius, std::span<const std::pair<v3, v3>> Forced = {}, std::size_t MaxSurfels = ~std::size_t(0)) noexcept
         {
             BuildRays();                                            // the vertices' visibility tests cast against the mesh
 
             // Dart throwing over weighted candidates: the kept ones become surfels of radius R
             // A candidate is taken by a kept surfel only if that one sees it: a door a few cm behind its frame gets surfels of its own
             // (the wall's past the frame's lip do not cover it - read through the lip, they faded in wedges)
-            const auto Poisson = [this](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G, std::vector<int>* pFrom = nullptr)
+            const auto Poisson = [this](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G, std::vector<int>* pFrom = nullptr, std::size_t Max = ~std::size_t(0))
             {
                 Out.clear();
                 if (pFrom) pFrom->clear();
@@ -1092,6 +1154,7 @@ namespace xlionrender::gi
                     G.Add(P[i], int(Out.size()));
                     Out.push_back({ P[i], N[i], R });
                     if (pFrom) pFrom->push_back(i);
+                    if (Out.size() > Max) break;
                 }
             };
 
@@ -1117,34 +1180,13 @@ namespace xlionrender::gi
             // 1. Candidates on the surface, by area
             std::vector<v3> CP, CN;
             std::vector<std::array<float, 3>> CT;                  // per candidate: its triangle, u, v (where its material is)
-            rng Sample(0xBA4Eu);
-            const float PerArea = 4.0f / (Radius * Radius);
-            for (const auto& T : m_Tris)
-            {
-                const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], C = m_Pos[T[2]];
-                const float Area = 0.5f * (B - A).Cross(C - A).Length();
-                const float Long = std::max({ (B - A).Length(), (C - B).Length(), (A - C).Length() });
-                const int   n    = std::min(1 << 16, std::max({ 1, int(std::ceil(Area * PerArea)), int(std::ceil(Long / (0.5f * Radius))) }));     // by area, and along a thin strip by length
-                for (int k = 0; k < n; ++k)
-                {
-                    float u = Sample.Next(), v = Sample.Next();
-                    if (u + v > 1) { u = 1 - u; v = 1 - v; }
-                    CP.push_back(A + (B - A) * u + (C - A) * v);
-                    // The triangle's own normal (to the smoothed normal's side): the GI's geometry tests use the surface as it is. A box
-                    // with averaged corner normals would tilt its surfels near the corners, and the reads step along its triangles
-                    const v3 Ns = m_Nrm[T[0]] * (1 - u - v) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * v;
-                    v3 Nn = (B - A).Cross(C - A);
-                    if (Nn.Length() < 1e-12f) Nn = Ns;
-                    else if (Nn.Dot(Ns) < 0) Nn = Nn * -1.0f;
-                    CN.push_back(Nn.NormalizeCopy());
-                    CT.push_back({ float(&T - m_Tris.data()), u, v });
-                }
-            }
+            Candidates(Radius, CP, CN, &CT);
 
             // 2. Surfels, 3. vertex indices
             surfel_grid G0, G1;
             std::vector<int> From;
-            Poisson(CP, CN, Radius, m_Levels[0], G0, &From);
+            Poisson(CP, CN, Radius, m_Levels[0], G0, &From, MaxSurfels);
+            if (m_Levels[0].size() > MaxSurfels) return;
             // The patches (PatchDefects: Forced, from BuildReadGrid's m_EmptyParts): a surfel at each, after the others (one where one already
             // stands for it: the same rule as the darts'), its material where it lies (the triangle under it)
             m_FirstPatch = 0xFFFFFFFFu;
