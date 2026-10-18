@@ -7,7 +7,10 @@
 // value's only field that straddles the 32/48-bit split (Weight0, bits 28-35) is reassembled from a
 // low nibble in `lo32` and a high nibble in `hi16` - see the bit-layout comment in xgeom_skin.h.
 //
-mat4 ComputeSkinMatrix(uint lo32, uint hi16, uint baseBoneIndex, uint maxInfluences)
+// The cluster's bone addressing (xgeom_skin.h cluster_data) is read once and branched on once per vertex, outside the influence loop:
+// the same for every vertex of a cluster. BASE_OFFSET: base bone + the 7 bit index; PALETTE: BoneMap[palette start + the 7 bit index].
+//
+mat4 ComputeSkinMatrix(uint lo32, uint hi16, ClusterData Cluster, uint maxInfluences)
 {
     const uint boneOffset0 =  lo32        & 0x7Fu;
     const uint boneOffset1 = (lo32 >>  7) & 0x7Fu;
@@ -23,7 +26,17 @@ mat4 ComputeSkinMatrix(uint lo32, uint hi16, uint baseBoneIndex, uint maxInfluen
     const float w2 =        (float(q2) / 31.0)   * (1.0 / 3.0);
     const float w3 = max(0.0, 1.0 - (w0 + w1 + w2));
 
-    const uint  boneIndex[4]  = uint[4](baseBoneIndex + boneOffset0, baseBoneIndex + boneOffset1, baseBoneIndex + boneOffset2, baseBoneIndex + boneOffset3);
+    uint boneIndex[4];
+    if ((Cluster.boneAddressing >> 30) == 1u)
+    {
+        const uint start = Cluster.boneAddressing & 0x3FFFFFFFu;
+        boneIndex = uint[4](BoneMapEntry(start + boneOffset0), BoneMapEntry(start + boneOffset1), BoneMapEntry(start + boneOffset2), BoneMapEntry(start + boneOffset3));
+    }
+    else
+    {
+        const uint base = uint(Cluster.posScale.w);
+        boneIndex = uint[4](base + boneOffset0, base + boneOffset1, base + boneOffset2, base + boneOffset3);
+    }
     const float rawWeight[4]  = float[4](w0, w1, w2, w3);
 
     // Weight-truncation skin LOD (Part A/C): at maxInfluences==k, use the first k-1 stored weights

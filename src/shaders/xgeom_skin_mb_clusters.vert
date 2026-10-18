@@ -4,7 +4,8 @@
 struct ClusterData
 {
     vec4 posScale;                 // xyz = position scale, w = this cluster's base skeleton bone index
-    vec4 posTranslation;           // xyz = position translation, w = trash
+    vec3 posTranslation;           // position translation
+    uint boneAddressing;           // bits 31..30: 0 base offset (posScale.w), 1 palette; bits 29..0: the palette's start in BoneMap
     vec4 uvScaleTranslation;       // xy = UV Scale, zw = UV offset
 };
 
@@ -24,6 +25,19 @@ layout(std430, set = 1, binding = 1) buffer BoneMatrixBuffer
 {
     mat4 boneMatrix[];
 };
+
+//
+// The palettes of the palette clusters: uint16 skeleton bone indices, two per 32 bit word (a skin without palettes binds a dummy word)
+//
+layout(std430, set = 1, binding = 8) readonly buffer BoneMapBuffer
+{
+    uint boneMapWords[];
+};
+
+uint BoneMapEntry(uint i)
+{
+    return (boneMapWords[i >> 1] >> ((i & 1u) * 16u)) & 0xFFFFu;
+}
 
 //
 // Push constant for cluster index and skin LOD (updated per draw)

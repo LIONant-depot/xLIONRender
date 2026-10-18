@@ -465,6 +465,7 @@ namespace xlionrender
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 2, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 8, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }     // SKIN: the BoneMap
             };
             const auto MakeCaster = [&](int k, xgpu::vertex_descriptor& VD, const xgpu::shader& Vert, std::size_t PushSize, std::size_t nBinds) -> xgpu::device::error*
             {
@@ -480,7 +481,7 @@ namespace xlionrender
             };
             if( auto Err = MakeCaster(0, m_MeshVD,       ForwardVert, sizeof(details::push_forward),     0); Err ) return Err;     // CreateMesh meshes
             if( auto Err = MakeCaster(1, m_StaticGeomVD, RigidVert,   sizeof(details::push_static_geom), 3); Err ) return Err;     // RIGID
-            if( auto Err = MakeCaster(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   4); Err ) return Err;     // SKIN
+            if( auto Err = MakeCaster(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   5); Err ) return Err;     // SKIN
 
             // The selection's mask: the same vertex paths, the mask's fragment (it samples the scene's depth), no bias, the depth test and write of its own
             {
@@ -496,7 +497,7 @@ namespace xlionrender
                 };
                 if( auto Err = MakeMask(0, m_MeshVD,       ForwardVert, sizeof(details::push_forward),     0); Err ) return Err;
                 if( auto Err = MakeMask(1, m_StaticGeomVD, RigidVert,   sizeof(details::push_static_geom), 3); Err ) return Err;
-                if( auto Err = MakeMask(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   4); Err ) return Err;
+                if( auto Err = MakeMask(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   5); Err ) return Err;
                 m_bOutlineReady = true;
             }
         }
@@ -836,6 +837,7 @@ namespace xlionrender
         UniformBinds.push_back(BothSSBO(5));                    // the GI: the mesh's surfels (RIGID: the vertex read; both: the per-pixel read
         UniformBinds.push_back(BothSSBO(6));                    // of mb_standard_pbr.frag, off on the skin path), their light
         UniformBinds.push_back(BothSSBO(7));                    //   and their depth moments
+        if( bSkin ) UniformBinds.push_back(VertexSSBO(8));     // SKIN: the BoneMap (xgeom_skin palettes)
         const auto Binds = std::span{ UniformBinds };
         if( m_Device.Create(M.m_Pipeline[k], { .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                              , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)

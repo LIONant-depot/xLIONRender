@@ -893,8 +893,8 @@ namespace xlionrender
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
                 if( &G != pBoundGeom )
                 {
-                    std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer };
-                    Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} });
+                    std::array<xgpu::buffer*, 4> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy };
+                    Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{4} : std::size_t{2} });
                     Cmd.setDynamicUBO(m_ShadowUBO, 0);
                     Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
                     pBoundGeom = &G;
@@ -1153,9 +1153,9 @@ namespace xlionrender
                 if( Slot == instance_slots::none_v ) continue;
                 if( bPlan && m_bBoxesOnly ) continue;                    // its box instead (planClusters)
                 const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
-                std::array<xgpu::buffer*, 8> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 8>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing }
-                                                                   : std::array<xgpu::buffer*, 8>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr, nullptr, nullptr, nullptr };
-                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{8} : std::size_t{4} };       // SKIN: the GI bindings of the material fragment (no surfels)
+                std::array<xgpu::buffer*, 9> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 9>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy }
+                                                                   : std::array<xgpu::buffer*, 9>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr, nullptr, nullptr, nullptr, nullptr };
+                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{9} : std::size_t{4} };       // SKIN: the GI bindings of the material fragment (no surfels), the BoneMap
                 std::array<xgpu::buffer*, 7> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
                                                       , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing, &m_GIMomentRing };
                 const auto  GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
@@ -1554,8 +1554,8 @@ namespace xlionrender
             {
                 const auto& G     = pMesh->m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
-                std::array<xgpu::buffer*, 3> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer };
-                Cmd.setPipelineInstance(View.m_MaskInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{3} : std::size_t{2} });
+                std::array<xgpu::buffer*, 4> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy };
+                Cmd.setPipelineInstance(View.m_MaskInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{4} : std::size_t{2} });
                 Cmd.setDynamicUBO(m_ShadowUBO, 0);
                 Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
                 const std::uint32_t Slot = m_DrawSlot[iDraw];

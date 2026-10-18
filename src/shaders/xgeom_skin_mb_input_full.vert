@@ -40,7 +40,6 @@ mb_full_vertex getVertexData()
 
     // Select cluster by push constant index
     ClusterData selectedCluster = cluster[push.clusterIndex];
-    const uint  baseBoneIndex   = uint(selectedCluster.posScale.w);
 
     //
     // Decode compressed position from int16 to [-1,1], then to local space
@@ -70,7 +69,7 @@ mb_full_vertex getVertexData()
     // Build this vertex's skin matrix and deform position/normal/tangent from bind pose
     //
     const uint lo32 = in_PackedLo | (in_PackedHi.x << 16);
-    const mat4 Skin = ComputeSkinMatrix(lo32, in_PackedHi.y, baseBoneIndex, push.maxInfluences);
+    const mat4 Skin = ComputeSkinMatrix(lo32, in_PackedHi.y, selectedCluster, push.maxInfluences);
     const mat3 SkinRot = mat3(Skin);
 
     Data.LocalPos    = Skin * bindPos;
