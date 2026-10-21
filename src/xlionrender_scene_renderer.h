@@ -22,6 +22,7 @@
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_rsc_loader.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_runtime.h"
 
+#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -39,6 +40,7 @@ namespace xlionrender
         std::unordered_map<std::uint64_t, made_material> m_Materials;  // per material instance (instance guid)
         std::uint32_t                                   m_UpdateCount = 0;              // xlioncore::resources::UpdateCount when the materials were last checked
         instance_ids                                    m_InstanceIds;                  // per drawn entity: its draw's instance id
+        std::unordered_set<std::uint64_t>               m_StaleReported;                // the instances E_LAYOUT_STALE was said for (once each)
 
         struct stats
         {
@@ -125,9 +127,15 @@ namespace xlionrender
                 if (&E == pMI->getTextures().data()) { Textures.push_back(nullptr); continue; }    // slot 0: the renderer's shadow atlas
                 Textures.push_back(static_cast<xgpu::texture*>(const_cast<void*>(From[1 + Textures.size()])));
             }
+            // An instance compiled against another layout than the material has now (the material was compiled again, the instance not yet): its block would be read
+            // wrong, so the slot draws with the constant material until the instance is rebuilt (documentation/material_contract.md section 5)
+            if (pMI->m_LayoutHash != pMat->m_LayoutHash)
+            {
+                if (m_StaleReported.insert(MIInstance).second) std::fprintf(stderr, "E_LAYOUT_STALE: material instance %016llX was compiled against another layout than its material\n", static_cast<unsigned long long>(MIInstance));
+                return {};
+            }
             material_id Id;
-            // ponytail: the material's default block until material instances carry their own (contract task 8)
-            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, pMat->m_Flags.m_bAlpha, { pMat->m_pDefaultBlock, pMat->m_BlockBytes / 4u })) return {};
+            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, pMat->m_Flags.m_bAlpha, { pMI->m_pParams, pMI->m_BlockBytes / 4u })) return {};
             m_Materials[MIInstance] = { Id, std::move(From) };
             return Id;
         }
