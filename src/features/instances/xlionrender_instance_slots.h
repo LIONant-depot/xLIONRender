@@ -117,6 +117,37 @@ namespace xlionrender
         std::vector<std::uint32_t>                       m_Pending;
         std::unordered_map<std::uint32_t, std::uint32_t> m_ByID;
     };
+
+    // Instance ids for a caller whose draws are keyed by a 64-bit handle (an ECS entity): one id per handle, never shared (a 32-bit
+    // hash of the handle gave two entities one slot), given back when the handle was not drawn for a whole frame. Never 0.
+    struct instance_ids
+    {
+        // A new frame: the handles not drawn last frame give their ids back
+        void Begin() noexcept
+        {
+            ++m_Frame;
+            std::erase_if(m_ByHandle, [&](const auto& E) { if (E.second.m_Frame + 1 >= m_Frame) return false; m_Free.push_back(E.second.m_ID); return true; });
+        }
+
+        std::uint32_t Of(std::uint64_t Handle) noexcept
+        {
+            auto [It, bNew] = m_ByHandle.try_emplace(Handle);
+            if (bNew)
+            {
+                if (m_Free.empty()) It->second.m_ID = m_Next++;
+                else { It->second.m_ID = m_Free.back(); m_Free.pop_back(); }
+            }
+            It->second.m_Frame = m_Frame;
+            return It->second.m_ID;
+        }
+
+    private:
+        struct entry { std::uint32_t m_ID = 0; std::uint64_t m_Frame = 0; };
+        std::unordered_map<std::uint64_t, entry>    m_ByHandle;
+        std::vector<std::uint32_t>                  m_Free;
+        std::uint32_t                               m_Next  = 1;
+        std::uint64_t                               m_Frame = 0;
+    };
 }
 
 #endif

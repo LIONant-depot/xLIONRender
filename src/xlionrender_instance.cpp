@@ -155,6 +155,9 @@ namespace xlionrender
         ReleaseBuffer(m_StaticGeomUBO);
         ReleaseBuffer(m_InstanceBuffer);
         ReleaseBuffer(m_InstanceRing);
+        ReleaseBuffer(m_MaterialParams);
+        ReleaseBuffer(m_MaterialParamsRing);
+        ReleaseBuffer(m_EntityParams);
         ReleaseBuffer(m_ShadowUBO);
         for( std::size_t k = 0; k < m_ShadowPipeline.size(); ++k ) { m_Device.Destroy(std::move(m_ShadowInstance[k])); m_Device.Destroy(std::move(m_ShadowPipeline[k])); }
         m_Device.Destroy(std::move(m_ShadowClearInstance));
@@ -349,6 +352,15 @@ namespace xlionrender
                 if( auto Err = Device.Create(m_InstanceRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::instance_data), .m_EntryCount = ring_frames_v * (max_instances_v + max_transient_v) }); Err ) return Err;
             }
             m_InstanceSlots.Init(max_instances_v);
+            {
+                std::vector<xmath::fvec4> Zeros(max_material_params_v, xmath::fvec4(0, 0, 0, 0));
+                void* pZeros = Zeros.data();
+                if( auto Err = Device.Create(m_MaterialParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = max_material_params_v, .m_pData = pZeros }); Err ) return Err;
+                if( auto Err = Device.Create(m_MaterialParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = ring_frames_v * max_material_params_v }); Err ) return Err;
+                std::vector<xmath::fvec4> EntityZeros(4 * std::size_t(max_instances_v + max_transient_v), xmath::fvec4(0, 0, 0, 0));     // a 64 B entry per slot (every slot a shader can index)
+                void* pEntityZeros = EntityZeros.data();
+                if( auto Err = Device.Create(m_EntityParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 4 * sizeof(xmath::fvec4), .m_EntryCount = max_instances_v + max_transient_v, .m_pData = pEntityZeros }); Err ) return Err;
+            }
 
             xgpu::shader Vert, Frag;
             // the GI variant: the constant material draws read the surfel GI (bindings 5, 6)
@@ -368,6 +380,8 @@ namespace xlionrender
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 5, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // GI: the mesh's surfels (+ the per-pixel read)
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 6, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // GI: the surfels' light
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 7, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // GI: their depth moments
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 9, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // MaterialParams (not read: the materials' layout)
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 10, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }  // EntityParams (not read)
             };
             if( auto Err = Device.Create(m_StaticGeomPipeline, { .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                                                , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
@@ -787,9 +801,9 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    xgpu::device::error* instance::CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, bool bAlpha ) noexcept
+    xgpu::device::error* instance::CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, bool bAlpha, std::span<const float> Params ) noexcept
     {
-        assert(m_bReady && !Textures.empty());
+        assert(m_bReady && !Textures.empty() && Params.size() % 4 == 0);
 
         material_slot M;
         M.m_bAlpha = bAlpha;
@@ -799,6 +813,27 @@ namespace xlionrender
 
         // The rigid pipeline now, so a material that cannot build reports it here (the skin one is built on its first skinned draw)
         if( getMaterialInstance(M, geom_kind::RIGID) == nullptr ) return VGPU_ERROR(xgpu::device::error::FAILURE, "The material's pipeline could not be created");
+
+        // Its parameter block: a range of MaterialParams (first fit, else the top), copied over by the next updateInstances
+        if( const int n = int(Params.size() / 4); n > 0 )
+        {
+            int At = -1;
+            for( auto It = m_ParamFree.begin(); It != m_ParamFree.end(); ++It )
+                if( It->second >= n ) { At = It->first; It->first += n; It->second -= n; if( It->second == 0 ) m_ParamFree.erase(It); break; }
+            if( At < 0 && m_ParamTop + n <= max_material_params_v ) { At = m_ParamTop; m_ParamTop += n; }
+            if( At < 0 )
+            {
+                for( std::size_t k = 0; k < M.m_Pipeline.size(); ++k )
+                {
+                    if( M.m_Instance[k].m_Private ) m_Device.Destroy(std::move(M.m_Instance[k]));
+                    if( M.m_Pipeline[k].m_Private ) m_Device.Destroy(std::move(M.m_Pipeline[k]));
+                }
+                return VGPU_ERROR(xgpu::device::error::FAILURE, "No room left in MaterialParams for the material's parameters");
+            }
+            M.m_ParamBase  = std::uint32_t(At);
+            M.m_ParamCount = std::uint32_t(n);
+            m_ParamPending.emplace_back(At, std::vector<float>(Params.begin(), Params.end()));
+        }
 
         const auto [Index, Gen] = AddSlot(m_Materials, std::move(M));
         Id = { Index, Gen };
@@ -838,6 +873,8 @@ namespace xlionrender
         UniformBinds.push_back(BothSSBO(6));                    // of mb_standard_pbr.frag, off on the skin path), their light
         UniformBinds.push_back(BothSSBO(7));                    //   and their depth moments
         if( bSkin ) UniformBinds.push_back(VertexSSBO(8));     // SKIN: the BoneMap (xgeom_skin palettes)
+        UniformBinds.push_back(FragmentSSBO(9));                // MaterialParams (every material declares it, read or not)
+        UniformBinds.push_back(FragmentSSBO(10));               // EntityParams
         const auto Binds = std::span{ UniformBinds };
         if( m_Device.Create(M.m_Pipeline[k], { .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                              , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
@@ -879,7 +916,7 @@ namespace xlionrender
         auto Binds = std::array
         { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
         , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
-        , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7)
+        , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7), FragmentSSBO(9), FragmentSSBO(10)
         };
         xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                    , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers };
@@ -904,6 +941,12 @@ namespace xlionrender
         {
             if( pM->m_Instance[k].m_Private ) m_Device.Destroy(std::move(pM->m_Instance[k]));
             if( pM->m_Pipeline[k].m_Private ) m_Device.Destroy(std::move(pM->m_Pipeline[k]));
+        }
+        if( pM->m_ParamCount )
+        {
+            std::erase_if(m_ParamPending, [&](const auto& P) { return P.first == int(pM->m_ParamBase); });     // created and destroyed before a render
+            m_ParamFree.push_back({ int(pM->m_ParamBase), int(pM->m_ParamCount) });
+            pM->m_ParamCount = 0;
         }
         pM->m_Textures.clear();
         pM->m_Fragment = {};

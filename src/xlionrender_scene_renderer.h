@@ -38,6 +38,7 @@ namespace xlionrender
         struct made_material { material_id m_Id; std::vector<const void*> m_From; };     // m_From: the instance, its material, its textures it was made from
         std::unordered_map<std::uint64_t, made_material> m_Materials;  // per material instance (instance guid)
         std::uint32_t                                   m_UpdateCount = 0;              // xlioncore::resources::UpdateCount when the materials were last checked
+        instance_ids                                    m_InstanceIds;                  // per drawn entity: its draw's instance id
 
         struct stats
         {
@@ -125,7 +126,8 @@ namespace xlionrender
                 Textures.push_back(static_cast<xgpu::texture*>(const_cast<void*>(From[1 + Textures.size()])));
             }
             material_id Id;
-            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, pMat->m_Flags.m_bAlpha)) return {};
+            // ponytail: the material's default block until material instances carry their own (contract task 8)
+            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, pMat->m_Flags.m_bAlpha, { pMat->m_pDefaultBlock, pMat->m_BlockBytes / 4u })) return {};
             m_Materials[MIInstance] = { Id, std::move(From) };
             return Id;
         }
@@ -172,7 +174,7 @@ namespace xlionrender
             }
 #endif
             draw D{ .m_Mesh = *pMesh, .m_L2W = L2W, .m_UserID = Entity
-                  , .m_Instance = std::uint64_t(std::uint32_t(Entity ^ (Entity >> 32)) | 1u) | (std::uint64_t(Mesh.m_GIRole) << draw_gi_role_shift_v) };
+                  , .m_Instance = std::uint64_t(m_InstanceIds.Of(Entity)) | (std::uint64_t(Mesh.m_GIRole) << draw_gi_role_shift_v) };
             const auto Defaults = pGeom->getDefaultMaterialInstances();
             D.m_Materials.resize(Defaults.size());
             for (std::size_t i = 0; i < Defaults.size(); ++i)
@@ -224,6 +226,7 @@ namespace xlionrender
             m_Scene.m_Ambient = { 0.15f, 0.15f, 0.17f };
             m_Scene.m_GI      = {};
             m_Stats           = {};
+            m_InstanceIds.Begin();
 
             // Something was compiled again (xlioncore::resources::MarkUpdated): a material made from what changed is made again when next asked for
             if (const auto n = xlioncore::resources::UpdateCount(); n != m_UpdateCount)

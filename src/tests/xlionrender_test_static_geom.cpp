@@ -11,6 +11,18 @@ using namespace xlionrender::test;
 
 int main()
 {
+    // Instance ids per entity (xlionrender_scene_renderer.h): entities 1 and 1<<32 had the same 32-bit hash (one slot for both)
+    {
+        xlionrender::instance_ids Ids;
+        Ids.Begin();
+        const auto A = Ids.Of(1), B = Ids.Of(1ull << 32);
+        CHECK(A && B && A != B && Ids.Of(1) == A, "Two entities get two ids, stable within a frame");
+        Ids.Begin();
+        CHECK(Ids.Of(1) == A, "An id stays while its entity is drawn");
+        Ids.Begin();                                    // B was not drawn for a whole frame: its id is free
+        CHECK(Ids.Of(7) == B && Ids.Of(1) == A, "A freed id is reused, the drawn one kept");
+    }
+
     app App;
     CHECK(App.Init(), "Init");
     auto& Renderer = App.m_Renderer;
@@ -115,6 +127,28 @@ int main()
         for (std::size_t i = 0; i < M.size(); ++i) CHECK(std::abs(M[i] - B[i]) <= 1e-3f * std::max(1.0f, B[i]), "Fallback texel %d: %f vs %f", int(i), M[i], B[i]);
 
         Device.Destroy(std::move(Texture));
+    }
+
+    // Material parameters (MaterialParams, set 1 binding 9): the second material's block sits after the first's; the shader finds it by MaterialBase
+    {
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_params_frag.h"
+        };
+        xgpu::shader Frag;
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "params shader");
+        const auto  Slots = std::array<xgpu::texture*, 1>{ nullptr };
+        const float First[] = { 9, 9, 9, 9, 9, 9, 9, 9 }, Second[] = { 0, 0, 0, 0, 2, 0.5f, 0.25f, 1 };
+        xlionrender::material_id MA, MB;
+        CHECK(!Renderer.CreateMaterial(MA, Frag, Slots, false, First) && !Renderer.CreateMaterial(MB, Frag, Slots, false, Second), "CreateMaterial with parameters");
+
+        Scene.m_Draws = { { .m_Mesh = Static, .m_Material = Mat, .m_Materials = { MB } } };
+        std::vector<float> P;
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, P), "Render parameters");
+        int nParams = 0;
+        for (float v : P) if (v != 0) { CHECK(std::abs(v - 2.0f) < 1e-3f, "Parameter texel %f, expected 2 (the second block's)", v); ++nParams; }
+        CHECK(nParams == nCovered, "Parameters covered %d texels, the standard path %d", nParams, nCovered);
+        Renderer.DestroyMaterial(MA);
+        Renderer.DestroyMaterial(MB);
     }
 
     // Stale-id safety does not touch the buffers it references (the caller owns them)

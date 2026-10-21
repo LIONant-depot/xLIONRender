@@ -110,6 +110,21 @@ namespace xlionrender
             m_InstanceSlots.Flush(region_v - m_RingUsed, Put);     // what does not fit this frame stays pending (several renders per frame)
         });
         Window.CopyBuffer(m_InstanceRing, m_InstanceBuffer, Regions);
+
+        // New materials' parameter blocks: into this frame's ring region at their own offsets, then copied into MaterialParams
+        if( m_ParamPending.empty() ) return;
+        const int ParamBase = int(Frame % ring_frames_v) * max_material_params_v;
+        std::vector<xgpu::buffer::copy> Blocks;
+        (void)m_MaterialParamsRing.MemoryMap(ParamBase, max_material_params_v, [&](void* pMemory)
+        {
+            for( const auto& [At, Floats] : m_ParamPending )
+            {
+                std::memcpy(static_cast<float*>(pMemory) + 4 * std::size_t(At), Floats.data(), Floats.size() * sizeof(float));
+                Blocks.push_back({ ParamBase + At, At, int(Floats.size() / 4) });
+            }
+        });
+        m_ParamPending.clear();
+        Window.CopyBuffer(m_MaterialParamsRing, m_MaterialParams, Blocks);
     }
 
     //------------------------------------------------------------------------------------------------
@@ -1153,11 +1168,11 @@ namespace xlionrender
                 if( Slot == instance_slots::none_v ) continue;
                 if( bPlan && m_bBoxesOnly ) continue;                    // its box instead (planClusters)
                 const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
-                std::array<xgpu::buffer*, 9> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 9>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy }
-                                                                   : std::array<xgpu::buffer*, 9>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr, nullptr, nullptr, nullptr, nullptr };
-                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{9} : std::size_t{4} };       // SKIN: the GI bindings of the material fragment (no surfels), the BoneMap
-                std::array<xgpu::buffer*, 7> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
-                                                      , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing, &m_GIMomentRing };
+                std::array<xgpu::buffer*, 11> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 11>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams }
+                                                                    : std::array<xgpu::buffer*, 11>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{11} : std::size_t{4} };      // SKIN: the GI bindings of the material fragment (no surfels), the BoneMap, the parameters
+                std::array<xgpu::buffer*, 9> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
+                                                      , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
                 const auto  GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
 
                 for( const auto& Sub : G.m_Submeshes )
@@ -1169,6 +1184,7 @@ namespace xlionrender
                         if( bSkin ) continue;       // ponytail: no constant-material fallback on the skin path; the editors give every slot a material
                         pInstance = &m_StaticGeomInstance;      // the constant material, read from the instance record
                     }
+                    const std::uint32_t MaterialBase = pMat ? pMat->m_ParamBase : 0u;
                     if( pInstance != pBound || &G != pBoundGeom )
                     {
                         if( !bSkin ) Cmd.setPipelineInstance(*pInstance, std::span{ GIBuffers });     // every rigid pipeline reads the GI
@@ -1184,8 +1200,8 @@ namespace xlionrender
                     {
                         if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
                         const auto& C = G.m_Clusters[c];
-                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot });
-                        else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second });
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase });
+                        else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second, MaterialBase });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                     }
                 }
@@ -1431,7 +1447,7 @@ namespace xlionrender
             std::memset(&ViewBlock, 0, sizeof(ViewBlock));
             auto& Light = m_LightUBO.allocEntry<details::ubo_lighting>();
             std::memset(&Light, 0, sizeof(Light));
-            std::array<xgpu::buffer*, 7> Buffers{ &J.m_Data, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(&pM->m_GIBuffer), &m_GILightRing, &m_GIMomentRing };
+            std::array<xgpu::buffer*, 9> Buffers{ &J.m_Data, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(&pM->m_GIBuffer), &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
             for( int a = 0; a < n; )
             {
                 const std::uint32_t Slot = Mats[J.m_Order[a]].m_iMaterial;
@@ -1447,7 +1463,7 @@ namespace xlionrender
                 Cmd.setBuffer(m_GICaptureIB);
                 for( int Pass = 0; Pass < 2; ++Pass )
                 {
-                    Cmd.setPushConstants(details::push_static_geom{ Pass ? std::uint32_t(-n) : 0u, J.m_Slot, 0u, (3u << 9) | (Pass ? 0x800u : 0u) });
+                    Cmd.setPushConstants(details::push_static_geom{ Pass ? std::uint32_t(-n) : 0u, J.m_Slot, 0u, (3u << 9) | (Pass ? 0x800u : 0u), pInst == &m_GIConstCaptureInstance ? 0u : pMat->m_ParamBase });
                     Cmd.Draw(6 * (b - a), 6 * a, Pass * 4 * n);
                 }
                 a = b;

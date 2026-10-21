@@ -10,6 +10,7 @@
 #include "scene/xlionrender_scene.h"
 #include "features/lights/xlionrender_light_cells.h"
 #include <array>
+#include <cstddef>
 
 namespace xlionrender::details
 {
@@ -70,7 +71,9 @@ namespace xlionrender::details
         std::uint32_t   m_InstanceIndex;
         std::uint32_t   m_GIOffset      = 0;            // surfel GI (xlionrender_static_geom_gi_vert.glsl): the first surfel in GILight
         std::uint32_t   m_GILevel       = 0xFFFFFFFFu;  // its level (0xFFFFFFFF: none)
+        std::uint32_t   m_MaterialBase  = 0;            // the material's first vec4 in MaterialParams (the fragment's "MaterialBase", offset 16)
     };
+    static_assert(offsetof(push_static_geom, m_MaterialBase) == 16);
 
     // xlionrender_skin_geom_vert.glsl (xgeom_skin_mb_clusters.vert) push constant
     struct push_skin_geom
@@ -78,7 +81,10 @@ namespace xlionrender::details
         std::uint32_t   m_ClusterIndex;
         std::uint32_t   m_MaxInfluences;
         std::uint32_t   m_InstanceIndex;
+        std::uint32_t   m_Pad           = 0;
+        std::uint32_t   m_MaterialBase  = 0;            // as push_static_geom's: one material fragment serves both paths
     };
+    static_assert(offsetof(push_skin_geom, m_MaterialBase) == 16);
 
     // mb_standard_pbr.frag "lighting_uniforms" (set 2, binding 1)
     struct ubo_lighting

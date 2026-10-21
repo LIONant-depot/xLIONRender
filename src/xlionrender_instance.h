@@ -90,7 +90,9 @@ namespace xlionrender
         // copied or owned: they must outlive the id. The same material draws rigid and skinned geometry: the pipeline of each
         // vertex path is built the first time the material is drawn with it.
         // bAlpha: a transparent material (the material's alpha flag): the GI's rays pass through it (gi::world::SetSeeThrough)
-        [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, bool bAlpha = false ) noexcept;
+        // Params: its parameter block (vec4s as floats: xmaterial::data_file::m_pDefaultBlock, m_BlockBytes / 4), copied into
+        // MaterialParams (set 1 binding 9); the shader reads it from g_Mat.P[MaterialBase + n]. Empty: the shader reads none.
+        [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, bool bAlpha = false, std::span<const float> Params = {} ) noexcept;
         // The renderer's default material (shaders/xlionrender_default_material_frag.glsl: PBR with a diffuse texture), for a slot whose
         // material does not resolve. Textures: slot 0 the shadow map (the renderer's atlas), slot 1 the diffuse texture.
         [[nodiscard]] xgpu::device::error* CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept;
@@ -212,6 +214,8 @@ namespace xlionrender
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             bool                    m_bAlpha        = false;        // transparent (CreateMaterial): the GI sees through it
+            std::uint32_t           m_ParamBase     = 0;            // its block in MaterialParams: the first vec4 (push constant MaterialBase), how many
+            std::uint32_t           m_ParamCount    = 0;
         };
 
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
@@ -282,6 +286,18 @@ namespace xlionrender
         int                         m_RingUsed              = 0;        // entries of this frame's ring region already written
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
         std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
+
+        // Material parameters (plugins/xmaterial.plugin/documentation/material_contract.md, section 0): every material's block in one
+        // device-local buffer (set 1 binding 9), a range per material; a new block goes into this frame's ring region at its own
+        // offset and is copied over by updateInstances. EntityParams (binding 10): zeros, a 64 B entry per instance slot, until
+        // the entity parameters write it.
+        static constexpr int        max_material_params_v   = 16384;    // vec4s (256 KiB)
+        xgpu::buffer                m_MaterialParams;
+        xgpu::buffer                m_MaterialParamsRing;
+        xgpu::buffer                m_EntityParams;
+        int                         m_ParamTop              = 0;        // the range allocator: the top, the free ranges (first, count)
+        std::vector<std::pair<int, int>> m_ParamFree;                   // ponytail: never merged; merge when materials churn
+        std::vector<std::pair<int, std::vector<float>>> m_ParamPending; // blocks not copied yet (first vec4, floats)
 
         // Surfel GI: the CPU world, draw id -> world instance, per draw this render's (first surfel in the light ring, level)
         static constexpr int        gi_light_region_v       = 1 << 17;  // surfels per frame (a uvec4: the HL2 basis' colors in RGB9E5, the validity)

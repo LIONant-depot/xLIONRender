@@ -36,7 +36,7 @@ endforeach()
 
 # Test-only shaders (src/tests/shaders), compiled against the same shader library
 set(TEST_SHADER_DIR "${XLIONRENDER_DIR}/src/tests/shaders")
-foreach(PAIR xlionrender_test_material_frag:fragment xlionrender_test_normal_frag:fragment xlionrender_test_cutout_frag:fragment)
+foreach(PAIR xlionrender_test_material_frag:fragment xlionrender_test_normal_frag:fragment xlionrender_test_cutout_frag:fragment xlionrender_test_params_frag:fragment)
   string(REPLACE ":" ";" PAIR ${PAIR})
   list(GET PAIR 0 NAME)
   list(GET PAIR 1 STAGE)
