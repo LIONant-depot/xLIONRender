@@ -33,10 +33,11 @@ namespace xlionrender
             m_Pending.clear();
         }
 
-        // The slot of ID this frame (none_v: no room - every slot was seen this frame). New or changed (transform or constant
-        // material): pending.
-        // bChanged: the slot is new, or its transform or constant material changed (what the shadow casters key on).
-        std::uint32_t Acquire(std::uint32_t ID, const xmath::fmat4& L2W, std::uint64_t Frame, const material& Mat = {}, bool* pChanged = nullptr) noexcept
+        // The slot of ID this frame (none_v: no room - every slot was seen this frame). New or changed (transform, constant
+        // material or entity parameters): pending.
+        // bChanged: the slot is new, or its transform or constant material changed (what the shadow casters key on; entity
+        // parameters only change how a material shades it).
+        std::uint32_t Acquire(std::uint32_t ID, const xmath::fmat4& L2W, std::uint64_t Frame, const material& Mat = {}, bool* pChanged = nullptr, const entity_params& Ent = {}) noexcept
         {
             if (pChanged) *pChanged = true;
             if (auto It = m_ByID.find(ID); It != m_ByID.end())
@@ -45,7 +46,8 @@ namespace xlionrender
                 S.m_LastSeen = Frame;
                 const bool bMoved   = std::memcmp(&S.m_L2W, &L2W, sizeof(L2W)) != 0;
                 const bool bMatEdit = std::memcmp(&S.m_Material, &Mat, sizeof(Mat)) != 0;
-                if (bMoved || bMatEdit) { S.m_L2W = L2W; S.m_Material = Mat; MarkPending(It->second); }
+                const bool bEntEdit = std::memcmp(&S.m_Entity, &Ent, sizeof(Ent)) != 0;
+                if (bMoved || bMatEdit || bEntEdit) { S.m_L2W = L2W; S.m_Material = Mat; S.m_Entity = Ent; MarkPending(It->second); }
                 if (pChanged) *pChanged = bMoved || bMatEdit;
                 return It->second;
             }
@@ -53,7 +55,7 @@ namespace xlionrender
             if (m_Free.empty() && !Evict(Frame)) return none_v;
             const std::uint32_t Index = m_Free.back();
             m_Free.pop_back();
-            m_Slots[Index] = { L2W, Mat, Frame, ID, false, true };
+            m_Slots[Index] = { L2W, Mat, Ent, Frame, ID, false, true };
             m_ByID.emplace(ID, Index);
             MarkPending(Index);
             return Index;
@@ -62,7 +64,8 @@ namespace xlionrender
         // Every live slot pending (the world origin moved: the stored rows are relative to it)
         void MarkAllPending() noexcept { for (std::uint32_t i = 0; i < m_Slots.size(); ++i) if (m_Slots[i].m_bLive) MarkPending(i); }
 
-        // Writes up to Max pending slots: Write(slot index, const fmat4& L2W, const material&). The rest stay pending. Returns how many.
+        // Writes up to Max pending slots: Write(slot index, const fmat4& L2W, const material&, const entity_params&). The rest stay
+        // pending. Returns how many.
         template<typename T_WRITE>
         int Flush(int Max, T_WRITE&& Write) noexcept
         {
@@ -72,7 +75,7 @@ namespace xlionrender
             {
                 auto& S = m_Slots[m_Pending[i]];
                 S.m_bPending = false;
-                if (S.m_bLive) { Write(m_Pending[i], S.m_L2W, S.m_Material); ++n; }
+                if (S.m_bLive) { Write(m_Pending[i], S.m_L2W, S.m_Material, S.m_Entity); ++n; }
             }
             m_Pending.erase(m_Pending.begin(), m_Pending.begin() + i);
             return n;
@@ -86,6 +89,7 @@ namespace xlionrender
         {
             xmath::fmat4    m_L2W;
             material        m_Material;
+            entity_params   m_Entity;
             std::uint64_t   m_LastSeen  = 0;
             std::uint32_t   m_ID        = 0;
             bool            m_bPending  = false;

@@ -64,6 +64,7 @@ namespace xlionrender
             m_InstanceFrame  = Frame;
             m_TransientCount = 0;
             m_RingUsed       = 0;
+            m_nSlotsWritten  = 0;
         }
 
         // The origin (camera-relative "little world" for the stored rows): re-snapped when the eye moves a grid cell away
@@ -75,16 +76,19 @@ namespace xlionrender
             m_InstanceSlots.MarkAllPending();
         }
 
-        // This frame's ring region: written in order, copied by contiguous runs
+        // This frame's ring region: written in order, copied by contiguous runs. The entity parameters: the same entries of their own ring
         constexpr int    region_v = max_instances_v + max_transient_v;
         const int        Base     = int(Frame % ring_frames_v) * region_v;
         std::vector<xgpu::buffer::copy> Regions;
+        (void)m_EntityParamsRing.MemoryMap(Base, region_v, [&](void* pEntityMemory) {
         (void)m_InstanceRing.MemoryMap(Base, region_v, [&](void* pMemory)
         {
-            auto* pRing = static_cast<details::instance_data*>(pMemory);
-            const auto Put = [&](std::uint32_t Slot, const xmath::fmat4& L2W, const material& Mat)
+            auto* pRing    = static_cast<details::instance_data*>(pMemory);
+            auto* pEntRing = static_cast<entity_params*>(pEntityMemory);
+            const auto Put = [&](std::uint32_t Slot, const xmath::fmat4& L2W, const material& Mat, const entity_params& Ent)
             {
                 pRing[m_RingUsed].set(L2W, m_Origin, Mat);
+                pEntRing[m_RingUsed] = Ent;
                 const int Src = Base + m_RingUsed++;
                 if( !Regions.empty() && Regions.back().m_SrcEntry + Regions.back().m_Count == Src && Regions.back().m_DstEntry + Regions.back().m_Count == int(Slot) ) ++Regions.back().m_Count;
                 else Regions.push_back({ Src, int(Slot), 1 });
@@ -97,19 +101,20 @@ namespace xlionrender
                 const auto&         D  = Scene.m_Draws[i];
                 const std::uint32_t ID = static_cast<std::uint32_t>(D.m_Instance);
                 bool bChanged = true;
-                std::uint32_t Slot = ID ? m_InstanceSlots.Acquire(ID, D.m_L2W, Frame, D.m_Material, &bChanged) : instance_slots::none_v;
+                std::uint32_t Slot = ID ? m_InstanceSlots.Acquire(ID, D.m_L2W, Frame, D.m_Material, &bChanged, D.m_EntityParams) : instance_slots::none_v;
                 m_DrawChanged[i] = bChanged;
                 if( Slot == instance_slots::none_v )
                 {
                     if( m_TransientCount >= max_transient_v || m_RingUsed >= region_v ) { m_DrawSlot[i] = instance_slots::none_v; continue; }     // ponytail: dropped
                     Slot = std::uint32_t(max_instances_v + m_TransientCount++);
-                    Put(Slot, D.m_L2W, D.m_Material);
+                    Put(Slot, D.m_L2W, D.m_Material, D.m_EntityParams);
                 }
                 m_DrawSlot[i] = Slot;
             }
-            m_InstanceSlots.Flush(region_v - m_RingUsed, Put);     // what does not fit this frame stays pending (several renders per frame)
-        });
+            m_nSlotsWritten += m_InstanceSlots.Flush(region_v - m_RingUsed, Put);     // what does not fit this frame stays pending (several renders per frame)
+        }); });
         Window.CopyBuffer(m_InstanceRing, m_InstanceBuffer, Regions);
+        Window.CopyBuffer(m_EntityParamsRing, m_EntityParams, Regions);
 
         // New materials' parameter blocks: into this frame's ring region at their own offsets, then copied into MaterialParams
         if( m_ParamPending.empty() ) return;

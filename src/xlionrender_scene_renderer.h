@@ -161,8 +161,9 @@ namespace xlionrender
             return true;
         }
 
-        // A Mesh entity into the scene: its geometry's mesh and per slot the component's material instance, else the geometry's own
-        void AddMesh(const mesh& Mesh, const xmath::fmat4& L2W, std::uint64_t Entity) noexcept
+        // A Mesh entity into the scene: its geometry's mesh and per slot its MeshMaterial's material instance, else the Mesh's deprecated
+        // one (old files), else the geometry's own; the MeshMaterial's entity values into the draw's entity parameters
+        void AddMesh(const mesh& Mesh, const mesh_material* pMaterial, const xmath::fmat4& L2W, std::uint64_t Entity) noexcept
         {
             ++m_Stats.m_Meshes;
             const mesh_id* pMesh = MeshOf(Mesh.m_Geom);
@@ -182,12 +183,14 @@ namespace xlionrender
             }
 #endif
             draw D{ .m_Mesh = *pMesh, .m_L2W = L2W, .m_UserID = Entity
-                  , .m_Instance = std::uint64_t(m_InstanceIds.Of(Entity)) | (std::uint64_t(Mesh.m_GIRole) << draw_gi_role_shift_v) };
+                  , .m_Instance = std::uint64_t(m_InstanceIds.Of(Entity)) | (std::uint64_t(Mesh.m_GIRole) << draw_gi_role_shift_v)
+                  , .m_EntityParams = pMaterial ? pMaterial->Params() : entity_params{} };
             const auto Defaults = pGeom->getDefaultMaterialInstances();
             D.m_Materials.resize(Defaults.size());
             for (std::size_t i = 0; i < Defaults.size(); ++i)
             {
-                const std::uint64_t Override = i < Mesh.m_Materials.size() ? Mesh.m_Materials[i].m_Instance.m_Value : 0;
+                const auto Swap = [i](const std::vector<material_instance_ref>& V) -> std::uint64_t { return i < V.size() ? V[i].m_Instance.m_Value : 0; };
+                const std::uint64_t Override = pMaterial && Swap(pMaterial->m_Slots) ? Swap(pMaterial->m_Slots) : Swap(Mesh.m_Materials);
                 D.m_Materials[i] = MaterialOf(Override ? Override : Defaults[i].m_Instance.m_Value);
                 m_Stats.m_ConstantSlots += !D.m_Materials[i].isValid();
             }

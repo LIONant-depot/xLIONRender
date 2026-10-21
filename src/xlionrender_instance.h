@@ -143,6 +143,8 @@ namespace xlionrender
         bool                                       m_bFrustumCull = true;
         // How many of the scene's draws the last Render drew in the scene pass
                       int                  getDrawsRendered( void ) const                                       noexcept { return m_nDrawsRendered; }
+        // How many persistent instance slots this frame wrote (new or changed: transform, constant material, entity parameters)
+                      int                  getSlotsWritten( void ) const                                        noexcept { return m_nSlotsWritten; }
 
         // The editor's view of huge meshes (view_options::m_bBoxesOnly, m_FrameBudgetMs), in Render's scene pass. Boxes only: no cluster mesh is drawn. A frame budget (> 0, ms;
         // the frame is the time from one Render to the next): only the clusters in the view are drawn, the biggest on the screen first, as many as fit the allowance of indices;
@@ -284,17 +286,19 @@ namespace xlionrender
         xgpu::buffer                m_InstanceRing;
         instance_slots              m_InstanceSlots;
         int                         m_RingUsed              = 0;        // entries of this frame's ring region already written
+        int                         m_nSlotsWritten         = 0;        // persistent slots written this frame (getSlotsWritten)
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
         std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
 
         // Material parameters (plugins/xmaterial.plugin/documentation/material_contract.md, section 0): every material's block in one
         // device-local buffer (set 1 binding 9), a range per material; a new block goes into this frame's ring region at its own
-        // offset and is copied over by updateInstances. EntityParams (binding 10): zeros, a 64 B entry per instance slot, until
-        // the entity parameters write it.
+        // offset and is copied over by updateInstances. EntityParams (binding 10): a 64 B entry per instance slot (draw::m_EntityParams),
+        // written with its instance entry: the same ring entry index in its own ring, copied by the same regions.
         static constexpr int        max_material_params_v   = 16384;    // vec4s (256 KiB)
         xgpu::buffer                m_MaterialParams;
         xgpu::buffer                m_MaterialParamsRing;
         xgpu::buffer                m_EntityParams;
+        xgpu::buffer                m_EntityParamsRing;
         int                         m_ParamTop              = 0;        // the range allocator: the top, the free ranges (first, count)
         std::vector<std::pair<int, int>> m_ParamFree;                   // ponytail: never merged; merge when materials churn
         std::vector<std::pair<int, std::vector<float>>> m_ParamPending; // blocks not copied yet (first vec4, floats)

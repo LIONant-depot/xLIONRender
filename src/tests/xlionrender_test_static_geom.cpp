@@ -151,6 +151,67 @@ int main()
         Renderer.DestroyMaterial(MB);
     }
 
+    // Entity parameters (EntityParams, set 1 binding 10, material_contract.md tests 5-6): one material whose Tint (block vec4 0) is red;
+    // A and B override it (green, blue), C has no entity values (mask 0) and keeps the material's red. Then B's tint is edited: one slot
+    // is written, nothing else changes
+    {
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_entity_frag.h"
+        };
+        xgpu::shader Frag;
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "entity shader");
+        const auto  Slots = std::array<xgpu::texture*, 1>{ nullptr };
+        const float Block[] = { 1, 0, 0, 1 };
+        xlionrender::material_id M;
+        CHECK(!Renderer.CreateMaterial(M, Frag, Slots, false, Block), "CreateMaterial with an entity tint");
+
+        xgpu::tools::view Front;
+        Front.setFov(xmath::radian{ 1.0f });
+        Front.LookAt(xmath::fvec3{ 0, 0, -4 }, xmath::fvec3{ 0, 0, 0 });
+        const auto Tinted = [](float R, float G, float B) { return xlionrender::entity_params{ .m_Mask = xlionrender::entity_params::TINT, .m_Tint = { R, G, B, 1 } }; };
+        Scene.m_Draws =
+        { { .m_Mesh = Static, .m_L2W = xmath::fmat4::fromTranslation({ -1.2f, 0, 0 }), .m_Material = Mat, .m_Materials = { M }, .m_Instance = 11, .m_EntityParams = Tinted(0, 1, 0) }
+        , { .m_Mesh = Static, .m_L2W = xmath::fmat4::fromTranslation({  1.2f, 0, 0 }), .m_Material = Mat, .m_Materials = { M }, .m_Instance = 12, .m_EntityParams = Tinted(0, 0, 1) }
+        , { .m_Mesh = Static, .m_L2W = xmath::fmat4::fromIdentity(),                    .m_Material = Mat, .m_Materials = { M }, .m_Instance = 13 }
+        };
+
+        // Per texel rgb (ReadHDR has red only); the probes: the middle sphere (C) and the two sides (A and B, in whichever order the camera puts them)
+        const auto ReadRGB = [&](std::vector<xmath::fvec3>& Out) -> bool
+        {
+            std::vector<std::byte> Raw;
+            int W, H;
+            if (Device.ReadTexture(View.m_HDR, Raw, W, H)) return false;
+            const auto* p = reinterpret_cast<const std::uint16_t*>(Raw.data());
+            Out.resize(std::size_t(W) * H);
+            for (std::size_t i = 0; i < Out.size(); ++i) Out[i] = { HalfToFloat(p[i * 4]), HalfToFloat(p[i * 4 + 1]), HalfToFloat(p[i * 4 + 2]) };
+            return true;
+        };
+        const int  Side = int(0.5f * size_v * (1 + 1.2f / (4 * std::tan(0.5f)))), Mid = size_v / 2;
+        const auto At   = [&](const std::vector<xmath::fvec3>& I, int x) { return I[std::size_t(Mid) * size_v + x]; };
+        const auto Is   = [](const xmath::fvec3& C, float R, float G, float B) { return std::abs(C.m_X - R) < 1e-3f && std::abs(C.m_Y - G) < 1e-3f && std::abs(C.m_Z - B) < 1e-3f; };
+
+        std::vector<xmath::fvec3> I;
+        CHECK(App.RenderFrame(Scene, View, Front) && ReadRGB(I), "Render entity parameters");
+        CHECK(Is(At(I, Mid), 1, 0, 0), "C (no entity values) %f %f %f, expected the material's red", At(I, Mid).m_X, At(I, Mid).m_Y, At(I, Mid).m_Z);
+        const bool bAIsLeft = Is(At(I, size_v - 1 - Side), 0, 1, 0);
+        const int  xA = bAIsLeft ? size_v - 1 - Side : Side, xB = bAIsLeft ? Side : size_v - 1 - Side;
+        CHECK(Is(At(I, xA), 0, 1, 0), "A %f %f %f, expected its green", At(I, xA).m_X, At(I, xA).m_Y, At(I, xA).m_Z);
+        CHECK(Is(At(I, xB), 0, 0, 1), "B %f %f %f, expected its blue", At(I, xB).m_X, At(I, xB).m_Y, At(I, xB).m_Z);
+        int nRed = 0, nGreen = 0, nBlue = 0, nOther = 0;
+        for (const auto& C : I) { if (C.m_X == 0 && C.m_Y == 0 && C.m_Z == 0) continue; Is(C, 1, 0, 0) ? ++nRed : Is(C, 0, 1, 0) ? ++nGreen : Is(C, 0, 0, 1) ? ++nBlue : ++nOther; }
+        CHECK(nRed > 100 && std::abs(nGreen - nRed) < nRed / 10 && std::abs(nBlue - nRed) < nRed / 10 && nOther == 0, "Covered texels red %d green %d blue %d other %d", nRed, nGreen, nBlue, nOther);
+
+        CHECK(App.RenderFrame(Scene, View, Front) && Renderer.getSlotsWritten() == 0, "Unchanged: %d slots written", Renderer.getSlotsWritten());
+        Scene.m_Draws[1].m_EntityParams = Tinted(1, 1, 0);
+        CHECK(App.RenderFrame(Scene, View, Front) && ReadRGB(I), "Render after B's tint edit");
+        CHECK(Renderer.getSlotsWritten() == 1, "B's tint edit wrote %d slots, expected 1", Renderer.getSlotsWritten());
+        CHECK(Is(At(I, xB), 1, 1, 0) && Is(At(I, xA), 0, 1, 0) && Is(At(I, Mid), 1, 0, 0), "After the edit: B yellow, A green, C red");
+
+        Scene.m_Draws[1].m_EntityParams = {};               // the component removed: B reads the material's value again
+        CHECK(App.RenderFrame(Scene, View, Front) && ReadRGB(I) && Is(At(I, xB), 1, 0, 0), "B without entity values reads the material's red");
+        Renderer.DestroyMaterial(M);
+    }
+
     // Stale-id safety does not touch the buffers it references (the caller owns them)
     Renderer.DestroyMesh(Static);
     std::vector<float> C;
@@ -166,13 +227,16 @@ int main()
         const auto s1 = S.Acquire(1, M1, 1), s2 = S.Acquire(2, M2, 1);
         CHECK(s1 != s2 && s1 != S.none_v && s2 != S.none_v, "Two slots");
         int nWritten = 0;
-        const auto Count = [&](std::uint32_t, const xmath::fmat4&, const xlionrender::material&) { ++nWritten; };
+        const auto Count = [&](std::uint32_t, const xmath::fmat4&, const xlionrender::material&, const xlionrender::entity_params&) { ++nWritten; };
         CHECK(S.Flush(1, Count) == 1 && S.getPendingCount() == 1, "A budget of 1 writes 1, the other stays pending");
         CHECK(S.Flush(16, Count) == 1 && nWritten == 2, "Then the rest");
         CHECK(S.Acquire(2, M2, 2) == s2 && S.Flush(16, Count) == 0, "An unchanged id keeps its slot, nothing to write");
         CHECK(S.Acquire(2, M1, 2) == s2 && S.Flush(16, Count) == 1, "A moved id is written once");
         CHECK(S.Acquire(2, M1, 2, { .m_BaseColor = { 1, 0, 0 } }) == s2 && S.Flush(16, Count) == 1, "A constant-material edit is written once");
         CHECK(S.Acquire(2, M1, 2, { .m_BaseColor = { 1, 0, 0 } }) == s2 && S.Flush(16, Count) == 0, "The same material again: nothing to write");
+        bool bChanged = true;
+        CHECK(S.Acquire(2, M1, 2, { .m_BaseColor = { 1, 0, 0 } }, &bChanged, { .m_Mask = 1, .m_Tint = { 0, 1, 0, 1 } }) == s2 && !bChanged && S.getPendingCount() == 1 && S.Flush(16, Count) == 1
+             , "An entity-parameter edit is written once, and is not a change for the shadow casters");
         CHECK(S.Acquire(3, M1, 2) == s1, "Full: the least recently seen slot (id 1) is evicted");
         CHECK(S.Acquire(1, M1, 2) == S.none_v, "Full and every slot seen this frame: no slot");
     }

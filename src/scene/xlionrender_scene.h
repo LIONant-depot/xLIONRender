@@ -53,6 +53,21 @@ namespace xlionrender
         xmath::fvec3    m_Emissive      { 0, 0, 0 };
     };
 
+    // A draw's entity parameters (plugins/xmaterial.plugin/documentation/material_contract.md section 4): the EntityParams entry of its
+    // instance slot (std430, 64 B). A field replaces the material's value where its m_Mask bit is set and the material opts the
+    // parameter into that field; mask 0 (the default): every material reads its own values
+    struct entity_params
+    {
+        enum : std::uint32_t { TINT = 1u << 0, PARAM0 = 1u << 1, PARAM1 = 1u << 2 };
+        std::uint32_t   m_Mask      = 0;
+        std::uint32_t   m_SlotMask  = 0;                // reserved (per-slot targeting), 0 in v1
+        std::uint32_t   m_Pad[2]    = {};
+        xmath::fvec4    m_Tint      { 0, 0, 0, 0 };     // linear rgba
+        xmath::fvec4    m_Param0    { 0, 0, 0, 0 };
+        xmath::fvec4    m_Param1    { 0, 0, 0, 0 };
+    };
+    static_assert(sizeof(entity_params) == 64);
+
     struct draw
     {
         mesh_id                     m_Mesh;
@@ -64,6 +79,7 @@ namespace xlionrender
         // written only when it changes (0: none, written every frame). The caller owns the ids (unique among its draws).
         // High 32 bits: flags. Bits 32-33: its gi_role (draw_gi_role_shift_v).
         std::uint64_t               m_Instance      = 0;
+        entity_params               m_EntityParams;     // read by the materials through its instance slot
     };
 
     // What an instance does in the GI's transport (documentation/gi_dynamic_master_plan.md, Phase 5), overriding its geometry's GI mode:

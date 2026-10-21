@@ -272,7 +272,18 @@ namespace xlionrender
             }
             R.m_Renderer.m_bBoxesOnly    = m_ViewOptions.m_bBoxesOnly;         // huge meshes: their boxes, or the clusters a frame budget allows
             R.m_Renderer.m_FrameBudgetMs = m_ViewOptions.m_FrameBudgetMs;
-            Each.template operator()<mesh>       ([&](std::uint64_t E, const mesh& C,        const xmath::fmat4& L2W) { R.AddMesh(C, L2W, E); });
+            {   // the Meshes, with their MeshMaterial when they have one
+                xecs::query::instance Query;
+                Query.m_Must.AddFromComponents<xlioncore::transform, mesh>();
+                LeaveOut(Query, View);
+                auto S = Search(Query);
+                Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const mesh& C, const mesh_material* pMaterial, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+                {
+                    xmath::fmat4 L2W;
+                    if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
+                    R.AddMesh(C, pMaterial, L2W, Ent.m_Value);
+                });
+            }
             Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });
             Each.template operator()<light_point>([&](std::uint64_t,   const light_point& C, const xmath::fmat4& L2W) { R.AddPoint(C, L2W * xmath::fvec3(0, 0, 0)); });
             Each.template operator()<light_spot> ([&](std::uint64_t,   const light_spot& C,  const xmath::fmat4& L2W) { R.AddSpot(C, L2W); });

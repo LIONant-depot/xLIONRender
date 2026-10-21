@@ -158,6 +158,7 @@ namespace xlionrender
         ReleaseBuffer(m_MaterialParams);
         ReleaseBuffer(m_MaterialParamsRing);
         ReleaseBuffer(m_EntityParams);
+        ReleaseBuffer(m_EntityParamsRing);
         ReleaseBuffer(m_ShadowUBO);
         for( std::size_t k = 0; k < m_ShadowPipeline.size(); ++k ) { m_Device.Destroy(std::move(m_ShadowInstance[k])); m_Device.Destroy(std::move(m_ShadowPipeline[k])); }
         m_Device.Destroy(std::move(m_ShadowClearInstance));
@@ -357,9 +358,11 @@ namespace xlionrender
                 void* pZeros = Zeros.data();
                 if( auto Err = Device.Create(m_MaterialParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = max_material_params_v, .m_pData = pZeros }); Err ) return Err;
                 if( auto Err = Device.Create(m_MaterialParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = ring_frames_v * max_material_params_v }); Err ) return Err;
-                std::vector<xmath::fvec4> EntityZeros(4 * std::size_t(max_instances_v + max_transient_v), xmath::fvec4(0, 0, 0, 0));     // a 64 B entry per slot (every slot a shader can index)
+                std::vector<entity_params> EntityZeros(max_instances_v + max_transient_v);     // a 64 B entry per slot (every slot a shader can index), like the instance buffer
                 void* pEntityZeros = EntityZeros.data();
-                if( auto Err = Device.Create(m_EntityParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 4 * sizeof(xmath::fvec4), .m_EntryCount = max_instances_v + max_transient_v, .m_pData = pEntityZeros }); Err ) return Err;
+                if( auto Err = Device.Create(m_EntityParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(entity_params), .m_EntryCount = int(EntityZeros.size()), .m_pData = pEntityZeros }); Err ) return Err;
+                // ponytail: sized like the instance ring (3 x 5 MiB); shrink to the pending slots only if the memory matters
+                if( auto Err = Device.Create(m_EntityParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(entity_params), .m_EntryCount = ring_frames_v * int(EntityZeros.size()) }); Err ) return Err;
             }
 
             xgpu::shader Vert, Frag;
