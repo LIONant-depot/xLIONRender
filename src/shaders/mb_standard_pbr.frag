@@ -52,10 +52,16 @@
 // 
 //-------------------------------------------------------------------------------------------
 
+// The xmaterial graph's "Output: PBR" includes this file: XMAT_VARYING_IN when its "Input: Vertex Variants" step already declared In,
+// XLION_NO_SHADOW_MAP in its LDR variant (the editors bind the graph's textures from sampler 0 there: no shadow map, unshadowed)
+#ifndef XLION_NO_SHADOW_MAP
 #include "mb_standard_shadow.frag"
+#endif
 #include "mb_varying_definition_full.glsl"
 
+#ifndef XMAT_VARYING_IN
 layout(location = 0) in VaryingFull In;
+#endif
 #ifndef XLION_LDR_OUTPUT
 layout(location = 9) in vec4 InGI;     // xLIONRender surfel GI: sum(w E), sum(w) from the vertex shader (0 without GI) - divided here, into g_GI
 #ifndef XLION_NO_GI_PIXEL
@@ -292,7 +298,9 @@ vec3 PBRLighting
 #endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).
-#ifdef XLION_LDR_OUTPUT
+#if defined(XLION_LDR_OUTPUT) && defined(XLION_NO_SHADOW_MAP)
+	float Shadow = 1.0;
+#elif defined(XLION_LDR_OUTPUT)
 	float Shadow = ShadowPCF(In.ShadowPosition / In.ShadowPosition.w);       // editors that draw materials themselves: their own shadow map
 #else
 	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? ShadowClipmap(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
