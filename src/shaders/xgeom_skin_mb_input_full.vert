@@ -16,6 +16,7 @@ layout(location = 3) in uvec2 in_UV;           // compressed UV (R16G16_UNORM)
 layout(location = 4) in uvec2 in_OctNormal;    // full-precision oct normal (R16G16_UINT)
 layout(location = 5) in uint  in_OctTangentX;  // full-precision oct tangent X (R16_UINT)
 layout(location = 6) in uint  in_OctTangentY_Sign; // oct tangent Y (15 bits) + binormal sign (bit 15) (R16_UINT)
+layout(location = 7) in vec4  in_Color;         // the optional COLOR0 stream (R8G8B8A8_UNORM, sRGB); a geometry without it binds constant white
 
 //
 // Fast oct-encoded normal/tangent decode
@@ -76,7 +77,7 @@ mb_full_vertex getVertexData()
     Data.Tangent.xyz = normalize(SkinRot * bindTangent);
     Data.Tangent.w   = binormal_sign;
     Data.Normal      = normalize(SkinRot * bindNormal);
-    Data.VertColor   = vec4(1.,1.,1.,1.);
+    Data.VertColor   = mb_DecodeVertexColor(in_Color);
 
     return Data;
 }

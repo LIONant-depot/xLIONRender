@@ -8,6 +8,7 @@
 layout(location = 0) in ivec4 in_PosExtra;      // xyz = compressed pos (R16G16B16_SINT), w = extra 16 bits
 layout(location = 1) in uvec2 in_UV;            // compressed UV (R16G16_UNORM)
 layout(location = 2) in uvec4 in_OctNormTan;    // high 8 bits of oct normal/tangent (R8G8B8A8_UINT)
+layout(location = 3) in vec4  in_Color;         // the optional COLOR0 stream (R8G8B8A8_UNORM, sRGB); a geometry without it binds constant white
 
 //
 // Fast oct-encoded normal/tangent decode (12-bit N, 12/11-bit T)
@@ -73,7 +74,7 @@ mb_full_vertex getVertexData()
     Data.Tangent.xyz            = oct_decode(enc_tangent);
     Data.Tangent.w              = binormal_sign;
     Data.Normal                 = oct_decode(enc_normal);
-    Data.VertColor              = vec4(1.,1.,1.,1.);
+    Data.VertColor              = mb_DecodeVertexColor(in_Color);
 
     return Data;
 }

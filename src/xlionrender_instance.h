@@ -237,6 +237,7 @@ namespace xlionrender
         std::vector<xgpu::pipeline_instance::sampler_binding>   LitBindings ( std::span<xgpu::texture* const> Textures ) noexcept;
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
         xgpu::pipeline_instance*    getCaptureInstance ( material_slot& Material )                              noexcept;
+        void                        BindClusterStreams ( xgpu::cmd_buffer& Cmd, const cluster_geom& Geom )      noexcept;   // the core + optional streams (m_StaticGeomVD / m_SkinGeomVD)
         void                        processGICapture( xgpu::window& Window )                                    noexcept;
 
         // The GI's material capture (processGICapture): a mesh's surfels drawn through their slots' real material shaders into
@@ -271,7 +272,7 @@ namespace xlionrender
         xgpu::vertex_descriptor     m_FullscreenVD;
         xgpu::pipeline              m_ForwardPipeline;
         xgpu::pipeline_instance     m_ForwardInstance;
-        xgpu::vertex_descriptor     m_StaticGeomVD;
+        xgpu::vertex_descriptor     m_StaticGeomVD;                     // the core streams + the optional ones (dynamic strides): BindClusterStreams
         xgpu::pipeline              m_StaticGeomPipeline;
         xgpu::pipeline_instance     m_StaticGeomInstance;
         xgpu::buffer                m_StaticGeomUBO;        // the view block of both cluster vertex paths (details::ubo_geom_view)
@@ -332,6 +333,7 @@ namespace xlionrender
         xgpu::buffer                m_GILightRing;
         xgpu::buffer                m_GIMomentRing;             // per surfel of m_GILightRing: gi::moment_texels_v uints (half mean, half mean^2) - ponytail: 48 MB host-visible, size it to the scenes if it matters
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
+        xgpu::buffer                m_WhiteColorStream;                 // one RGBA8 white: the COLOR0 stream of a cluster geom without colors (stride 0)
         std::uint64_t               m_GIRender = 0;
         double                      m_GIOverheadMs = 0;         // the GI's main-thread work in updateGI outside gi::world::Update (the upload), smoothed: its allowance's pre-charge
         struct gi_frame { std::uint64_t m_Frame; gi::world::stats m_Stats; double m_SceneGpuMs = -1; };     // (SceneGpuMs: the scene pass' GPU time, getGPUTimes: -1 not known)

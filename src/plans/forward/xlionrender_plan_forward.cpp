@@ -916,7 +916,7 @@ namespace xlionrender
                     std::array<xgpu::buffer*, 4> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy };
                     Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{4} : std::size_t{2} });
                     Cmd.setDynamicUBO(m_ShadowUBO, 0);
-                    Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
+                    BindClusterStreams(Cmd, G);
                     pBoundGeom = &G;
                 }
 
@@ -1196,7 +1196,7 @@ namespace xlionrender
                         else         Cmd.setPipelineInstance(*pInstance, Static);
                         Cmd.setDynamicUBO(m_LightUBO, 1);
                         Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
-                        Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
+                        BindClusterStreams(Cmd, G);
                         pBound     = pInstance;
                         pBoundGeom = &G;
                     }
@@ -1578,7 +1578,7 @@ namespace xlionrender
                 std::array<xgpu::buffer*, 4> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy };
                 Cmd.setPipelineInstance(View.m_MaskInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{4} : std::size_t{2} });
                 Cmd.setDynamicUBO(m_ShadowUBO, 0);
-                Cmd.setStreamingBuffers({ G.m_pStreams, 3 });
+                BindClusterStreams(Cmd, G);
                 const std::uint32_t Slot = m_DrawSlot[iDraw];
                 for( const auto& Sub : G.m_Submeshes )
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )

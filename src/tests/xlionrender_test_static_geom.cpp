@@ -212,6 +212,51 @@ int main()
         Renderer.DestroyMaterial(M);
     }
 
+    // The optional COLOR0 stream: a colored and an uncolored copy of the sphere in one frame, the same material reading the vertex color.
+    // The colored one decodes its sRGB (255, 128, 0) to linear (1, 0.216, 0); the other has no stream and reads the constant white
+    {
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_vertcolor_frag.h"
+        };
+        xgpu::shader Frag;
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "vertex color shader");
+        const auto Slots = std::array<xgpu::texture*, 1>{ nullptr };
+        xlionrender::material_id M;
+        CHECK(!Renderer.CreateMaterial(M, Frag, Slots), "CreateMaterial reading the vertex color");
+
+        cluster_buffers Colored;
+        CHECK(MakeStaticBuffers(Device, Prim, 0.5f, Colored) && Colored.SetColor(Device, Prim.m_Vertices.size(), 0xff0080ffu), "colored static geom buffers");
+        xlionrender::mesh_id ColoredId;
+        CHECK(!Renderer.CreateClusterGeom(ColoredId, Colored.Geom()), "CreateClusterGeom with colors");
+
+        xgpu::tools::view Front;
+        Front.setFov(xmath::radian{ 1.0f });
+        Front.LookAt(xmath::fvec3{ 0, 0, -3 }, xmath::fvec3{ 0, 0, 0 });
+        Scene.m_Draws =
+        { { .m_Mesh = ColoredId, .m_L2W = xmath::fmat4::fromTranslation({ -0.6f, 0, 0 }), .m_Material = Mat, .m_Materials = { M } }
+        , { .m_Mesh = Static,    .m_L2W = xmath::fmat4::fromTranslation({  0.6f, 0, 0 }), .m_Material = Mat, .m_Materials = { M } }
+        };
+
+        std::vector<std::byte> Raw;
+        int W, H;
+        CHECK(App.RenderFrame(Scene, View, Front) && !Device.ReadTexture(View.m_HDR, Raw, W, H), "Render vertex colors");
+        const auto* p = reinterpret_cast<const std::uint16_t*>(Raw.data());
+        int nColored = 0, nWhite = 0, nOther = 0;
+        for (std::size_t i = 0; i < std::size_t(W) * H; ++i)
+        {
+            const float R = HalfToFloat(p[i * 4]), G = HalfToFloat(p[i * 4 + 1]), B = HalfToFloat(p[i * 4 + 2]);
+            if (R == 0 && G == 0 && B == 0) continue;
+            if      (std::abs(R - 1) < 2e-3f && std::abs(G - 0.2158f) < 2e-3f && B < 2e-3f) ++nColored;
+            else if (std::abs(R - 1) < 2e-3f && std::abs(G - 1) < 2e-3f && std::abs(B - 1) < 2e-3f) ++nWhite;
+            else ++nOther;
+        }
+        CHECK(nColored > 100 && std::abs(nColored - nWhite) < nColored / 10 && nOther == 0, "Vertex colors: colored %d white %d other %d", nColored, nWhite, nOther);
+
+        Renderer.DestroyMesh(ColoredId);
+        Renderer.DestroyMaterial(M);
+        Device.Destroy(std::move(Colored.m_Colors));
+    }
+
     // Stale-id safety does not touch the buffers it references (the caller owns them)
     Renderer.DestroyMesh(Static);
     std::vector<float> C;
