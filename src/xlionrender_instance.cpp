@@ -218,11 +218,11 @@ namespace xlionrender
         return Samplers;
     }
 
-    std::vector<xgpu::pipeline_instance::sampler_binding> instance::LitBindings( std::span<xgpu::texture* const> Textures ) noexcept
+    std::vector<xgpu::pipeline_instance::sampler_binding> instance::LitBindings( std::span<xgpu::texture* const> Textures, bool bShadowAtlas ) noexcept
     {
         std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
         Bindings.reserve(lit_samplers_v);
-        Bindings.emplace_back(m_ShadowAtlas);
+        Bindings.emplace_back(bShadowAtlas ? m_ShadowAtlas : m_WhiteTexture);
         for( std::size_t i = 1; i < 8; ++i ) Bindings.emplace_back( i < Textures.size() && Textures[i] ? *Textures[i] : m_WhiteTexture );
         Bindings.emplace_back(m_EnvAtlas);
         Bindings.emplace_back(m_EnvDFG);
@@ -816,12 +816,12 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    xgpu::device::error* instance::CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, bool bAlpha, std::span<const float> Params ) noexcept
+    xgpu::device::error* instance::CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, const material_state& State, std::span<const float> Params ) noexcept
     {
         assert(m_bReady && !Textures.empty() && Params.size() % 4 == 0);
 
         material_slot M;
-        M.m_bAlpha = bAlpha;
+        M.m_State = State;
         M.m_Fragment = FragmentHDR;
         M.m_Textures.clear();
         for( auto* p : Textures ) M.m_Textures.push_back(p ? *p : xgpu::texture{});
@@ -866,9 +866,24 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    xgpu::pipeline_instance* instance::getMaterialInstance( material_slot& M, geom_kind Kind ) noexcept
+    // A material's settings in its pipeline (material_state): culling, raster, blend, depth
+    void instance::ApplyState( xgpu::pipeline::setup& Setup, const material_state& S ) noexcept
     {
-        const auto k = static_cast<std::size_t>(Kind);
+        using blend = xgpu::pipeline::blend;
+        if( S.m_bDoubleSided ) Setup.m_Primitive.m_Cull   = xgpu::pipeline::primitive::cull::NONE;
+        if( S.m_bWireframe )   Setup.m_Primitive.m_Raster = xgpu::pipeline::primitive::raster::WIRELINE;
+        Setup.m_DepthStencil.m_bDepthTestEnable  = S.m_bDepthTest;
+        Setup.m_DepthStencil.m_bDepthWriteEnable = S.m_bDepthWrite;
+        // The color blends; the alpha (what was drawn: the tone map's coverage) only grows: "over" for translucent, kept for additive
+        if( S.m_Blend == material_state::blend::ALPHA ) { Setup.m_Blend = blend::getAlphaOriginal(); Setup.m_Blend.m_AlphaDstFactor = blend::factor::ONE_MINUS_SRC_ALPHA; }
+        if( S.m_Blend == material_state::blend::ADD )   { Setup.m_Blend = blend::getAdd(); Setup.m_Blend.m_AlphaSrcFactor = blend::factor::ZERO; Setup.m_Blend.m_AlphaDstFactor = blend::factor::ONE; }
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    xgpu::pipeline_instance* instance::getMaterialInstance( material_slot& M, geom_kind Kind, bool bShadow ) noexcept
+    {
+        const auto k = (bShadow ? shadow_path_v : 0) + static_cast<std::size_t>(Kind);
         if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
 
         const bool bSkin = Kind == geom_kind::SKIN;
@@ -900,12 +915,22 @@ namespace xlionrender
         UniformBinds.push_back(FragmentSSBO(9));                // MaterialParams (every material declares it, read or not)
         UniformBinds.push_back(FragmentSSBO(10));               // EntityParams
         const auto Binds = std::span{ UniformBinds };
-        if( m_Device.Create(M.m_Pipeline[k], { .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
-                                             , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
-                                             , .m_UniformBinds = Binds, .m_Samplers = Samplers }) ) return nullptr;
+        xgpu::pipeline::setup Setup{ .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
+                                   , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
+                                   , .m_UniformBinds = Binds, .m_Samplers = Samplers };
+        if( bShadow )       // the casters' state (instance::Init MakeCaster); the fragment cuts out and stops (ubo_lighting m_LightParams.w)
+        {
+            Setup.m_Primitive.m_Cull                        = xgpu::pipeline::primitive::cull::NONE;
+            Setup.m_DepthStencil.m_DepthBiasConstantFactor  = 2.0f;
+            Setup.m_DepthStencil.m_DepthBiasSlopeFactor     = 4.0f;
+            Setup.m_DepthStencil.m_bDepthBiasEnable         = true;
+            Setup.m_DepthStencil.m_bDepthClampEnable        = true;
+        }
+        else ApplyState(Setup, M.m_State);
+        if( m_Device.Create(M.m_Pipeline[k], Setup) ) return nullptr;
 
         std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
-        Bindings = LitBindings(M.TexturePointers());
+        Bindings = LitBindings(M.TexturePointers(), !bShadow);     // a shadow caster renders into the atlas
         if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
         {
             m_Device.Destroy(std::move(M.m_Pipeline[k]));

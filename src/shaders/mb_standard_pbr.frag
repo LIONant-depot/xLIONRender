@@ -92,7 +92,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 AmbientLightColor;            // Ambient light color (RGB)
 	vec4 wSpaceLightPos;               // Light position in world space (XYZ) and radius (W > 0 for finite falloff)
 	vec4 wSpaceEyePos;                 // Camera position in world space (XYZ)
-	vec4 LightParams;                  // .x=area radius (spec/soft shadow approx), .y=temperature (Kelvin), .z=intensity mult, .w=spare
+	vec4 LightParams;                  // .x=area radius (spec/soft shadow approx), .y=temperature (Kelvin), .z=intensity mult, .w=1 a shadow caster pass (a masked material stops after its cut)
 #ifndef XLION_LDR_OUTPUT
 	// xLIONRender (plans/forward/xlionrender_plan_forward.h ubo_lighting): the directional light's shadow clipmap
 	mat4 W2Light;                      // world -> light space (rotation)
@@ -222,7 +222,12 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 	vec3 vB = In.Tangent.w * cross(In.Normal.xyz, In.Tangent.xyz);  
 
 	// Decode final world normal
-    return normalize(inNormal.x * In.Tangent.xyz + inNormal.y * vB.xyz + inNormal.z * In.Normal.xyz);  
+    const vec3 N = normalize(inNormal.x * In.Tangent.xyz + inNormal.y * vB.xyz + inNormal.z * In.Normal.xyz);
+#ifdef XMAT_BACK_FACE_AS_FRONT
+	return N;                           // Back Face Normal: None (foliage cards lit as the front)
+#else
+	return gl_FrontFacing ? N : -N;     // a back face (double sided: the material's or an instance's setting) is lit by its own side; culled, never taken
+#endif  
 }
 
 #ifndef XLION_LDR_OUTPUT

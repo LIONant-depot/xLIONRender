@@ -190,7 +190,7 @@ namespace xlionrender
             const auto TakeMaterials = [&](int Id)
             {
                 std::vector<bool> Alpha(D.m_Materials.size(), false);
-                for( std::size_t k = 0; k < D.m_Materials.size(); ++k ) if( const auto* pMat = findMaterial(D.m_Materials[k]); pMat && pMat->m_bAlpha ) Alpha[k] = true;
+                for( std::size_t k = 0; k < D.m_Materials.size(); ++k ) if( const auto* pMat = findMaterial(D.m_Materials[k]); pMat && pMat->m_State.isBlended() ) Alpha[k] = true;
                 W.SetSeeThrough(Id, Alpha);
                 const_cast<mesh_slot*>(pM)->m_bTriColors = false;              // the SURFACE_COLOR view's table: made again from the new capture
                 // a capture still waiting for this instance is of materials it no longer has (one in flight does not publish: processGICapture)
@@ -890,7 +890,9 @@ namespace xlionrender
             auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();     // absolute world: the instances' origin as is
             ViewBlock.m_w2C         = W2C;
             ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
-            const cluster_geom* pBoundGeom = nullptr;       // binds only when the mesh changes
+            const cluster_geom*            pBoundGeom = nullptr;       // binds only when the mesh or the caster changes
+            const xgpu::pipeline_instance* pBound     = nullptr;
+            bool                           bCutLight  = false;
 
             for( const std::uint32_t i : Indices )
             {
@@ -901,6 +903,7 @@ namespace xlionrender
                 if( M.m_bCluster == false )
                 {
                     pBoundGeom = nullptr;
+                    pBound     = nullptr;
                     Cmd.setPipelineInstance(m_ShadowInstance[0]);
                     Cmd.setPushConstants(details::push_forward{ D.m_L2W, W2C });
                     Cmd.setBuffer(const_cast<xgpu::buffer&>(M.m_VertexBuffer));
@@ -911,24 +914,48 @@ namespace xlionrender
 
                 const auto& G     = M.m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
-                if( &G != pBoundGeom )
-                {
-                    std::array<xgpu::buffer*, 4> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy };
-                    Cmd.setPipelineInstance(m_ShadowInstance[bSkin ? 2 : 1], std::span{ StaticBuffers.data(), bSkin ? std::size_t{4} : std::size_t{2} });
-                    Cmd.setDynamicUBO(m_ShadowUBO, 0);
-                    BindClusterStreams(Cmd, G);
-                    pBoundGeom = &G;
-                }
-
                 for( const auto& Sub : G.m_Submeshes )
+                {
+                    // The material's settings: no shadow, or a masked one's cutout (its own caster: the material's fragment, which stops after the cut)
+                    auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                    if( pMat && !pMat->m_State.m_bCastShadows ) continue;
+                    auto* pCut = pMat && pMat->m_State.m_Blend == material_state::blend::MASKED ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
+                    auto* pInstance = pCut ? pCut : &m_ShadowInstance[bSkin ? 2 : 1];
+                    if( pInstance != pBound || &G != pBoundGeom )
+                    {
+                        if( pCut )
+                        {
+                            if( !bCutLight )        // the fragment's "shadow pass" flag (ubo_lighting m_LightParams.w), once per call
+                            {
+                                m_LightUBO.allocEntry<details::ubo_lighting>().m_LightParams = xmath::fvec4(0, 0, 1, 1);
+                                bCutLight = true;
+                            }
+                            std::array<xgpu::buffer*, 11> Buffers = bSkin ? std::array<xgpu::buffer*, 11>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams }
+                                                                          : std::array<xgpu::buffer*, 11>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, nullptr, nullptr };
+                            Cmd.setPipelineInstance(*pCut, std::span{ Buffers.data(), bSkin ? std::size_t{11} : std::size_t{9} });
+                            Cmd.setDynamicUBO(m_LightUBO, 1);
+                        }
+                        else
+                        {
+                            std::array<xgpu::buffer*, 4> StaticBuffers{ G.m_pClusterData, bSkin ? G.m_pBones : &m_InstanceBuffer, &m_InstanceBuffer, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy };
+                            Cmd.setPipelineInstance(*pInstance, std::span{ StaticBuffers.data(), bSkin ? std::size_t{4} : std::size_t{2} });
+                        }
+                        Cmd.setDynamicUBO(m_ShadowUBO, 0);
+                        BindClusterStreams(Cmd, G);
+                        pBound     = pInstance;
+                        pBoundGeom = &G;
+                    }
+
+                    const std::uint32_t MaterialBase = pCut ? pMat->m_ParamBase : 0u;
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {
                         if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
                         const auto& C = G.m_Clusters[c];
-                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot });
-                        else        Cmd.setPushConstants(details::push_static_geom{ c, Draws[i].m_Slot });
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot, 0u, MaterialBase });
+                        else        Cmd.setPushConstants(details::push_static_geom{ c, Draws[i].m_Slot, 0u, 0xFFFFFFFFu, MaterialBase });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                     }
+                }
             }
         };
 
@@ -1135,6 +1162,58 @@ namespace xlionrender
 
             const xgpu::pipeline_instance* pBound     = nullptr;      // the state the last cluster draw left bound
             const cluster_geom*            pBoundGeom = nullptr;
+
+            // A cluster mesh's submesh with its material (null: the constant one)
+            const auto DrawSubmesh = [&]( std::size_t iDraw, const cluster_geom::submesh& Sub, material_slot* pMat )
+            {
+                const auto& D     = Scene.m_Draws[iDraw];
+                const auto& G     = findMesh(D.m_Mesh)->m_Geom;
+                const bool  bSkin = G.m_Kind == geom_kind::SKIN;
+                const std::uint32_t Slot     = m_DrawSlot[iDraw];
+                const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
+                auto* pInstance = pMat ? getMaterialInstance(*pMat, G.m_Kind) : nullptr;
+                if( pInstance == nullptr )
+                {
+                    if( bSkin ) return;         // ponytail: no constant-material fallback on the skin path; the editors give every slot a material
+                    pInstance = &m_StaticGeomInstance;      // the constant material, read from the instance record
+                }
+                const std::uint32_t MaterialBase = pMat ? pMat->m_ParamBase : 0u;
+                if( pInstance != pBound || &G != pBoundGeom )
+                {
+                    const auto* pMesh = findMesh(D.m_Mesh);
+                    if( !bSkin )
+                    {
+                        std::array<xgpu::buffer*, 9> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
+                                                              , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
+                        Cmd.setPipelineInstance(*pInstance, std::span{ GIBuffers });     // every rigid pipeline reads the GI
+                    }
+                    else
+                    {
+                        std::array<xgpu::buffer*, 11> Static{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams };
+                        Cmd.setPipelineInstance(*pInstance, std::span{ Static });      // SKIN: the GI bindings of the material fragment (no surfels), the BoneMap, the parameters
+                    }
+                    Cmd.setDynamicUBO(m_LightUBO, 1);
+                    Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                    BindClusterStreams(Cmd, G);
+                    pBound     = pInstance;
+                    pBoundGeom = &G;
+                }
+
+                const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
+                for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                {
+                    if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
+                    const auto& C = G.m_Clusters[c];
+                    if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase });
+                    else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second, MaterialBase });
+                    Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
+                }
+            };
+
+            // Translucent and additive submeshes: after the opaque ones and the sky, by priority, then back to front
+            struct blended_draw { std::int8_t m_Priority; float m_Distance; std::uint32_t m_iDraw; const cluster_geom::submesh* m_pSub; material_slot* m_pMat; };
+            std::vector<blended_draw> Blended;
+
             for( const auto& Vis : m_Visible )
             {
                 const std::size_t iDraw = Vis.m_iDraw;
@@ -1168,47 +1247,18 @@ namespace xlionrender
                     continue;
                 }
 
-                const auto& G     = pMesh->m_Geom;
-                const bool  bSkin = G.m_Kind == geom_kind::SKIN;
                 if( Slot == instance_slots::none_v ) continue;
                 if( bPlan && m_bBoxesOnly ) continue;                    // its box instead (planClusters)
-                const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
-                std::array<xgpu::buffer*, 11> StaticBuffers = bSkin ? std::array<xgpu::buffer*, 11>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams }
-                                                                    : std::array<xgpu::buffer*, 11>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
-                const auto  Static = std::span{ StaticBuffers.data(), bSkin ? std::size_t{11} : std::size_t{4} };      // SKIN: the GI bindings of the material fragment (no surfels), the BoneMap, the parameters
-                std::array<xgpu::buffer*, 9> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
-                                                      , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
-                const auto  GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
-
-                for( const auto& Sub : G.m_Submeshes )
+                for( const auto& Sub : pMesh->m_Geom.m_Submeshes )
                 {
-                    auto* pMat      = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
-                    auto* pInstance = pMat ? getMaterialInstance(*pMat, G.m_Kind) : nullptr;
-                    if( pInstance == nullptr )
+                    auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                    if( pMat && pMat->m_State.isBlended() )
                     {
-                        if( bSkin ) continue;       // ponytail: no constant-material fallback on the skin path; the editors give every slot a material
-                        pInstance = &m_StaticGeomInstance;      // the constant material, read from the instance record
+                        const auto& B = m_DrawWorld[iDraw];
+                        Blended.push_back({ pMat->m_State.m_SortPriority, ((B.m_Min + B.m_Max) * 0.5f - Eye).LengthSq(), std::uint32_t(iDraw), &Sub, pMat });
+                        continue;
                     }
-                    const std::uint32_t MaterialBase = pMat ? pMat->m_ParamBase : 0u;
-                    if( pInstance != pBound || &G != pBoundGeom )
-                    {
-                        if( !bSkin ) Cmd.setPipelineInstance(*pInstance, std::span{ GIBuffers });     // every rigid pipeline reads the GI
-                        else         Cmd.setPipelineInstance(*pInstance, Static);
-                        Cmd.setDynamicUBO(m_LightUBO, 1);
-                        Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
-                        BindClusterStreams(Cmd, G);
-                        pBound     = pInstance;
-                        pBoundGeom = &G;
-                    }
-
-                    for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
-                    {
-                        if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
-                        const auto& C = G.m_Clusters[c];
-                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase });
-                        else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second, MaterialBase });
-                        Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
-                    }
+                    DrawSubmesh(iDraw, Sub, pMat);
                 }
             }
 
@@ -1230,6 +1280,11 @@ namespace xlionrender
                     Cmd.Draw(3);
                 }
             }
+
+            // The blended ones, over everything (ponytail: sorted per submesh by its draw's box center; per-pixel order would need OIT)
+            std::sort(Blended.begin(), Blended.end(), [](const blended_draw& a, const blended_draw& b) { return a.m_Priority != b.m_Priority ? a.m_Priority < b.m_Priority : a.m_Distance > b.m_Distance; });
+            pBound = nullptr;
+            for( const auto& B : Blended ) DrawSubmesh(B.m_iDraw, *B.m_pSub, B.m_pMat);
 
 #if 0       // The first attempt: the primitives' OBB outline shader over the scene (it needs a mesh that is box-like): replaced by renderOutline
             // The selection's outline, with the editor's outline shader: the selected draw's mesh expanded in screen space, over what was drawn

@@ -89,10 +89,11 @@ namespace xlionrender
         // is the shadow map: the renderer binds its shadow atlas there whatever is given; then the textures. Neither is
         // copied or owned: they must outlive the id. The same material draws rigid and skinned geometry: the pipeline of each
         // vertex path is built the first time the material is drawn with it.
-        // bAlpha: a transparent material (the material's alpha flag): the GI's rays pass through it (gi::world::SetSeeThrough)
+        // State: its pipeline settings (blend, culling, depth, shadows); a blended one is drawn after the opaque ones, sorted, and the
+        // GI's rays pass through it (gi::world::SetSeeThrough)
         // Params: its parameter block (vec4s as floats: xmaterial::data_file::m_pDefaultBlock, m_BlockBytes / 4), copied into
         // MaterialParams (set 1 binding 9); the shader reads it from g_Mat.P[MaterialBase + n]. Empty: the shader reads none.
-        [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, bool bAlpha = false, std::span<const float> Params = {} ) noexcept;
+        [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, const material_state& State = {}, std::span<const float> Params = {} ) noexcept;
         // The renderer's default material (shaders/xlionrender_default_material_frag.glsl: PBR with a diffuse texture), for a slot whose
         // material does not resolve. Textures: slot 0 the shadow map (the renderer's atlas), slot 1 the diffuse texture.
         [[nodiscard]] xgpu::device::error* CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept;
@@ -203,6 +204,7 @@ namespace xlionrender
         };
 
         static constexpr std::size_t capture_path_v = std::size_t(geom_kind::COUNT);      // the GI material capture's pipelines (getCaptureInstance)
+        static constexpr std::size_t shadow_path_v  = capture_path_v + 1;                 // a masked material's shadow casters, per vertex path (getMaterialInstance bShadow)
 
         struct material_slot
         {
@@ -211,11 +213,11 @@ namespace xlionrender
             xgpu::shader                                            m_Fragment;
             std::vector<xgpu::texture>                              m_Textures;     // slot 0 (shadow map) may be empty: white
             std::vector<xgpu::texture*> TexturePointers() noexcept { std::vector<xgpu::texture*> P; for (auto& T : m_Textures) P.push_back(T.m_Private ? &T : nullptr); return P; }
-            std::array<xgpu::pipeline,          capture_path_v + 1> m_Pipeline;     // per vertex path (geom_kind, the GI capture last), built on first use
-            std::array<xgpu::pipeline_instance, capture_path_v + 1> m_Instance;
+            std::array<xgpu::pipeline,          shadow_path_v + capture_path_v> m_Pipeline;     // per vertex path (geom_kind), the GI capture, then the shadow
+            std::array<xgpu::pipeline_instance, shadow_path_v + capture_path_v> m_Instance;     // casters per vertex path: built on first use
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
-            bool                    m_bAlpha        = false;        // transparent (CreateMaterial): the GI sees through it
+            material_state          m_State;                        // CreateMaterial: its pipelines' settings
             std::uint32_t           m_ParamBase     = 0;            // its block in MaterialParams: the first vec4 (push constant MaterialBase), how many
             std::uint32_t           m_ParamCount    = 0;
         };
@@ -234,8 +236,9 @@ namespace xlionrender
         void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        prefilterInto   ( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept;
         std::vector<xgpu::pipeline::sampler>                    LitSamplers ( void ) const                     noexcept;
-        std::vector<xgpu::pipeline_instance::sampler_binding>   LitBindings ( std::span<xgpu::texture* const> Textures ) noexcept;
-        xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind )              noexcept;
+        std::vector<xgpu::pipeline_instance::sampler_binding>   LitBindings ( std::span<xgpu::texture* const> Textures, bool bShadowAtlas = true ) noexcept;     // false: white in slot 0 (a pass that renders into the atlas)
+        xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind, bool bShadow = false ) noexcept;     // bShadow: its shadow caster (a masked material's cutout)
+        static void                 ApplyState         ( xgpu::pipeline::setup& Setup, const material_state& S ) noexcept;
         xgpu::pipeline_instance*    getCaptureInstance ( material_slot& Material )                              noexcept;
         void                        BindClusterStreams ( xgpu::cmd_buffer& Cmd, const cluster_geom& Geom )      noexcept;   // the core + optional streams (m_StaticGeomVD / m_SkinGeomVD)
         void                        processGICapture( xgpu::window& Window )                                    noexcept;

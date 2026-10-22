@@ -217,7 +217,7 @@ int main()
         CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "cut out shader");
         xlionrender::material_id Cutout;
         const auto Slots = std::array<xgpu::texture*, 1>{ nullptr };
-        CHECK(!Renderer.CreateMaterial(Cutout, Frag, Slots, true), "cut out material");
+        CHECK(!Renderer.CreateMaterial(Cutout, Frag, Slots, { .m_Blend = xlionrender::material_state::blend::MASKED }), "cut out material");
 
         Scene.m_Draws[3].m_Materials = { Cutout };
         for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the cut out wall");

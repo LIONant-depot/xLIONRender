@@ -18,6 +18,7 @@
 #include "plugins/xmaterial.plugin/source/xmaterial_xgpu_rsc_loader.h"
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_xgpu_rsc_loader.h"
 #include "plugins/xmaterial.plugin/source/xmaterial_runtime.h"
+#include "plugins/xmaterial.plugin/source/xmaterial_xlionrender.h"
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_runtime.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_rsc_loader.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_runtime.h"
@@ -136,7 +137,7 @@ namespace xlionrender
                 return {};
             }
             material_id Id;
-            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, pMat->m_Flags.m_bAlpha, { pMI->m_pParams, pMI->m_BlockBytes / 4u })) return {};
+            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, xmaterial::RenderState(pMat->m_Render, pMI->m_DoubleSided), { pMI->m_pParams, pMI->m_BlockBytes / 4u })) return {};
             m_Materials[MIInstance] = { Id, std::move(From) };
             return Id;
         }

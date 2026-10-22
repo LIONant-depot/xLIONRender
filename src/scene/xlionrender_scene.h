@@ -42,6 +42,28 @@ namespace xlionrender
         bool operator==(const material_id&) const noexcept = default;
     };
 
+    // A compiled material's pipeline settings (instance::CreateMaterial): the material's render settings (xmaterial.plugin
+    // xmaterial_render_settings.h, mapped by xmaterial_xlionrender.h). Each combination is its own pipeline.
+    struct material_state
+    {
+        enum class blend : std::uint8_t
+        { OFF               // opaque
+        , MASKED            // opaque, the shader discards below its cutoff (its shadow too); solid for the GI
+        , ALPHA             // translucent: src alpha, one minus src alpha; drawn after the opaque ones, back to front
+        , ADD               // additive: one, one; drawn with the translucent ones
+        };
+        blend           m_Blend         = blend::OFF;
+        bool            m_bDoubleSided  = false;        // no culling
+        bool            m_bDepthWrite   = true;
+        bool            m_bDepthTest    = true;
+        bool            m_bCastShadows  = true;
+        bool            m_bWireframe    = false;        // debug: the triangles' edges
+        std::int8_t     m_SortPriority  = 0;            // blended: lower priorities first, back to front within one
+
+        constexpr bool isBlended( void ) const noexcept { return m_Blend == blend::ALPHA || m_Blend == blend::ADD; }
+        constexpr bool operator==( const material_state& ) const noexcept = default;
+    };
+
     // Standard metal/roughness material (glTF-style), scene-linear values
     struct material
     {

@@ -139,7 +139,7 @@ int main()
         const auto  Slots = std::array<xgpu::texture*, 1>{ nullptr };
         const float First[] = { 9, 9, 9, 9, 9, 9, 9, 9 }, Second[] = { 0, 0, 0, 0, 2, 0.5f, 0.25f, 1 };
         xlionrender::material_id MA, MB;
-        CHECK(!Renderer.CreateMaterial(MA, Frag, Slots, false, First) && !Renderer.CreateMaterial(MB, Frag, Slots, false, Second), "CreateMaterial with parameters");
+        CHECK(!Renderer.CreateMaterial(MA, Frag, Slots, {}, First) && !Renderer.CreateMaterial(MB, Frag, Slots, {}, Second), "CreateMaterial with parameters");
 
         Scene.m_Draws = { { .m_Mesh = Static, .m_Material = Mat, .m_Materials = { MB } } };
         std::vector<float> P;
@@ -149,6 +149,82 @@ int main()
         CHECK(nParams == nCovered, "Parameters covered %d texels, the standard path %d", nParams, nCovered);
         Renderer.DestroyMaterial(MA);
         Renderer.DestroyMaterial(MB);
+    }
+
+    // A material's render settings (material_state: xmaterial.plugin documentation/render_settings_plan.md), each its own pipeline. The
+    // parameters' shader writes a constant red, so blending, culling and raster show as values and counts of the HDR red
+    {
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_params_frag.h"
+        };
+        static constexpr std::uint32_t s_Cut[] = {
+            #include "xlionrender_test_cutout_frag.h"
+        };
+        xgpu::shader Frag, CutFrag;
+        CHECK(!Device.Create(Frag,    { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "params shader");
+        CHECK(!Device.Create(CutFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Cut), std::size(s_Cut) } } }), "cut out shader");
+        using st = xlionrender::material_state;
+        const auto  Slots   = std::array<xgpu::texture*, 1>{ nullptr };
+        const float Quarter[] = { 0, 0, 0, 0, 0.25f, 0, 0, 1 }, Two[] = { 0, 0, 0, 0, 2, 0, 0, 1 };
+        xlionrender::material_id Add, AddBoth, Wire, Opaque, NoShadow, Cut;
+        CHECK(!Renderer.CreateMaterial(Add,      Frag, Slots, { .m_Blend = st::blend::ADD, .m_bDepthWrite = false }, Quarter), "additive material");
+        CHECK(!Renderer.CreateMaterial(AddBoth,  Frag, Slots, { .m_Blend = st::blend::ADD, .m_bDoubleSided = true, .m_bDepthWrite = false }, Quarter), "double sided additive material");
+        CHECK(!Renderer.CreateMaterial(Wire,     Frag, Slots, { .m_bWireframe = true }, Two), "wireframe material");
+        CHECK(!Renderer.CreateMaterial(Opaque,   Frag, Slots, {}, Two), "opaque material");
+        CHECK(!Renderer.CreateMaterial(NoShadow, Frag, Slots, { .m_bCastShadows = false }, Two), "material without shadows");
+        CHECK(!Renderer.CreateMaterial(Cut,      CutFrag, Slots, { .m_Blend = st::blend::MASKED }, {}), "masked material");
+
+        std::vector<float> I;
+        const auto Count = [&](float V) { int n = 0; for (float v : I) n += std::abs(v - V) < 1e-3f; return n; };
+        const auto Draw  = [&](xlionrender::material_id M) { return xlionrender::draw{ .m_Mesh = Static, .m_Material = Mat, .m_Materials = { M } }; };
+
+        Scene.m_Draws = { Draw(Add), Draw(Add) };
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, I), "Render additive");
+        CHECK(Count(0.5f) == nCovered, "Additive twice over itself: %d texels at 0.5, %d covered", Count(0.5f), nCovered);
+
+        Scene.m_Draws = { Draw(AddBoth) };
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, I), "Render double sided");
+        CHECK(Count(0.5f) > nCovered * 95 / 100, "Double sided: the back faces add too, %d texels at 0.5 of %d", Count(0.5f), nCovered);
+
+        Scene.m_Draws = { Draw(Add), Draw(Opaque) };        // the additive one first: it still lands over the opaque one
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, I), "Render blended after opaque");
+        CHECK(Count(2.25f) == nCovered, "Blended after the opaque ones: %d texels at 2.25, %d covered", Count(2.25f), nCovered);
+
+        Scene.m_Draws = { Draw(Wire) };
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, I), "Render wireframe");
+        CHECK(Count(2.0f) > 0 && Count(2.0f) < nCovered * 9 / 10, "Wireframe (a dense sphere: gaps between its edges): %d edge texels of %d covered", Count(2.0f), nCovered);
+
+        // Shadows on a ground (the reference path, shadowed by the sun's clipmap): Cast Shadows off and a masked material cut out everywhere
+        // leave the ground as with the sun's shadows off
+        xlionrender::mesh_id Ground;
+        {
+            const auto Box = xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 });
+            std::vector<xlionrender::vertex> Verts(Box.m_Vertices.size());
+            for (std::size_t i = 0; i < Verts.size(); ++i)
+            {
+                const auto& V = Box.m_Vertices[i];
+                Verts[i] = { { V.m_Position.m_X, V.m_Position.m_Y, V.m_Position.m_Z }, { V.m_Texcoord.m_X, V.m_Texcoord.m_Y }, 0xffffffffu
+                           , { V.m_Normal.m_X, V.m_Normal.m_Y, V.m_Normal.m_Z }, { V.m_Tangent.m_X, V.m_Tangent.m_Y, V.m_Tangent.m_Z, V.m_Tangent.m_D } };
+            }
+            CHECK(!Renderer.CreateMesh(Ground, Verts, Box.m_Indices), "ground");
+        }
+        const auto Shadowed = [&](xlionrender::material_id M, std::vector<float>& On, std::vector<float>& Off) -> bool
+        {
+            Scene.m_Draws = { { .m_Mesh = Ground, .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.6f, 0 }) * xmath::fmat4::fromScale({ 10.0f, 0.1f, 10.0f }), .m_Material = Mat }, Draw(M) };
+            Scene.m_Sun.m_bCastShadows = false;
+            const bool bOk = App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Off);
+            Scene.m_Sun.m_bCastShadows = true;
+            return bOk && App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, On);
+        };
+        const auto Darker = [](const std::vector<float>& On, const std::vector<float>& Off) { int n = 0; for (std::size_t i = 0; i < On.size(); ++i) n += On[i] < Off[i] * 0.8f; return n; };
+        std::vector<float> On, Off;
+        Renderer.m_bShadowCache = false;           // every tile each frame: the sun turned off and on keeps no stale tile
+        CHECK(Shadowed(Opaque, On, Off) && Darker(On, Off) > 50, "An opaque material casts a shadow (%d darker texels)", Darker(On, Off));
+        CHECK(Shadowed(NoShadow, On, Off) && Darker(On, Off) == 0, "Cast Shadows off: %d darker texels", Darker(On, Off));
+        CHECK(Shadowed(Cut, On, Off) && Darker(On, Off) == 0, "A masked material cut out everywhere casts no shadow: %d darker texels", Darker(On, Off));
+
+        for (auto M : { Add, AddBoth, Wire, Opaque, NoShadow, Cut }) Renderer.DestroyMaterial(M);
+        Renderer.DestroyMesh(Ground);
     }
 
     // Entity parameters (EntityParams, set 1 binding 10, material_contract.md tests 5-6): one material whose Tint (block vec4 0) is red;
@@ -163,7 +239,7 @@ int main()
         const auto  Slots = std::array<xgpu::texture*, 1>{ nullptr };
         const float Block[] = { 1, 0, 0, 1 };
         xlionrender::material_id M;
-        CHECK(!Renderer.CreateMaterial(M, Frag, Slots, false, Block), "CreateMaterial with an entity tint");
+        CHECK(!Renderer.CreateMaterial(M, Frag, Slots, {}, Block), "CreateMaterial with an entity tint");
 
         xgpu::tools::view Front;
         Front.setFov(xmath::radian{ 1.0f });
