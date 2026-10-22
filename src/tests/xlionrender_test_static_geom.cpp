@@ -257,6 +257,51 @@ int main()
         Device.Destroy(std::move(Colored.m_Colors));
     }
 
+    // The optional UV1 stream: a copy of the sphere with a UV1 of (0.25, 0.75) everywhere and one without the stream, in one frame,
+    // the material writing UV1 in RG and UV0 in BA: the first reads its stream, the other its UV0
+    {
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_uv1_frag.h"
+        };
+        xgpu::shader Frag;
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "UV1 shader");
+        const auto Slots = std::array<xgpu::texture*, 1>{ nullptr };
+        xlionrender::material_id M;
+        CHECK(!Renderer.CreateMaterial(M, Frag, Slots), "CreateMaterial reading UV1");
+
+        cluster_buffers WithUV1;
+        CHECK(MakeStaticBuffers(Device, Prim, 0.5f, WithUV1) && WithUV1.SetUV1(Device, Prim.m_Vertices.size(), 0.25f, 0.75f), "static geom buffers with UV1");
+        xlionrender::mesh_id WithUV1Id;
+        CHECK(!Renderer.CreateClusterGeom(WithUV1Id, WithUV1.Geom()), "CreateClusterGeom with UV1");
+
+        xgpu::tools::view Front;
+        Front.setFov(xmath::radian{ 1.0f });
+        Front.LookAt(xmath::fvec3{ 0, 0, -3 }, xmath::fvec3{ 0, 0, 0 });
+        Scene.m_Draws =
+        { { .m_Mesh = WithUV1Id, .m_L2W = xmath::fmat4::fromTranslation({ -0.6f, 0, 0 }), .m_Material = Mat, .m_Materials = { M } }
+        , { .m_Mesh = Static,    .m_L2W = xmath::fmat4::fromTranslation({  0.6f, 0, 0 }), .m_Material = Mat, .m_Materials = { M } }
+        };
+
+        std::vector<std::byte> Raw;
+        int W, H;
+        CHECK(App.RenderFrame(Scene, View, Front) && !Device.ReadTexture(View.m_HDR, Raw, W, H), "Render UV1");
+        const auto* p = reinterpret_cast<const std::uint16_t*>(Raw.data());
+        int nStream = 0, nUV0 = 0, nOther = 0;
+        for (std::size_t i = 0; i < std::size_t(W) * H; ++i)
+        {
+            const float U1 = HalfToFloat(p[i * 4]), V1 = HalfToFloat(p[i * 4 + 1]), U0 = HalfToFloat(p[i * 4 + 2]), V0 = HalfToFloat(p[i * 4 + 3]);
+            if (U1 == 0 && V1 == 0 && U0 == 0 && V0 == 0) continue;
+            if      (std::abs(U1 - U0) < 2e-3f && std::abs(V1 - V0) < 2e-3f) ++nUV0;
+            else if (std::abs(U1 - 0.25f) < 2e-3f && std::abs(V1 - 0.75f) < 2e-3f) ++nStream;
+            else ++nOther;
+        }
+        CHECK(nStream > 100 && std::abs(nStream - nUV0) < nStream / 10 && nOther == 0, "UV1: from the stream %d, UV0 %d, other %d", nStream, nUV0, nOther);
+
+        Renderer.DestroyMesh(WithUV1Id);
+        Renderer.DestroyMaterial(M);
+        Device.Destroy(std::move(WithUV1.m_UV1));
+    }
+
     // Stale-id safety does not touch the buffers it references (the caller owns them)
     Renderer.DestroyMesh(Static);
     std::vector<float> C;

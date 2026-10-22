@@ -38,6 +38,7 @@ namespace xlionrender
         geom_kind                   m_Kind          = geom_kind::RIGID;
         xgpu::buffer*               m_pStreams      = nullptr;  // 3 contiguous: index (uint16), positions, extras - the core streams
         xgpu::buffer*               m_pColors       = nullptr;  // the optional COLOR0 stream (RGBA8 sRGB per vertex); null: the renderer binds constant white
+        xgpu::buffer*               m_pUV1          = nullptr;  // the optional UV1 stream (float2 per vertex); null: the renderer binds a constant, the shaders read UV0
         xgpu::buffer*               m_pClusterData  = nullptr;  // SSBO of the per-cluster dequantization data
         xgpu::buffer*               m_pBones        = nullptr;  // SKIN: SSBO of the bone matrices (the caller fills it each frame), every bone of the skeleton
         xgpu::buffer*               m_pBoneMap      = nullptr;  // SKIN: SSBO of the palettes (xgeom_skin BoneMap); null: the renderer binds a dummy
@@ -52,7 +53,7 @@ namespace xlionrender
     template<typename T_GEOM>
     cluster_geom MakeClusterGeom( T_GEOM& Geom, int iLOD = 0 ) noexcept
     {
-        cluster_geom G{ .m_pStreams = &Geom.IndexBuffer(), .m_pColors = Geom.getVertexColors().empty() ? nullptr : &Geom.ColorBuffer(), .m_pClusterData = &Geom.ClusterBuffer(), .m_BBox = Geom.m_BBox };
+        cluster_geom G{ .m_pStreams = &Geom.IndexBuffer(), .m_pColors = Geom.getVertexColors().empty() ? nullptr : &Geom.ColorBuffer(), .m_pUV1 = Geom.getUV1s().empty() ? nullptr : &Geom.UV1Buffer(), .m_pClusterData = &Geom.ClusterBuffer(), .m_BBox = Geom.m_BBox };
 
         for( auto& C : Geom.getClusters() ) G.m_Clusters.push_back({ C.m_iIndex, C.m_nIndices, C.m_iVertex, C.m_BBox });
         for( auto& M : Geom.getMeshes() )

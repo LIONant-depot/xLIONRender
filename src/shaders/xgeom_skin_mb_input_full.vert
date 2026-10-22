@@ -17,6 +17,7 @@ layout(location = 4) in uvec2 in_OctNormal;    // full-precision oct normal (R16
 layout(location = 5) in uint  in_OctTangentX;  // full-precision oct tangent X (R16_UINT)
 layout(location = 6) in uint  in_OctTangentY_Sign; // oct tangent Y (15 bits) + binormal sign (bit 15) (R16_UINT)
 layout(location = 7) in vec4  in_Color;         // the optional COLOR0 stream (R8G8B8A8_UNORM, sRGB); a geometry without it binds constant white
+layout(location = 8) in vec2  in_UV1;           // the optional UV1 stream (R32G32_SFLOAT); a geometry without it binds a marker: UV0
 
 //
 // Fast oct-encoded normal/tangent decode
@@ -78,6 +79,7 @@ mb_full_vertex getVertexData()
     Data.Tangent.w   = binormal_sign;
     Data.Normal      = normalize(SkinRot * bindNormal);
     Data.VertColor   = mb_DecodeVertexColor(in_Color);
+    Data.UV1         = mb_UV1(in_UV1, Data.UV);
 
     return Data;
 }

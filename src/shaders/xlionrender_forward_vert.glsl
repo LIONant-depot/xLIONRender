@@ -15,6 +15,7 @@ layout(push_constant) uniform Push
 } push;
 
 layout(location = 0) out VaryingFull Out;
+layout(location = 6) out vec2 OutUV1;           // no second UVs on this path: UV0
 layout(location = 9) out vec4 OutGI;            // surfel GI (mb_standard_pbr.frag): none on this path
 
 void main()
@@ -30,6 +31,7 @@ void main()
     Out.VertColor      = in_Color;
     OutGI              = vec4(0.0);
     Out.UV             = in_UV;
+    OutUV1             = in_UV;
 
     // No shadows yet: z outside (-1,1) makes ShadowPCF return 1 without sampling
     Out.ShadowPosition = vec4(0.5, 0.5, 2.0, 1.0);

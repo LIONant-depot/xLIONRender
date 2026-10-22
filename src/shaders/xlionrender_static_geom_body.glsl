@@ -26,6 +26,7 @@ layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 
 // Fragment shader inputs
 layout(location = 0) out VaryingFull Out;
+layout(location = 6) out vec2 OutUV1;                // the second UVs (mb_varying_definition_full.glsl)
 layout(location = 8) flat out uint OutInstance;     // the slot, for fragment shaders that read the instance record (geom standard)
 layout(location = 9) out vec4 OutGI;                // surfel GI: sum(w E), sum(w), interpolated and divided per pixel (mb_standard_pbr.frag); 0 without GI
 layout(location = 10) out vec3 OutGIPos;            // the per-pixel read (mb_standard_pbr.frag): mesh space position,
@@ -93,6 +94,7 @@ void main()
     // Set the UVs
     //
     Out.UV = VertData.UV;
+    OutUV1 = VertData.UV1;
 
     //
     // Handle the Tangent space transforms for MikkTSpace

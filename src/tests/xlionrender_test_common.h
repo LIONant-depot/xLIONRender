@@ -97,12 +97,13 @@ namespace xlionrender::test
         std::array<xgpu::buffer, 3>     m_Streams;
         xgpu::buffer                    m_ClusterData;
         xgpu::buffer                    m_Colors;                // the optional COLOR0 stream (SetColor); empty: the renderer binds white
+        xgpu::buffer                    m_UV1;                   // the optional UV1 stream (SetUV1); empty: the shaders read UV0
         std::uint32_t                   m_nIndices = 0;
         float                           m_Scale    = 1;         // positions lie in [-m_Scale, m_Scale]
 
         cluster_geom Geom(geom_kind Kind = geom_kind::RIGID, xgpu::buffer* pBones = nullptr, std::uint32_t MaxInfluences = 1) noexcept
         {
-            cluster_geom G{ .m_Kind = Kind, .m_pStreams = m_Streams.data(), .m_pColors = m_Colors.m_Private ? &m_Colors : nullptr, .m_pClusterData = &m_ClusterData, .m_pBones = pBones, .m_MaxInfluences = MaxInfluences };
+            cluster_geom G{ .m_Kind = Kind, .m_pStreams = m_Streams.data(), .m_pColors = m_Colors.m_Private ? &m_Colors : nullptr, .m_pUV1 = m_UV1.m_Private ? &m_UV1 : nullptr, .m_pClusterData = &m_ClusterData, .m_pBones = pBones, .m_MaxInfluences = MaxInfluences };
             G.m_BBox.m_Min = xmath::fvec3(-m_Scale);
             G.m_BBox.m_Max = xmath::fvec3( m_Scale);
             G.m_Clusters  = { { 0, m_nIndices, 0 } };
@@ -115,6 +116,13 @@ namespace xlionrender::test
         {
             std::vector<std::uint32_t> Colors(nVertices, RGBA);
             return !Device.Create(m_Colors, { .m_Type = xgpu::buffer::type::VERTEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Colors.size()), .m_pData = Colors.data() });
+        }
+
+        // Every vertex the same UV1, nVertices of them
+        bool SetUV1(xgpu::device& Device, std::size_t nVertices, float U, float V) noexcept
+        {
+            std::vector<std::array<float, 2>> UVs(nVertices, { U, V });
+            return !Device.Create(m_UV1, { .m_Type = xgpu::buffer::type::VERTEX, .m_EntryByteSize = sizeof(UVs[0]), .m_EntryCount = int(UVs.size()), .m_pData = UVs.data() });
         }
     };
 

@@ -20,6 +20,7 @@ layout(push_constant) uniform PushConstants
 } push;
 
 layout(location = 0) out VaryingFull Out;
+layout(location = 6) out vec2 OutUV1;
 layout(location = 8) flat out uint OutInstance;
 layout(location = 9) out vec4 OutGI;
 layout(location = 10) out vec3 OutGIPos;
@@ -43,6 +44,7 @@ void main()
     Out.Tangent         = vec4(T, 1.0);
     Out.Normal          = N;
     Out.UV              = M.xy + Sign * M.z;
+    OutUV1              = Out.UV;           // ponytail: the surfels sample UV0; UV1 materials capture as if UV1 were UV0
     OutInstance         = push.instanceIndex;
     OutGI               = vec4(0.0);
     OutGIPos            = vec3(0.0);

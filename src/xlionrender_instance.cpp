@@ -145,6 +145,7 @@ namespace xlionrender
         ReleaseBuffer(m_GIMomentRing);
         ReleaseBuffer(m_GIDummy);
         ReleaseBuffer(m_WhiteColorStream);
+        ReleaseBuffer(m_NoUV1Stream);
         for( auto& M : m_Materials ) if( M.m_bAlive ) for( std::size_t k = 0; k < M.m_Pipeline.size(); ++k )
         {
             if( M.m_Instance[k].m_Private ) m_Device.Destroy(std::move(M.m_Instance[k]));
@@ -264,6 +265,8 @@ namespace xlionrender
         {
             std::uint32_t White = 0xFFFFFFFFu;
             if( auto Err = Device.Create(m_WhiteColorStream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(White), .m_EntryCount = 1, .m_pData = &White }); Err ) return Err;
+            float NoUV1[2] = { -3.0e38f, -3.0e38f };   // mb_input_definition_full.vert mb_UV1: below -1e38 reads UV0
+            if( auto Err = Device.Create(m_NoUV1Stream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(NoUV1), .m_EntryCount = 1, .m_pData = NoUV1 }); Err ) return Err;
         }
         if( auto Err = Device.Create(m_CellRing,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * max_cell_uints_v }); Err ) return Err;
         if( auto Err = Device.Create(m_MaterialUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_material), .m_EntryCount = max_draws_per_frame_v }); Err ) return Err;
@@ -335,6 +338,7 @@ namespace xlionrender
             , xgpu::vertex_descriptor::attribute{ .m_Offset = 0, .m_Format = xgpu::vertex_descriptor::format::UINT16_2D, .m_iStream = 1 }   // vertex_extras::m_UV
             , xgpu::vertex_descriptor::attribute{ .m_Offset = 4, .m_Format = xgpu::vertex_descriptor::format::UINT8_4D,  .m_iStream = 1 }   // vertex_extras::m_OctNormal + m_OctTangent
             , xgpu::vertex_descriptor::attribute{ .m_Offset = 0, .m_Format = xgpu::vertex_descriptor::format::UINT8_4D_NORMALIZED, .m_iStream = 2 }   // optional: COLOR0
+            , xgpu::vertex_descriptor::attribute{ .m_Offset = 0, .m_Format = xgpu::vertex_descriptor::format::FLOAT_2D, .m_iStream = 3 }              // optional: UV1
             };
             if( auto Err = Device.Create(m_StaticGeomVD, { .m_bUseStreaming = true, .m_Topology = xgpu::vertex_descriptor::topology::TRIANGLE_LIST, .m_VertexSize = 0, .m_Attributes = Attributes, .m_bDynamicStride = true }); Err ) return Err;
 
@@ -349,6 +353,7 @@ namespace xlionrender
             , xgpu::vertex_descriptor::attribute{ .m_Offset = 8,  .m_Format = xgpu::vertex_descriptor::format::UINT16_1D, .m_iStream = 1 }
             , xgpu::vertex_descriptor::attribute{ .m_Offset = 10, .m_Format = xgpu::vertex_descriptor::format::UINT16_1D, .m_iStream = 1 }
             , xgpu::vertex_descriptor::attribute{ .m_Offset = 0,  .m_Format = xgpu::vertex_descriptor::format::UINT8_4D_NORMALIZED, .m_iStream = 2 }  // optional: COLOR0
+            , xgpu::vertex_descriptor::attribute{ .m_Offset = 0,  .m_Format = xgpu::vertex_descriptor::format::FLOAT_2D, .m_iStream = 3 }             // optional: UV1
             };
             if( auto Err = Device.Create(m_SkinGeomVD, { .m_bUseStreaming = true, .m_Topology = xgpu::vertex_descriptor::topology::TRIANGLE_LIST, .m_VertexSize = 0, .m_Attributes = SkinAttributes, .m_bDynamicStride = true }); Err ) return Err;
             if( auto Err = Device.Create(m_StaticGeomUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_geom_view), .m_EntryCount = 64 }); Err ) return Err;
@@ -855,8 +860,8 @@ namespace xlionrender
     // The index buffer, the core streams, then the optional ones: a stream the geometry lacks reads a constant default (stride 0)
     void instance::BindClusterStreams( xgpu::cmd_buffer& Cmd, const cluster_geom& G ) noexcept
     {
-        const auto Streams = std::array{ &G.m_pStreams[0], &G.m_pStreams[1], &G.m_pStreams[2], G.m_pColors ? G.m_pColors : &m_WhiteColorStream };
-        Cmd.setStreamingBuffers(std::span<xgpu::buffer* const>{ Streams }, G.m_pColors ? 0u : 1u << 2);    // stream 2: COLOR0
+        const auto Streams = std::array{ &G.m_pStreams[0], &G.m_pStreams[1], &G.m_pStreams[2], G.m_pColors ? G.m_pColors : &m_WhiteColorStream, G.m_pUV1 ? G.m_pUV1 : &m_NoUV1Stream };
+        Cmd.setStreamingBuffers(std::span<xgpu::buffer* const>{ Streams }, (G.m_pColors ? 0u : 1u << 2) | (G.m_pUV1 ? 0u : 1u << 3));    // stream 2: COLOR0, 3: UV1
     }
 
     //------------------------------------------------------------------------------------------------

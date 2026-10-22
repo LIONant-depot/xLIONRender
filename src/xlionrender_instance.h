@@ -334,6 +334,7 @@ namespace xlionrender
         xgpu::buffer                m_GIMomentRing;             // per surfel of m_GILightRing: gi::moment_texels_v uints (half mean, half mean^2) - ponytail: 48 MB host-visible, size it to the scenes if it matters
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
         xgpu::buffer                m_WhiteColorStream;                 // one RGBA8 white: the COLOR0 stream of a cluster geom without colors (stride 0)
+        xgpu::buffer                m_NoUV1Stream;                      // one float2 marker (mb_input_definition_full.vert: the shaders read UV0): the UV1 stream of a cluster geom without one (stride 0)
         std::uint64_t               m_GIRender = 0;
         double                      m_GIOverheadMs = 0;         // the GI's main-thread work in updateGI outside gi::world::Update (the upload), smoothed: its allowance's pre-charge
         struct gi_frame { std::uint64_t m_Frame; gi::world::stats m_Stats; double m_SceneGpuMs = -1; };     // (SceneGpuMs: the scene pass' GPU time, getGPUTimes: -1 not known)

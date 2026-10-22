@@ -26,6 +26,7 @@ layout(std430, set = 1, binding = 2) readonly buffer InstanceBuffer
 
 // Fragment shader inputs
 layout(location = 0) out VaryingFull Out;
+layout(location = 6) out vec2 OutUV1;                // the second UVs (mb_varying_definition_full.glsl)
 layout(location = 9) out vec4 OutGI;                // surfel GI (mb_standard_pbr.frag): none on the skin path yet
 layout(location = 10) out vec3 OutGIPos;
 layout(location = 11) out vec3 OutGINormal;
@@ -52,6 +53,7 @@ void main()
     // Set the UVs
     //
     Out.UV = VertData.UV;
+    OutUV1 = VertData.UV1;
 
     //
     // Handle the Tangent space transforms for MikkTSpace
