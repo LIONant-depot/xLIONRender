@@ -122,9 +122,10 @@ namespace xlionrender
             auto* pMI  = static_cast<xmaterial_instance::rt*>(const_cast<void*>(From[0]));
             auto* pMat = static_cast<xmaterial::rt*>(const_cast<void*>(From[1]));
             std::vector<xgpu::texture*> Textures;
+            if (pMat->m_Flags.m_bSamplersFrom1) Textures.push_back(nullptr);    // a graph material has no slot-0 entry in its list: its textures are samplers 1..
             for (auto& E : pMI->getTextures())
             {
-                if (&E == pMI->getTextures().data()) { Textures.push_back(nullptr); continue; }    // slot 0: the renderer's shadow atlas
+                if (!pMat->m_Flags.m_bSamplersFrom1 && &E == pMI->getTextures().data()) { Textures.push_back(nullptr); continue; }    // slot 0: the renderer's shadow atlas
                 Textures.push_back(static_cast<xgpu::texture*>(const_cast<void*>(From[1 + Textures.size()])));
             }
             // An instance compiled against another layout than the material has now (the material was compiled again, the instance not yet): its block would be read
@@ -151,9 +152,10 @@ namespace xlionrender
             auto* pMat = GetResource(material_type_guid_v.m_Value, pMI->m_MaterialRef.m_Instance.m_Value);
             if (!pMat) return false;
             From = { pMI, pMat };
+            const bool bFrom1 = static_cast<xmaterial::rt*>(pMat)->m_Flags.m_bSamplersFrom1;
             for (auto& E : pMI->getTextures())
             {
-                if (&E == pMI->getTextures().data()) continue;
+                if (!bFrom1 && &E == pMI->getTextures().data()) continue;
                 auto* pTexture = GetResource(texture_type_guid_v.m_Value, E.m_TexureRef.m_Instance.m_Value);
                 if (!pTexture) return false;
                 From.push_back(pTexture);
