@@ -1,4 +1,4 @@
-# Flexible vertex streams (COLOR0 built 2026-10-22, uncommitted)
+# Flexible vertex streams (COLOR0 and UV1 built 2026-10-22)
 
 Tomas, 2026-10-22: some streams are required (the core); extra UVs, colors, etc. come as additional streams that the
 pipeline allows and handles. The vertex shader always gives the fragment stage every input: from the stream when the
@@ -58,7 +58,9 @@ again. The instance asks for API 1.3; a 1.2 device still runs, but a dynamic-str
 - Vertex pulling from a storage buffer (my first idea) measures about even with vertex buffers for indexed draws, but
   nobody needs it for this; the stride-0 buffer is the common answer.
 
-**Material side:** the Vertex Input node's Color pin already exists; it gets a UV1 pin. `VaryingFull` grows by UV1.
+**Material side:** the Vertex Input node has Color, UV and UV1 pins. `VaryingFull` is unchanged: UV1 is its own varying at
+location 6 (`OutUV1` in every vertex shader that feeds material fragments, `InUV1` where a fragment reads it), so the
+fragment shaders that never read it do not change.
 
 **Importer:** store colors as 8-bit sRGB. FBX colors are already sRGB-like; glTF `COLOR_0` is linear and is converted.
 
@@ -68,8 +70,11 @@ again. The instance asks for API 1.3; a 1.2 device still runs, but a dynamic-str
    (`ColorBuffer`), xGPU dynamic strides, the renderer's white default (`BindClusterStreams`), the shaders decode sRGB.
    Tests: xlionrender_test_static_geom (a colored and an uncolored sphere in one frame), xgeom_skin_compiler -SELFTEST
    (the colors follow their vertices through the cluster split). The geom editors shade through xLIONRender: they get it.
-2. UV1: a stream bit, a FLOAT_2D stream, the `VaryingFull` UV1 and the Vertex Input node's pin (xmaterial.plugin).
-3. glTF linear colors converted to sRGB at import.
+2. DONE: UV1 in both formats (version 6: `stream_uv1_v`, `m_UV1Offset`), compilers (UV0 for a submesh without a second set
+   when another has one), loaders (`UV1Buffer`), the renderer's default (`m_NoUV1Stream`: one float2 marker, stride 0;
+   `mb_UV1` reads UV0 below -1e38), the Vertex Input node's UV1 pin. Tests: xlionrender_test_static_geom (a sphere with UV1
+   and one without in one frame), xgeom_skin_compiler -SELFTEST (UV1 follows its vertex).
+3. DONE: glTF linear colors converted to sRGB at import (xraw3d assimp_v3 `StoredColor`, .gltf/.glb only).
 
 ## Open points
 
