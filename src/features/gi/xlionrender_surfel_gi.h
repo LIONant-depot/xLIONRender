@@ -2580,10 +2580,12 @@ namespace xlionrender::gi
                 R[0] = MeshOf(*I.m_pMesh);
                 R[1] = std::uint32_t(I.m_Level);
                 const std::size_t nS = I.m_E.size();
-                R[2] = V3s(I.m_E.data(), nS);
-                R[3] = Words(I.m_Valid.data(), I.m_Valid.size());
+                // room for both levels in every per-surfel array (the finer one's count): a level switch re-levels in place (gpu_trace::Relevel)
+                const std::size_t nRoom = std::max({ nS, I.m_pMesh->m_Levels[0].size(), I.m_pMesh->m_Levels[1].size() });
+                R[2] = V3s(I.m_E.data(), nS); Grow(3 * (nRoom - nS));
+                R[3] = Words(I.m_Valid.data(), I.m_Valid.size()); Grow(nRoom - I.m_Valid.size());
                 static_assert(sizeof(moments) == 4 * 2 * moment_texels_v);
-                R[4] = Words(I.m_Moments.data(), I.m_Moments.size() * 2 * moment_texels_v);
+                R[4] = Words(I.m_Moments.data(), I.m_Moments.size() * 2 * moment_texels_v); Grow((nRoom - I.m_Moments.size()) * 2 * moment_texels_v);
                 R[5] = F(I.m_MeanE.m_X); R[6] = F(I.m_MeanE.m_Y); R[7] = F(I.m_MeanE.m_Z);
                 R[8] = F(I.m_Albedo.m_X); R[9] = F(I.m_Albedo.m_Y); R[10] = F(I.m_Albedo.m_Z);
                 {   // its material, always there (changed in place: GPUMaterial)
@@ -2594,7 +2596,7 @@ namespace xlionrender::gi
                 }
                 R[15] = F(I.m_MeanScale);
                 {
-                    const std::size_t At = Grow(9 * nS);
+                    const std::size_t At = Grow(9 * nRoom);
                     std::uint32_t* o = D.data() + At;
                     const float Third = 1.0f / 3;
                     for (std::size_t k = 0; k < nS; ++k)
@@ -2604,18 +2606,18 @@ namespace xlionrender::gi
                     R[41] = std::uint32_t(At);
                 }
                 {
-                    const std::size_t At = Grow(nS * gpu_est_v);
+                    const std::size_t At = Grow(nRoom * gpu_est_v);
                     for (std::size_t k = 0; k < nS && k < I.m_Est.size(); ++k) PackEst(I.m_Est[k], D.data() + At + k * gpu_est_v);
                     R[42] = std::uint32_t(At);
                 }
                 {
-                    const std::size_t At = Grow(nS * moment_texels_v);
+                    const std::size_t At = Grow(nRoom * moment_texels_v);
                     std::uint32_t* o = D.data() + At;
                     for (std::size_t k = 0; k < nS && k < I.m_MomCount.size(); ++k) for (int t = 0; t < moment_texels_v; ++t) o[k * moment_texels_v + std::size_t(t)] = I.m_MomCount[k][std::size_t(t)];
                     R[43] = std::uint32_t(At);
                 }
                 {
-                    const std::size_t At = Grow(nS * 9);
+                    const std::size_t At = Grow(nRoom * 9);
                     std::uint32_t* o = D.data() + At;
                     for (std::size_t k = 0; k < nS && k < I.m_EmitB.size(); ++k) for (int c = 0; c < 3; ++c) std::memcpy(o + 9 * k + 3 * std::size_t(c), &I.m_EmitB[k][std::size_t(c)].m_X, 12);
                     R[44] = std::uint32_t(At);
@@ -2772,6 +2774,7 @@ namespace xlionrender::gi
             }
         }
         std::uint64_t GPUGen() const noexcept { return m_GPUGen; }
+        std::uint64_t GPULevelGen() const noexcept { return m_GPULevelGen; }     // an instance changed level (the arrays have room for both: PackGPUSurfels)
 
         // G4c: a range of a surfel pass (GPURanges): the GPU's expand serves its surfels (shaders/xlionrender_gi_expand_comp.glsl). Flags:
         // gpu_range_urgent_v (a change's surfel: no tier), gpu_range_settled_v (its instance is settled: the tiers apply). m_Start: its
@@ -3383,7 +3386,7 @@ namespace xlionrender::gi
                     for (std::size_t s = 0; s < M.m_ParentOf.size(); ++s) { E[M.m_ParentOf[s]] = E[M.m_ParentOf[s]] + I.m_E[s]; Valid[M.m_ParentOf[s]] += I.m_Valid[s]; ++Cnt[M.m_ParentOf[s]]; }
                     for (std::size_t p = 0; p < E.size(); ++p) if (Cnt[p]) { E[p] = E[p] * (1.0f / float(Cnt[p])); Valid[p] /= float(Cnt[p]); }
                 }
-                I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0; ++m_GPUGen;
+                I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0; ++m_GPULevelGen;     // (the GPU re-levels in place: gpu_trace::Relevel)
                 I.m_bEmitRelevel = true;
                 I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
                 ResetMoments(I);
@@ -4544,6 +4547,7 @@ namespace xlionrender::gi
         double                                  m_MovesMsAcc = 0;
         std::vector<work_item>                  m_Pending;              // Phase 1: the surfels picked and not finished
         std::uint64_t                           m_GPUGen = 1;           // G3: the structure's version (what PackGPU and PackGPUSurfels write)
+        std::uint64_t                           m_GPULevelGen = 1;      // the instances' levels' version (gpu_trace::Relevel: no repack)
         std::uint64_t                           m_GPUXformGen = 0;      // G4c: the placements' version (PackGPUTlas, the records' rows)
         std::vector<gpu_item>                   m_GPUOut;               // G3: GPUWork's list
         std::vector<gpu_range>                  m_GPURangesOut;         // G4c: GPURanges' list

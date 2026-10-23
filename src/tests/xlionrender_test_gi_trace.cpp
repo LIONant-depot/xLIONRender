@@ -111,7 +111,7 @@ namespace
         for (std::size_t i = 0; i < std::size(Pieces); ++i) W.Add(M[i], xmath::fmat4::fromTranslation(Pieces[i].m_Pos), Pieces[i].m_Color);
     }
 
-    struct result { int m_Surfels = 0, m_Mismatch = 0; double m_Worst = 0, m_UpdateMs = 0, m_TraceMs = 0; int m_Packs = 0; double m_ShownWorst = -1, m_MomentWorst = -1, m_InitMs = 0; };
+    struct result { int m_Surfels = 0, m_Mismatch = 0; double m_Worst = 0, m_UpdateMs = 0, m_TraceMs = 0; int m_Packs = 0, m_Relevels = 0; double m_ShownWorst = -1, m_MomentWorst = -1, m_InitMs = 0; };
 
     // Updates of the CPU world against the GPU world's (it commits a batch one update later: one update more). bEvents: on both at the
     // same updates, a wall recolored (its material: the scene packed again), the box moved (estimator ops: Lower, the changes near it),
@@ -159,7 +159,7 @@ namespace
             App.m_Window.PageFlip();
             if (u > 0) R.m_TraceMs = std::max(R.m_TraceMs, T.LastMs());
         }
-        R.m_Packs = T.Packs();
+        R.m_Packs = T.Packs(); R.m_Relevels = T.Relevels();
         Sync(App, T, Wg);
         // per surfel: its light within 1e-3 of the instance's brightest (the sums' float order differs; the passes compound it)
         for (int i = 0; i < Wc.InstanceCount(); ++i)
@@ -251,9 +251,9 @@ int main()
         result R;
         if (Compare(App, L, false, 24, R, true)) return 1;
         std::printf("GPU trace with events (a wall recolored, another's triangles captured, one recolored while a slice is in flight, the box dragged, the coarse level), 24 updates: %d surfels, %d differ from the CPU world, the worst of the others %.1e; packed %d times\n",
-                    R.m_Surfels, R.m_Mismatch, R.m_Worst, R.m_Packs);
+                    R.m_Surfels, R.m_Mismatch, R.m_Worst, R.m_Packs, R.m_Relevels);
         CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "with events: %d of %d surfels differ from the CPU world", R.m_Mismatch, R.m_Surfels);
-        CHECK(R.m_Packs == 2, "with events the scene was packed %d times (the first, the coarse level; the material and the drag in place)", R.m_Packs);
+        CHECK(R.m_Packs == 1 && R.m_Relevels >= 1, "with events the scene was packed %d times and re-leveled %d (the first pack; the coarse level, the material and the drag in place)", R.m_Packs, R.m_Relevels);
     }
     // The shown light's RGB9E5 (gi::PackRGB9E5, the filter shader's the same steps): a channel within 2^-9 of the color's largest, over
     // 1e-4..1e4; 0, negative and NaN 0; past the range its top

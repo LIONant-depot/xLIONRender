@@ -92,6 +92,7 @@ namespace xlionrender::gi
             m_OldDataB = {};                                            // (the last pack's old layout: its frame is done)
             if (W.GPUGen() != m_Gen || L.m_Points.size() != m_nPoints || m_Data.empty() || W.EmitterCount() > m_EmRoom) { if (!Pack(Window, W, L)) return false; }     // (the emitter table past its room too)
             else if (W.GPUXformGen() != m_XformGen && !Retlas(Window, W) && !Pack(Window, W, L)) return false;     // (moved: the TLAS; its reserve full: all)
+            if (W.GPULevelGen() != m_LevelGen && !Relevel(Window, W) && !Pack(Window, W, L)) return false;       // (a level switch: in place; no room: all)
             if (!ApplyOps(Window, W) || !Refresh(Window, W, L)) return false;
             bool bSlice = false;
             if (m_NextRange >= m_Ranges.size())
@@ -237,6 +238,7 @@ namespace xlionrender::gi
         double          LastMs      ( void ) const noexcept { return m_LastMs; }        // the last slice's GPU time
         double          RaysPerMs   ( void ) const noexcept { return m_RaysPerMs; }
         int             Packs       ( void ) const noexcept { return m_nPacks; }       // the scene packed in full (a structural change)
+        int             Relevels    ( void ) const noexcept { return m_nRelevels; }    // level switches done in place (Relevel)
         int             Retlases    ( void ) const noexcept { return m_nRetlas; }      // the TLAS made again (a move)
         int             Batches     ( void ) const noexcept { return m_nBatches; }
         int             Slices      ( void ) const noexcept { return m_nSlices; }
@@ -281,9 +283,17 @@ namespace xlionrender::gi
         // world's, as it was made)
         bool Pack(xgpu::window& Window, world& W, const lights& L) noexcept
         {
+            // measurement only (GI review): the stages of a pack, printed when the whole takes more than 10 ms
+            const auto PT0 = std::chrono::steady_clock::now();
+            double PMs[4] = {};
+            auto PLap = [&, T = PT0](int k) mutable { const auto N = std::chrono::steady_clock::now(); PMs[k] += std::chrono::duration<double, std::milli>(N - T).count(); T = N; };
+            struct pack_report { double* p; std::chrono::steady_clock::time_point t0; ~pack_report() { const double All = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                if (All > 10) std::printf("GIPACK %.1f ms: BVHs %.1f, surfel data %.1f, uploads %.1f, light migration %.1f\n", All, p[0], p[1], p[2], p[3]), std::fflush(stdout); } } PackReport{ PMs, PT0 };
             std::vector<std::uint32_t> Old = std::move(m_Data);
             W.PackGPU(m_Scene);
+            PLap(0);
             W.PackGPUSurfels(m_Data, L);
+            PLap(1);
             std::vector<std::uint32_t> Owners;
             for (int i = 0; i < W.InstanceCount(); ++i)
             {
@@ -293,7 +303,9 @@ namespace xlionrender::gi
                 Owners.insert(Owners.end(), W.InstanceLight(i).size(), std::uint32_t(i));
             }
             m_nShown = Owners.size();
-            m_Gen = W.GPUGen(); m_nPoints = L.m_Points.size();
+            m_ShownRoom = 0;                                            // (the shown light's scratch: room for every instance at its finer level, Relevel)
+            for (int i = 0; i < W.InstanceCount(); ++i) if (m_Data[m_Data[0] + std::uint32_t(i) * world::gpu_inst_v + 40] != 0) { const std::uint32_t M = m_Data[m_Data[0] + std::uint32_t(i) * world::gpu_inst_v]; m_ShownRoom += std::max(m_Data[M + 6], m_Data[M + 8]); }
+            m_Gen = W.GPUGen(); m_LevelGen = W.GPULevelGen(); m_nPoints = L.m_Points.size();
             m_EmitGen.assign(std::size_t(W.InstanceCount()), 0); m_MatGen.assign(std::size_t(W.InstanceCount()), 0);
             for (int i = 0; i < W.InstanceCount(); ++i) { m_EmitGen[std::size_t(i)] = W.EmitGen(i); m_MatGen[std::size_t(i)] = W.MatGen(i); }
             ++m_nPacks;
@@ -307,7 +319,8 @@ namespace xlionrender::gi
                 if (!Local(m_Nodes, Nodes)) return false;
             }
             if (!Local(m_Tri4, m_Scene.m_Tri4) || !Local(m_Inst, m_Scene.m_Instances) || !Local(m_Tlas, m_Scene.m_TlasLeaves) || !Local(m_DataB, m_Data)
-                || !Local(m_OwnerB, Owners) || !Local(m_ScratchB, std::vector<float>(std::max<std::size_t>(18 * m_nShown, 1), 0.0f))) return false;
+                || !Local(m_OwnerB, Owners) || !Local(m_ScratchB, std::vector<float>(std::max<std::size_t>(18 * std::max(m_nShown, m_ShownRoom), 1), 0.0f))) return false;
+            PLap(2);
             if (Old.empty() || !m_OldDataB.m_Private) return true;
             // the light from the old layout
             std::vector<std::array<int, 4>> Jobs;
@@ -327,6 +340,66 @@ namespace xlionrender::gi
             xgpu::buffer* B[] = { &m_OldDataB, &m_DataB, &m_JobB };
             const int Pad[4] = {};
             Window.Dispatch(m_Migrate, B, Pad, sizeof(Pad), int(Jobs.size()));
+            PLap(3);
+            return true;
+        }
+
+        // An instance changed level (world::GPULevelGen) and nothing else did: no repack. The arrays have room for both levels (PackGPUSurfels),
+        // so the record keeps its offsets. The switched instances' records and light (E, validity) are saved first by the migrate shader's copy
+        // jobs into a scratch at the same offsets (a device-local buffer cannot be a copy's source), the new level and the shown order's words
+        // are scattered, then the migrate shader's kind 1 re-levels each one in place from the scratch (a child its parent's light, a parent its
+        // children's mean, the rest seeded: world::Update's switch on the CPU). false: not possible here (a full Pack)
+        bool Relevel(xgpu::window& Window, world& W) noexcept
+        {
+            m_LevelGen = W.GPULevelGen();
+            if (m_Data.empty() || !m_DataB.m_Private) return false;
+            std::vector<std::array<int, 4>> Save, Move;
+            std::vector<std::uint32_t> Pairs, Owners;
+            for (int i = 0; i < W.InstanceCount() && std::uint32_t(i) < m_Data[1]; ++i)
+            {
+                const std::uint32_t R = m_Data[0] + std::uint32_t(i) * world::gpu_inst_v;
+                if (m_Data[R + 40] == 0) continue;
+                const std::uint32_t Lv = std::uint32_t(W.Level(i)), Old = m_Data[R + 1], M = m_Data[R];
+                if (Lv != Old)
+                {
+                    const std::uint32_t nOld = m_Data[M + 6 + 2 * Old];
+                    Save.push_back({ 0, int(R), int(R), int(world::gpu_inst_v) });
+                    Save.push_back({ 0, int(m_Data[R + 2]), int(m_Data[R + 2]), int(3 * nOld) });
+                    Save.push_back({ 0, int(m_Data[R + 3]), int(m_Data[R + 3]), int(nOld) });
+                    Move.push_back({ 1, int(R), int(R), 0 });
+                    m_Data[R + 1] = Lv; Pairs.push_back(R + 1); Pairs.push_back(Lv);
+                }
+                const std::uint32_t First = std::uint32_t(Owners.size());
+                if (m_Data[R + 46] != First) { m_Data[R + 46] = First; Pairs.push_back(R + 46); Pairs.push_back(First); }
+                Owners.insert(Owners.end(), W.InstanceLight(i).size(), std::uint32_t(i));
+            }
+            if (Owners.size() > std::max(m_nShown, m_ShownRoom)) return false;      // (more than the scratch has room for)
+            m_nShown = Owners.size();
+            if (!Local(m_OwnerB, Owners)) return false;
+            if (Move.empty() && Pairs.empty()) return true;
+            const int Pad[4] = {};
+            if (!Move.empty())
+            {
+                if (!FitLocal(m_RelevelB, int(sizeof(std::uint32_t)), m_Data.size())) return false;
+                if (!Fit(m_RelSaveB, int(sizeof(Save[0])), Save.size()) || m_RelSaveB.MemoryMap(0, int(Save.size()), [&](void* p) { std::memcpy(p, Save.data(), Save.size() * sizeof(Save[0])); })) return false;
+                xgpu::buffer* B[] = { &m_DataB, &m_RelevelB, &m_RelSaveB };
+                Window.Dispatch(m_Migrate, B, Pad, sizeof(Pad), int(Save.size()));
+            }
+            if (!Pairs.empty())
+            {
+                const int nPairs = int(Pairs.size() / 2);
+                if (!Fit(m_RelStageB, int(2 * sizeof(std::uint32_t)), std::size_t(nPairs)) || m_RelStageB.MemoryMap(0, nPairs, [&](void* p) { std::memcpy(p, Pairs.data(), Pairs.size() * sizeof(std::uint32_t)); })) return false;
+                const struct { int m_nPairs, m_Pad0, m_Pad1, m_Pad2; } Push{ nPairs, 0, 0, 0 };
+                xgpu::buffer* Bufs[] = { &m_DataB, &m_RelStageB };
+                Window.Dispatch(m_Scatter, Bufs, &Push, sizeof(Push), (nPairs + 63) / 64);
+            }
+            if (!Move.empty())
+            {
+                if (!Fit(m_RelMoveB, int(sizeof(Move[0])), Move.size()) || m_RelMoveB.MemoryMap(0, int(Move.size()), [&](void* p) { std::memcpy(p, Move.data(), Move.size() * sizeof(Move[0])); })) return false;
+                xgpu::buffer* B[] = { &m_RelevelB, &m_DataB, &m_RelMoveB };
+                Window.Dispatch(m_Migrate, B, Pad, sizeof(Pad), int(Move.size()));
+            }
+            ++m_nRelevels;
             return true;
         }
 
@@ -511,6 +584,10 @@ namespace xlionrender::gi
         bool                                m_bMeasured = false, m_bMeansIn = false;
         long long                           m_Diag[7] = {};     // (measurement only, setup::m_bAblateStats: hits, read entries, probes, accepted, BVH nodes, rays, unsupported)
         int                                 m_nDiag = 0;
+        std::uint64_t                       m_LevelGen = 0;     // world::GPULevelGen at the last Pack or Relevel
+        std::size_t                         m_ShownRoom = 0;    // the shown light's room: every instance at its finer level (Relevel)
+        xgpu::buffer                        m_RelevelB, m_RelSaveB, m_RelMoveB, m_RelStageB;     // Relevel: the saved light (device), its jobs, its words
+        int                                 m_nRelevels = 0;
     };
 }
 
