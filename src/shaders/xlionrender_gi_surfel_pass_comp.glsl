@@ -46,6 +46,7 @@ bool GISeeThroughBits(int Inst, int Tri)
 bool GISeeThrough(int Inst, int Tri) { return GISeeThroughBits(Inst, Tri); }
 #include "xlionrender_gi_bvh.glsl"
 int g_Shadows = 0, g_ReadEntries = 0, g_Probes = 0;      // (diagnostics, with g_GIBvhVisits: gi::world::gpu_result::m_Work)
+int g_Accepted = 0;                                      // (diagnostics: the read entries that contributed, in the result's word 67)
 
 // ---- an instance's placement
 vec3 ToWorld(uint R, vec3 P)  { return vec3(dot(GV(R + 16u), P) + GF(R + 19u), dot(GV(R + 20u), P) + GF(R + 23u), dot(GV(R + 24u), P) + GF(R + 27u)); }
@@ -291,6 +292,7 @@ bool ReadPoint(int Id, vec3 P, vec3 N, out vec3 E)
         RS += El * w0; RW += w0;
         const float w = w0 * Visibility(R, M, Level, sl, P);
         if (w <= 0.0) continue;
+        ++g_Accepted;
         S += El * w; W += w;
     }
     if (W <= 1e-6) { S = RS; W = RW; }
@@ -462,12 +464,13 @@ void main()
             if (dot(Nh, D) > 0.0) { nBack += H.m_T < Reach * MeanScale ? 1 : 0; ++nBackAll; continue; }
             vec3 Albedo, Emission;
             SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
-            vec3 Q;
-            const bool bQ = Indirect(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Q);
+            vec3 Q = vec3(0.5);
+            const bool bAblate = (GD[11] & 4u) != 0u;              // measurement only (setup::m_bAblateHitRead): the hit's cache read is a constant
+            const bool bQ = bAblate || Indirect(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Q);
             const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
             if (!bQ) { if (nUns == 0) { UnsAt = Ph; FirstUns = r; } ++nUns; }
             ++nHits;
-            const vec3 In = Direct(Ph, Nh) + (bQ ? Q : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));
+            const vec3 In = Direct(Ph, Nh) + (bQ ? Q : (GD[11] & 32u) != 0u ? GV(HR + 5u) : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));     // (bit 32, measurement only: the fallback's walk replaced by the instance's mean)
             const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + (GD[13] == 0u && (GD[R + 47u] & 32u) == 0u ? Emission : vec3(0));     // (no light sampling, no links: the hits bring the emitters' light)
             Sum += Lr; BA0 += Lr * Bw.x; BA1 += Lr * Bw.y; BA2 += Lr * Bw.z;
         }
@@ -523,6 +526,7 @@ void main()
     const int First = subgroupClusteredMin(FirstUns, gi_lanes_v);
     UnsAt = subgroupClusteredAdd(FirstUns == First && First != 0x7FFFFFFF ? UnsAt : vec3(0), gi_lanes_v);
     const ivec4 Work = subgroupClusteredAdd(ivec4(g_GIBvhVisits, g_Shadows, g_ReadEntries, g_Probes), gi_lanes_v);
+    const int   nAccepted = subgroupClusteredAdd(g_Accepted, gi_lanes_v);
     if (!bItem || Lane != 0) return;
     GIResults[k].m_V[0] = Sum.x; GIResults[k].m_V[1] = Sum.y; GIResults[k].m_V[2] = Sum.z;
     GIResults[k].m_V[3] = BA0.x; GIResults[k].m_V[4] = BA0.y; GIResults[k].m_V[5] = BA0.z;
@@ -530,6 +534,6 @@ void main()
     GIResults[k].m_V[9] = BA2.x; GIResults[k].m_V[10] = BA2.y; GIResults[k].m_V[11] = BA2.z;
     for (int t = 0; t < 48; ++t) GIResults[k].m_V[12 + t] = MA[t];
     GIResults[k].m_V[60] = intBitsToFloat(nBack); GIResults[k].m_V[61] = intBitsToFloat(nBackAll); GIResults[k].m_V[62] = intBitsToFloat(nUns); GIResults[k].m_V[63] = intBitsToFloat(nHits);
-    GIResults[k].m_V[64] = UnsAt.x; GIResults[k].m_V[65] = UnsAt.y; GIResults[k].m_V[66] = UnsAt.z; GIResults[k].m_V[67] = 0.0;
+    GIResults[k].m_V[64] = UnsAt.x; GIResults[k].m_V[65] = UnsAt.y; GIResults[k].m_V[66] = UnsAt.z; GIResults[k].m_V[67] = intBitsToFloat(nAccepted);
     for (int w = 0; w < 4; ++w) GIResults[k].m_V[68 + w] = intBitsToFloat(Work[w]);
 }

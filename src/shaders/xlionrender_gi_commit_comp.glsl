@@ -39,6 +39,18 @@ void main()
     if (GD[Rec + 40u] == 0u || GD[Rec + 1u] != uint(Level)) return;     // gone, or another level since the pick: the world drops it
     float V[72];
     for (int i = 0; i < 72; ++i) V[i] = GIResults[k].m_V[i];
+    if ((GD[11] & 8u) != 0u)        // measurement only (setup::m_bAblateFreeze): the range's stats, the light left as it is
+    {
+        const int Rg0 = floatBitsToInt(GIItems[k].m_Offsets.w);
+        atomicAdd(GIStats[8 * Rg0], R); atomicAdd(GIStats[8 * Rg0 + 1], 1);
+        atomicAdd(GIStats[8 * Rg0 + 2], floatBitsToInt(V[62])); atomicAdd(GIStats[8 * Rg0 + 3], floatBitsToInt(V[63]));
+        if ((GD[11] & 16u) != 0u)   // (setup::m_bAblateStats, a diagnostic run: the pass's work counters in the range's words 4..7)
+        {
+            atomicAdd(GIStats[8 * Rg0 + 4], floatBitsToInt(V[70])); atomicAdd(GIStats[8 * Rg0 + 5], floatBitsToInt(V[71]));
+            atomicAdd(GIStats[8 * Rg0 + 6], floatBitsToInt(V[67])); atomicAdd(GIStats[8 * Rg0 + 7], floatBitsToInt(V[68]));
+        }
+        return;
+    }
 
     // FinishPass: the emitters it sees (the links), E = pi mean(L), the validity from the back faces
     vec3 Sum = vec3(V[0], V[1], V[2]);

@@ -61,6 +61,20 @@ namespace xlionrender::gi
             if (m_SliceCount == 0) return false;
             m_StatsOut.resize(m_SliceCount);
             if (m_StatsB.MemoryMap(int(m_SliceFirst), int(m_SliceCount), [&](void* p) { std::memcpy(m_StatsOut.data(), p, m_StatsOut.size() * sizeof(world::gpu_range_stats)); })) return false;
+            if (W.m_Setup.m_bAblateStats)      // measurement only (GI review, experiment A): the work counters per hit, printed about every 2 s
+            {
+                for (auto& S : m_StatsOut)
+                {
+                    m_Diag[0] += S.m_nHits; m_Diag[1] += std::bit_cast<int>(S.m_UnsupportedAt[0]); m_Diag[2] += std::bit_cast<int>(S.m_UnsupportedAt[1]);
+                    m_Diag[3] += std::bit_cast<int>(S.m_UnsupportedAt[2]); m_Diag[4] += S.m_bAt; m_Diag[5] += S.m_Rays; m_Diag[6] += S.m_nUnsupported;
+                    S.m_UnsupportedAt[0] = S.m_UnsupportedAt[1] = S.m_UnsupportedAt[2] = 0; S.m_bAt = 0;
+                }
+                if (++m_nDiag % 120 == 0 && m_Diag[0] > 0)
+                    std::printf("GIABLATE rays %lld hits %lld per hit: read entries %.1f, accepted %.1f, hash probes %.2f; BVH nodes per ray %.1f; unsupported hits %.3f; entries per unsupported hit %.0f\n",
+                        m_Diag[5], m_Diag[0], double(m_Diag[1]) / double(m_Diag[0]), double(m_Diag[3]) / double(m_Diag[0]), double(m_Diag[2]) / double(m_Diag[0]),
+                        double(m_Diag[4]) / double(std::max<long long>(m_Diag[5], 1)), double(m_Diag[6]) / double(m_Diag[0]),
+                        double(m_Diag[1]) / double(std::max<long long>(m_Diag[6], 1))), std::fflush(stdout);
+            }
             W.DeliverGPURanges(std::span<const world::gpu_range>(m_Ranges).subspan(m_SliceFirst, m_SliceCount), m_StatsOut);
             m_LastRays = 0; m_LastTraced = 0;
             for (const auto& S : m_StatsOut) { m_LastRays += S.m_Rays; m_LastTraced += S.m_Traced; }
@@ -495,6 +509,8 @@ namespace xlionrender::gi
         double                              m_LastMs = 0, m_RaysPerMs = 0;
         int                                 m_Budget = 32768;   // (until measured)
         bool                                m_bMeasured = false, m_bMeansIn = false;
+        long long                           m_Diag[7] = {};     // (measurement only, setup::m_bAblateStats: hits, read entries, probes, accepted, BVH nodes, rays, unsupported)
+        int                                 m_nDiag = 0;
     };
 }
 

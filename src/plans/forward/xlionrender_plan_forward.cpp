@@ -283,6 +283,23 @@ namespace xlionrender
         }
         m_GICapturesQuiet = m_GICaptures.empty() ? m_GICapturesQuiet + 1 : 0;
         if( s_bHold && m_GICapturesQuiet < 10 ) return;
+        // Measurement only (GI review, experiment A: the ablations). XLION_GI_ABLATE holds any of: "freeze" (after XLION_GI_FREEZE_S seconds,
+        // default 15, of this renderer's GI the slices are traced, their stats kept, the light not committed: the cache stays as it settled), "hits" (frozen, and the
+        // pass's hits read a constant instead of the cache), "pixel_vertex" (the pixels read their vertices' surfels only: no per-pixel walk),
+        // "pixel_nomoments" (the per-pixel read without its moment test), "pixel_none" (no GI read in shading at all; the solver still runs)
+        static const std::string s_Ablate = [] { const char* p = std::getenv("XLION_GI_ABLATE"); return std::string(p ? p : ""); }();
+        static const double      s_FreezeS = [] { const char* p = std::getenv("XLION_GI_FREEZE_S"); return p ? std::atof(p) : 15.0; }();
+        if( !s_Ablate.empty() )
+        {
+            static std::unordered_map<const void*, std::chrono::steady_clock::time_point> s_Start;     // ponytail: per renderer, never erased (a measurement hook)
+            const auto It = s_Start.try_emplace(this, std::chrono::steady_clock::now()).first;
+            const bool bHits   = s_Ablate.find("hits") != std::string::npos;
+            const bool bFrozen = (bHits || s_Ablate.find("freeze") != std::string::npos) && MsSince(It->second) > s_FreezeS * 1000.0;
+            W.m_Setup.m_bAblateHitRead = bFrozen && bHits;
+            W.m_Setup.m_bAblateFreeze  = bFrozen;
+            W.m_Setup.m_bAblateStats   = bFrozen && s_Ablate.find("stats") != std::string::npos;     // ("freeze,stats": the diagnostic run, never timed)
+            W.m_Setup.m_bAblateFallback = bFrozen && s_Ablate.find("fallback") != std::string::npos; // ("freeze,fallback": only the unsupported hits' walk stubbed)
+        }
         m_GIStats = W.Update(L, Eye, bGPU && Scene.m_GI.m_GPUBudgetMs > 0 ? m_pGITrace->BatchRays() : Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));     // (no GPU budget: the scene's rays, a slice each)
         if( bGPU )
         {
@@ -398,6 +415,12 @@ namespace xlionrender
                 else { for( const int k : T.m_Pending[Slot] ) if( std::size_t(k) < E.size() ) Write(std::size_t(k)); Entries += T.m_Pending[Slot].size(); }
                 T.m_Pending[Slot].clear();
                 m_DrawGI[i] = { std::uint32_t(Base + T.m_Offset + 1), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
+                {   // measurement only (XLION_GI_ABLATE, updateGI above): the pixel read's variants
+                    static const std::string s_Px = [] { const char* p = std::getenv("XLION_GI_ABLATE"); return std::string(p ? p : ""); }();
+                    if( s_Px.find("pixel_vertex") != std::string::npos )    m_DrawGI[i].second &= ~0x100u;
+                    if( s_Px.find("pixel_nomoments") != std::string::npos ) m_DrawGI[i].second |= 0x4000u;
+                    if( s_Px.find("pixel_none") != std::string::npos )      m_DrawGI[i] = { 0u, 0xFFFFFFFFu };
+                }
             }
         });
         m_GIStats.m_RingCopyMs = MsSince(TRing);
@@ -1537,9 +1560,17 @@ namespace xlionrender
         }
 
         if( Frame < J.m_Frame + ring_frames_v + 1 ) return;         // the GPU is done with it after the frames in flight
+        // measurement only (GI review): the read back's steps, printed when the whole takes more than half a second
+        const auto TCap = std::chrono::steady_clock::now();
+        double CapMs[6] = {};
+        auto CapLap = [&, T = TCap](int k) mutable { const auto N = std::chrono::steady_clock::now(); CapMs[k] += std::chrono::duration<double, std::milli>(N - T).count(); T = N; };
+        struct cap_report { double* p; std::chrono::steady_clock::time_point t0; ~cap_report() { const double All = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if( All > 500 ) std::printf("GICAPTURE %.0f ms: read back %.0f, unpack %.0f, surfel/triangle albedo %.0f, emission %.0f, all albedo %.0f, buildMeshGI %.0f\n", All, p[0], p[1], p[2], p[3], p[4], p[5]), std::fflush(stdout); } } CapReport{ CapMs, TCap };
         std::vector<std::byte> Raw;
         int W = 0, H = 0;
-        if( m_Device.ReadTexture(m_GICaptureTex, Raw, W, H) == nullptr && W == gi_capture_w_v && H == gi_capture_h_v )
+        const bool bRead = m_Device.ReadTexture(m_GICaptureTex, Raw, W, H) == nullptr;
+        CapLap(0);
+        if( bRead && W == gi_capture_w_v && H == gi_capture_h_v )
         {
             const auto Half = details::HalfToFloat;
             const auto* P = reinterpret_cast<const std::uint16_t*>(Raw.data());
@@ -1552,20 +1583,25 @@ namespace xlionrender
                 Albedo[J.m_Order[i]]   = Block(y0);
                 Emission[J.m_Order[i]] = Block(y0 + H / 2);                           // as captured (the world scales it: scene::gi_settings::m_EmissiveScale)
             }
+            CapLap(1);
             // Captured from materials the instance no longer has (they were made again while this was in flight): not published - its new capture is queued
             const bool bCurrent = std::size_t(J.m_GIId) < m_GITrack.size() && m_GITrack[J.m_GIId].m_Materials == J.m_Materials;
-            if( bCurrent && !J.m_bTriangles ) m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission));
+            if( bCurrent && !J.m_bTriangles ) { m_pGIWorld->SetSurfelMaterial(J.m_GIId, std::move(Albedo), std::move(Emission)); CapLap(2); }
             else if( bCurrent )
             {
                 m_pGIWorld->SetTriangleAlbedo(J.m_GIId, J.m_First, Albedo);
+                CapLap(2);
                 m_pGIWorld->SetTriangleEmission(J.m_GIId, J.m_First, Emission);
+                CapLap(3);
                 if( J.m_First + std::size_t(n) >= G.m_Tris.size() )         // its last batch: the SURFACE_COLOR view's table (the mesh's first instance)
                 {
                     const auto& All = m_pGIWorld->TriangleAlbedo(J.m_GIId);
+                    CapLap(4);
                     if( auto* pSlot = const_cast<mesh_slot*>(pM); pSlot->m_GIBuffer.m_Private && pSlot->m_bTriColors == false )
                     {
                         std::vector<xmath::fvec3> C(All.begin(), All.end());
                         (void)buildMeshGI(*pSlot, C);
+                        CapLap(5);
                         pSlot->m_bTriColors = true;
                     }
                 }
@@ -1668,6 +1704,8 @@ namespace xlionrender
     void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& CameraIn, const overlay_fn& Overlay ) noexcept
     {
         assert(m_bReady && View.m_Width > 0);
+        static const bool s_bNoBudget = std::getenv("XLION_NO_FRAME_BUDGET") != nullptr;    // measurement only (GI review): every cluster drawn, whatever the host's budget
+        if( s_bNoBudget ) m_FrameBudgetMs = 0;
 
         // The render target's viewport is for this render: on a copy. The host's own view keeps the viewport it has (the editor's panel, in screen
         // coordinates): its click-pick of the same frame builds its ray from it (it used to get the target's: every click missed)

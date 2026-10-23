@@ -1670,7 +1670,11 @@ namespace xlionrender::gi
             float   m_RayUncertainty = 3.0f;    // RequestedRays: the rays = m_RaysPerSurfel x relative deviation x this (a quarter to all of them)
             float   m_LinkShare     = 0.3f;     // Phase 2: the part of the allowance the emitter links may use while the trace has work too     // the share of an update's surfels kept for the instance waiting longest (fairness: whatever its score)
             bool    m_bDistanceTiers = true;    // a surfel far from the eye (in its radii) is traced every 2nd, 4th, 8th pass (Update)
-            float   m_Saturation    = 1;        // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
+            bool    m_bAblateHitRead = false;   // measurement only (GI review, experiment A): the GPU pass's hits read a constant instead of the cache (header word 11 bit 4)
+            bool    m_bAblateFreeze  = false;   // measurement only: the GPU commit keeps its ranges' stats but leaves the light as it is (header word 11 bit 8)
+            bool    m_bAblateStats   = false;   // measurement only, with the freeze: the pass's work counters summed per range (bit 16; gpu_trace::Collect prints them)
+            bool    m_bAblateFallback = false;  // measurement only: an unsupported hit takes its instance's mean instead of walking its cell (bit 32)
+            float   m_Saturation    = 1;       // the shown light's saturation (BasisLight, after the filter; luminance kept): the filter and the coarse surfels average colors toward grey
             float   m_EmissiveScale = 1;        // the surfels' emission (SetSurfelMaterial) times this: self-illumination as the lights it is
             int     m_FilterPasses  = 4;
             float   m_ShowShare     = 0.2f;     // Phase 6b: the part of the allowance kept for the shown light while it has a backlog
@@ -2680,7 +2684,7 @@ namespace xlionrender::gi
             D[7]  = m_Emitters.empty() ? 1u : 0u;
             D[8]  = std::bit_cast<std::uint32_t>(m_Setup.m_MinBlend);
             D[10] = std::uint32_t(std::max(m_Setup.m_RaysPerSurfel, 1));
-            D[11] = (m_Setup.m_bAdaptiveRays ? 1u : 0u) | (m_Setup.m_bDistanceTiers ? 2u : 0u);
+            D[11] = (m_Setup.m_bAdaptiveRays ? 1u : 0u) | (m_Setup.m_bDistanceTiers ? 2u : 0u) | (m_Setup.m_bAblateHitRead ? 4u : 0u) | (m_Setup.m_bAblateFreeze ? 8u : 0u) | (m_Setup.m_bAblateStats ? 16u : 0u) | (m_Setup.m_bAblateFallback ? 32u : 0u);
             D[12] = std::bit_cast<std::uint32_t>(m_Setup.m_RayUncertainty);
             D[13] = m_Setup.m_bEmitterSampling ? 1u : 0u;
         }
