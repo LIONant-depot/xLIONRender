@@ -900,6 +900,65 @@ int main()
         }
     }
 
+    // 6j2b. The emission resolve's bound (GI review, experiment A): it splits each emissive triangle's power over the surfels its vertices
+    //       name (or, for a triangle larger than they can represent, over samples with a capped search), batch by batch. Three adversarial
+    //       cases: (a) many small triangles over few large surfels (the Golem: it used to search every surfel for every triangle), (b) the
+    //       same panel at a coarser tessellation: the power and its spread must not change, (c) two triangles over many small surfels (a
+    //       big panel: its power must reach the surfels over it, not only its corners'). Each: power conserved, work bounded per triangle
+    {
+        struct res { double Power, Want, Unassigned; std::size_t Work, nTris; std::vector<v3> E; std::vector<float> R; std::array<double, 9> Irr{}; };
+        const auto Run = [](float Split, float Rad, int nBatches) -> res
+        {
+            surfel_mesh M;
+            AddQuad(M, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, Split);          // a 4 x 4 m emissive floor panel, facing up
+            M.Bake(Rad, 3 * Rad);
+            world W;
+            const int i = W.Add(M, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+            W.SetSurfelMaterial(i, {}, std::vector<v3>(M.m_Levels[0].size(), v3{ 0, 0, 0 }));
+            const std::size_t n = M.m_Tris.size(), Per = (n + nBatches - 1) / nBatches;
+            for (std::size_t f = 0; f < n; f += Per) W.SetTriangleEmission(i, f, std::vector<v3>(std::min(Per, n - f), v3{ 2, 2, 2 }));     // in batches, as the capture
+            res R{ 0, 2.0 * 16.0, W.EmissionUnassigned(i).m_X, W.EmissionResolveWork(i), n, W.SurfaceEmission(i), {} };
+            for (const auto& S : M.m_Levels[0]) R.R.push_back(S.m_Radius);
+            for (std::size_t s = 0; s < R.E.size(); ++s)
+            {
+                const double p = R.E[s].m_X * 1.47f * R.R[s] * R.R[s];
+                R.Power += p;
+                const auto& c = M.m_Levels[0][s].m_Center;
+                for (int q = 0; q < 9; ++q)     // what it delivers to 9 points 1 m above the panel (each surfel a Lambertian emitter of its power)
+                {
+                    const v3 X{ float(q % 3 - 1), 1.0f, float(q / 3 - 1) }, D = X - c;
+                    const double d2 = D.Dot(D), ct = D.m_Y / std::sqrt(d2);
+                    R.Irr[std::size_t(q)] += p * ct * ct / (3.14159265 * d2);
+                }
+            }
+            return R;
+        };
+        const res A = Run(0.02f, 0.5f, 7), B = Run(0.25f, 0.5f, 1), C = Run(4.0f, 0.15f, 1);
+        for (const auto* p : { &A, &B, &C })
+            std::printf("emission resolve: %zu triangles, %zu surfels: power %.3f (the panel's %.3f, unassigned %.3f), %.1f candidates a triangle\n",
+                        p->nTris, p->E.size(), p->Power + p->Unassigned, p->Want, p->Unassigned, double(p->Work) / double(p->nTris));
+        for (const auto* p : { &A, &B, &C })
+        {
+            CHECK(std::abs(p->Power + p->Unassigned - p->Want) < 1e-3 * p->Want, "the emitted power is not conserved: %.4f vs %.4f", p->Power + p->Unassigned, p->Want);
+            CHECK(p->Unassigned < 0.02 * p->Want, "%.1f%% of the power has no surfel", 100 * p->Unassigned / p->Want);
+        }
+        CHECK(double(A.Work) <= 12.0 * double(A.nTris), "the resolve searched more than the triangles' vertices' surfels: %.1f a triangle", double(A.Work) / double(A.nTris));
+        {   // (b): the same panel at 2 cm and at 25 cm triangles (and as 2 triangles over fine surfels, (c), the reference): the irradiance
+            //      their surfels deliver 1 m above it. The surfels differ between bakes; the light they give must not
+            const auto Rel = [](const res& X, const res& Y) { double d = 0, m = 0; for (int q = 0; q < 9; ++q) { d += std::pow(X.Irr[q] - Y.Irr[q], 2.0); m += std::pow(Y.Irr[q], 2.0); } return std::sqrt(d / std::max(m, 1e-12)); };
+            std::printf("emission resolve: the irradiance 1 m above, 2 cm vs 25 cm triangles %.1f%%, 2 cm vs the fine reference %.1f%%, 25 cm vs it %.1f%% (rms)\n", 100 * Rel(A, B), 100 * Rel(A, C), 100 * Rel(B, C));
+            CHECK(Rel(A, B) < 0.1, "the tessellation changes the light the panel gives by %.0f%%", 100 * Rel(A, B));
+            CHECK(Rel(A, C) < 0.2 && Rel(B, C) < 0.2, "the large surfels' light is off the fine reference: %.0f%%, %.0f%%", 100 * Rel(A, C), 100 * Rel(B, C));
+        }
+        {   // (c): the big panel lights the surfels over it: most of them emit, and none holds a corner's share of the whole
+            int nLit = 0; double Max = 0;
+            for (std::size_t s = 0; s < C.E.size(); ++s) { nLit += C.E[s].m_X > 0; Max = std::max(Max, double(C.E[s].m_X) * 1.47 * C.R[s] * C.R[s]); }
+            std::printf("emission resolve: a 2-triangle panel over %zu surfels: %d emit, the largest share %.1f%%\n", C.E.size(), nLit, 100 * Max / C.Want);
+            CHECK(nLit > int(C.E.size()) / 2, "only %d of %zu surfels under a big panel emit", nLit, C.E.size());
+            CHECK(Max < 0.05 * C.Want, "one surfel holds %.0f%% of a big panel's power", 100 * Max / C.Want);
+        }
+    }
+
     // 6j2c. The unsupported fallback's bound (GI review, experiment A): 200 small quads facing every way in one 1 m cell, no leak protection, so the
     //       cell holds a patch per orientation and lists hundreds of surfels in all. A query forced through the fallback (world::Unsupported) walks at
     //       most fallback_cap_v of them (it walked the whole cell: 10,000 to 33,000 entries a hit on the Test Models) and still returns light

@@ -1815,64 +1815,113 @@ namespace xlionrender::gi
         {
             ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
             auto& I = m_Instances[Id];
-            const std::size_t n = I.m_pMesh->m_Tris.size();
-            if (I.m_TriEmission.size() != n) { I.m_TriEmission.assign(n, v3{ 0, 0, 0 }); I.m_bTriEmission = false; }
-            for (std::size_t k = 0; k < Emission.size() && First + k < n; ++k) I.m_TriEmission[First + k] = Emission[k];
-            if (First + Emission.size() < n) return;                // not the last batch
+            const auto& M = *I.m_pMesh;
+            const std::size_t n = M.m_Tris.size();
+            if (First == 0 || I.m_SurfEmitPower.size() != M.m_Levels[0].size())    // a capture's first batch: the power starts again
+            {
+                I.m_SurfEmitPower.assign(M.m_Levels[0].size(), v3{ 0, 0, 0 });
+                I.m_EmitUnassigned = v3{ 0, 0, 0 }; I.m_nEmitUnassigned = 0; I.m_bTriEmission = false;
+            }
+            AccumulateTriangleEmission(I, First, Emission);    // this batch's triangles only: the work of a batch, never the whole mesh at once
+            if (First + Emission.size() < n) return;            // not the last batch
             I.m_bTriEmission = true;
             ResolveSurfEmission(Id);
             EmittersChanged(Id);
             AffectNear(I.m_Lo, I.m_Hi, Id);
         }
 
-        // The surfels' emission: the radiance whose power over the surfel's nominal area (1.47 r^2, RebuildEmitterList) is the emitted power
-        // of the triangles it is nearest to (sample points over each emissive triangle, each to its nearest surfel facing the same way).
-        // Without the triangles' emission (or the surfels' own capture): the surfels' sample at their center
+        // The emitted power of triangles First.. into the surfels that represent them (world::instance::m_SurfEmitPower). A triangle's
+        // candidates are its vertices' surfels (surfel_mesh::m_VertSurfels: at most 12, deduplicated), those facing its way (cos >= 0.5);
+        // its power (emission x area) is split over them by weights that are >= 0 and sum to 1 (the distance falloff at its centroid; equal
+        // when none reaches it), so the power is conserved whatever the tessellation and never added in full to more than one surfel. A
+        // triangle with no candidate is counted (m_EmitUnassigned), not searched for: the work is bounded by 12 a triangle. A large triangle
+        // (below) is sampled with a capped search instead, so a big emissive panel lights the surfels over it, not only its corners'
+        static void AccumulateTriangleEmission(auto& I, std::size_t First, const std::vector<v3>& Emission) noexcept
+        {
+            const auto& M = *I.m_pMesh;
+            const auto& L = M.m_Levels[0];
+            const bool bVert = M.m_VertSurfels.size() == M.m_Pos.size();
+            if (L.empty()) return;
+            float Rmin = L[0].m_Radius;
+            for (const auto& S : L) Rmin = std::min(Rmin, S.m_Radius);
+            // A triangle larger than its vertices' surfels can represent (more than 4 Rmin^2: the bake's candidate density) is sampled
+            // instead: points over it, each to the nearest surfel facing its way in a grid of cells Rmin, the search capped at
+            // emit_search_cap_v entries a point (the grid is made for the batch only when it has such a triangle)
+            constexpr int emit_search_cap_v = 64, emit_samples_cap_v = 4096;
+            surfel_grid G{ Rmin, {} };
+            bool bGrid = false;
+            for (std::size_t k = 0; k < Emission.size() && First + k < M.m_Tris.size(); ++k)
+            {
+                const v3& Le = Emission[k];
+                if (Le.m_X + Le.m_Y + Le.m_Z <= 1e-6f) continue;
+                const auto& T = M.m_Tris[First + k];
+                const v3 A = M.m_Pos[T[0]], B = M.m_Pos[T[1]], C = M.m_Pos[T[2]];
+                const v3 F = (B - A).Cross(C - A);
+                const float Len = F.Length();
+                if (Len < 2e-12f) continue;
+                const v3 Nt = F * (1.0f / Len), Ct = (A + B + C) * (1.0f / 3.0f);
+                const v3 Power = Le * (0.5f * Len);
+                const float Area = 0.5f * Len;
+                if (Area > 4.0f * Rmin * Rmin)
+                {
+                    if (!bGrid) { for (int q = 0; q < int(L.size()); ++q) G.Add(L[q].m_Center, q); bGrid = true; }
+                    const int nS = std::clamp(int(std::ceil(Area * 4.0f / (Rmin * Rmin))), 1, emit_samples_cap_v);
+                    const v3 Share = Power * (1.0f / float(nS));
+                    for (int j = 0; j < nS; ++j)
+                    {
+                        const auto Frac = [](float x) { return x - std::floor(x); };
+                        float u = Frac((float(j) + 0.5f) * 0.7548776662f), v = Frac((float(j) + 0.5f) * 0.5698402910f);
+                        if (u + v > 1) { u = 1 - u; v = 1 - v; }
+                        const v3 P = A + (B - A) * u + (C - A) * v;
+                        float Best = 1e30f; int iBest = -1, nSeen = 0;
+                        G.Near(P, 1, [&](int q)
+                        {
+                            if (nSeen >= emit_search_cap_v) return;
+                            ++nSeen; ++I.m_EmitResolveWork;
+                            if (L[q].m_Normal.Dot(Nt) < 0.5f) return;
+                            const float d = (P - L[q].m_Center).Length();
+                            if (d < Best) { Best = d; iBest = q; }
+                        });
+                        if (iBest >= 0) I.m_SurfEmitPower[iBest] = I.m_SurfEmitPower[iBest] + Share;
+                        else { I.m_EmitUnassigned = I.m_EmitUnassigned + Share; ++I.m_nEmitUnassigned; }
+                    }
+                    continue;
+                }
+                int Cand[12]; float Wt[12]; int nC = 0;
+                if (bVert)
+                    for (int v = 0; v < 3; ++v)
+                        for (const int s : M.m_VertSurfels[T[v]])
+                        {
+                            ++I.m_EmitResolveWork;
+                            if (s < 0 || L[s].m_Normal.Dot(Nt) < 0.5f) continue;
+                            bool bSeen = false;
+                            for (int j = 0; j < nC; ++j) bSeen = bSeen || Cand[j] == s;
+                            if (bSeen) continue;
+                            Cand[nC] = s;
+                            Wt[nC++] = std::max(0.0f, 1.0f - (Ct - L[s].m_Center).Length() / (2.0f * L[s].m_Radius));
+                        }
+                if (nC == 0) { I.m_EmitUnassigned = I.m_EmitUnassigned + Power; ++I.m_nEmitUnassigned; continue; }
+                float Sum = 0;
+                for (int j = 0; j < nC; ++j) Sum += Wt[j];
+                for (int j = 0; j < nC; ++j)
+                {
+                    const float w = Sum > 1e-12f ? Wt[j] / Sum : 1.0f / float(nC);
+                    I.m_SurfEmitPower[Cand[j]] = I.m_SurfEmitPower[Cand[j]] + Power * w;
+                }
+            }
+        }
+
+        // The surfels' emission: the radiance whose power over the surfel's nominal area (1.47 r^2, RebuildEmitterList) is the power the
+        // triangles gave it (AccumulateTriangleEmission). Without the triangles' emission (or the surfels' own capture): the surfels' sample
+        // at their center. O(surfels): the triangles were done batch by batch as they came
         void ResolveSurfEmission(int Id) noexcept
         {
             ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
             auto& I = m_Instances[Id];
             I.m_SurfEmission = I.m_SurfEmissionPoint;
-            const auto& M = *I.m_pMesh;
-            const auto& L = M.m_Levels[0];
-            if (!I.m_bTriEmission || L.empty() || I.m_SurfEmissionPoint.size() != L.size() || I.m_TriEmission.size() != M.m_Tris.size()) return;
-
-            float Rmin = L[0].m_Radius, Rmax = L[0].m_Radius;
-            for (const auto& S : L) { Rmin = std::min(Rmin, S.m_Radius); Rmax = std::max(Rmax, S.m_Radius); }
-            surfel_grid G{ 2 * Rmax, {} };
-            for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
-
-            std::vector<v3> Acc(L.size(), v3{ 0, 0, 0 });
-            for (std::size_t t = 0; t < M.m_Tris.size(); ++t)
-            {
-                const v3& Le = I.m_TriEmission[t];
-                if (Le.m_X + Le.m_Y + Le.m_Z <= 1e-6f) continue;
-                const auto& T = M.m_Tris[t];
-                const v3    A = M.m_Pos[T[0]], B = M.m_Pos[T[1]], C = M.m_Pos[T[2]];
-                const v3    F = (B - A).Cross(C - A);
-                const float Area = 0.5f * F.Length();
-                if (Area < 1e-12f) continue;
-                const v3  N = F * (1.0f / F.Length());
-                const int n = std::clamp(int(std::ceil(Area * 4.0f / (Rmin * Rmin))), 1, 4096);
-                const float w = Area / float(n);
-                for (int j = 0; j < n; ++j)
-                {
-                    const auto Frac = [](float x) { return x - std::floor(x); };
-                    float u = Frac((float(j) + 0.5f) * 0.7548776662f), v = Frac((float(j) + 0.5f) * 0.5698402910f);
-                    if (u + v > 1) { u = 1 - u; v = 1 - v; }
-                    const v3 P = A + (B - A) * u + (C - A) * v;
-                    float Best = 1e30f; int iBest = -1;
-                    for (int Ring = 1; Ring <= 3 && iBest < 0; ++Ring)
-                        G.Near(P, Ring, [&](int s)
-                        {
-                            if (L[s].m_Normal.Dot(N) < 0.5f) return;
-                            const float d = (P - L[s].m_Center).Length();
-                            if (d < Best) { Best = d; iBest = s; }
-                        });
-                    if (iBest >= 0) Acc[iBest] = Acc[iBest] + Le * w;
-                }
-            }
-            for (std::size_t s = 0; s < L.size(); ++s) I.m_SurfEmission[s] = Acc[s] * (1.0f / (1.47f * L[s].m_Radius * L[s].m_Radius));
+            const auto& L = I.m_pMesh->m_Levels[0];
+            if (!I.m_bTriEmission || L.empty() || I.m_SurfEmissionPoint.size() != L.size() || I.m_SurfEmitPower.size() != L.size()) return;
+            for (std::size_t s = 0; s < L.size(); ++s) I.m_SurfEmission[s] = I.m_SurfEmitPower[s] * (1.0f / (1.47f * L[s].m_Radius * L[s].m_Radius));
         }
 
         // An instance's triangles' colors (the material capture, triangle First on): a ray hit takes its triangle's (SurfaceAt), so a
@@ -1888,6 +1937,8 @@ namespace xlionrender::gi
         }
         const std::vector<v3>& TriangleAlbedo( int Id ) const noexcept { return m_Instances[Id].m_TriAlbedo; }
         const std::vector<v3>& SurfaceEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }       // per fine surfel (tests)
+        v3          EmissionUnassigned( int Id ) const noexcept { return m_Instances[Id].m_EmitUnassigned; }      // (tests) the triangles' power no surfel represents
+        std::size_t EmissionResolveWork( int Id ) const noexcept { return m_Instances[Id].m_EmitResolveWork; }    // (tests) AccumulateTriangleEmission's candidates examined
 
         // An instance's transparent material slots (SlotSeeThrough[slot]: its material has alpha). The GI leaves them out, as the references
         // do (Lumen, DDGI, Wicked: translucent surfaces neither block nor bounce): rays pass through their triangles, their surfels go dark
@@ -3684,8 +3735,11 @@ namespace xlionrender::gi
             std::vector<moments>    m_Moments;                  // per surfel of the active level (MomentTexel)
             std::vector<v3>         m_SurfAlbedo, m_SurfEmission;     // per fine surfel (SetSurfelMaterial; empty: m_Albedo, none)
             std::vector<v3>         m_TriAlbedo;                      // per triangle (SetTriangleAlbedo; empty: the surfels')
-            std::vector<v3>         m_TriEmission, m_SurfEmissionPoint;   // per triangle (SetTriangleEmission), and the surfels' emission sampled at their center (SetSurfelMaterial)
-            bool                    m_bTriEmission = false;           // m_TriEmission is complete: m_SurfEmission is made from it (ResolveSurfEmission)
+            std::vector<v3>         m_SurfEmitPower, m_SurfEmissionPoint; // per fine surfel: the power its triangles emit (SetTriangleEmission, batch by batch), and its emission sampled at its center (SetSurfelMaterial)
+            v3                      m_EmitUnassigned{ 0, 0, 0 };      // the emitted power of triangles no surfel represents (none of their vertices' surfels faces their way)
+            int                     m_nEmitUnassigned = 0;
+            std::size_t             m_EmitResolveWork = 0;            // (tests) candidates examined by AccumulateTriangleEmission: at most 12 a small emissive triangle, 64 a sample of a large one
+            bool                    m_bTriEmission = false;           // every batch of the triangles' emission is in: m_SurfEmission is made from m_SurfEmitPower (ResolveSurfEmission)
             std::vector<std::uint8_t> m_SeeThrough, m_SurfSeeThrough;   // per triangle, per fine surfel: transparent (SetSeeThrough; empty: none)
             std::vector<std::uint32_t> m_LinkFirst;              // per fine surfel + 1: its emitter links (PumpLinks)
             std::vector<emit_link>  m_Links;
