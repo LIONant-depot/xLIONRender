@@ -190,8 +190,10 @@ namespace xlionrender
             W.m_Setup.m_bGPUTrace = W.m_Setup.m_bGPUShown = W.m_Setup.m_bGPUOwned = false;
             W.DirtyAll();                                           // (its passes in flight are dropped: traced again)
         }
+        static std::unordered_map<const void*, bool> s_TransportAsked;     // measurement (XLION_GI_TRANSPORT): compiled at the dump, below (ponytail: never erased)
         if( !m_GIDumpPath.empty() && m_bGIDumpAsked && (!m_pGITrace || !m_pGITrace->ReadBackPending()) )        // DumpGI: the GPU's light came back
         {
+            if( std::getenv("XLION_GI_TRANSPORT") ) s_TransportAsked[this] = true;
             (void)W.Dump(m_GIDumpPath.c_str()); (void)DumpGIFrames((m_GIDumpPath + ".frames.csv").c_str());
             m_GIDumpPath.clear(); m_bGIDumpAsked = false;
         }
@@ -278,6 +280,38 @@ namespace xlionrender
         }
         L.m_Points.reserve(Scene.m_LocalLights.size());
         for( const auto& LL : Scene.m_LocalLights ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });
+        if( auto It = s_TransportAsked.find(this); It != s_TransportAsked.end() && It->second )      // measurement: experiment D at a real size
+        {
+            It->second = false;
+            const int Rays = std::max(16, std::atoi(std::getenv("XLION_GI_TRANSPORT")));
+            const auto T = W.CompileTransport(L, Rays);
+            std::vector<gi::v3> Ref; std::vector<char> Near;
+            for( int i = 0; i < W.InstanceCount(); ++i )
+            {
+                const auto& E = W.InstanceLight(i);
+                const std::size_t nRows = T.m_InstFirst[std::size_t(i) + 1] - T.m_InstFirst[std::size_t(i)];
+                for( std::size_t r = 0; r < nRows; ++r ) { Ref.push_back(r < E.size() ? E[r] : gi::v3{ 0, 0, 0 }); Near.push_back(W.Level(i) == 0 && E.size() == nRows); }
+            }
+            const auto Lum = [](const gi::v3& e) { return 0.2126 * e.m_X + 0.7152 * e.m_Y + 0.0722 * e.m_Z; };
+            std::size_t MaxLinks = 0; for( std::size_t r = 0; r + 1 < T.m_First.size(); ++r ) MaxLinks = std::max<std::size_t>(MaxLinks, T.m_First[r + 1] - T.m_First[r]);
+            std::printf("GITRANSPORT %zu surfels, %d rays each: compiled in %.0f ms; %zu links (%.1f a surfel, at most %zu; %.1f MB at 16 B); rays: %.1f%% sky, %.1f%% unsupported, %.1f%% far, %.1f%% back\n",
+                        T.m_D.size(), Rays, T.m_CompileMs, T.m_Col.size(), double(T.m_Col.size()) / double(std::max<std::size_t>(T.m_D.size(), 1)), MaxLinks, T.m_Col.size() * 16.0 / 1048576.0,
+                        100.0 * T.m_nSky / double(T.m_nRays), 100.0 * T.m_nUnsupported / double(T.m_nRays), 100.0 * T.m_nFar / double(T.m_nRays), 100.0 * T.m_nBack / double(T.m_nRays));
+            std::vector<gi::v3> E;
+            double SolveMs = 0;
+            for( int it = 1; it <= 40; ++it )
+            {
+                const auto Ts = std::chrono::steady_clock::now();
+                gi::world::SolveTransport(T, E, 1);
+                SolveMs += MsSince(Ts);
+                if( it != 5 && it != 10 && it != 20 && it != 40 ) continue;
+                double a = 0, b = 0, d2 = 0, Top = 1e-9; std::size_t nN = 0;
+                for( std::size_t r = 0; r < E.size(); ++r ) if( Near[r] ) { a += Lum(E[r]); b += Lum(Ref[r]); d2 += (Lum(E[r]) - Lum(Ref[r])) * (Lum(E[r]) - Lum(Ref[r])); Top = std::max(Top, Lum(Ref[r])); ++nN; }
+                std::printf("GITRANSPORT iteration %d: the near surfels' total light %.2f%% off the GPU's converged light, %.2f%% RMS (of the brightest); %.2f ms an iteration on the CPU\n",
+                            it, 100 * std::abs(a - b) / std::max(b, 1e-9), 100 * std::sqrt(d2 / double(std::max<std::size_t>(nN, 1))) / Top, SolveMs / it);
+            }
+            std::fflush(stdout);
+        }
         W.m_Setup.m_FilterPasses  = std::clamp(Scene.m_GI.m_FilterPasses, 0, 16);   // what is shown only: no re-solve
         W.m_Setup.m_RaysPerSurfel = std::clamp(Scene.m_GI.m_RaysPerSurfel, 1, 256);
         W.m_Setup.m_Saturation    = std::clamp(Scene.m_GI.m_Saturation, 0.0f, 4.0f);     // what is shown only: no re-solve

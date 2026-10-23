@@ -2972,7 +2972,7 @@ namespace xlionrender::gi
             std::vector<std::uint32_t>  m_Col;           // per link: the row it reads
             std::vector<v3>             m_W;             // per link: its weight (albedo x read share / rays)
             std::vector<v3>             m_D;             // per row: the part no surfel carries (sky, direct, emission)
-            std::size_t                 m_nRays = 0, m_nUnsupported = 0, m_nBack = 0, m_nSky = 0;
+            std::size_t                 m_nRays = 0, m_nUnsupported = 0, m_nBack = 0, m_nSky = 0, m_nFar = 0;     // (far: a hit on a level-1 instance, dropped)
             double                      m_CompileMs = 0;
         };
         transport CompileTransport(const lights& L, int Rays, unsigned Seed = 1) noexcept
@@ -3009,6 +3009,7 @@ namespace xlionrender::gi
                         if (H.m_Inst < 0) { D = D + L.SkyAt(Dir) * (pi_v / float(Rays)); ++T.m_nSky; continue; }
                         const v3 Nh = HitNormal(H);
                         if (Nh.Dot(Dir) > 0) { ++T.m_nBack; continue; }
+                        if (m_Instances[std::size_t(H.m_Inst)].m_Level != 0) { ++T.m_nFar; continue; }      // (the prototype's rows are level 0)
                         v3 Albedo, Emission;
                         SurfaceAt(H, Albedo, Emission);
                         const v3 Dl = Direct(HitPosition(H), Nh, L);
