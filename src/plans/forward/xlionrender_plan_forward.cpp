@@ -419,7 +419,10 @@ namespace xlionrender
                     static const std::string s_Px = [] { const char* p = std::getenv("XLION_GI_ABLATE"); return std::string(p ? p : ""); }();
                     if( s_Px.find("pixel_vertex") != std::string::npos )    m_DrawGI[i].second &= ~0x100u;
                     if( s_Px.find("pixel_nomoments") != std::string::npos ) m_DrawGI[i].second |= 0x4000u;
+                    if( s_Px.find("pixel_nolocal") != std::string::npos )   m_DrawGI[i].second |= 0x8000u;     // (mb_standard_pbr.frag: no SurfelGILocalMean)
                     if( s_Px.find("pixel_none") != std::string::npos )      m_DrawGI[i] = { 0u, 0xFFFFFFFFu };
+                    static const std::uint32_t s_Cap = [] { const char* p = std::getenv("XLION_GI_PIXEL_CAP"); return p ? std::uint32_t(std::clamp(std::atoi(p), 0, 255)) : 0u; }();
+                    if( s_Cap && m_DrawGI[i].second != 0xFFFFFFFFu ) m_DrawGI[i].second |= s_Cap << 16;     // (xlionrender_surfel_gi.glsl GIPixelCap)
                 }
             }
         });

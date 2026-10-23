@@ -975,7 +975,7 @@ int main()
         }
         M.m_bLeakProtection = false;
         M.Bake(1.0f, 3.0f);
-        M.BuildReadGrid();
+        M.BuildReadGridAt(1.0f);        // the radius' cell, not refined (BuildReadGrid's would split it: 6j2d): the worst case a grid can hold
         world W;
         const int i = W.Add(M, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
         lights L; L.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = { 3, 3, 3 }; L.m_Sky = { 0.2f, 0.2f, 0.2f };
@@ -1009,6 +1009,45 @@ int main()
         CHECK(std::size_t(Walked) <= ListSize, "the fallback walked past its own patch (%d of %zu)", Walked, ListSize);
         CHECK(Walked <= fallback_cap_v, "the fallback walked %d entries (cap %d)", Walked, fallback_cap_v);
         CHECK(std::isfinite(E.m_X) && E.m_X > 0, "the fallback returned no light (%.3f)", E.m_X);
+    }
+
+    // 6j2d. The read grid follows the surface (GI review: the Golem's 2 m cells held 300 patches each, every pixel scored them all): the same
+    //       crumpled cluster as 6j2c, BuildReadGrid halves the cell while the cells hold more than read_patches_v patches on average (at most
+    //       read_halvings_v times). Fewer patches per cell than at the radius' cell, and every quad still reads its surfels (none lost)
+    {
+        surfel_mesh M;
+        std::mt19937 Rng(7);
+        std::uniform_real_distribution<float> U(-1, 1);
+        for (int k = 0; k < 400; ++k)
+        {
+            v3 N{ U(Rng), U(Rng), U(Rng) }; if (N.Length() < 0.1f) N = { 0, 1, 0 }; N = N.NormalizeCopy();
+            const v3 T = (std::abs(N.m_X) < 0.9f ? v3{ 1, 0, 0 } : v3{ 0, 1, 0 }).Cross(N).NormalizeCopy(), Bt = N.Cross(T);
+            AddQuad(M, v3{ 0.4f * U(Rng), 0.4f * U(Rng), 0.4f * U(Rng) } - (T + Bt) * 0.05f, Bt * 0.1f, T * 0.1f, 0.1f);
+        }
+        M.m_bLeakProtection = false;
+        M.Bake(1.0f, 3.0f);
+        const auto Unread = [&]
+        {
+            int n = 0;
+            for (std::size_t t = 0; t < M.m_Tris.size(); t += 2)
+            {
+                const auto& T = M.m_Tris[t];
+                const v3 P = (M.m_Pos[T[0]] + M.m_Pos[T[1]] + M.m_Pos[T[2]]) * (1.0f / 3.0f);
+                n += M.ReadCellList(P, (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy()).empty() ? 1 : 0;
+            }
+            return n;
+        };
+        M.BuildReadGridAt(1.0f);
+        const float Coarse = M.ReadPatchesPerCell();
+        const int   CoarseUnread = Unread();
+        M.BuildReadGrid();
+        const float Fine = M.ReadPatchesPerCell();
+        const int   FineUnread = Unread();
+        std::printf("read grid: at the radius' cell (1 m) %.1f patches a cell, %d quads read nothing; refined to %.3f m: %.1f a cell, %d read nothing\n", Coarse, CoarseUnread, M.m_ReadCell, Fine, FineUnread);
+        CHECK(Coarse > surfel_mesh::read_patches_v, "the test's cluster is not crumpled enough (%.1f patches a cell at 1 m)", Coarse);
+        CHECK(M.m_ReadCell < 1.0f && M.m_ReadCell >= 1.0f / float(1 << surfel_mesh::read_halvings_v), "the cell was not refined within its halvings (%.3f m)", M.m_ReadCell);
+        CHECK(Fine < 0.5f * Coarse, "refining did not cut the patches a cell scores (%.1f -> %.1f)", Coarse, Fine);
+        CHECK(FineUnread <= CoarseUnread, "the finer grid loses quads (%d read nothing, %d before)", FineUnread, CoarseUnread);
     }
 
     // 6j3. The sky by direction (lights::SkyAt): a 4 x 4 octahedral map with down (-Y) at the center and the seams up (the renderer's

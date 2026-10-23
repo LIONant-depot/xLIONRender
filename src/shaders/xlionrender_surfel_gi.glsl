@@ -26,6 +26,11 @@ const uint gi_debug_shift_v = 9u;        // 2 bits (scene::gi_debug): 1 the surf
 const uint gi_capture_emission_v = 0x800u;
 const uint gi_no_moments_v       = 0x4000u;     // the reads skip the depth-moment test (scene::gi_settings::m_bMoments off)
 bool       g_GIMoments           = true;        // GIVisibility's moment test (the caller sets it from its GI reference)
+// The most list entries the per-pixel read walks, the nearest first (surfel_mesh::SortReadLists): the far ones weigh little (a dense mesh
+// lists 100+, the Golem 139 on average). Bits 16-23 of the GI reference override it (measurement: XLION_GI_PIXEL_CAP; 255: all)
+const uint gi_pixel_cap_v = 32u;
+uint       g_GIPixelCap   = gi_pixel_cap_v;
+uint GIPixelCap(in const uint Ref) { const uint c = (Ref >> 16u) & 0xFFu; return c == 0u ? gi_pixel_cap_v : c == 255u ? 0xFFFFFFFFu : c; }
 uint GIDebugCode(in const uint Ref) { return Ref == gi_none_v ? 0u : ((Ref >> gi_debug_shift_v) & 3u) | ((Ref >> 10u) & 0x4u); }    // scene::gi_debug
 
 vec4 g_GIDebug = vec4(0.0);             // w > 0: the debug view's color replaces the lit one (GIDebugOr)
@@ -108,7 +113,7 @@ float GIMaskDistance(in const vec3 P, in const vec3 N, in const vec3 PatchN, in 
     }
     return Best;
 }
-bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count, out vec3 PatchN, out uint Patches, out uint nPatches)
+bool GIReadCellLookup(in const vec3 P, in const vec3 N, out uint First, out uint Count, out vec3 PatchN, out uint Patches, out uint nPatches)
 {
     First = 0u; Count = 0u; PatchN = N; Patches = 0u; nPatches = 0u;
     const uint Mask = GIMesh[3];
@@ -135,12 +140,30 @@ bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count
             const float c  = dot(Np, N);
             if (c < 0.5) continue;
             const uint  w3 = GIMesh[a + 3u];
-            const float Score = c - abs(dot(P, Np) - uintBitsToFloat(GIMesh[a + 1u])) / Cell + 2.0 - 2.0 * min(1.0, GIMaskDistance(P, N, Np, Cell, w3 >> 16u));
+            const float Upper = c - abs(dot(P, Np) - uintBitsToFloat(GIMesh[a + 1u])) / Cell + 2.0;     // (its score inside its sub-cells)
+            if (Upper <= Best) continue;                                                                // (it cannot win: no mask distance)
+            const float Score = Upper - 2.0 * min(1.0, GIMaskDistance(P, N, Np, Cell, w3 >> 16u));
             if (Score > Best) { Best = Score; First = GIMesh[a + 2u]; Count = w3 & 0xFFFFu; PatchN = Np; }
         }
         return Best > -1e29;
     }
     return false;
+}
+
+// The last lookup (a pixel's reads ask for the same point: the per-pixel read, then its fallback): the patch choice scores every patch of
+// the cell, the most of a dense mesh's read (the Golem: 30 ms of 34 at cap 32, maximized)
+bool  g_GICellValid = false, g_GICellHit;
+vec3  g_GICellP, g_GICellN, g_GICellPatchN;
+uint  g_GICellFirst, g_GICellCount, g_GICellPatches, g_GICellnPatches;
+bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count, out vec3 PatchN, out uint Patches, out uint nPatches)
+{
+    if (!(g_GICellValid && P == g_GICellP && N == g_GICellN))
+    {
+        g_GICellHit = GIReadCellLookup(P, N, g_GICellFirst, g_GICellCount, g_GICellPatchN, g_GICellPatches, g_GICellnPatches);
+        g_GICellValid = true; g_GICellP = P; g_GICellN = N;
+    }
+    First = g_GICellFirst; Count = g_GICellCount; PatchN = g_GICellPatchN; Patches = g_GICellPatches; nPatches = g_GICellnPatches;
+    return g_GICellHit;
 }
 
 // How much the surface at P sees a listed surfel (surfel_mesh::ReadEntryWeight): the entry's 4 corner weights (4 bits each, the cell's
@@ -214,7 +237,7 @@ vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const
     Relaxed = vec4(0.0);                                            // the same without the moments' test (SurfelGIQuery's second tier)
     g_GIReflSum = vec3(0.0); g_GIReflRelaxed = vec3(0.0);
     const bool bRefl = dot(g_GIReflDir, g_GIReflDir) > 0.5;
-    for (uint i = 0u; i < Count; ++i)
+    for (uint i = 0u; i < min(Count, g_GIPixelCap); ++i)            // (the lists are nearest first: surfel_mesh::SortReadLists)
     {
         const uint  e = GIMesh[GIMesh[5] + First + i], s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
         const uint  b = GIMesh[0] + 8u * s;

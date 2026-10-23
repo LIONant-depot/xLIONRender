@@ -616,6 +616,14 @@ namespace xlionrender::gi
         // nearest. Called after the grid is built or unpacked; the reads that sum a whole list are unchanged (the order of a sum)
         void SortReadLists() noexcept
         {
+            if (std::getenv("XLION_GI_GRIDSTATS"))     // measurement: each loaded or built read grid (GI review)
+            {
+                std::size_t nCells = 0, nPatch = 0, MaxPatch = 0, nEnt = 0, MaxEnt = 0;
+                for (const auto& E : m_ReadTable) { if (E[1] == 0xFFFFFFFFu) continue; ++nCells; nPatch += E[3]; MaxPatch = std::max<std::size_t>(MaxPatch, E[3]);
+                    for (std::uint32_t p = 0; p < E[3]; ++p) { const std::size_t n = m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu; nEnt += n; MaxEnt = std::max(MaxEnt, n); } }
+                std::printf("GIGRID cells %zu (table %zu), patches/cell mean %.1f max %zu, entries/patch mean %.1f max %zu, cell %.3f, surfels %zu\n", nCells, m_ReadTable.size(),
+                            nCells ? double(nPatch) / nCells : 0.0, MaxPatch, nPatch ? double(nEnt) / nPatch : 0.0, MaxEnt, m_ReadCell, m_Levels.empty() ? 0 : m_Levels[0].size()); std::fflush(stdout);
+            }
             const auto Sx = [](std::uint64_t v) { const int i = int(v & 0x1FFFFF); return i >= 0x100000 ? i - 0x200000 : i; };
             for (const auto& E : m_ReadTable)
             {
@@ -685,13 +693,15 @@ namespace xlionrender::gi
                     const float il = 1.0f / std::sqrt(x * x + y * y + z * z); x *= il; y *= il; z *= il;
                     const float c = x * Nx + y * Ny + z * Nz;
                     if (c < 0.5f) continue;
+                    const float Upper = c - std::abs(P.m_X * x + P.m_Y * y + P.m_Z * z - std::bit_cast<float>(Pa[1])) * iCell + 2.0f;     // (its score inside its sub-cells)
+                    if (Upper <= Best) continue;                                                     // (it cannot win: GIReadCell the same)
                     const float ax = std::abs(x), ay = std::abs(y), az = std::abs(z);
                     const int   Au = ax >= ay && ax >= az ? 1 : 0, Av = ax >= ay && ax >= az ? 2 : ay >= az ? 2 : 1;      // ReadAxes
                     const float uv[2] = { Fr[Au], Fr[Av] };
                     const std::uint32_t Msk = Pa[3] >> 16;
                     const int su = std::min(int(uv[0] * sub_v), sub_v - 1), sv = std::min(int(uv[1] * sub_v), sub_v - 1);
                     const float D = (Msk >> (sv * sub_v + su)) & 1u ? 0.0f : MaskDistance(Msk, { uv[0], uv[1] });
-                    const float Score = c - std::abs(P.m_X * x + P.m_Y * y + P.m_Z * z - std::bit_cast<float>(Pa[1])) * iCell + 2.0f - 2.0f * std::min(1.0f, D);
+                    const float Score = Upper - 2.0f * std::min(1.0f, D);
                     if (Score > Best) { Best = Score; Bp = p; }
                 }
                 if (Bp == 0xFFFFFFFFu) return {};
@@ -798,12 +808,33 @@ namespace xlionrender::gi
             return Best;
         }
 
+        // The read grid's cell: the fine surfels' radius, halved while its cells hold more than read_patches_v patches on average (at most
+        // read_halvings_v times). Each pixel scores its cell's patches (GIReadCell): a crumpled surface (the Golem, 2 m surfels on a 4 m
+        // model) put 300 of them in each of its 24 cells, 30 ms a frame maximized. The lists stay the surfels whose reach touches the cell
+        static constexpr float read_patches_v  = 8;
+        static constexpr int   read_halvings_v = 4;
+        float ReadPatchesPerCell() const noexcept
+        {
+            std::size_t nCells = 0, nPatches = 0;
+            for (const auto& E : m_ReadTable) if (E[1] != 0xFFFFFFFFu) { ++nCells; nPatches += E[3]; }
+            return nCells ? float(nPatches) / float(nCells) : 0.0f;
+        }
         void BuildReadGrid() noexcept
         {
             m_ReadTable.clear(); m_ReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
+            if (m_Levels[0].empty()) return;
+            // The cell: halved while the surface's patches alone (BuildReadGridAt's first step: no lists, no rays) are too many per cell
+            float Cell = m_Levels[0][0].m_Radius;
+            for (int k = 0; k < read_halvings_v && BuildReadGridAt(Cell, true) > read_patches_v; ++k) Cell *= 0.5f;
+            BuildReadGridAt(Cell);
+        }
+        // bPatches: only the cells' patches (their mean per cell returned; the grid is left empty)
+        float BuildReadGridAt(float CellSize, bool bPatches = false) noexcept
+        {
+            m_ReadTable.clear(); m_ReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
             const auto& L = m_Levels[0];
-            if (L.empty()) return;
-            m_ReadCell = L[0].m_Radius;
+            if (L.empty()) return 0;
+            m_ReadCell = CellSize;
             const float Cell = m_ReadCell, Reach = 2 * L[0].m_Radius;
 
             // The cells the surface crosses (points on every triangle an eighth of a cell apart), and per cell its patches: the pieces of
@@ -873,6 +904,13 @@ namespace xlionrender::gi
                     { const v3 F = (B - A).Cross(Cc - A); if (F.Length() > 1e-12f) N = (F.Dot(N) < 0 ? F * -1.0f : F).NormalizeCopy(); else N = N.NormalizeCopy(); }     // the face's (as the pixels')
                     Touch(A + (B - A) * u + (Cc - A) * w, N);
                 }
+            }
+
+            if (bPatches)
+            {
+                std::size_t n = 0;
+                for (const auto& [Key, Ce] : Cells) n += Ce.m_Patches.size();
+                return Cells.empty() ? 0.0f : float(n) / float(Cells.size());
             }
 
             // Two points of one surface are joined when the line between them, lifted by a layer (SameLayer's: a tenth of a cell), is clear
@@ -1041,6 +1079,7 @@ namespace xlionrender::gi
                     if (Lists[c][p].empty() && Pa.m_bSeen && !Pa.m_Pts.empty()) m_EmptyParts.push_back({ Pa.m_Pts[Pa.m_Pts.size() / 2], Pa.m_N });
                 }
             SortReadLists();
+            return ReadPatchesPerCell();
         }
 
         // A unit normal as 2 x snorm 16 octahedral (GLSL unpackSnorm2x16 + GIOctDecode)
@@ -1619,6 +1658,7 @@ namespace xlionrender::gi
         bool bDerived = false;
         if constexpr (requires { Geom.getGIDerived(); }) bDerived = M.UnpackDerived(Geom.getGIDerived());
         if (!bDerived) M.BuildNeighbors();
+        if (std::getenv("XLION_GI_REGRID")) M.BuildReadGrid();      // measurement: the grid rebuilt at load (BuildReadGrid's cell), no recompile
         return true;
     }
 
