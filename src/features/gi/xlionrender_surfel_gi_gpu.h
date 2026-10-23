@@ -211,11 +211,27 @@ namespace xlionrender::gi
             xgpu::buffer* Bufs[] = { &m_DataB, &m_OwnerB, &m_ScratchB, &m_PlaceB, &Light, &Moments };
             struct { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push{ 0, int(m_nShown), 1, Base, Saturation, 0, 0, 0 };
             const int Groups = int((m_nShown + 63) / 64);
+            static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;     // measurement: the three steps' GPU time
+            if (s_bTimes && !m_ShowTimesOk) { xgpu::device D; Window.getDevice(D); m_ShowTimesOk = D.Create(m_ShowTimes, { .m_Count = 4 }) == nullptr; }
+            const bool bT = s_bTimes && m_ShowTimesOk;
+            if (bT)
+            {
+                std::vector<std::uint64_t> Ns;
+                if (m_ShowTimes.getResults(Ns) && Ns.size() >= 4 && Ns[3] > Ns[0])
+                {
+                    for (int k = 0; k < 3; ++k) m_ShowSum[k] += (Ns[k + 1] - Ns[k]) * 1e-6;
+                    if (++m_nShowSum == 120) { std::printf("GISHOW %zu surfels: pass 0 %.2f, %d filter passes %.2f, into the rings %.2f ms\n", m_nShown, m_ShowSum[0] / 120, Passes, m_ShowSum[1] / 120, m_ShowSum[2] / 120); std::fflush(stdout); m_nShowSum = 0; for (auto& v : m_ShowSum) v = 0; }
+                }
+                Window.WriteTimestamp(m_ShowTimes, 0);
+            }
             Window.Dispatch(m_Filter, Bufs, &Push, sizeof(Push), Groups);             // pass 0 into the first array
+            if (bT) Window.WriteTimestamp(m_ShowTimes, 1);
             const int nP = std::clamp(Passes, 0, 16);
             for (int p = 1; p <= nP; ++p) { Push.m_Mode = 1; Push.m_Src = (p - 1) % 2; Window.Dispatch(m_Filter, Bufs, &Push, sizeof(Push), Groups); }
+            if (bT) Window.WriteTimestamp(m_ShowTimes, 2);
             Push.m_Mode = 2; Push.m_Src = nP % 2;
-            Window.Dispatch(m_Filter, Bufs, &Push, sizeof(Push), Groups);
+            Window.Dispatch(m_Filter, Bufs, &Push, sizeof(Push), int((16 * m_nShown + 63) / 64));      // (16 invocations a surfel: coalesced stores)
+            if (bT) Window.WriteTimestamp(m_ShowTimes, 3);
             return true;
         }
 
@@ -555,6 +571,10 @@ namespace xlionrender::gi
         xgpu::shader                        m_Shader[10];
         xgpu::compute                       m_Pass, m_Scatter, m_Commit, m_OpsC, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBackC;
         xgpu::timestamps                    m_Times;
+        xgpu::timestamps                    m_ShowTimes;        // measurement (XLION_GPU_TIMES): Show's steps
+        bool                                m_ShowTimesOk = false;
+        double                              m_ShowSum[3] = {};
+        int                                 m_nShowSum = 0;
         xgpu::buffer                        m_Nodes, m_Tri4, m_Inst, m_Tlas, m_DataB, m_OldDataB, m_OwnerB, m_ScratchB;     // (device-local)
         xgpu::buffer                        m_ItemB, m_Results, m_CountB, m_RangeB, m_StatsB, m_MeansB, m_CubeB, m_JobB, m_StageB, m_OpB, m_PlaceB, m_ReadB;
         world::gpu_scene                    m_Scene;

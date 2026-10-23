@@ -134,6 +134,26 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    // Measurement only (XLION_GPU_TIMES): GPU timestamps of the GI update's parts (slots: before Submit, after it, before Show, after it)
+    namespace { struct gi_times { xgpu::timestamps m_T; bool m_bOk = false; std::vector<std::uint64_t> m_Ns; double m_Sum[3] = {}; int m_n = 0; }; }
+    static gi_times* GITimes(const void* pKey, xgpu::device& Device) noexcept
+    {
+        static const bool s_bOn = std::getenv("XLION_GPU_TIMES") != nullptr;
+        if( !s_bOn ) return nullptr;
+        static std::unordered_map<const void*, gi_times> s_Map;      // ponytail: per renderer, never erased (a measurement hook)
+        auto [It, bNew] = s_Map.try_emplace(pKey);
+        if( bNew ) It->second.m_bOk = Device.Create(It->second.m_T, { .m_Count = 4 }) == nullptr;
+        if( !It->second.m_bOk ) return nullptr;
+        auto& G = It->second;
+        if( G.m_T.getResults(G.m_Ns) && G.m_Ns.size() >= 4 && G.m_Ns[3] > G.m_Ns[0] )
+        {
+            for( int k = 0; k < 3; ++k ) G.m_Sum[k] += (G.m_Ns[k + 1] - G.m_Ns[k]) * 1e-6;
+            if( ++G.m_n == 120 ) { std::printf("GIGPU submit %.2f, between %.2f, show %.2f ms\n", G.m_Sum[0] / G.m_n, G.m_Sum[1] / G.m_n, G.m_Sum[2] / G.m_n); std::fflush(stdout); G.m_n = 0; for( auto& v : G.m_Sum ) v = 0; }
+        }
+        return &G;
+    }
+
+
     // Surfel GI (features/gi/xlionrender_surfel_gi.h): the draws of meshes with surfels and a persistent id become world instances
     // (added, moved, removed when no longer drawn), the scene's lights its lights, one Update on the ray budget; then every drawn
     // instance's active-level light into this frame's region of the GI light ring (m_DrawGI: where, which level)
@@ -304,7 +324,9 @@ namespace xlionrender
         if( bGPU )
         {
             const auto TSubmit = std::chrono::steady_clock::now();
+            if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 0);
             m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
+            if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 1);
             if( (m_bGIToCPU && !m_bGIToCPUAsked) || (!m_GIDumpPath.empty() && !m_bGIDumpAsked) )     // the GPU's light back into the world (the next Collect)
                 if( m_pGITrace->ReadBack(Window, GIFrame) ) { if( m_bGIToCPU ) m_bGIToCPUAsked = true; if( !m_GIDumpPath.empty() ) m_bGIDumpAsked = true; }
             m_GIStats.m_GPUTraceMs = m_pGITrace->LastMs(); m_GIStats.m_GPUPacks = m_pGITrace->Packs(); m_GIStats.m_GPUCpuMs = CollectMs + MsSince(TSubmit);
@@ -454,7 +476,9 @@ namespace xlionrender
             std::vector<int> Places(std::size_t(W.InstanceCount()), -1);
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
                 if( const int Id = DrawId[i]; Id >= 0 && m_GITrack[Id].m_Offset >= 0 ) Places[std::size_t(Id)] = m_GITrack[Id].m_Offset;
+            if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 2);
             (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation);
+            if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 3);
         }
         m_GIStats.m_UploadBytes += Entries * 3 * sizeof(xmath::fvec4) + MomentUints * sizeof(std::uint32_t);
         m_GIStats.m_MomentsMs += MsSince(TMomentsCopy);
@@ -1727,19 +1751,44 @@ namespace xlionrender
         using clock = std::chrono::steady_clock;
         const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
         const auto T0 = clock::now();
+        // Measurement only (XLION_GPU_TIMES): the whole Render on the GPU (its start, after the GI and the captures, after the tone map, its end)
+        static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+        static std::unordered_map<const void*, xgpu::timestamps> s_TS;      // ponytail: per renderer, never erased (a measurement hook)
+        xgpu::timestamps* pTS = nullptr;
+        if( s_bTimes )
+        {
+            auto [It, bNew] = s_TS.try_emplace(this);
+            if( bNew && m_Device.Create(It->second, { .m_Count = 7 }) ) s_TS.erase(It);
+            else pTS = &It->second;
+        }
+        if( pTS )
+        {
+            static std::vector<std::uint64_t> s_Ns;
+            static double s_Sum[6] = {}; static int s_n = 0;
+            if( pTS->getResults(s_Ns) && s_Ns.size() >= 7 && s_Ns[6] > s_Ns[0] )
+            {
+                for( int k = 0; k < 6; ++k ) s_Sum[k] += (s_Ns[k + 1] - s_Ns[k]) * 1e-6;
+                if( ++s_n == 120 ) { std::printf("RENDERGPU environment %.2f, instances %.2f, GI update %.2f, captures %.2f, shadows+scene+tonemap %.2f, overlays+outline %.2f ms\n", s_Sum[0] / s_n, s_Sum[1] / s_n, s_Sum[2] / s_n, s_Sum[3] / s_n, s_Sum[4] / s_n, s_Sum[5] / s_n); std::fflush(stdout); s_n = 0; for( auto& v : s_Sum ) v = 0; }
+            }
+            Window.WriteTimestamp(*pTS, 0);
+        }
         // The probe atlas and the shadow atlas are bound by every lit pipeline, the GI capture's below included: cleared before anything samples them
         // (the first frame's capture used to read them undefined: a Vulkan validation error)
         if( !m_bProbeAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ProbeAtlasClearPass); m_bProbeAtlasReady = true; }
         if( !m_bShadowAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ShadowClearPass); m_bShadowAtlasReady = true; }
         updateEnvironment(Window, Scene);
+        if( pTS ) Window.WriteTimestamp(*pTS, 1);
         updateInstances(Window, Scene, Eye);
-        updateGI(Window, Scene, Eye, ProjScale);                                   // CPU (getGIStats); the probes' captures read it too
+        if( pTS ) Window.WriteTimestamp(*pTS, 2);
+        updateGI(Window, Scene, Eye, ProjScale);
+        if( pTS ) Window.WriteTimestamp(*pTS, 3);                                   // CPU (getGIStats); the probes' captures read it too
         {
             const auto TCapture = std::chrono::steady_clock::now();
             processGICapture(Window);                           // the surfels' material colors (one mesh at a time)
             if( !m_GIFrames.empty() ) m_GIFrames.back().m_Stats.m_CaptureMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TCapture).count();
         }
         const auto T1 = clock::now();
+        if( pTS ) Window.WriteTimestamp(*pTS, 4);
         Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
         renderShadows(Window, Scene, Eye, ProjScale);
         updateProbes(Window, Scene, Eye);
@@ -1757,6 +1806,7 @@ namespace xlionrender
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
             Cmd.WriteTimestamp(m_Timestamps, 3);
+            if( pTS ) Cmd.WriteTimestamp(*pTS, 5);
         }
 
         // Editor overlays over the tone-mapped image, depth-tested against the scene
@@ -1768,6 +1818,7 @@ namespace xlionrender
 
         // The selection's outline last, over the overlays too: the host's grid is opaque floor and painted over the outline of an object standing on it
         renderOutline(Window, Scene, View, W2C, Eye);
+        if( pTS ) Window.WriteTimestamp(*pTS, 6);
 
         const auto T3 = clock::now();
         m_CPUTimes = { Ms(T0, T1), Ms(T1, T2), m_LightBuildMs, Ms(T0, T3) };

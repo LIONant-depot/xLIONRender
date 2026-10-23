@@ -48,7 +48,9 @@ uint Half(float f)
 
 void main()
 {
-    const uint g = gl_GlobalInvocationID.x;
+    // Mode 2: 16 invocations a surfel (t: its moment word), so that the stores into the host-visible rings are contiguous across invocations
+    const uint t = Push.m_Mode == 2 ? gl_GlobalInvocationID.x % 16u : 0u;
+    const uint g = Push.m_Mode == 2 ? gl_GlobalInvocationID.x / 16u : gl_GlobalInvocationID.x;
     if (g >= uint(Push.m_N)) return;
     const uint Inst = GIOwner[g], R = GD[0] + Inst * gi_inst_v;
     const uint s = g - GD[R + 46u], Level = GD[R + 1u], M = GD[R];
@@ -88,6 +90,9 @@ void main()
     const int Place = GIPlace[Inst];
     if (Place < 0) return;
     const uint At = uint(Push.m_Base + Place + 1) + s;
+    const uint Mo = GD[R + 4u] + 32u * s;
+    GIMoment[16u * At + t] = Half(GF(Mo + 2u * t)) | (Half(GF(Mo + 2u * t + 1u)) << 16);
+    if (t != 0u) return;
     const float Valid = GF(GD[R + 3u] + s);
     uint P[3];
     for (uint i = 0u; i < 3u; ++i)
@@ -101,6 +106,4 @@ void main()
         P[i] = PackRGB9E5(C);
     }
     GILight[At] = uvec4(P[0], P[1], P[2], floatBitsToUint(Valid));
-    const uint Mo = GD[R + 4u] + 32u * s;
-    for (uint t = 0u; t < 16u; ++t) GIMoment[16u * At + t] = Half(GF(Mo + 2u * t)) | (Half(GF(Mo + 2u * t + 1u)) << 16);
 }
