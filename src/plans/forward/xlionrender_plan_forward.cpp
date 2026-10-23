@@ -294,21 +294,28 @@ namespace xlionrender
             }
             const auto Lum = [](const gi::v3& e) { return 0.2126 * e.m_X + 0.7152 * e.m_Y + 0.0722 * e.m_Z; };
             std::size_t MaxLinks = 0; for( std::size_t r = 0; r + 1 < T.m_First.size(); ++r ) MaxLinks = std::max<std::size_t>(MaxLinks, T.m_First[r + 1] - T.m_First[r]);
-            std::printf("GITRANSPORT %zu surfels, %d rays each: compiled in %.0f ms; %zu links (%.1f a surfel, at most %zu; %.1f MB at 16 B); rays: %.1f%% sky, %.1f%% unsupported, %.1f%% far, %.1f%% back\n",
+            std::printf("GITRANSPORT %zu surfels, %d rays each: compiled in %.0f ms; %zu links (%.1f a surfel, at most %zu; %.1f MB at 16 B); rays: %.1f%% sky, %.1f%% unsupported (%.2f%% dropped), %.1f%% far, %.1f%% back\n",
                         T.m_D.size(), Rays, T.m_CompileMs, T.m_Col.size(), double(T.m_Col.size()) / double(std::max<std::size_t>(T.m_D.size(), 1)), MaxLinks, T.m_Col.size() * 16.0 / 1048576.0,
-                        100.0 * T.m_nSky / double(T.m_nRays), 100.0 * T.m_nUnsupported / double(T.m_nRays), 100.0 * T.m_nFar / double(T.m_nRays), 100.0 * T.m_nBack / double(T.m_nRays));
+                        100.0 * T.m_nSky / double(T.m_nRays), 100.0 * T.m_nUnsupported / double(T.m_nRays), 100.0 * T.m_nDropped / double(T.m_nRays), 100.0 * T.m_nFar / double(T.m_nRays), 100.0 * T.m_nBack / double(T.m_nRays));
+            for( const int KI : { 0, 16, 32, 116, 132 } )        // (1xx: the tail to whole instances)
+            {
+            const int K = KI % 100; const bool bInst = KI >= 100;
+            const auto Tk = K > 0 ? W.TruncateTransport(T, K, bInst) : gi::world::transport{};
+            const auto& TT = K > 0 ? Tk : T;
+            if( K > 0 ) std::printf("GITRANSPORT top %d + the tail through the %s: %zu links + %zu aggregate (%.1f MB at 16 B)\n", K, bInst ? "instances" : "parents", TT.m_Col.size(), TT.m_AGroup.size(), (TT.m_Col.size() + TT.m_AGroup.size()) * 16.0 / 1048576.0);
             std::vector<gi::v3> E;
             double SolveMs = 0;
-            for( int it = 1; it <= 40; ++it )
+            for( int it = 1; it <= 20; ++it )
             {
                 const auto Ts = std::chrono::steady_clock::now();
-                gi::world::SolveTransport(T, E, 1);
+                gi::world::SolveTransport(TT, E, 1);
                 SolveMs += MsSince(Ts);
-                if( it != 5 && it != 10 && it != 20 && it != 40 ) continue;
+                if( it != 5 && it != 20 ) continue;
                 double a = 0, b = 0, d2 = 0, Top = 1e-9; std::size_t nN = 0;
                 for( std::size_t r = 0; r < E.size(); ++r ) if( Near[r] ) { a += Lum(E[r]); b += Lum(Ref[r]); d2 += (Lum(E[r]) - Lum(Ref[r])) * (Lum(E[r]) - Lum(Ref[r])); Top = std::max(Top, Lum(Ref[r])); ++nN; }
                 std::printf("GITRANSPORT iteration %d: the near surfels' total light %.2f%% off the GPU's converged light, %.2f%% RMS (of the brightest); %.2f ms an iteration on the CPU\n",
                             it, 100 * std::abs(a - b) / std::max(b, 1e-9), 100 * std::sqrt(d2 / double(std::max<std::size_t>(nN, 1))) / Top, SolveMs / it);
+            }
             }
             std::fflush(stdout);
         }

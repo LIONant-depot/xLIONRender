@@ -2972,7 +2972,10 @@ namespace xlionrender::gi
             std::vector<std::uint32_t>  m_Col;           // per link: the row it reads
             std::vector<v3>             m_W;             // per link: its weight (albedo x read share / rays)
             std::vector<v3>             m_D;             // per row: the part no surfel carries (sky, direct, emission)
-            std::size_t                 m_nRays = 0, m_nUnsupported = 0, m_nBack = 0, m_nSky = 0, m_nFar = 0;     // (far: a hit on a level-1 instance, dropped)
+            std::size_t                 m_nRays = 0, m_nUnsupported = 0, m_nDropped = 0, m_nBack = 0, m_nSky = 0, m_nFar = 0;
+            // TruncateTransport: per row its aggregate links (the tail) to groups (a surfel's parent: its level-1 surfel); per row its group
+            std::vector<std::uint32_t>  m_AFirst, m_AGroup, m_Group, m_GroupSize;
+            std::vector<v3>             m_AW;     // (far: a hit on a level-1 instance, dropped)
             double                      m_CompileMs = 0;
         };
         transport CompileTransport(const lights& L, int Rays, unsigned Seed = 1) noexcept
@@ -3019,10 +3022,31 @@ namespace xlionrender::gi
                         m_pReadCapture = &Cap;
                         const query Q = Indirect(H);
                         m_pReadCapture = nullptr;
-                        if (!Q.m_bSupported || Cap.empty()) { ++T.m_nUnsupported; continue; }
+                        if (!Q.m_bSupported || Cap.empty())         // the solver's fallback (Unsupported), its weights; none: dropped (counted)
+                        {
+                            ++T.m_nUnsupported;
+                            Cap.clear(); m_pReadCapture = &Cap; (void)Unsupported(H); m_pReadCapture = nullptr;
+                            if (Cap.empty()) { ++T.m_nDropped; continue; }
+                        }
                         const std::uint32_t Base = T.m_InstFirst[std::size_t(H.m_Inst)];
                         for (const auto& [j, w] : Cap) Row[Base + std::uint32_t(j)] = Row[Base + std::uint32_t(j)] + Albedo * (w / float(Rays));
                     }
+                    // the emitters' light the pass adds besides its rays (FinishPass, SampleEmitters): the links', or the sampling's expectation
+                    // (every emitter in sight, by its weight: what a lane's pick averages to)
+                    if (m_Setup.m_bEmitterSampling)
+                    {
+                        const v3 C = I.m_L2W * S.m_Center, N = NormalToWorld(I, S.m_Normal);
+                        for (std::size_t k = 0; k < m_Em.size(); ++k)
+                        {
+                            if (m_Emitters[k].first == int(i) && m_Emitters[k].second == int(s)) continue;
+                            float w;
+                            if (!EmitterWeight(k, C, N, w)) continue;
+                            const v3 Dk = m_Em[k].m_C - C; const float d = Dk.Length();
+                            if (Occluded(C + N * 1e-3f, Dk * (1.0f / d), d * 0.98f)) continue;
+                            D = D + EmitterRadiance(k) * w;
+                        }
+                    }
+                    else if (s < I.m_EmitB.size()) D = D + (I.m_EmitB[s][0] + I.m_EmitB[s][1] + I.m_EmitB[s][2]) * (1.0f / 3.0f);
                     T.m_D.push_back(D);
                     for (const auto& [j, w] : Row) { T.m_Col.push_back(j); T.m_W.push_back(w); }
                     T.m_First.push_back(std::uint32_t(T.m_Col.size()));
@@ -3036,17 +3060,61 @@ namespace xlionrender::gi
         {
             const std::size_t n = T.m_D.size();
             if (E.size() != n) E.assign(n, v3{ 0, 0, 0 });
-            std::vector<v3> Next(n);
+            std::vector<v3> Next(n), Mean(T.m_GroupSize.size());
+            const bool bTail = !T.m_AFirst.empty();
             for (int it = 0; it < Iterations; ++it)
             {
+                if (bTail)
+                {
+                    std::fill(Mean.begin(), Mean.end(), v3{ 0, 0, 0 });
+                    for (std::size_t r = 0; r < n; ++r) Mean[T.m_Group[r]] = Mean[T.m_Group[r]] + E[r];
+                    for (std::size_t g = 0; g < Mean.size(); ++g) Mean[g] = Mean[g] * (1.0f / float(std::max<std::uint32_t>(T.m_GroupSize[g], 1)));
+                }
                 for (std::size_t r = 0; r < n; ++r)
                 {
                     v3 Sum = T.m_D[r];
                     for (std::uint32_t k = T.m_First[r]; k < T.m_First[r + 1]; ++k) { const v3& w = T.m_W[k]; const v3& e = E[T.m_Col[k]]; Sum = Sum + v3{ w.m_X * e.m_X, w.m_Y * e.m_Y, w.m_Z * e.m_Z }; }
+                    if (bTail) for (std::uint32_t k = T.m_AFirst[r]; k < T.m_AFirst[r + 1]; ++k) { const v3& w = T.m_AW[k]; const v3& m = Mean[T.m_AGroup[k]]; Sum = Sum + v3{ w.m_X * m.m_X, w.m_Y * m.m_Y, w.m_Z * m.m_Z }; }
                     Next[r] = Sum;
                 }
                 E.swap(Next);
             }
+        }
+        // Each row its K heaviest links (by luminance); the rest read the mean of their surfel's parent (level 1), one aggregate link per
+        // parent: an explicit tail, not dropped and not renormalized away
+        transport TruncateTransport(const transport& T, int K, bool bInstances = false) const noexcept     // (bInstances: the tail to whole instances)
+        {
+            transport O;
+            O.m_InstFirst = T.m_InstFirst; O.m_D = T.m_D; O.m_nRays = T.m_nRays; O.m_nUnsupported = T.m_nUnsupported; O.m_nDropped = T.m_nDropped;
+            O.m_nBack = T.m_nBack; O.m_nSky = T.m_nSky; O.m_nFar = T.m_nFar; O.m_CompileMs = T.m_CompileMs;
+            const std::size_t n = T.m_D.size();
+            O.m_Group.resize(n);
+            for (std::size_t i = 0, Base = 0; i < m_Instances.size(); ++i)
+            {
+                const std::size_t r0 = T.m_InstFirst[i], r1 = T.m_InstFirst[i + 1];
+                if (r1 == r0) continue;
+                const auto& Pa = m_Instances[i].m_pMesh->m_ParentOf;
+                std::uint32_t nP = 1;
+                for (std::size_t r = r0; r < r1; ++r) { const std::uint32_t p = bInstances ? 0u : (r - r0) < Pa.size() ? std::uint32_t(std::max(Pa[r - r0], 0)) : 0u; O.m_Group[r] = std::uint32_t(Base) + p; nP = std::max(nP, p + 1); }
+                Base += nP;
+                O.m_GroupSize.resize(Base, 0);
+            }
+            for (std::size_t r = 0; r < n; ++r) ++O.m_GroupSize[O.m_Group[r]];
+            const auto Lum = [](const v3& e) { return 0.2126f * e.m_X + 0.7152f * e.m_Y + 0.0722f * e.m_Z; };
+            O.m_First.push_back(0); O.m_AFirst.push_back(0);
+            std::vector<std::uint32_t> Ord; std::unordered_map<std::uint32_t, v3> Tail;
+            for (std::size_t r = 0; r < n; ++r)
+            {
+                Ord.clear(); Tail.clear();
+                for (std::uint32_t k = T.m_First[r]; k < T.m_First[r + 1]; ++k) Ord.push_back(k);
+                if (int(Ord.size()) > K) std::nth_element(Ord.begin(), Ord.begin() + K, Ord.end(), [&](std::uint32_t a, std::uint32_t b) { return Lum(T.m_W[a]) > Lum(T.m_W[b]); });
+                for (std::size_t q = 0; q < Ord.size(); ++q)
+                    if (int(q) < K) { O.m_Col.push_back(T.m_Col[Ord[q]]); O.m_W.push_back(T.m_W[Ord[q]]); }
+                    else Tail[O.m_Group[T.m_Col[Ord[q]]]] = Tail[O.m_Group[T.m_Col[Ord[q]]]] + T.m_W[Ord[q]];
+                for (const auto& [g, w] : Tail) { O.m_AGroup.push_back(g); O.m_AW.push_back(w); }
+                O.m_First.push_back(std::uint32_t(O.m_Col.size())); O.m_AFirst.push_back(std::uint32_t(O.m_AGroup.size()));
+            }
+            return O;
         }
 
         // The cache's indirect irradiance at a hit: the hit instance's level through its triangle's vertices
@@ -3163,7 +3231,9 @@ namespace xlionrender::gi
                 const float w = f * I.m_Valid[sl];
                 if (w <= 0) continue;
                 Sx += I.m_E[sl].m_X * w; Sy += I.m_E[sl].m_Y * w; Sz += I.m_E[sl].m_Z * w; W += w;
+                if (m_pReadCapture) m_pReadCapture->push_back({ sl, w });
             }
+            if (m_pReadCapture && W > 1e-6f) for (auto& [j, w] : *m_pReadCapture) w /= W;     // (CompileTransport: normalized)
             if (W > 1e-6f) return v3{ Sx / W, Sy / W, Sz / W };
             return I.m_MeanE;
         }
