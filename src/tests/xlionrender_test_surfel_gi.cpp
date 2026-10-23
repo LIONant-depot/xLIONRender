@@ -1050,6 +1050,130 @@ int main()
         CHECK(FineUnread <= CoarseUnread, "the finer grid loses quads (%d read nothing, %d before)", FineUnread, CoarseUnread);
     }
 
+    // 6k. Experiment D, step 1 (GI review: compiled transport), the CPU prototype: the Cornell box converged by the solver (the reference),
+    //     its transport compiled once from the solver's own rays and reads (world::CompileTransport) and solved with no ray at all
+    //     (SolveTransport: E = D + T E). Per iteration the residual |D + T E - E| and the error against the converged world; the links
+    {
+        cornell C;
+        MakeCornell(C, 0.5f, false);
+        Converge(C, 64, 200);
+        auto& W = C.m_World;
+        std::vector<v3> Ref;
+        for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i)) Ref.push_back(e);
+        const auto T = W.CompileTransport(C.m_Lights, 1024);
+        const std::size_t n = T.m_D.size();
+        CHECK(n == Ref.size(), "the transport has %zu rows, the world %zu surfels", n, Ref.size());
+        const auto Lum = [](const v3& e) { return 0.2126 * e.m_X + 0.7152 * e.m_Y + 0.0722 * e.m_Z; };
+        double RefSum = 0; for (const auto& e : Ref) RefSum += Lum(e);
+        const auto Err = [&](const std::vector<v3>& E)      // the mean relative error per instance (its mean light) and per surfel (RMS of the brightest)
+        {
+            double Inst = 0, Top = 1e-9, Rms = 0;
+            for (const auto& e : Ref) Top = std::max(Top, Lum(e));
+            for (int i = 0; i < W.InstanceCount(); ++i)
+            {
+                double a = 0, b = 0;
+                for (std::uint32_t r = T.m_InstFirst[std::size_t(i)]; r < T.m_InstFirst[std::size_t(i) + 1]; ++r) { a += Lum(E[r]); b += Lum(Ref[r]); }
+                Inst = std::max(Inst, std::abs(a - b) / std::max(b, 1e-9));
+            }
+            for (std::size_t r = 0; r < n; ++r) Rms += (Lum(E[r]) - Lum(Ref[r])) * (Lum(E[r]) - Lum(Ref[r]));
+            return std::pair{ Inst, std::sqrt(Rms / double(n)) / Top };
+        };
+        std::vector<v3> E;
+        std::printf("compiled transport (Cornell, %zu surfels, 1024 rays each): %.0f ms to compile, %zu links (%.1f a surfel, %.1f KB at 16 B), %.2f%% of rays unsupported, %.2f%% sky\n",
+                    n, T.m_CompileMs, T.m_Col.size(), double(T.m_Col.size()) / double(n), T.m_Col.size() * 16.0 / 1024.0, 100.0 * double(T.m_nUnsupported) / double(T.m_nRays), 100.0 * double(T.m_nSky) / double(T.m_nRays));
+        int Within = -1;
+        double SolveMs = 0;
+        for (int it = 1; it <= 12; ++it)
+        {
+            const auto Ts = std::chrono::steady_clock::now();
+            world::SolveTransport(T, E, 1);
+            SolveMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - Ts).count();
+            std::vector<v3> F = E; world::SolveTransport(T, F, 1);
+            double Res = 0; for (std::size_t r = 0; r < n; ++r) Res += std::abs(Lum(F[r]) - Lum(E[r]));
+            const auto [Inst, Rms] = Err(E);
+            if (Within < 0 && Inst < 0.01) Within = it;
+            std::printf("  iteration %2d: residual %.2e of the light, the converged world's instances off by %.2f%% at most, surfels by %.2f%% RMS (of the brightest)\n", it, Res / RefSum, 100 * Inst, 100 * Rms);
+        }
+        std::printf("  within 1%% of the converged world's instances after %d iterations (%.3f ms an iteration on the CPU)\n", Within, SolveMs / 12);
+        const auto [Inst, Rms] = Err(E);
+        CHECK(Inst < 0.03, "the compiled transport's light is %.1f%% off the converged world's (an instance's mean)", 100 * Inst);
+
+        // Top K: each row keeps its K heaviest links; the rest is not dropped and not renormalized away - it reads the mean of the instance
+        // each dropped link pointed into (per row, one aggregate link per such instance: a two-level hierarchy)
+        for (const bool bParents : { false, true })
+        for (const int K : { 8, 16, 32, 64 })
+        {
+            // the groups the tail reads the mean of: whole instances, or the surfels' parents (their own level 1)
+            std::vector<int> InstOf(n);
+            int nInst = 0;
+            for (int i = 0; i < W.InstanceCount(); ++i)
+            {
+                const auto& Pa = C.m_Meshes[std::size_t(i)].m_ParentOf;
+                int nP = 1;
+                for (std::uint32_t r = T.m_InstFirst[std::size_t(i)]; r < T.m_InstFirst[std::size_t(i) + 1]; ++r)
+                {
+                    const int p = bParents ? Pa[r - T.m_InstFirst[std::size_t(i)]] : 0;
+                    InstOf[r] = nInst + p; nP = std::max(nP, p + 1);
+                }
+                nInst += nP;
+            }
+            std::vector<int> GroupSize(static_cast<std::size_t>(nInst), 0);
+            for (std::size_t r = 0; r < n; ++r) ++GroupSize[std::size_t(InstOf[r])];
+            std::vector<std::uint32_t> First{ 0 }, Col; std::vector<v3> Wk; std::vector<std::uint32_t> AFirst{ 0 }; std::vector<int> AInst; std::vector<v3> AW;
+            for (std::size_t r = 0; r < n; ++r)
+            {
+                std::vector<std::uint32_t> Ord;
+                for (std::uint32_t k = T.m_First[r]; k < T.m_First[r + 1]; ++k) Ord.push_back(k);
+                std::sort(Ord.begin(), Ord.end(), [&](std::uint32_t x, std::uint32_t y) { return Lum(T.m_W[x]) > Lum(T.m_W[y]); });
+                std::vector<v3> Tail(std::size_t(nInst), v3{ 0, 0, 0 });
+                for (std::size_t q = 0; q < Ord.size(); ++q)
+                    if (int(q) < K) { Col.push_back(T.m_Col[Ord[q]]); Wk.push_back(T.m_W[Ord[q]]); }
+                    else Tail[std::size_t(InstOf[T.m_Col[Ord[q]]])] = Tail[std::size_t(InstOf[T.m_Col[Ord[q]]])] + T.m_W[Ord[q]];
+                for (int i = 0; i < nInst; ++i) if (Lum(Tail[std::size_t(i)]) > 0) { AInst.push_back(i); AW.push_back(Tail[std::size_t(i)]); }
+                First.push_back(std::uint32_t(Col.size())); AFirst.push_back(std::uint32_t(AInst.size()));
+            }
+            std::vector<v3> Ek(n, v3{ 0, 0, 0 }), Next(n), InstMean(static_cast<std::size_t>(nInst));
+            int WithinK = -1;
+            for (int it = 1; it <= 30; ++it)
+            {
+                std::fill(InstMean.begin(), InstMean.end(), v3{ 0, 0, 0 });
+                for (std::size_t r = 0; r < n; ++r) InstMean[std::size_t(InstOf[r])] = InstMean[std::size_t(InstOf[r])] + Ek[r];
+                for (int i = 0; i < nInst; ++i) InstMean[std::size_t(i)] = InstMean[std::size_t(i)] * (1.0f / float(std::max(GroupSize[std::size_t(i)], 1)));
+                for (std::size_t r = 0; r < n; ++r)
+                {
+                    v3 Sum = T.m_D[r];
+                    for (auto k = First[r]; k < First[r + 1]; ++k) Sum = Sum + v3{ Wk[k].m_X * Ek[Col[k]].m_X, Wk[k].m_Y * Ek[Col[k]].m_Y, Wk[k].m_Z * Ek[Col[k]].m_Z };
+                    for (auto k = AFirst[r]; k < AFirst[r + 1]; ++k) { const v3& m = InstMean[std::size_t(AInst[k])]; Sum = Sum + v3{ AW[k].m_X * m.m_X, AW[k].m_Y * m.m_Y, AW[k].m_Z * m.m_Z }; }
+                    Next[r] = Sum;
+                }
+                Ek.swap(Next);
+                if (WithinK < 0 && Err(Ek).first < 0.01) WithinK = it;
+            }
+            const auto [I2, R2] = Err(Ek);
+            std::printf("  top %2d links + the tail to %.1f %s means a surfel (%.1f KB): converged off the world by %.2f%% (instances), %.2f%% RMS (surfels); within 1%% after %d iterations\n",
+                        K, double(AInst.size()) / double(n), bParents ? "parent" : "instance", (Col.size() + AInst.size()) * 16.0 / 1024.0, 100 * I2, 100 * R2, WithinK);
+        }
+
+        // The solver's own time to the same 1%, from scratch, every surfel every update (64 rays: the reference's)
+        {
+            cornell C2;
+            MakeCornell(C2, 0.5f, false);
+            C2.m_World.m_Setup.m_RaysPerSurfel = 64;
+            int Updates = 0;
+            for (; Updates < 400; ++Updates)
+            {
+                C2.m_World.Update(C2.m_Lights, { 0, 0, -0.9f }, 1 << 30, 900 + Updates);
+                std::vector<v3> E2;
+                for (int i = 0; i < C2.m_World.InstanceCount(); ++i) for (const auto& e : C2.m_World.InstanceLight(i)) E2.push_back(e);
+                const double e2 = Err(E2).first;
+                if (Updates + 1 == 10 || Updates + 1 == 30 || Updates + 1 == 100 || Updates + 1 == 200) std::printf("  the solver from scratch after %d updates: instances off by %.2f%%\n", Updates + 1, 100 * e2);
+                if (e2 < 0.01) break;
+            }
+            std::printf("  the solver from scratch: within 1%% of the converged world after %d updates (64 rays a surfel each: %zu rays; the compile cast %zu once)\n",
+                        Updates + 1, std::size_t(Updates + 1) * 64 * n, T.m_nRays);
+        }
+    }
+
     // 6j3. The sky by direction (lights::SkyAt): a 4 x 4 octahedral map with down (-Y) at the center and the seams up (the renderer's
     //      coarsest prefiltered level): a ray leaving downward reads the center texels, one leaving upward the corners
     {

@@ -2960,6 +2960,94 @@ namespace xlionrender::gi
             return E;
         }
 
+        // Experiment D, step 1 (GI review: compiled transport), the CPU prototype. Each surfel's irradiance as the solver estimates it is
+        // linear in the others' once the reads' weights are fixed (validity, moments: as they are now): E_s = D_s + sum_j T_sj E_j, with
+        // D_s the sky, the direct light and the emission its rays bring and T_sj the albedo-weighted share of surfel j in the reads at its
+        // rays' hits (the solver's own cosine rays, origins and reads). CompileTransport casts Rays a surfel once; SolveTransport iterates
+        // E = D + T E with no ray at all. Level 0 of every instance; unsupported hits are counted and dropped (their share is reported)
+        struct transport
+        {
+            std::vector<std::uint32_t>  m_InstFirst;     // per instance its first row (+1: the total)
+            std::vector<std::uint32_t>  m_First;         // per row its first link (+1)
+            std::vector<std::uint32_t>  m_Col;           // per link: the row it reads
+            std::vector<v3>             m_W;             // per link: its weight (albedo x read share / rays)
+            std::vector<v3>             m_D;             // per row: the part no surfel carries (sky, direct, emission)
+            std::size_t                 m_nRays = 0, m_nUnsupported = 0, m_nBack = 0, m_nSky = 0;
+            double                      m_CompileMs = 0;
+        };
+        transport CompileTransport(const lights& L, int Rays, unsigned Seed = 1) noexcept
+        {
+            const auto T0 = std::chrono::steady_clock::now();
+            BuildTlas();
+            transport T;
+            T.m_InstFirst.push_back(0);
+            for (const auto& I : m_Instances) T.m_InstFirst.push_back(T.m_InstFirst.back() + std::uint32_t(I.m_bAlive ? I.m_pMesh->m_Levels[0].size() : 0));
+            T.m_First.push_back(0);
+            std::vector<std::pair<int, float>> Cap;
+            std::unordered_map<std::uint32_t, v3> Row;
+            rng R(Seed);
+            for (std::size_t i = 0; i < m_Instances.size(); ++i)
+            {
+                const auto& I = m_Instances[i];
+                if (!I.m_bAlive) continue;
+                const auto& Mo = *I.m_pMesh;
+                for (std::size_t s = 0; s < Mo.m_Levels[0].size(); ++s)
+                {
+                    const auto& S = Mo.m_Levels[0][s];
+                    const bool bSpread = Mo.m_OriginFirst.size() == Mo.m_Levels[0].size() + 1;
+                    const std::uint32_t o0 = bSpread ? Mo.m_OriginFirst[s] : 0, nO = bSpread ? Mo.m_OriginFirst[s + 1] - o0 : 0;
+                    v3 D{ 0, 0, 0 };
+                    Row.clear();
+                    const float Off1 = R.Next(), Off2 = R.Next();
+                    for (int r = 0; r < Rays; ++r)
+                    {
+                        v3 Cr = I.m_L2W * S.m_Center, Nr = NormalToWorld(I, S.m_Normal);
+                        if (nO > 1) { const std::uint32_t k = o0 + std::uint32_t(r) % nO; Cr = I.m_L2W * Mo.m_OriginPos[k]; Nr = NormalToWorld(I, Mo.m_OriginNrm[k]); }
+                        const v3 Dir = StratifiedCosineDir(Nr, r, Rays, Off1, Off2);
+                        const hit H = Cast(Cr + Nr * 1e-3f, Dir);
+                        ++T.m_nRays;
+                        if (H.m_Inst < 0) { D = D + L.SkyAt(Dir) * (pi_v / float(Rays)); ++T.m_nSky; continue; }
+                        const v3 Nh = HitNormal(H);
+                        if (Nh.Dot(Dir) > 0) { ++T.m_nBack; continue; }
+                        v3 Albedo, Emission;
+                        SurfaceAt(H, Albedo, Emission);
+                        const v3 Dl = Direct(HitPosition(H), Nh, L);
+                        const v3 Em = I.m_EmitB.empty() && !m_Setup.m_bEmitterSampling ? Emission : v3{ 0, 0, 0 };
+                        D = D + (v3{ Albedo.m_X * Dl.m_X, Albedo.m_Y * Dl.m_Y, Albedo.m_Z * Dl.m_Z } + Em * pi_v) * (1.0f / float(Rays));
+                        Cap.clear();
+                        m_pReadCapture = &Cap;
+                        const query Q = Indirect(H);
+                        m_pReadCapture = nullptr;
+                        if (!Q.m_bSupported || Cap.empty()) { ++T.m_nUnsupported; continue; }
+                        const std::uint32_t Base = T.m_InstFirst[std::size_t(H.m_Inst)];
+                        for (const auto& [j, w] : Cap) Row[Base + std::uint32_t(j)] = Row[Base + std::uint32_t(j)] + Albedo * (w / float(Rays));
+                    }
+                    T.m_D.push_back(D);
+                    for (const auto& [j, w] : Row) { T.m_Col.push_back(j); T.m_W.push_back(w); }
+                    T.m_First.push_back(std::uint32_t(T.m_Col.size()));
+                }
+            }
+            T.m_CompileMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+            return T;
+        }
+        // Iterations of E = D + T E (Jacobi), from E (empty: from zero)
+        static void SolveTransport(const transport& T, std::vector<v3>& E, int Iterations) noexcept
+        {
+            const std::size_t n = T.m_D.size();
+            if (E.size() != n) E.assign(n, v3{ 0, 0, 0 });
+            std::vector<v3> Next(n);
+            for (int it = 0; it < Iterations; ++it)
+            {
+                for (std::size_t r = 0; r < n; ++r)
+                {
+                    v3 Sum = T.m_D[r];
+                    for (std::uint32_t k = T.m_First[r]; k < T.m_First[r + 1]; ++k) { const v3& w = T.m_W[k]; const v3& e = E[T.m_Col[k]]; Sum = Sum + v3{ w.m_X * e.m_X, w.m_Y * e.m_Y, w.m_Z * e.m_Z }; }
+                    Next[r] = Sum;
+                }
+                E.swap(Next);
+            }
+        }
+
         // The cache's indirect irradiance at a hit: the hit instance's level through its triangle's vertices
         // The light a ray's hit point reads (the hit triangle's vertices' surfels, as the GPU's vertex read): the solver's GI query. Unsupported
         // (no valid surfel facing the hit's way at any of its vertices) is not dark: Update applies the policy (Unsupported)
@@ -2976,14 +3064,17 @@ namespace xlionrender::gi
             if (M.m_bLeakProtection && !M.m_ReadTable.empty()) return ReadPoint(H.m_Inst, M.m_Pos[T[0]] * B[0] + M.m_Pos[T[1]] * B[1] + M.m_Pos[T[2]] * B[2]
                                                        , (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy());
             v3 Sum{ 0, 0, 0 }; float W = 0;
+            const std::size_t Cap0 = m_pReadCapture ? m_pReadCapture->size() : 0;
             for (int k = 0; k < 3; ++k)
             {
                 float w = 0;
+                m_CaptureScale = B[k];
                 const v3 E = ReadVertex(I, T[k], w);
                 Sum = Sum + E * B[k];
                 W += w * B[k];
             }
             if (W <= 0) return {};
+            if (m_pReadCapture) for (std::size_t k = Cap0; k < m_pReadCapture->size(); ++k) (*m_pReadCapture)[k].second /= W;     // (normalized: the read is their mean)
             return { Sum * (1.0f / W), W, true };
         }
         // The surfels a point of an instance's surface (mesh space, its face's normal) reads: the read grid's patch for it and the weights of
@@ -3026,9 +3117,17 @@ namespace xlionrender::gi
                 const float w0 = f * f * c * cn * Corner * pValid[sl];
                 if (w0 <= 0) continue;
                 Rx += pE[sl].m_X * w0; Ry += pE[sl].m_Y * w0; Rz += pE[sl].m_Z * w0; RW += w0;
+                if (m_pReadCapture) m_CapT2.push_back({ sl, w0 });
                 const float w = w0 * Visibility(Id, sl, P);
                 if (w <= 0) continue;
                 Sx += pE[sl].m_X * w; Sy += pE[sl].m_Y * w; Sz += pE[sl].m_Z * w; W += w;
+                if (m_pReadCapture) m_CapT1.push_back({ sl, w });
+            }
+            if (m_pReadCapture)     // (CompileTransport: the tier used, normalized)
+            {
+                const bool b1 = W > 1e-6f; const float Wt = b1 ? W : RW;
+                if (Wt > 1e-6f) for (const auto& [j, w] : b1 ? m_CapT1 : m_CapT2) m_pReadCapture->push_back({ j, w / Wt });
+                m_CapT1.clear(); m_CapT2.clear();
             }
             // The moments' test rejects every surfel (next to a wall's foot: their rays met the wall just past the point): its own surfels
             // without it (SurfelGIQuery's second tier) - the corner weights still keep the other side of a wall out
@@ -4573,10 +4672,14 @@ namespace xlionrender::gi
                 const float w = (f * f * c + 1e-6f) * I.m_Valid[s];
                 Sum = Sum + I.m_E[s] * w;
                 W += w;
+                if (m_pReadCapture && w > 0) m_pReadCapture->push_back({ s, w * m_CaptureScale });     // (CompileTransport)
             }
             return Sum;
         }
 
+        mutable std::vector<std::pair<int, float>>*  m_pReadCapture = nullptr;     // CompileTransport: the reads report their surfels' weights here
+        mutable float                           m_CaptureScale = 1;         //   (a vertex's share of the triangle read)
+        mutable std::vector<std::pair<int, float>>   m_CapT1, m_CapT2;          //   (ReadPoint's two tiers)
         bool                                    m_bEmittersDirty = false;   // m_Emitters / m_Em are made again (PumpLinks)
         std::deque<int>                         m_LinkQueue;                // receivers waiting for a link build (MarkLinks)
         link_build                              m_LinkCur;                  // the one being built
