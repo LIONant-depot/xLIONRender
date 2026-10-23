@@ -38,29 +38,36 @@ namespace xlionrender::gi
                 && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 });
         }
 
-        // Before world::Update: the slice of an earlier frame (done: that frame's PageFlip waited for it) and the means into the world; a
-        // read back asked for, into its arrays. true: a slice was delivered
+        // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
+        // waited for the one before) into the world - the means, the oldest slice's stats; never a wait for the frame in flight. A read
+        // back asked for, into its arrays. true: a slice was delivered
+        static constexpr std::uint64_t lag_frames_v = 2;
         bool Collect(world& W, std::uint64_t Frame) noexcept
         {
             if (m_ReadFrame != ~0ull && Frame > m_ReadFrame) FinishReadBack(W);
-            if (m_InFlight == ~0ull || Frame <= m_InFlight) return false;
-            m_InFlight = ~0ull;
+            for (int Pass = 0; Pass < 2; ++Pass)            // (both done: the older first, the newer last)
+            {
+                int k = -1;
+                for (int j = 0; j < 2; ++j)
+                    if (m_MeansFrame[j] != ~0ull && Frame >= m_MeansFrame[j] + lag_frames_v && (k < 0 || m_MeansFrame[j] < m_MeansFrame[k])) k = j;
+                if (k < 0) break;
+                m_MeansOut.resize(std::size_t(5) * m_MeansCount[k]);
+                if (!m_MeansOut.empty() && !m_MeansB2[k].MemoryMapFrameRegion(0, int(m_MeansOut.size()), [&](void* p) { std::memcpy(m_MeansOut.data(), p, m_MeansOut.size() * sizeof(float)); })) W.SetGPUMeans(m_MeansOut);
+                m_MeansFrame[k] = ~0ull;
+            }
+            if (m_nSlicesOut == 0 || Frame < m_SlicesOut[0].m_Frame + lag_frames_v) return false;
+            const auto Sl = m_SlicesOut[0];
+            m_SlicesOut[0] = m_SlicesOut[1]; --m_nSlicesOut;
             std::vector<std::uint64_t> Ns;
-            if (m_SliceCount > 0 && m_Times.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] > Ns[0])
+            if (m_Times.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] > Ns[0])
             {
                 m_LastMs = double(Ns[1] - Ns[0]) * 1e-6;
                 m_RaysPerMs = double(m_LastRays) / std::max(m_LastMs, 1e-3);
                 m_bMeasured = true;
             }
-            if (m_bMeansIn)
-            {
-                m_MeansOut.resize(std::size_t(5) * m_Data[1]);
-                if (!m_MeansOut.empty() && !m_MeansB.MemoryMap(0, int(m_MeansOut.size()), [&](void* p) { std::memcpy(m_MeansOut.data(), p, m_MeansOut.size() * sizeof(float)); })) W.SetGPUMeans(m_MeansOut);
-                m_bMeansIn = false;
-            }
-            if (m_SliceCount == 0) return false;
-            m_StatsOut.resize(m_SliceCount);
-            if (m_StatsB.MemoryMap(int(m_SliceFirst), int(m_SliceCount), [&](void* p) { std::memcpy(m_StatsOut.data(), p, m_StatsOut.size() * sizeof(world::gpu_range_stats)); })) return false;
+            if (Sl.m_Count == 0) return false;
+            m_StatsOut.resize(Sl.m_Count);
+            if (m_StatsB.MemoryMapFrameRegion(int(Sl.m_First), int(Sl.m_Count), [&](void* p) { std::memcpy(m_StatsOut.data(), p, m_StatsOut.size() * sizeof(world::gpu_range_stats)); })) return false;
             if (W.m_Setup.m_bAblateStats)      // measurement only (GI review, experiment A): the work counters per hit, printed about every 2 s
             {
                 for (auto& S : m_StatsOut)
@@ -75,10 +82,9 @@ namespace xlionrender::gi
                         double(m_Diag[4]) / double(std::max<long long>(m_Diag[5], 1)), double(m_Diag[6]) / double(m_Diag[0]),
                         double(m_Diag[1]) / double(std::max<long long>(m_Diag[6], 1))), std::fflush(stdout);
             }
-            W.DeliverGPURanges(std::span<const world::gpu_range>(m_Ranges).subspan(m_SliceFirst, m_SliceCount), m_StatsOut);
+            W.DeliverGPURanges(std::span<const world::gpu_range>(m_Ranges).subspan(Sl.m_First, Sl.m_Count), m_StatsOut);
             m_LastRays = 0; m_LastTraced = 0;
             for (const auto& S : m_StatsOut) { m_LastRays += S.m_Rays; m_LastTraced += S.m_Traced; }
-            m_SliceCount = 0;
             return true;
         }
 
@@ -88,11 +94,18 @@ namespace xlionrender::gi
         bool Submit(xgpu::window& Window, world& W, const lights& L, std::uint64_t Frame, float BudgetMs, const v3& Eye) noexcept
         {
             { auto Ops = W.TakeGPUOps(); m_Ops.insert(m_Ops.end(), Ops.begin(), Ops.end()); }
-            if (m_InFlight != ~0ull) return false;
-            m_OldDataB = {};                                            // (the last pack's old layout: its frame is done)
-            if (W.GPUGen() != m_Gen || L.m_Points.size() != m_nPoints || m_Data.empty() || W.EmitterCount() > m_EmRoom) { if (!Pack(Window, W, L)) return false; }     // (the emitter table past its room too)
-            else if (W.GPUXformGen() != m_XformGen && !Retlas(Window, W) && !Pack(Window, W, L)) return false;     // (moved: the TLAS; its reserve full: all)
-            if (W.GPULevelGen() != m_LevelGen && !Relevel(Window, W) && !Pack(Window, W, L)) return false;       // (a level switch: in place; no room: all)
+            const bool bStructural = W.GPUGen() != m_Gen || L.m_Points.size() != m_nPoints || m_Data.empty() || W.EmitterCount() > m_EmRoom
+                                  || W.GPUXformGen() != m_XformGen || W.GPULevelGen() != m_LevelGen;
+            // Slices out (their stats not read yet: lag_frames_v): another of the same batch may go, two at most; a new batch, a pack,
+            // a move or a level switch, an op wait for them to come back (the ranges and the records they name must stay as they were)
+            if (m_nSlicesOut > 0 && (m_nSlicesOut >= 2 || bStructural || !m_Ops.empty() || m_NextRange >= m_Ranges.size())) return false;
+            if (m_nSlicesOut == 0)
+            {
+                m_OldDataB = {};                                        // (the last pack's old layout: its frame is done)
+                if (W.GPUGen() != m_Gen || L.m_Points.size() != m_nPoints || m_Data.empty() || W.EmitterCount() > m_EmRoom) { if (!Pack(Window, W, L)) return false; }     // (the emitter table past its room too)
+                else if (W.GPUXformGen() != m_XformGen && !Retlas(Window, W) && !Pack(Window, W, L)) return false;     // (moved: the TLAS; its reserve full: all)
+                if (W.GPULevelGen() != m_LevelGen && !Relevel(Window, W) && !Pack(Window, W, L)) return false;       // (a level switch: in place; no room: all)
+            }
             if (!ApplyOps(Window, W) || !Refresh(Window, W, L)) return false;
             bool bSlice = false;
             if (m_NextRange >= m_Ranges.size())
@@ -105,8 +118,9 @@ namespace xlionrender::gi
                     std::vector<std::array<int, 8>> G(m_Ranges.size());
                     for (std::size_t k = 0; k < G.size(); ++k) { const auto& r = m_Ranges[k]; G[k] = { r.m_Inst, r.m_Level, r.m_First, r.m_Count, r.m_Flags, r.m_History, int(r.m_Seed), r.m_Start }; }
                     std::vector<world::gpu_range_stats> Zeros(m_Ranges.size());
-                    if (!Fit(m_RangeB, int(sizeof(G[0])), G.size()) || m_RangeB.MemoryMap(0, int(G.size()), [&](void* p) { std::memcpy(p, G.data(), G.size() * sizeof(G[0])); })) return false;
-                    if (!Fit(m_StatsB, int(sizeof(world::gpu_range_stats)), Zeros.size()) || m_StatsB.MemoryMap(0, int(Zeros.size()), [&](void* p) { std::memcpy(p, Zeros.data(), Zeros.size() * sizeof(Zeros[0])); })) return false;
+                    // (no slice out reads them: a new batch waits for the last one's stats, two frames on)
+                    if (!Fit(m_RangeB, int(sizeof(G[0])), G.size()) || m_RangeB.MemoryMapFrameRegion(0, int(G.size()), [&](void* p) { std::memcpy(p, G.data(), G.size() * sizeof(G[0])); })) return false;
+                    if (!Fit(m_StatsB, int(sizeof(world::gpu_range_stats)), Zeros.size()) || m_StatsB.MemoryMapFrameRegion(0, int(Zeros.size()), [&](void* p) { std::memcpy(p, Zeros.data(), Zeros.size() * sizeof(Zeros[0])); })) return false;
                     ++m_nBatches;
                 }
             }
@@ -120,20 +134,21 @@ namespace xlionrender::gi
                 for (std::size_t k = m_SliceFirst; k < m_NextRange; ++k) nThreads += m_Ranges[k].m_Count;
                 m_SliceCount = m_NextRange - m_SliceFirst;
                 const std::uint32_t Zero[4] = {};
+                auto& CountB = m_CountB2[m_nSlices % 2];                // (two: the slice before may still be running)
                 if (!FitLocal(m_ItemB, int(sizeof(world::gpu_item)), std::size_t(nThreads)) || !FitLocal(m_Results, int(sizeof(world::gpu_result)), std::size_t(nThreads))
-                    || !Fit(m_CountB, int(sizeof(std::uint32_t)), 4) || m_CountB.MemoryMap(0, 4, [&](void* p) { std::memcpy(p, Zero, sizeof(Zero)); })) return false;
+                    || !Fit(CountB, int(sizeof(std::uint32_t)), 4) || CountB.MemoryMapFrameRegion(0, 4, [&](void* p) { std::memcpy(p, Zero, sizeof(Zero)); })) return false;
                 const struct { int m_RangeFirst, m_nRanges, m_nThreads, m_StartBase; float m_Eye[4]; } EPush{ int(m_SliceFirst), int(m_SliceCount), nThreads, m_Ranges[m_SliceFirst].m_Start, { Eye.m_X, Eye.m_Y, Eye.m_Z, 0 } };
                 const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First; } Push{ nThreads, m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0 };
                 const struct { int m_nItems, m_First, m_Count, m_Pad; } CPush{ nThreads, 0, nThreads, 0 };
-                xgpu::buffer* EBufs[] = { &m_DataB, &m_RangeB, &m_ItemB, &m_CountB };
-                xgpu::buffer* Bufs[]  = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ItemB, &m_Results, &m_CountB };
-                xgpu::buffer* CBufs[] = { &m_DataB, &m_ItemB, &m_Results, &m_StatsB, &m_CountB };
+                xgpu::buffer* EBufs[] = { &m_DataB, &m_RangeB, &m_ItemB, &CountB };
+                xgpu::buffer* Bufs[]  = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ItemB, &m_Results, &CountB };
+                xgpu::buffer* CBufs[] = { &m_DataB, &m_ItemB, &m_Results, &m_StatsB, &CountB };
                 Window.WriteTimestamp(m_Times, 0);
                 Window.Dispatch(m_Expand, EBufs, &EPush, sizeof(EPush), (nThreads + 63) / 64);
                 Window.Dispatch(m_Pass, Bufs, &Push, sizeof(Push), world::GPUGroups(std::size_t(nThreads)));
                 Window.Dispatch(m_Commit, CBufs, &CPush, sizeof(CPush), (nThreads + 63) / 64);
                 Window.WriteTimestamp(m_Times, 1);
-                m_InFlight = Frame;
+                m_SlicesOut[m_nSlicesOut++] = { Frame, m_SliceFirst, m_SliceCount };
                 ++m_nSlices;
                 bSlice = true;
             }
@@ -153,14 +168,14 @@ namespace xlionrender::gi
                 const int Pad[4] = {};
                 Window.Dispatch(m_Cube, B, Pad, sizeof(Pad), int(Cubes.size()));
             }
-            if (m_Data[1] > 0)
+            if (m_Data[1] > 0 && m_MeansFrame[Frame % 2] == ~0ull)         // (two copies: the one written the frame before may still be running; this one read)
             {
-                if (!Fit(m_MeansB, int(sizeof(float)), std::size_t(5) * m_Data[1])) return false;
-                xgpu::buffer* B[] = { &m_DataB, &m_MeansB };
+                const int k = int(Frame % 2);
+                if (!Fit(m_MeansB2[k], int(sizeof(float)), std::size_t(5) * m_Data[1])) return false;
+                xgpu::buffer* B[] = { &m_DataB, &m_MeansB2[k] };
                 const int Pad[4] = {};
                 Window.Dispatch(m_Means, B, Pad, sizeof(Pad), int(m_Data[1]));
-                m_bMeansIn = true;
-                if (m_InFlight == ~0ull) m_InFlight = Frame;             // (the means come back the frame after, as a slice)
+                m_MeansFrame[k] = Frame; m_MeansCount[k] = m_Data[1];
             }
             return bSlice;
         }
@@ -207,8 +222,9 @@ namespace xlionrender::gi
             if (m_nShown == 0 || m_Data.empty()) return false;
             std::vector<int> P(Places.begin(), Places.end());
             P.resize(std::size_t(std::max<std::uint32_t>(m_Data[1], 1)), -1);
-            if (!Fit(m_PlaceB, int(sizeof(int)), P.size()) || m_PlaceB.MemoryMap(0, int(P.size()), [&](void* p) { std::memcpy(p, P.data(), P.size() * sizeof(int)); })) return false;
-            xgpu::buffer* Bufs[] = { &m_DataB, &m_OwnerB, &m_ScratchB, &m_PlaceB, &Light, &Moments };
+            auto& PlaceB = m_PlaceB2[m_nShows++ % 2];                  // (two: the frame before may still read its copy)
+            if (!Fit(PlaceB, int(sizeof(int)), P.size()) || PlaceB.MemoryMapFrameRegion(0, int(P.size()), [&](void* p) { std::memcpy(p, P.data(), P.size() * sizeof(int)); })) return false;
+            xgpu::buffer* Bufs[] = { &m_DataB, &m_OwnerB, &m_ScratchB, &PlaceB, &Light, &Moments };
             struct { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push{ 0, int(m_nShown), 1, Base, Saturation, 0, 0, 0 };
             const int Groups = int((m_nShown + 63) / 64);
             static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;     // measurement: the three steps' GPU time
@@ -249,7 +265,7 @@ namespace xlionrender::gi
         }
         bool ReadBackPending( void ) const noexcept { return m_ReadFrame != ~0ull; }
 
-        bool            InFlight    ( void ) const noexcept { return m_InFlight != ~0ull; }
+        bool            InFlight    ( void ) const noexcept { return m_nSlicesOut > 0; }
         bool            BatchDone   ( void ) const noexcept { return m_NextRange >= m_Ranges.size(); }    // the batch's slices are all dispatched
         double          LastMs      ( void ) const noexcept { return m_LastMs; }        // the last slice's GPU time
         double          RaysPerMs   ( void ) const noexcept { return m_RaysPerMs; }
@@ -576,7 +592,13 @@ namespace xlionrender::gi
         double                              m_ShowSum[3] = {};
         int                                 m_nShowSum = 0;
         xgpu::buffer                        m_Nodes, m_Tri4, m_Inst, m_Tlas, m_DataB, m_OldDataB, m_OwnerB, m_ScratchB;     // (device-local)
-        xgpu::buffer                        m_ItemB, m_Results, m_CountB, m_RangeB, m_StatsB, m_MeansB, m_CubeB, m_JobB, m_StageB, m_OpB, m_PlaceB, m_ReadB;
+        xgpu::buffer                        m_ItemB, m_Results, m_RangeB, m_StatsB, m_CubeB, m_JobB, m_StageB, m_OpB, m_ReadB;
+        xgpu::buffer                        m_CountB2[2], m_MeansB2[2], m_PlaceB2[2];     // two copies: what the CPU writes or reads every frame (one frame in flight)
+        struct slice_out { std::uint64_t m_Frame = 0; std::size_t m_First = 0, m_Count = 0; };
+        slice_out                           m_SlicesOut[2] = {};    // dispatched, their stats not read yet (Collect, lag_frames_v on)
+        int                                 m_nSlicesOut = 0, m_nShows = 0;
+        std::uint64_t                       m_MeansFrame[2] = { ~0ull, ~0ull };     // the frame each copy of the means was written in (~0: read)
+        std::uint32_t                       m_MeansCount[2] = {};
         world::gpu_scene                    m_Scene;
         std::vector<std::uint32_t>          m_Data;             // PackGPUSurfels' array: the layout, the world's words (the light is the GPU's)
         std::vector<world::gpu_range>       m_Ranges;           // the batch
@@ -596,12 +618,12 @@ namespace xlionrender::gi
         std::size_t                         m_EmRoom = 0;       // the emitter table's room (world::GPUEmitterRoom)
         bool                                m_bPlaced = false;  // Retlas: the records' placements go up (Refresh)
         int                                 m_nRetlas = 0;
-        std::uint64_t                       m_Gen = 0, m_InFlight = ~0ull, m_ReadFrame = ~0ull;
+        std::uint64_t                       m_Gen = 0, m_ReadFrame = ~0ull;
         std::size_t                         m_nPoints = 0, m_nShown = 0, m_UploadWords = 0, m_ReadWords = 0;
         int                                 m_LastRays = 0, m_LastTraced = 0, m_nPacks = 0, m_nBatches = 0, m_nSlices = 0, m_nOps = 0;
         double                              m_LastMs = 0, m_RaysPerMs = 0;
         int                                 m_Budget = 32768;   // (until measured)
-        bool                                m_bMeasured = false, m_bMeansIn = false;
+        bool                                m_bMeasured = false;
         long long                           m_Diag[7] = {};     // (measurement only, setup::m_bAblateStats: hits, read entries, probes, accepted, BVH nodes, rays, unsupported)
         int                                 m_nDiag = 0;
         std::uint64_t                       m_LevelGen = 0;     // world::GPULevelGen at the last Pack or Relevel

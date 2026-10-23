@@ -44,9 +44,22 @@ namespace
     const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp };
 
     // The GPU's light into the world's arrays: the last slice delivered, the read back copied, then in (two frames)
+    // Empty frames until the slices out are back (gpu_trace::Collect reads them lag_frames_v frames on)
+    void Drain(app& App, gpu_trace& T, world& W)
+    {
+        for (int f = 0; f < 8 && T.InFlight(); ++f)
+        {
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            T.Collect(W, App.m_Device.getFrameIndex());
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+        }
+    }
+
     void Sync(app& App, gpu_trace& T, world& W)
     {
-        for (int f = 0; f < 2; ++f)
+        Drain(App, T, W);
+        for (int f = 0; f < 1 + int(gpu_trace::lag_frames_v); ++f)
         {
             while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
             const std::uint64_t Frame = App.m_Device.getFrameIndex();
@@ -144,8 +157,9 @@ namespace
         };
         const auto EyeAt = [&](int u) { return bEvents && u >= 14 ? v3{ 0, 0, -60 } : bRoom ? v3{ 0, 1.6f, -1.9f } : v3{ 0, 0, -0.9f }; };
         for (int u = 0; u < Updates; ++u) { Event(Wc, Mc, u); Wc.Update(L, EyeAt(u), 1 << 30, 100 + u); Late(Wc, Mc, u); }
-        for (int u = 0; u < Updates; ++u)       // (the GPU commits a batch in the frame it traces it: the same updates)
+        for (int u = 0; u < Updates; ++u)       // (the GPU commits a batch in the frame it traces it: the same updates; its stats back first)
         {
+            Drain(App, T, Wg);
             while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
             const std::uint64_t Frame = App.m_Device.getFrameIndex();
             const auto T0 = std::chrono::steady_clock::now();
