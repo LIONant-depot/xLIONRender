@@ -374,7 +374,7 @@ namespace xlionrender
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 0);
             m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
             // Experiment D (XLION_GI_LINKS=<rays>[,settle frames[,surfels a frame]]): the links built on the GPU once the rays settled, then solved every frame
-            static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 0, 120, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
+            static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 0, 30, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
             if( s_Links[0] > 0 ) m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 1);
             if( (m_bGIToCPU && !m_bGIToCPUAsked) || (!m_GIDumpPath.empty() && !m_bGIDumpAsked) )     // the GPU's light back into the world (the next Collect)
