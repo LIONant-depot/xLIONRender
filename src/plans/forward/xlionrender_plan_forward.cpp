@@ -1507,7 +1507,10 @@ namespace xlionrender
             std::memset(&ViewBlock, 0, sizeof(ViewBlock));
             auto& Light = m_LightUBO.allocEntry<details::ubo_lighting>();
             std::memset(&Light, 0, sizeof(Light));
-            std::array<xgpu::buffer*, 9> Buffers{ &J.m_Data, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(&pM->m_GIBuffer), &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
+            // GIMesh: the empty one. The capture's GI reference is not gi_none (its debug bits say "capture"), so the material shader still runs
+            // its GI fallback (SurfelGILocalMean at the capture's position 0) before the capture output replaces it: with the mesh's read grid
+            // that walked every list of the cell at the mesh's origin for every capture pixel (the Golem: about 4 s of GPU a batch, 31 batches)
+            std::array<xgpu::buffer*, 9> Buffers{ &J.m_Data, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
             for( int a = 0; a < n; )
             {
                 const std::uint32_t Slot = Mats[J.m_Order[a]].m_iMaterial;
