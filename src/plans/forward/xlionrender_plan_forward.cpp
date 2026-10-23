@@ -37,6 +37,12 @@ namespace xlionrender
         constexpr std::uint32_t s_GIReadBackComp[] = {
             #include "xlionrender_gi_readback_comp.h"
         };
+        constexpr std::uint32_t s_GILinksComp[] = {        // experiment D: the links and their solve
+            #include "xlionrender_gi_links_comp.h"
+        };
+        constexpr std::uint32_t s_GISolveComp[] = {
+            #include "xlionrender_gi_solve_comp.h"
+        };
 
         // FNV-1a over a caster's identity and state: a different value is a different (or moved) caster
         std::uint64_t Hash(std::uint64_t H, const void* pData, std::size_t Size) noexcept
@@ -169,7 +175,7 @@ namespace xlionrender
         if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
         {
             m_pGITrace = std::make_unique<gi::gpu_trace>();
-            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp }) )
+            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp }) )
                 { m_pGITrace.reset(); m_bGITraceFailed = true; }
         }
         // The light lives on the GPU (m_bGPUOwned). Turned off, the GPU's light comes back into the world first (a read back: one frame
@@ -367,6 +373,9 @@ namespace xlionrender
             const auto TSubmit = std::chrono::steady_clock::now();
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 0);
             m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
+            // Experiment D (XLION_GI_LINKS=<rays>[,settle frames[,surfels a frame]]): the links built on the GPU once the rays settled, then solved every frame
+            static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 0, 120, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
+            if( s_Links[0] > 0 ) m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 1);
             if( (m_bGIToCPU && !m_bGIToCPUAsked) || (!m_GIDumpPath.empty() && !m_bGIDumpAsked) )     // the GPU's light back into the world (the next Collect)
                 if( m_pGITrace->ReadBack(Window, GIFrame) ) { if( m_bGIToCPU ) m_bGIToCPUAsked = true; if( !m_GIDumpPath.empty() ) m_bGIDumpAsked = true; }

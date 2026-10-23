@@ -22,7 +22,7 @@ namespace xlionrender::gi
     public:
 
         // The SPIR-V of the shaders (shaders/xlionrender_gi_*_comp.glsl)
-        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links; };     // (m_Links: optional, experiment D)
+        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links, m_Solve; };     // (m_Links, m_Solve: optional, experiment D)
 
         bool Init(xgpu::device& Device, const shaders& S) noexcept
         {
@@ -36,7 +36,8 @@ namespace xlionrender::gi
                 && Make(m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make(m_Shader[4], m_Filter, S.m_Filter, 6, 32) && Make(m_Shader[5], m_Expand, S.m_Expand, 4, 32)
                 && Make(m_Shader[6], m_Means, S.m_Means, 2, 16) && Make(m_Shader[7], m_Cube, S.m_Cube, 2, 16) && Make(m_Shader[8], m_Migrate, S.m_Migrate, 3, 16)
                 && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 })
-                && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 8, 16)) || true);
+                && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 8, 16)) || true)
+                && (S.m_Solve.empty() || (m_bSolve = Make(m_Shader[11], m_SolveC, S.m_Solve, 6, 16)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
@@ -109,6 +110,7 @@ namespace xlionrender::gi
             }
             if (!ApplyOps(Window, W) || !Refresh(Window, W, L)) return false;
             bool bSlice = false;
+            if (m_LinkState == 2 && m_LinkSolves > 0) return false;      // experiment D: the links own the light (no more slices: they would overwrite it)
             if (m_NextRange >= m_Ranges.size())
             {
                 const auto R = W.GPURanges();
@@ -176,7 +178,7 @@ namespace xlionrender::gi
                 xgpu::buffer* B[] = { &m_DataB, &m_MeansB2[k] };
                 const int Pad[4] = {};
                 Window.Dispatch(m_Means, B, Pad, sizeof(Pad), int(m_Data[1]));
-                m_MeansFrame[k] = Frame; m_MeansCount[k] = m_Data[1];
+                m_MeansFrame[k] = Frame; m_MeansCount[k] = m_Data[1]; m_LastMeans = k;
             }
             return bSlice;
         }
@@ -205,6 +207,49 @@ namespace xlionrender::gi
             Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int(Count));
             return true;
         }
+        // One Jacobi iteration over the links built (xlionrender_gi_solve_comp.glsl): into a scratch, then into the surfels' light. After
+        // Submit (its means: the tail's instance means) and before Show (what it shows)
+        bool SolveLinks(xgpu::window& Window, std::size_t nItems) noexcept
+        {
+            if (!m_bSolve || nItems == 0 || m_Data.empty() || m_LastMeans < 0) return false;
+            if (!FitLocal(m_LinkNextB, int(4 * sizeof(float)), nItems)) return false;
+            const int Groups = int((nItems + 63) / 64);
+            xgpu::buffer* B[] = { &m_DataB, &m_LinkB, &m_LinkDB, &m_LinkItemB, &m_MeansB2[m_LastMeans], &m_LinkNextB };
+            struct { int m_nItems, m_Mode, m_nInst, m_Links; } Push{ int(nItems), 0, int(m_Data[1]), links_v };
+            Window.Dispatch(m_SolveC, B, &Push, sizeof(Push), Groups);
+            Push.m_Mode = 1;
+            Window.Dispatch(m_SolveC, B, &Push, sizeof(Push), Groups);
+            return true;
+        }
+        // Experiment D in a renderer (XLION_GI_LINKS): after Settle frames of the ray solver (the reads' validity and moments), the links of
+        // every level-0 surfel are built, PerFrame surfels a frame; two frames after the last slice they are solved, one iteration a frame.
+        // A pack, a move or a level switch drops them (built again Settle frames on). After Submit, before Show
+        void PumpLinks(xgpu::window& Window, world& W, const lights& L, std::uint64_t Frame, int Rays, int Settle, int PerFrame) noexcept
+        {
+            if (!m_bLinks || !m_bSolve || m_Data.empty()) return;
+            const std::uint64_t Key = m_Gen ^ (m_XformGen << 20) ^ (m_LevelGen << 40);
+            if (Key != m_LinkKey) { m_LinkKey = Key; m_LinkState = 0; m_LinkSince = Frame; m_LinkItems.clear(); }
+            if (m_LinkState == 0 && Frame >= m_LinkSince + std::uint64_t(Settle))
+            {
+                for (int i = 0; i < W.InstanceCount(); ++i)
+                    if (W.IsAlive(i) && W.Level(i) == 0) for (std::size_t s = 0; s < W.InstanceSurfels0(i); ++s) m_LinkItems.push_back({ i, int(s) });
+                m_LinkCursor = 0; m_LinkState = m_LinkItems.empty() ? 3 : 1;
+                m_LinkT0 = std::chrono::steady_clock::now();
+            }
+            if (m_LinkState == 1)
+            {
+                if (!BuildLinks(Window, W, L, m_LinkItems, Rays, m_LinkCursor, std::size_t(PerFrame))) { m_LinkState = 3; return; }
+                m_LinkCursor += std::size_t(PerFrame);
+                if (m_LinkCursor >= m_LinkItems.size()) { m_LinkState = 2; m_LinkReady = Frame + 2; }
+            }
+            if (m_LinkState == 2 && Frame >= m_LinkReady)
+            {
+                if (m_LinkSolves == 0) std::printf("GILINKS %zu surfels' links built in %.0f ms (%d rays each, %d a frame); solving\n", m_LinkItems.size(),
+                                                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_LinkT0).count(), Rays, PerFrame), std::fflush(stdout);
+                if (SolveLinks(Window, m_LinkItems.size())) ++m_LinkSolves;
+            }
+        }
+
         // What BuildLinks wrote (its frame done) as the world's transport: rows in Items' order (all of the world's level-0 surfels, in
         // order: the CPU's rows), the tail grouped by instance (world::TruncateTransport's tail through the instances)
         bool ReadLinks(const world& W, std::span<const std::array<int, 2>> Items, world::transport& T, double* pDropped = nullptr) noexcept
@@ -643,10 +688,16 @@ namespace xlionrender::gi
         }
 
         xgpu::device*                       m_pDevice = nullptr;
-        xgpu::shader                        m_Shader[11];
+        xgpu::shader                        m_Shader[12];
         xgpu::compute                       m_LinksC;           // experiment D: the link build (optional: shaders::m_Links)
-        xgpu::buffer                        m_LinkItemB, m_LinkB, m_LinkDB;
-        bool                                m_bLinks = false;
+        xgpu::buffer                        m_LinkItemB, m_LinkB, m_LinkDB, m_LinkNextB;
+        bool                                m_bLinks = false, m_bSolve = false;
+        xgpu::compute                       m_SolveC;
+        std::vector<std::array<int, 2>>     m_LinkItems;        // PumpLinks: the surfels with links, its state (0 settling, 1 building, 2 solving, 3 off)
+        int                                 m_LinkState = 0, m_LastMeans = -1;
+        std::size_t                         m_LinkCursor = 0, m_LinkSolves = 0;
+        std::uint64_t                       m_LinkKey = ~0ull, m_LinkSince = 0, m_LinkReady = 0;
+        std::chrono::steady_clock::time_point m_LinkT0{};
         xgpu::compute                       m_Pass, m_Scatter, m_Commit, m_OpsC, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBackC;
         xgpu::timestamps                    m_Times;
         xgpu::timestamps                    m_ShowTimes;        // measurement (XLION_GPU_TIMES): Show's steps
