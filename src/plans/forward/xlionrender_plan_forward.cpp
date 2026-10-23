@@ -80,8 +80,8 @@ namespace xlionrender
         constexpr int    region_v = max_instances_v + max_transient_v;
         const int        Base     = int(Frame % ring_frames_v) * region_v;
         std::vector<xgpu::buffer::copy> Regions;
-        (void)m_EntityParamsRing.MemoryMap(Base, region_v, [&](void* pEntityMemory) {
-        (void)m_InstanceRing.MemoryMap(Base, region_v, [&](void* pMemory)
+        (void)m_EntityParamsRing.MemoryMapFrameRegion(Base, region_v, [&](void* pEntityMemory) {        // (this frame's slot: no wait for the frame in flight)
+        (void)m_InstanceRing.MemoryMapFrameRegion(Base, region_v, [&](void* pMemory)
         {
             auto* pRing    = static_cast<details::instance_data*>(pMemory);
             auto* pEntRing = static_cast<entity_params*>(pEntityMemory);
@@ -412,7 +412,7 @@ namespace xlionrender
                                         | (Scene.m_GI.m_bMoments ? 0u : 0x4000u);                   // gi_no_moments_v
         const auto TRing = std::chrono::steady_clock::now();
         std::size_t Entries = 0, MomentUints = 0;
-        (void)m_GILightRing.MemoryMap(std::size_t(Base), std::size_t(gi_light_region_v), [&](void* pMemory)     // a uvec4 a surfel: 3 colors in RGB9E5, the validity's bits
+        (void)m_GILightRing.MemoryMapFrameRegion(std::size_t(Base), std::size_t(gi_light_region_v), [&](void* pMemory)     // a uvec4 a surfel: 3 colors in RGB9E5, the validity's bits
         {
             auto* pOut = static_cast<std::array<std::uint32_t, 4>*>(pMemory);
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
@@ -452,7 +452,7 @@ namespace xlionrender
         const auto TMomentsCopy = std::chrono::steady_clock::now();
 
         // The surfels' depth moments at the same index (gi::moment_texels_v per surfel, each a mean and a mean^2 in two 16-bit floats)
-        if( !bGPU ) (void)m_GIMomentRing.MemoryMap(std::size_t(Base) * gi::moment_texels_v, std::size_t(gi_light_region_v) * gi::moment_texels_v, [&](void* pMemory)
+        if( !bGPU ) (void)m_GIMomentRing.MemoryMapFrameRegion(std::size_t(Base) * gi::moment_texels_v, std::size_t(gi_light_region_v) * gi::moment_texels_v, [&](void* pMemory)
         {
             auto* pOut = static_cast<std::uint32_t*>(pMemory);
             for( const auto& [ID, Id] : m_GIIds )
