@@ -464,7 +464,11 @@ namespace xlionrender
         m_GIStats.m_TimeMs = std::chrono::duration<double, std::milli>(TGI - m_GIStart).count();
         m_GIOverheadMs += (std::max(m_GIStats.m_UpdateGIMs - m_GIStats.m_TotalMs, 0.0) - m_GIOverheadMs) * 0.2;      // (the outside part, slowly)
         m_GIStats.m_LoadMs = m_GILoadMsAcc; m_GILoadMsAcc = 0;
-        { gpu_times T; m_GIFrames.push_back({ m_Device.getFrameIndex(), m_GIStats, getGPUTimes(T) ? T.m_SceneMs : -1.0 }); }     // (the scene pass' GPU time: the per-pixel GI read is in it)
+        {   gpu_times T; const bool bT = getGPUTimes(T);
+            m_GIFrames.push_back({ m_Device.getFrameIndex(), m_GIStats, bT ? T.m_SceneMs : -1.0 });     // (the scene pass' GPU time: the per-pixel GI read is in it)
+            static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;     // measurement: the GPU passes, every 120 frames
+            if( s_bTimes && bT && m_Device.getFrameIndex() % 120 == 0 ) std::printf("GPUTIMES shadows %.2f scene %.2f tonemap %.2f GItrace %.2f ms; CPU Render %.2f ms (instances %.2f, shadows %.2f)\n", T.m_ShadowMs, T.m_SceneMs, T.m_ToneMapMs, m_GIStats.m_GPUTraceMs, m_CPUTimes.m_RenderMs, m_CPUTimes.m_InstancesMs, m_CPUTimes.m_ShadowsMs), std::fflush(stdout);
+        }
         if( m_GIFrames.size() > gi_frame_log_v ) m_GIFrames.erase(m_GIFrames.begin(), m_GIFrames.begin() + std::ptrdiff_t(m_GIFrames.size() - gi_frame_log_v));
     }
 
