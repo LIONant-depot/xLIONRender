@@ -900,6 +900,58 @@ int main()
         }
     }
 
+    // 6j2c. The unsupported fallback's bound (GI review, experiment A): 200 small quads facing every way in one 1 m cell, no leak protection, so the
+    //       cell holds a patch per orientation and lists hundreds of surfels in all. A query forced through the fallback (world::Unsupported) walks at
+    //       most fallback_cap_v of them (it walked the whole cell: 10,000 to 33,000 entries a hit on the Test Models) and still returns light
+    //       from the nearest surfels of its own patch, not the instance's mean
+    {
+        surfel_mesh M;
+        std::mt19937 Rng(7);     // 400 small quads, every way, in one cell (what a dense engine or a crumpled prop is to 1 m surfels)
+        std::uniform_real_distribution<float> U(-1, 1);
+        for (int k = 0; k < 400; ++k)
+        {
+            v3 N{ U(Rng), U(Rng), U(Rng) }; if (N.Length() < 0.1f) N = { 0, 1, 0 }; N = N.NormalizeCopy();
+            const v3 T = (std::abs(N.m_X) < 0.9f ? v3{ 1, 0, 0 } : v3{ 0, 1, 0 }).Cross(N).NormalizeCopy(), Bt = N.Cross(T);
+            AddQuad(M, v3{ 0.4f * U(Rng), 0.4f * U(Rng), 0.4f * U(Rng) } - (T + Bt) * 0.05f, Bt * 0.1f, T * 0.1f, 0.1f);
+        }
+        M.m_bLeakProtection = false;
+        M.Bake(1.0f, 3.0f);
+        M.BuildReadGrid();
+        world W;
+        const int i = W.Add(M, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
+        lights L; L.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); L.m_SunColor = { 3, 3, 3 }; L.m_Sky = { 0.2f, 0.2f, 0.2f };
+        for (int u = 0; u < 20; ++u) (void)W.Update(L, { 0, 3, 0 }, 1 << 16, unsigned(u));
+        const std::size_t Top = 0;                                       // a triangle of the first quad
+        const auto& T = M.m_Tris[Top];
+        const v3 P = (M.m_Pos[T[0]] + M.m_Pos[T[1]] + M.m_Pos[T[2]]) * (1.0f / 3.0f);
+        const std::size_t ListSize = M.ReadCellList(P, (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy()).size();
+        std::size_t AllCell = 0, nPatches = 0;         // what the old fallback walked: every patch's list in the cell
+        {
+            const v3 Nn = (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy();
+            const auto C = surfel_mesh::ReadCellAt(P, Nn, M.m_ReadCell);
+            const auto K = surfel_mesh::ReadKey(C);
+            const std::uint32_t Mask = std::uint32_t(M.m_ReadTable.size() - 1);
+            for (std::uint32_t h = surfel_mesh::ReadHash(C) & Mask, n = 0; n <= Mask; h = (h + 1) & Mask, ++n)
+            {
+                const auto& Ent = M.m_ReadTable[h];
+                if (Ent[1] == 0xFFFFFFFFu) break;
+                if (Ent[0] != K[0] || Ent[1] != K[1]) continue;
+                nPatches = Ent[3];
+                for (std::uint32_t p = 0; p < Ent[3]; ++p) AllCell += M.m_ReadList[Ent[2] + 4 * p + 3] & 0xFFFFu;
+                break;
+            }
+        }
+        world::hit H; H.m_Inst = i; H.m_Tri = int(Top); H.m_U = 1.0f / 3.0f; H.m_V = 1.0f / 3.0f;
+        int Walked = 0;
+        const v3 E = W.Unsupported(H, &Walked);
+        const v3 Mean = W.MeanLight(i);
+        std::printf("fallback bound: the cell holds %zu patches listing %zu surfels in all (the old walk); its patch lists %zu, the fallback walked %d (cap %d); its light %.3f, the instance's mean %.3f\n", nPatches, AllCell, ListSize, Walked, fallback_cap_v, E.m_X, Mean.m_X);
+        CHECK(AllCell > 10 * std::size_t(Walked) && AllCell > 4 * std::size_t(fallback_cap_v), "the test's cell lists only %zu surfels: no worst case", AllCell);
+        CHECK(std::size_t(Walked) <= ListSize, "the fallback walked past its own patch (%d of %zu)", Walked, ListSize);
+        CHECK(Walked <= fallback_cap_v, "the fallback walked %d entries (cap %d)", Walked, fallback_cap_v);
+        CHECK(std::isfinite(E.m_X) && E.m_X > 0, "the fallback returned no light (%.3f)", E.m_X);
+    }
+
     // 6j3. The sky by direction (lights::SkyAt): a 4 x 4 octahedral map with down (-Y) at the center and the seams up (the renderer's
     //      coarsest prefiltered level): a ray leaving downward reads the center texels, one leaving upward the corners
     {

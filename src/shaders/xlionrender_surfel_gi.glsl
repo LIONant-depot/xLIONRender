@@ -255,18 +255,19 @@ vec3 SurfelGIMean(in const uint LightOffset) { return UnpackRGB9E5(GILight[Light
 // What a point no read supports shows (the last of the policy; gi::world::Unsupported the same): the mean light of the valid surfels its
 // cell lists (every patch: by their reach and validity only - no sight, no facing), else the instance's mean. Not black, and local: the
 // whole building's mean was a grey square in a dark room. Only the pixels that come to it pay for it
+// An unsupported point's light (gi::world::Unsupported's twin), bounded: the patch of its cell that matches it (GIReadCell; never the whole
+// cell, which mixes layers), its nearest gi_fallback_cap_v surfels (the lists are nearest first: surfel_mesh::SortReadLists), by reach
+// and validity, the current light; else the instance's mean
+const uint gi_fallback_cap_v = 32u;
 vec3 SurfelGILocalMean(in const vec3 P, in const vec3 N, in const uint LightOffset, in const uint Level)
 {
     uint First, Count, Patches, nPatches;
     vec3 PatchN;
-    GIReadCell(P, N, First, Count, PatchN, Patches, nPatches);
     vec4 Sum = vec4(0.0);
-    for (uint p = 0u; p < nPatches; ++p)
-    {
-        const uint a = Patches + 4u * p, n = GIMesh[a + 3u] & 0xFFFFu;
-        for (uint i = 0u; i < n; ++i)
+    if (GIReadCell(P, N, First, Count, PatchN, Patches, nPatches))
+        for (uint i = 0u; i < min(Count, gi_fallback_cap_v); ++i)
         {
-            const uint  s  = GIMesh[GIMesh[5] + GIMesh[a + 2u] + i] & 0xFFFFu;
+            const uint  s  = GIMesh[GIMesh[5] + First + i] & 0xFFFFu;
             const uint  b  = GIMesh[0] + 8u * s;
             const float f  = max(0.0, 1.0 - length(P - GISurfelCenter(b)) / (2.0 * uintBitsToFloat(GIMesh[b + 3u])));
             const uint  sl = Level == 1u ? (GIMesh[b + 7u] & 0xFFFFu) : s;
@@ -275,7 +276,6 @@ vec3 SurfelGILocalMean(in const vec3 P, in const vec3 N, in const uint LightOffs
             const uvec4 L  = GILight[LightOffset + sl];
             Sum += vec4((UnpackRGB9E5(L.x) + UnpackRGB9E5(L.y) + UnpackRGB9E5(L.z)) * (w / 3.0), w);
         }
-    }
     return Sum.w > 1e-6 ? Sum.rgb / Sum.w : SurfelGIMean(LightOffset);
 }
 

@@ -409,6 +409,7 @@ namespace xlionrender::gi
     // catches up). Samples far above the noise are clipped (fireflies).
     enum class role : std::uint8_t { ASSET = 0, RECEIVER = 1, FULL = 2 };     // Phase 5: scene::gi_role (an instance's transport, over its mesh's m_bBounce)
     constexpr int warmup_passes_v = 16;     // after a change: the estimator's first samples are averaged (1 / n), its multiscale blend after
+    constexpr int fallback_cap_v  = 32;     // the most list entries an unsupported query walks (surfel_mesh::SortReadLists: the nearest first)
     constexpr int running_cap_v   = 256;    // the multiscale blend never below 1 / n of the samples since the change, up to this (estimator::Add)
 
     // A color in 32 bits (RGB9E5: three 9-bit mantissas, a shared 5-bit exponent; VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, as Godot's probes): the
@@ -609,6 +610,26 @@ namespace xlionrender::gi
         {
             const std::uint64_t K = surfel_grid::Key(C[0], C[1], C[2]);
             return { std::uint32_t(K), std::uint32_t(K >> 32) };
+        }
+        // The fallback's bound (GI review, experiment A): every patch's list nearest first, from its cell's center, so an unsupported query's
+        // walk (world::Unsupported, the pass's Unsupported, SurfelGILocalMean) can stop after fallback_cap_v entries and still take the
+        // nearest. Called after the grid is built or unpacked; the reads that sum a whole list are unchanged (the order of a sum)
+        void SortReadLists() noexcept
+        {
+            const auto Sx = [](std::uint64_t v) { const int i = int(v & 0x1FFFFF); return i >= 0x100000 ? i - 0x200000 : i; };
+            for (const auto& E : m_ReadTable)
+            {
+                if (E[1] == 0xFFFFFFFFu) continue;
+                const std::uint64_t K = std::uint64_t(E[0]) | (std::uint64_t(E[1]) << 32);
+                const v3 Cc{ (float(Sx(K >> 42)) + 0.5f) * m_ReadCell, (float(Sx(K >> 21)) + 0.5f) * m_ReadCell, (float(Sx(K)) + 0.5f) * m_ReadCell };
+                for (std::uint32_t p = 0; p < E[3]; ++p)
+                {
+                    const std::uint32_t First = m_ReadList[E[2] + 4 * p + 2], n = m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu;
+                    if (n < 2 || First + n > m_ReadList.size()) continue;
+                    const auto D2 = [&](std::uint32_t e) { const v3 d = m_Levels[0][e & 0xFFFFu].m_Center - Cc; return d.Dot(d); };
+                    std::stable_sort(m_ReadList.begin() + First, m_ReadList.begin() + First + n, [&](std::uint32_t a, std::uint32_t b) { return D2(a) < D2(b); });
+                }
+            }
         }
         static std::uint32_t ReadHash(const std::array<int, 3>& C) noexcept { return (std::uint32_t(C[0]) * 73856093u) ^ (std::uint32_t(C[1]) * 19349663u) ^ (std::uint32_t(C[2]) * 83492791u); }
 
@@ -1019,6 +1040,7 @@ namespace xlionrender::gi
                     const auto& Pa = Order[c]->m_Parts[p];
                     if (Lists[c][p].empty() && Pa.m_bSeen && !Pa.m_Pts.empty()) m_EmptyParts.push_back({ Pa.m_Pts[Pa.m_Pts.size() / 2], Pa.m_N });
                 }
+            SortReadLists();
         }
 
         // A unit normal as 2 x snorm 16 octahedral (GLSL unpackSnorm2x16 + GIOctDecode)
@@ -1382,6 +1404,7 @@ namespace xlionrender::gi
             m_OriginFirst.assign(pOF, pOF + nOFirst);
             const auto V = [](const std::uint32_t* f, std::uint32_t n) { std::vector<v3> Out(n); for (std::uint32_t k = 0; k < n; ++k) Out[k] = { std::bit_cast<float>(f[3 * k]), std::bit_cast<float>(f[3 * k + 1]), std::bit_cast<float>(f[3 * k + 2]) }; return Out; };
             m_OriginPos = V(pOP, nO); m_OriginNrm = V(pON, nO);
+            SortReadLists();
             return true;
         }
 
@@ -2919,42 +2942,31 @@ namespace xlionrender::gi
 
         // The policy for an unsupported query: the hit instance's mean light (its valid surfels', weighted by validity; MeanLight), not black and
         // not dropped - the ray still counts as one of the surfel's rays, the same denominator. Counted, the first places kept (UnsupportedAt)
-        v3 Unsupported(const hit& H) const noexcept
+        v3 Unsupported(const hit& H, int* pWalked = nullptr) const noexcept     // (pWalked, tests: the list entries walked)
         {
-            // Local first (SurfelGILocalMean's twin): the valid surfels its cell lists, by reach and validity; else the instance's mean
+            // Local first (SurfelGILocalMean's twin), bounded: the patch of the hit's cell that matches its surface (ReadCellList: never the
+            // whole cell, which mixes layers), its nearest fallback_cap_v surfels, by reach and validity, the current light; else the mean
             const auto& I = m_Instances[H.m_Inst]; const auto& M = *I.m_pMesh;
             if (M.m_ReadTable.empty()) return I.m_MeanE;
             const auto& T = M.m_Tris[H.m_Tri];
             const float B[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
             const v3 P = M.m_Pos[T[0]] * B[0] + M.m_Pos[T[1]] * B[1] + M.m_Pos[T[2]] * B[2];
             const v3 N = (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy();
-            const auto C = surfel_mesh::ReadCellAt(P, N, M.m_ReadCell);
-            const auto K = surfel_mesh::ReadKey(C);
-            const std::uint32_t Mask = std::uint32_t(M.m_ReadTable.size() - 1);
-            for (std::uint32_t h = surfel_mesh::ReadHash(C) & Mask, n = 0; n <= Mask; h = (h + 1) & Mask, ++n)
+            const auto List = M.ReadCellList(P, N);
+            float Sx = 0, Sy = 0, Sz = 0, W = 0;
+            for (std::size_t i = 0; i < std::min<std::size_t>(List.size(), fallback_cap_v); ++i)
             {
-                const auto& E = M.m_ReadTable[h];
-                if (E[1] == 0xFFFFFFFFu) break;
-                if (E[0] != K[0] || E[1] != K[1]) continue;
-                float Sx = 0, Sy = 0, Sz = 0, W = 0;
-                for (std::uint32_t p = 0; p < E[3]; ++p)
-                {
-                    const std::uint32_t* Pa = &M.m_ReadList[E[2] + 4 * p];
-                    for (std::uint32_t i = 0; i < (Pa[3] & 0xFFFFu); ++i)
-                    {
-                        const int s = int(M.m_ReadList[Pa[2] + i] & 0xFFFFu);
-                        const auto& S = M.m_Levels[0][s];
-                        const float f = std::max(0.0f, 1.0f - (P - S.m_Center).Length() / (2 * S.m_Radius));
-                        const int sl = I.m_Level == 1 ? M.m_ParentOf[s] : s;
-                        if (std::size_t(sl) >= I.m_E.size()) continue;
-                        const float w = f * I.m_Valid[sl];
-                        if (w <= 0) continue;
-                        Sx += I.m_E[sl].m_X * w; Sy += I.m_E[sl].m_Y * w; Sz += I.m_E[sl].m_Z * w; W += w;
-                    }
-                }
-                if (W > 1e-6f) return v3{ Sx / W, Sy / W, Sz / W };
-                break;
+                if (pWalked) ++*pWalked;
+                const int s = int(List[i] & 0xFFFFu);
+                const auto& S = M.m_Levels[0][s];
+                const float f = std::max(0.0f, 1.0f - (P - S.m_Center).Length() / (2 * S.m_Radius));
+                const int sl = I.m_Level == 1 ? M.m_ParentOf[s] : s;
+                if (std::size_t(sl) >= I.m_E.size()) continue;
+                const float w = f * I.m_Valid[sl];
+                if (w <= 0) continue;
+                Sx += I.m_E[sl].m_X * w; Sy += I.m_E[sl].m_Y * w; Sz += I.m_E[sl].m_Z * w; W += w;
             }
+            if (W > 1e-6f) return v3{ Sx / W, Sy / W, Sz / W };
             return I.m_MeanE;
         }
         const v3& MeanLight(int Id) const noexcept { return m_Instances[Id].m_MeanE; }      // the same for the GPU's reads (the renderer uploads it)

@@ -348,6 +348,7 @@ bool Indirect(int Id, int Tri, float U, float V, out vec3 E)
     E = Sum * (1.0 / W);
     return true;
 }
+const uint gi_fallback_cap_v = 32u;      // (gi::fallback_cap_v: the lists are nearest first, surfel_mesh::SortReadLists)
 vec3 Unsupported(int Id, int Tri, float U, float V)
 {
     const uint R = InstRec(Id), M = MeshOf(R), Level = GD[R + 1u];
@@ -357,25 +358,22 @@ vec3 Unsupported(int Id, int Tri, float U, float V)
     const float B[3] = float[3](1.0 - U - V, U, V);
     const vec3 P0 = MPos(M, T.x), P1 = MPos(M, T.y), P2 = MPos(M, T.z);
     const vec3 P = P0 * B[0] + P1 * B[1] + P2 * B[2], N = normalize(cross(P1 - P0, P2 - P0));
-    const int h = ReadEntry(M, P, N);
-    if (h < 0) return Mean;
-    const uint Tb = GD[M + 10u] + 4u * uint(h), Lb = GD[M + 12u];
+    uint First, Count; vec3 PatchN;
+    if (!ReadCellList(M, P, N, First, Count, PatchN)) return Mean;          // the patch that matches the surface (world::Unsupported's twin)
+    const uint Lb = GD[M + 12u];
     const uint nLight = GD[M + 6u + 2u * Level];
     vec3 S = vec3(0); float W = 0.0;
-    for (uint p = 0u; p < GD[Tb + 3u]; ++p)
+    for (uint i = 0u; i < min(Count, gi_fallback_cap_v); ++i)
     {
-        const uint Pa = Lb + GD[Tb + 2u] + 4u * p;
-        for (uint i = 0u; i < (GD[Pa + 3u] & 0xFFFFu); ++i)
-        {
-            const int s = int(GD[Lb + GD[Pa + 2u] + i] & 0xFFFFu);
-            const uint Sb = MSurfel(M, 0u, s);
-            const float f = max(0.0, 1.0 - length(P - GV(Sb)) / (2.0 * GF(Sb + 6u)));
-            const int sl = Level == 1u ? MParent(M, s) : s;
-            if (uint(sl) >= nLight) continue;
-            const float w = f * GF(GD[R + 3u] + uint(sl));
-            if (w <= 0.0) continue;
-            S += GV(GD[R + 2u] + 3u * uint(sl)) * w; W += w;
-        }
+        ++g_ReadEntries;                                  // (diagnostics: the fallback's walk counts as read entries too)
+        const int s = int(GD[Lb + First + i] & 0xFFFFu);
+        const uint Sb = MSurfel(M, 0u, s);
+        const float f = max(0.0, 1.0 - length(P - GV(Sb)) / (2.0 * GF(Sb + 6u)));
+        const int sl = Level == 1u ? MParent(M, s) : s;
+        if (uint(sl) >= nLight) continue;
+        const float w = f * GF(GD[R + 3u] + uint(sl));
+        if (w <= 0.0) continue;
+        S += GV(GD[R + 2u] + 3u * uint(sl)) * w; W += w;
     }
     return W > 1e-6 ? S / W : Mean;
 }
