@@ -38,10 +38,13 @@ namespace
     constexpr std::uint32_t s_MigrateComp[] = {
         #include "xlionrender_gi_migrate_comp.h"
     };
+    constexpr std::uint32_t s_LinksComp[] = {
+        #include "xlionrender_gi_links_comp.h"
+    };
     constexpr std::uint32_t s_ReadBackComp[] = {
         #include "xlionrender_gi_readback_comp.h"
     };
-    const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp };
+    const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp, s_LinksComp };
 
     // The GPU's light into the world's arrays: the last slice delivered, the read back copied, then in (two frames)
     // Empty frames until the slices out are back (gpu_trace::Collect reads them lag_frames_v frames on)
@@ -338,6 +341,57 @@ int main()
                     T.Batches(), T.Slices(), Frames, 100 * Worst);
         CHECK(2 * T.Slices() >= 3 * T.Batches(), "the batches were not sliced (the budget starts at 32k rays: the first ones are whole) (%d batches, %d slices)", T.Batches(), T.Slices());
         CHECK(Worst < 0.03, "over time the GPU world's light is %.1f%% off the CPU world's", 100 * Worst);
+    }
+    // Experiment D: the links built on the GPU (gpu_trace::BuildLinks, xlionrender_gi_links_comp.glsl) against the CPU's (CompileTransport,
+    // TruncateTransport: top 16, the tail through the instances) on a converged world: both solved on the CPU (SolveTransport), each
+    // against the converged world's light. The rays differ (their offsets), so the two agree to their noise, not to the bit
+    for (const bool bPanel : { false, true })
+    {
+        lights L;
+        if (!bPanel) L.m_Points = { { { 0.2f, 0.4f, -0.3f }, { 1.5f, 1.5f, 1.5f }, 4.0f } };
+        std::vector<surfel_mesh> M; world W;
+        MakeCornell(M, W, bPanel);
+        W.m_Setup.m_bEmitterSampling = bPanel;
+        W.m_Setup.m_RaysPerSurfel = 64;
+        W.m_Setup.m_MinBlend = 1;                                        // (converged: 8 bounces replaced, then averaged - as surfel_gi's Converge)
+        for (int u = 0; u < 8; ++u) W.Update(L, { 0, 0, -0.9f }, 1 << 30, 3000 + u);
+        W.m_Setup.m_MinBlend = 0;
+        for (int u = 0; u < 300; ++u) W.Update(L, { 0, 0, -0.9f }, 1 << 30, 3100 + u);
+        std::vector<std::array<int, 2>> Items;
+        for (int i = 0; i < W.InstanceCount(); ++i) for (std::size_t s = 0; s < W.InstanceSurfels0(i); ++s) Items.push_back({ i, int(s) });
+        gpu_trace G;
+        CHECK(G.Init(App.m_Device, s_Shaders), "gpu_trace::Init (links)");
+        while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+        CHECK(G.BuildLinks(App.m_Window, W, L, Items, 256, 0, Items.size()), "BuildLinks");
+        { auto Cmd = App.m_Window.getCmdBuffer(); }
+        App.m_Window.PageFlip();
+        world::transport Tg; double Dropped = 0;
+        CHECK(G.ReadLinks(W, Items, Tg, &Dropped), "ReadLinks");
+        const auto Tf = W.CompileTransport(L, 256);
+        const auto Tc = W.TruncateTransport(Tf, gpu_trace::links_v, true);
+        std::vector<v3> Ref;
+        for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i)) Ref.push_back(e);
+        std::vector<v3> Eg, Ec;
+        std::vector<v3> Ef;
+        world::SolveTransport(Tg, Eg, 20); world::SolveTransport(Tc, Ec, 20); world::SolveTransport(Tf, Ef, 20);
+        const auto Lum = [](const v3& e) { return 0.2126 * e.m_X + 0.7152 * e.m_Y + 0.0722 * e.m_Z; };
+        const auto Off = [&](const std::vector<v3>& A, const std::vector<v3>& B)      // the worst instance's mean, relative
+        {
+            double Worst = 0;
+            for (int i = 0; i < W.InstanceCount(); ++i)
+            {
+                double a = 0, b = 0;
+                for (std::uint32_t r = Tg.m_InstFirst[std::size_t(i)]; r < Tg.m_InstFirst[std::size_t(i) + 1]; ++r) { a += Lum(A[r]); b += Lum(B[r]); }
+                Worst = std::max(Worst, std::abs(a - b) / std::max(b, 1e-9));
+            }
+            return Worst;
+        };
+        std::printf("links on the GPU (Cornell, %s): %zu links + %zu tail entries (the CPU's %zu + %zu), %.4f of the weight dropped; solved, the instances off the converged world by %.2f%% (the CPU's links %.2f%%, every link %.2f%%), off the CPU's by %.2f%%\n",
+                    bPanel ? "the emissive panel, sampled" : "a point light", Tg.m_Col.size(), Tg.m_AGroup.size(), Tc.m_Col.size(), Tc.m_AGroup.size(), Dropped, 100 * Off(Eg, Ref), 100 * Off(Ec, Ref), 100 * Off(Ef, Ref), 100 * Off(Eg, Ec));
+        // (the same rays as the CPU's: the same offsets and origins; a closed box is the worst case of the top 16 - surfel_gi 6k: 4.8%)
+        CHECK(Off(Eg, Ec) < 0.005, "the GPU's links are %.2f%% off the CPU's (the same rays)", 100 * Off(Eg, Ec));
+        CHECK(Off(Ef, Ref) < 0.02, "every link: %.1f%% off the converged world", 100 * Off(Ef, Ref));
+        CHECK(Off(Eg, Ref) < 0.15, "the GPU's links: %.1f%% off the converged world (the tail through whole instances: a closed box of big walls is its worst case)", 100 * Off(Eg, Ref));
     }
     {   // the room of the GI render test, its light (a point light, the ambient as the sky)
         lights L; L.m_Points = { { { 0.4f, 3.0f, -0.2f }, { 4, 4, 4 }, 9.0f } }; L.m_Sky = v3{ 0.02f, 0.02f, 0.02f } * (1.0f / pi_v);

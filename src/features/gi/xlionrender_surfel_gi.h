@@ -3237,7 +3237,8 @@ namespace xlionrender::gi
             if (W > 1e-6f) return v3{ Sx / W, Sy / W, Sz / W };
             return I.m_MeanE;
         }
-        const v3& MeanLight(int Id) const noexcept { return m_Instances[Id].m_MeanE; }      // the same for the GPU's reads (the renderer uploads it)
+        const v3& MeanLight(int Id) const noexcept { return m_Instances[Id].m_MeanE; }
+        std::size_t InstanceSurfels0(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_pMesh->m_Levels[0].size(); }     // (its level-0 surfels: the transport's rows)      // the same for the GPU's reads (the renderer uploads it)
         const std::vector<v3>& UnsupportedAt() const noexcept { return m_UnsupportedAt; }
 
         // The 6 parents an ambient cube traces: for each axis direction (+-x, +-y, +-z) the parent whose normal faces it best (within 60 degrees)

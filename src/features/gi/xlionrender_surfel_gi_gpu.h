@@ -22,7 +22,7 @@ namespace xlionrender::gi
     public:
 
         // The SPIR-V of the shaders (shaders/xlionrender_gi_*_comp.glsl)
-        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack; };
+        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links; };     // (m_Links: optional, experiment D)
 
         bool Init(xgpu::device& Device, const shaders& S) noexcept
         {
@@ -35,7 +35,8 @@ namespace xlionrender::gi
             return Make(m_Shader[0], m_Pass, S.m_Pass, 8, 16) && Make(m_Shader[1], m_Scatter, S.m_Scatter, 2, 16) && Make(m_Shader[2], m_Commit, S.m_Commit, 5, 16)
                 && Make(m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make(m_Shader[4], m_Filter, S.m_Filter, 6, 32) && Make(m_Shader[5], m_Expand, S.m_Expand, 4, 32)
                 && Make(m_Shader[6], m_Means, S.m_Means, 2, 16) && Make(m_Shader[7], m_Cube, S.m_Cube, 2, 16) && Make(m_Shader[8], m_Migrate, S.m_Migrate, 3, 16)
-                && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 });
+                && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 })
+                && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 8, 16)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
@@ -178,6 +179,64 @@ namespace xlionrender::gi
                 m_MeansFrame[k] = Frame; m_MeansCount[k] = m_Data[1];
             }
             return bSlice;
+        }
+
+        // Experiment D (compiled transport) on the GPU, world::CompileTransport's twin: the links of level-0 surfels, one workgroup each
+        // (xlionrender_gi_links_comp.glsl): Items { instance, surfel }, Rays each, into a host-visible table (2 x links_v a surfel: the
+        // heaviest links, the tail per instance) and D. Packs the scene first if it must. First / Count: a range of Items (a frame's share)
+        static constexpr int links_v = 16;
+        bool BuildLinks(xgpu::window& Window, world& W, const lights& L, std::span<const std::array<int, 2>> Items, int Rays, std::size_t First, std::size_t Count, unsigned Seed = 1) noexcept
+        {
+            if (!m_bLinks || Items.empty()) return false;
+            if (W.GPUGen() != m_Gen || L.m_Points.size() != m_nPoints || m_Data.empty() || W.EmitterCount() > m_EmRoom) { if (!Pack(Window, W, L)) return false; }
+            if (First == 0)
+            {
+                struct item { std::int32_t m_Ids[4]; float m_Offsets[4]; };
+                std::vector<item> It(Items.size());
+                rng R(Seed);
+                for (std::size_t k = 0; k < Items.size(); ++k) It[k] = { { Items[k][0], Items[k][1], 0, Rays }, { R.Next(), R.Next(), 0, 0 } };
+                if (!Fit(m_LinkItemB, int(sizeof(item)), It.size()) || m_LinkItemB.MemoryMap(0, int(It.size()), [&](void* p) { std::memcpy(p, It.data(), It.size() * sizeof(item)); })) return false;
+                if (!Fit(m_LinkB, int(4 * sizeof(std::uint32_t)), 2 * links_v * Items.size()) || !Fit(m_LinkDB, int(4 * sizeof(float)), Items.size())) return false;
+            }
+            Count = std::min(Count, Items.size() - std::min(First, Items.size()));
+            if (Count == 0) return true;
+            const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First; } Push{ int(Items.size()), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First) };
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB };
+            Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int(Count));
+            return true;
+        }
+        // What BuildLinks wrote (its frame done) as the world's transport: rows in Items' order (all of the world's level-0 surfels, in
+        // order: the CPU's rows), the tail grouped by instance (world::TruncateTransport's tail through the instances)
+        bool ReadLinks(const world& W, std::span<const std::array<int, 2>> Items, world::transport& T, double* pDropped = nullptr) noexcept
+        {
+            if (!m_bLinks || Items.empty()) return false;
+            std::vector<std::array<std::uint32_t, 4>> Lk(2 * links_v * Items.size());
+            std::vector<std::array<float, 4>> Dk(Items.size());
+            if (m_LinkB.MemoryMap(0, int(Lk.size()), [&](void* p) { std::memcpy(Lk.data(), p, Lk.size() * 16); })) return false;
+            if (m_LinkDB.MemoryMap(0, int(Dk.size()), [&](void* p) { std::memcpy(Dk.data(), p, Dk.size() * 16); })) return false;
+            T = {};
+            T.m_InstFirst.push_back(0);
+            for (int i = 0; i < W.InstanceCount(); ++i) T.m_InstFirst.push_back(T.m_InstFirst.back() + std::uint32_t(W.IsAlive(i) ? W.InstanceSurfels0(i) : 0));
+            T.m_First.push_back(0); T.m_AFirst.push_back(0);
+            double Drop = 0;
+            for (std::size_t k = 0; k < Items.size(); ++k)
+            {
+                T.m_D.push_back(v3{ Dk[k][0], Dk[k][1], Dk[k][2] }); Drop += Dk[k][3];
+                T.m_Group.push_back(std::uint32_t(Items[k][0]));
+                for (int q = 0; q < 2 * links_v; ++q)
+                {
+                    const auto& e = Lk[2 * links_v * k + std::size_t(q)];
+                    if (e[0] == 0xFFFFFFFFu) continue;
+                    const v3 w{ std::bit_cast<float>(e[1]), std::bit_cast<float>(e[2]), std::bit_cast<float>(e[3]) };
+                    if (e[0] & 0x80000000u) { T.m_AGroup.push_back(e[0] & 0x7FFFFFFFu); T.m_AW.push_back(w); }
+                    else { T.m_Col.push_back(T.m_InstFirst[e[0] >> 16] + (e[0] & 0xFFFFu)); T.m_W.push_back(w); }
+                }
+                T.m_First.push_back(std::uint32_t(T.m_Col.size())); T.m_AFirst.push_back(std::uint32_t(T.m_AGroup.size()));
+            }
+            T.m_GroupSize.assign(std::size_t(W.InstanceCount()), 0);
+            for (int i = 0; i < W.InstanceCount(); ++i) T.m_GroupSize[std::size_t(i)] = T.m_InstFirst[std::size_t(i) + 1] - T.m_InstFirst[std::size_t(i)];
+            if (pDropped) *pDropped = Drop;
+            return true;
         }
 
         // A slice: the ranges from First whose estimated rays fit Rays (one at least); the end. What is left of the batch after it, when
@@ -584,7 +643,10 @@ namespace xlionrender::gi
         }
 
         xgpu::device*                       m_pDevice = nullptr;
-        xgpu::shader                        m_Shader[10];
+        xgpu::shader                        m_Shader[11];
+        xgpu::compute                       m_LinksC;           // experiment D: the link build (optional: shaders::m_Links)
+        xgpu::buffer                        m_LinkItemB, m_LinkB, m_LinkDB;
+        bool                                m_bLinks = false;
         xgpu::compute                       m_Pass, m_Scatter, m_Commit, m_OpsC, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBackC;
         xgpu::timestamps                    m_Times;
         xgpu::timestamps                    m_ShowTimes;        // measurement (XLION_GPU_TIMES): Show's steps
