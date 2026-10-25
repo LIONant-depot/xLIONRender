@@ -272,13 +272,15 @@ namespace xlionrender
             }
             R.m_Renderer.m_bBoxesOnly    = m_ViewOptions.m_bBoxesOnly;         // huge meshes: their boxes, or the clusters a frame budget allows
             R.m_Renderer.m_FrameBudgetMs = m_ViewOptions.m_FrameBudgetMs;
-            {   // the Meshes, with their MeshMaterial when they have one
+            {   // the Meshes, with their MeshMaterial when they have one (old files: OldMaterials lists them for the editor to convert)
                 xecs::query::instance Query;
                 Query.m_Must.AddFromComponents<xlioncore::transform, mesh>();
                 LeaveOut(Query, View);
                 auto S = Search(Query);
+                m_OldMaterials.clear();
                 Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const mesh& C, const mesh_material* pMaterial, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
                 {
+                    if (HasOldMaterials(C, pMaterial)) m_OldMaterials.push_back(Ent.m_Value);
                     xmath::fmat4 L2W;
                     if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
                     R.AddMesh(C, pMaterial, L2W, Ent.m_Value);
@@ -291,6 +293,22 @@ namespace xlionrender
         }
 
         void BlitScene(xgpu::cmd_buffer& CmdBuffer) noexcept { if (m_pScene) m_pScene->Blit(CmdBuffer); }
+
+        // Old files' material data (a MeshMaterial, the Mesh's deprecated Materials list): the Meshes the last RenderScene found with it, and one
+        // of them converted into its Mesh's own slots (UpgradeOldMaterials: false while its materials load, or when it has none)
+        std::vector<std::uint64_t> m_OldMaterials;
+        bool UpgradeOldMaterialsOf(std::uint64_t Entity) noexcept
+        {
+            bool bDone = false;
+            xecs::query::instance Query;
+            Query.m_Must.AddFromComponents<mesh>();
+            auto S = Search(Query);
+            Foreach(S, [&](const xecs::component::entity& Ent, mesh& M, mesh_material* pOld) noexcept
+            {
+                if (!bDone && Ent.m_Value == Entity) bDone = UpgradeOldMaterials(M, pOld);
+            });
+            return bDone;
+        }
 
         // What the last RenderScene had (the editor's DescribeScene, tests)
         std::string DescribeScene() const noexcept

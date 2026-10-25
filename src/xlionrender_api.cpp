@@ -120,6 +120,19 @@ namespace xlionrender
                 if (pOut && MaxBoxes > 0) std::copy_n(Boxes.begin(), std::min<std::size_t>(Boxes.size(), static_cast<std::size_t>(MaxBoxes)), pOut);
                 return static_cast<int>(Boxes.size());
             }
+            int           OldMaterials(const void* pWorld, std::uint64_t* pOut, int MaxEntities) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                if (!pSystem) return 0;
+                const auto& V = pSystem->m_OldMaterials;
+                if (pOut && MaxEntities > 0) std::copy_n(V.begin(), std::min<std::size_t>(V.size(), static_cast<std::size_t>(MaxEntities)), pOut);
+                return static_cast<int>(V.size());
+            }
+            bool          UpgradeOldMaterials(const void* pWorld, std::uint64_t EntityValue) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                return pSystem && pSystem->UpgradeOldMaterialsOf(EntityValue);
+            }
             int           DumpGI(const void* pWorld, const char* pPath) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);

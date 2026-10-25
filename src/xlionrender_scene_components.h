@@ -362,6 +362,65 @@ namespace xlionrender
         }
     };
 
+    // Old files' material data into the Mesh's own slots (Override Materials on): the swaps of its deprecated Materials list and of the
+    // MeshMaterial (which won per slot), and the MeshMaterial's entity values (Tint, Param0, Param1) as overrides of the parameter each slot's
+    // material lets that field replace (its manifest's entity field; none: the value never reached that material, nothing to keep). The old data
+    // is emptied, so the MeshMaterial draws nothing twice until the editor removes it. Whether it has old data at all: HasOldMaterials.
+    // False (nothing changed) while the geometry or a material the values need is not loaded.
+    inline bool HasOldMaterials( const mesh& Mesh, const mesh_material* pOld ) noexcept
+    {
+        return pOld || !Mesh.m_Materials.empty();
+    }
+    inline bool UpgradeOldMaterials( mesh& Mesh, mesh_material* pOld ) noexcept
+    {
+        using namespace xlioncore::resources;
+        if (!HasOldMaterials(Mesh, pOld)) return false;
+        auto* pGeom = Mesh.m_Geom.empty() ? nullptr : static_cast<xgeom_static::xgpu::geom*>(GetResource(geom_static_type_guid_v.m_Value, Mesh.m_Geom.m_Instance.m_Value));
+        if (pGeom == nullptr) return false;
+        const auto Defaults = pGeom->getDefaultMaterialInstances();
+        const auto SwapOf = [&](std::size_t i) -> const material_instance_ref*
+        {
+            if (pOld && i < pOld->m_Slots.size() && pOld->m_Slots[i].m_Instance.m_Value) return &pOld->m_Slots[i];
+            if (i < Mesh.m_Materials.size() && Mesh.m_Materials[i].m_Instance.m_Value) return &Mesh.m_Materials[i];
+            return nullptr;
+        };
+        const entity_value* Values[] = { pOld ? &pOld->m_Tint : nullptr, pOld ? &pOld->m_Param0 : nullptr, pOld ? &pOld->m_Param1 : nullptr };     // entity_field TINT, PARAM0, PARAM1
+        const bool bValues = std::ranges::any_of(Values, [](const entity_value* p) { return p && p->m_bOverride; });
+
+        // The materials the values go to, all loaded first (a half-done conversion would be saved half done)
+        std::vector<const xmaterial::rt*> Mats(Defaults.size(), nullptr);
+        if (bValues)
+            for (std::size_t i = 0; i < Defaults.size(); ++i)
+            {
+                const auto* pSwap = SwapOf(i);
+                const std::uint64_t MI = pSwap ? pSwap->m_Instance.m_Value : Defaults[i].m_Instance.m_Value;
+                auto* pMI = MI ? static_cast<xmaterial_instance::rt*>(GetResource(material_instance_type_guid_v.m_Value, MI)) : nullptr;
+                Mats[i]   = pMI ? static_cast<const xmaterial::rt*>(GetResource(material_type_guid_v.m_Value, pMI->m_MaterialRef.m_Instance.m_Value)) : nullptr;
+                if (Mats[i] == nullptr) return false;
+            }
+
+        auto& Slots = Mesh.Slots();
+        for (std::size_t i = 0; i < Slots.size() && i < Defaults.size(); ++i)
+        {
+            if (const auto* pSwap = SwapOf(i)) Slots[i].m_Material = *pSwap;
+            if (!bValues) continue;
+            for (int f = 0; f < 3; ++f)
+            {
+                if (Values[f] == nullptr || !Values[f]->m_bOverride) continue;
+                for (const auto& Info : Mats[i]->getParams())
+                {
+                    if (Info.m_EntityField != f + 1 || xmaterial::param_type(Info.m_Type) == xmaterial::param_type::TEXTURE) continue;
+                    auto& P = Slots[i].Set(Info.m_ID, Info.m_Name);
+                    P.m_X = Values[f]->m_X; P.m_Y = Values[f]->m_Y; P.m_Z = Values[f]->m_Z; P.m_W = Values[f]->m_W;
+                }
+            }
+        }
+        Mesh.m_bOverrideMaterials = true;
+        Mesh.m_Materials.clear();
+        if (pOld) *pOld = mesh_material{ .m_Tint = {} };
+        return true;
+    }
+
     // The directional light: it shines along the entity's -Y; one per level (the first one found)
     struct light_sun
     {
@@ -482,7 +541,7 @@ namespace xlionrender
     XSCRIPT_REGISTER_COMPONENT(light_point, "Rendering", 54)
     XSCRIPT_REGISTER_COMPONENT(light_spot,  "Rendering", 55)
     XSCRIPT_REGISTER_COMPONENT(environment, "Rendering", 56)
-    XSCRIPT_REGISTER_COMPONENT(mesh_material, "Rendering", 57)
+    XSCRIPT_REGISTER_COMPONENT(mesh_material, "Deprecated", 57)     // (old files: the editor moves it into the Mesh, UpgradeOldMaterials; not offered to add)
 }
 
 #endif

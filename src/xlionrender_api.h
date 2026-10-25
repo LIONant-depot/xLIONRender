@@ -53,7 +53,7 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 10;               // 10: NotDrawnBoxes and view_options::m_bBoxesOnly / m_FrameBudgetMs (huge meshes: drawn as their boxes, or as many clusters as a frame budget allows); 9: GITraceMs and view_options::m_GITraceAllowanceMs (the host's shared GI allowance); 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
+        static constexpr std::uint32_t kVersion = 11;               // 11: OldMaterials, UpgradeOldMaterials (old files' MeshMaterial into the Mesh's slots); 10: NotDrawnBoxes and view_options::m_bBoxesOnly / m_FrameBudgetMs (huge meshes: drawn as their boxes, or as many clusters as a frame budget allows); 9: GITraceMs and view_options::m_GITraceAllowanceMs (the host's shared GI allowance); 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
@@ -91,6 +91,11 @@ namespace xlionrender
         // What the world's last RenderScene did not draw the inside of (view_options::m_bBoxesOnly, m_FrameBudgetMs): its boxes, at most MaxBoxes of them into pOut (the most
         // important first), for the host to draw as lines. Returns how many there are (more than MaxBoxes: the rest were not copied). Version 10.
         virtual int           NotDrawnBoxes(const void* pWorld, wire_box* pOut, int MaxBoxes) noexcept = 0;
+        // Old files' material data (a MeshMaterial, the Mesh's deprecated Materials list): the entities the world's last RenderScene found with it, at most MaxEntities
+        // into pOut; returns how many there are. UpgradeOldMaterials moves one entity's into its Mesh's own slots (Override Materials) and empties the old data:
+        // true when it did (the host then removes the MeshMaterial and marks the entity changed), false while its materials load. Version 11.
+        virtual int           OldMaterials(const void* pWorld, std::uint64_t* pOut, int MaxEntities) noexcept = 0;
+        virtual bool          UpgradeOldMaterials(const void* pWorld, std::uint64_t EntityValue) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";
