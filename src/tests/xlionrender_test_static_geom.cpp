@@ -261,6 +261,36 @@ int main()
         Renderer.DestroyMaterial(MB);
     }
 
+    // The parameter ranges (OffsetAllocator, xGPU Details/OffsetAllocator): freed neighbours merge back into one range, and materials of
+    // mixed sizes made and destroyed far more often than MaterialParams holds (16384 vec4s) never run out
+    {
+        OffsetAllocator::Allocator A(64);
+        const auto a = A.allocate(16), b = A.allocate(16), c = A.allocate(32);
+        CHECK(a.offset == 0 && b.offset == 16 && c.offset == 32 && A.allocate(1).offset == OffsetAllocator::Allocation::NO_SPACE, "OffsetAllocator: three ranges fill 64");
+        A.free(a); A.free(b);
+        const auto ab = A.allocate(32);
+        CHECK(ab.offset == 0, "OffsetAllocator: two freed neighbours merge (32 at %u)", ab.offset);
+
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_params_frag.h"
+        };
+        xgpu::shader Frag;
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "params shader");
+        const auto Slots = std::array<xgpu::texture*, 1>{ nullptr };
+        std::vector<float> Block;
+        int nMade = 0;
+        for (int i = 0; i < 6000; ++i)
+        {
+            Block.assign(4 * std::size_t(1 + (i * 7) % 13), 0.0f);
+            xlionrender::material_id M;
+            if (Renderer.CreateMaterial(M, Frag, Slots, {}, Block)) break;
+            ++nMade;
+            Renderer.DestroyMaterial(M);
+            if (i % 50 == 49 && !App.RenderFrame(Scene, View, Camera)) break;     // the destroyed instances' sets retire with the frames
+        }
+        CHECK(nMade == 6000, "Mixed-size materials made and destroyed: %d of 6000 before MaterialParams ran out", nMade);
+    }
+
     // A material's render settings (material_state: xmaterial.plugin documentation/render_settings_plan.md), each its own pipeline. The
     // parameters' shader writes a constant red, so blending, culling and raster show as values and counts of the HDR red
     {

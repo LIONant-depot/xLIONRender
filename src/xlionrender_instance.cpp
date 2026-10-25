@@ -941,10 +941,8 @@ namespace xlionrender
         Params = Block;
         if( const int n = int(Params.size() / 4); n > 0 )
         {
-            int At = -1;
-            for( auto It = m_ParamFree.begin(); It != m_ParamFree.end(); ++It )
-                if( It->second >= n ) { At = It->first; It->first += n; It->second -= n; if( It->second == 0 ) m_ParamFree.erase(It); break; }
-            if( At < 0 && m_ParamTop + n <= max_material_params_v ) { At = m_ParamTop; m_ParamTop += n; }
+            M.m_ParamRange = m_ParamAlloc.allocate(std::uint32_t(n));
+            const int At = M.m_ParamRange.offset == OffsetAllocator::Allocation::NO_SPACE ? -1 : int(M.m_ParamRange.offset);
             if( At < 0 )
             {
                 releaseInstances(M);
@@ -1174,7 +1172,8 @@ namespace xlionrender
         if( pM->m_ParamCount )
         {
             std::erase_if(m_ParamPending, [&](const auto& P) { return P.first >= int(pM->m_ParamBase) && P.first < int(pM->m_ParamBase + pM->m_ParamCount); });     // created (or a texture set) and destroyed before a render
-            m_ParamFree.push_back({ int(pM->m_ParamBase), int(pM->m_ParamCount) });
+            m_ParamAlloc.free(pM->m_ParamRange);
+            pM->m_ParamRange = {};
             pM->m_ParamCount = 0;
         }
         pM->m_Textures.clear();

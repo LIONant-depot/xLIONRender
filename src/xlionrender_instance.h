@@ -21,6 +21,7 @@
 #include <chrono>
 #include <memory>
 #include "dependencies/xGPU/source/Tools/xgpu_view.h"
+#include "dependencies/xGPU/source/Details/OffsetAllocator/offsetAllocator_inline.hpp"
 #include <span>
 #include <vector>
 #include <functional>
@@ -259,6 +260,7 @@ namespace xlionrender
             material_state          m_State;                        // CreateMaterial: its pipelines' settings
             std::uint32_t           m_ParamBase     = 0;            // its block in MaterialParams: the first vec4 (push constant MaterialBase), how many
             std::uint32_t           m_ParamCount    = 0;
+            OffsetAllocator::Allocation m_ParamRange;               // m_ParamAlloc's: freed by DestroyMaterial
             // A texture-table material (CreateMaterial bTextureTable): its textures' table (set 3), their ids from vec4 m_IDsAt of its block
             bool                    m_bTable        = false;
             xgpu::texture_table     m_Table;
@@ -372,8 +374,7 @@ namespace xlionrender
         xgpu::buffer                m_MaterialParamsRing;
         xgpu::buffer                m_EntityParams;
         xgpu::buffer                m_EntityParamsRing;
-        int                         m_ParamTop              = 0;        // the range allocator: the top, the free ranges (first, count)
-        std::vector<std::pair<int, int>> m_ParamFree;                   // ponytail: never merged; merge when materials churn
+        OffsetAllocator::Allocator  m_ParamAlloc            { max_material_params_v };     // the materials' ranges (vec4s): O(1), freed ranges merge
         std::vector<std::pair<int, std::vector<float>>> m_ParamPending; // blocks not copied yet (first vec4, floats)
 
         // Surfel GI: the CPU world, draw id -> world instance, per draw this render's (first surfel in the light ring, level)
