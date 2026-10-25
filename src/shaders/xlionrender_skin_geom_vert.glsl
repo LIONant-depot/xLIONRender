@@ -80,9 +80,9 @@ void main()
     //
     Out.VertColor = VertData.VertColor;
     OutGI         = vec4(0.0);
-    OutGIPos      = vec3(0.0);
+    OutGIPos      = Out.wSpacePosition.xyz;                       // (the probe grid's read: the eye's world, as the lights')
     OutGINormal   = vec3(0.0, 1.0, 0.0);
-    OutGIRef      = uvec2(0u, 0xFFFFFFFFu);
+    OutGIRef      = uvec2(0u, push.giProbes != 0u ? 0xFFFFFFFEu : 0xFFFFFFFFu);     // (xlionrender_surfel_gi.glsl gi_probes_v / gi_none_v)
     OutGITangent  = vec4(1.0, 0.0, 0.0, 1.0);
 }
 

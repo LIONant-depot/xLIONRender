@@ -48,10 +48,13 @@ namespace
     constexpr std::uint32_t s_GhostsComp[] = {
         #include "xlionrender_gi_ghosts_comp.h"
     };
+    constexpr std::uint32_t s_ProbesComp[] = {
+        #include "xlionrender_gi_probes_comp.h"
+    };
     constexpr std::uint32_t s_ReadBackComp[] = {
         #include "xlionrender_gi_readback_comp.h"
     };
-    const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp, s_LinksComp, s_SolveComp, s_GhostsComp };
+    const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp, s_LinksComp, s_SolveComp, s_GhostsComp, s_ProbesComp };
 
     // The GPU's light into the world's arrays: the last slice delivered, the read back copied, then in (two frames)
     // Empty frames until the slices out are back (gpu_trace::Collect reads them lag_frames_v frames on)
@@ -423,6 +426,62 @@ int main()
         CHECK(G.CopyLinksOut(App.m_Window, Items.size()), "CopyLinksOut");      // (the links live in device-local memory)
         { auto Cmd = App.m_Window.getCmdBuffer(); }
         App.m_Window.PageFlip();
+        // The probe grid (what has no surfels: skinned meshes) in the box: 8 x 8 x 8 probes 0.25 apart around its center, all of them updated
+        // 6 times. The ones in the room are lit; the inner box's inside is flagged (its rays meet its back faces); by the red wall a probe's
+        // irradiance toward the wall is redder than toward the green one (the bleeding), and the probes see the point light's bounce
+        if (!bPanel)
+        {
+            for (int f = 0; f < 6; ++f)
+            {
+                while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+                CHECK(G.UpdateProbes(App.m_Window, v3{ 0, 0, 0 }, 0.25f, { 8, 8, 8 }, 512, std::uint64_t(f)), "UpdateProbes");
+                { auto Cmd = App.m_Window.getCmdBuffer(); }
+                App.m_Window.PageFlip();
+            }
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            CHECK(G.CopyProbesOut(App.m_Window), "CopyProbesOut");
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+            const auto P = G.ReadProbes();
+            CHECK(P.size() >= 16 + 16 * 512, "ReadProbes (%zu words)", P.size());
+            const auto Slot = [&](int x, int y, int z) { const int lx = ((x % 8) + 8) % 8, ly = ((y % 8) + 8) % 8, lz = ((z % 8) + 8) % 8; return 16 + 16 * std::size_t(lx + 8 * (ly + 8 * lz)); };
+            const auto E = [&](std::size_t b, const v3& n)      // its irradiance toward n (SurfelGIProbes' formula)
+            {
+                v3 c[4];
+                for (int k = 0; k < 4; ++k) c[k] = { std::bit_cast<float>(P[b + 3 * k]), std::bit_cast<float>(P[b + 3 * k + 1]), std::bit_cast<float>(P[b + 3 * k + 2]) };
+                return c[0] * (3.14159265f * 0.282095f) + (c[1] * n.m_X + c[2] * n.m_Y + c[3] * n.m_Z) * (2.0943951f * 0.488603f);
+            };
+            int nLit = 0, nInside = 0, nRoom = 0;
+            for (int z = -3; z <= 3; ++z) for (int y = -3; y <= 3; ++y) for (int x = -3; x <= 3; ++x)
+            {
+                const std::size_t b = Slot(x, y, z);
+                if ((P[b + 15] & 2u) != 0) { ++nInside; continue; }
+                ++nRoom; nLit += (P[b + 15] & 1u) != 0 && E(b, { 0, 1, 0 }).m_X + E(b, { 0, -1, 0 }).m_X > 1e-3f;
+            }
+            const std::size_t Red = Slot(-3, 1, 0);           // (-0.75, 0.25, 0): by the red wall (x = -1)
+            const v3 ToRed = E(Red, { -1, 0, 0 }), ToGreen = E(Red, { 1, 0, 0 });
+            std::printf("  probe grid: %d of %d room probes lit, %d inside; by the red wall toward it r/g %.2f, away %.2f\n", nLit, nRoom, nInside,
+                        ToRed.m_X / std::max(ToRed.m_Y, 1e-6f), ToGreen.m_X / std::max(ToGreen.m_Y, 1e-6f));
+            CHECK(nLit == nRoom && nRoom > 300, "probe grid: %d of %d room probes lit", nLit, nRoom);
+            CHECK(nInside > 0, "probe grid: no probe flagged inside the inner box");
+            CHECK(ToRed.m_X / std::max(ToRed.m_Y, 1e-6f) > 1.5f * ToGreen.m_X / std::max(ToGreen.m_Y, 1e-6f), "probe grid: no red bleeding by the red wall");
+            // An empty scene (a level's first frames, its meshes still loading): no probe update - its BVH is a placeholder, and walking it
+            // lost the Vulkan device in the editor
+            {
+                world We; gpu_trace Ge;
+                CHECK(Ge.Init(App.m_Device, s_Shaders), "gpu_trace::Init (empty)");
+                while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+                We.Update(L, v3{ 0, 0, 0 }, 1 << 20, 1);
+                (void)Ge.Submit(App.m_Window, We, L, 1, 1000.0f, v3{ 0, 0, 0 });
+                const bool bUpdated = Ge.UpdateProbes(App.m_Window, v3{ 0, 0, 0 }, 0.25f, { 8, 8, 8 }, 512, 1);
+                { auto Cmd = App.m_Window.getCmdBuffer(); }
+                App.m_Window.PageFlip();
+                CHECK(!bUpdated, "probe grid: updated over an empty scene");
+            }
+        }
         world::transport Tg; double Dropped = 0;
         CHECK(G.ReadLinks(W, Items, Tg, &Dropped), "ReadLinks");
         W.RelightTransport(Tg, L);                                       // (the GPU's first bounce: its hit clusters lit)

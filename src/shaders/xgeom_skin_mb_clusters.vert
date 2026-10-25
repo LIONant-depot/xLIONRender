@@ -47,4 +47,5 @@ layout(push_constant) uniform PushConstants
     uint    clusterIndex;   // Index into cluster array
     uint    maxInfluences;  // 1..4 - how many bone weights to actually use (weight-truncation skin LOD)
     uint    instanceIndex;  // xLIONRender: the draw's slot in the instance buffer
+    uint    giProbes;       // xLIONRender: 1 the probe grid is bound as GIMesh (the fragment's SurfelGIProbes)
 } push;

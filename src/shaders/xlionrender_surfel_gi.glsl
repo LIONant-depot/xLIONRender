@@ -19,6 +19,7 @@ layout(std430, set = 1, binding = 7) readonly buffer GIMomentBuffer { uint GIMom
 // The GI reference a vertex shader passes on (giLevel of the push constants): the level in the low 8 bits, gi_per_pixel_v when the
 // pixels may read the grid, 0xFFFFFFFF: no GI
 const uint gi_none_v      = 0xFFFFFFFFu;
+const uint gi_probes_v    = 0xFFFFFFFEu;     // no surfels of its own: the probe grid's light (GIMesh is the probe buffer: SurfelGIProbes)
 const uint gi_per_pixel_v = 0x100u;
 const uint gi_debug_shift_v = 9u;        // 2 bits (scene::gi_debug): 1 the surfels (each pixel the color of its dominant surfel), 2 the GI light only,
                                          // 3 the material capture (0x800: its emission pass); then 0x1000 the captured color of each pixel's triangle (what a
@@ -242,6 +243,41 @@ vec3 SurfelDebugColor(in const uint s)
 vec3 g_GIReflDir = vec3(0.0);
 vec4 g_GIRefl    = vec4(0.0);           // w > 0.5: g_GIReflDir's read (an irradiance, as g_GI's), for EnvLighting
 vec3 g_GIReflSum = vec3(0.0), g_GIReflRelaxed = vec3(0.0);
+
+// The probe grid's irradiance at a point (the eye's world: the scene pass's) and normal (xlionrender_gi_probes_comp.glsl's buffer, bound as GIMesh): its cell's 8
+// probes, trilinear, each weighed by how much it faces the normal (a probe behind the surface lights it less), the ones inside a wall
+// or of another cell (not yet updated after the grid moved) left out. w 0: none (the caller keeps its ambient)
+vec4 SurfelGIProbes(in const vec3 P, in const vec3 N)
+{
+    if (GIMesh.length() < 16) return vec4(0.0);
+    const ivec3 Org = ivec3(int(GIMesh[0]), int(GIMesh[1]), int(GIMesh[2])), Dim = ivec3(int(GIMesh[4]), int(GIMesh[5]), int(GIMesh[6]));
+    const float Sp = uintBitsToFloat(GIMesh[3]);
+    if (Sp <= 0.0 || Dim.x <= 0) return vec4(0.0);
+    const vec3  Pw = P + vec3(uintBitsToFloat(GIMesh[8]), uintBitsToFloat(GIMesh[9]), uintBitsToFloat(GIMesh[10]));     // (P: the eye's world; the header: the eye)
+    const vec3  F = Pw / Sp, B = floor(F), Fr = F - B;
+    vec3 Sum = vec3(0.0); float W = 0.0;
+    for (int k = 0; k < 8; ++k)
+    {
+        const ivec3 O = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1), C = ivec3(B) + O;
+        if (any(lessThan(C, Org)) || any(greaterThanEqual(C, Org + Dim))) continue;
+        const ivec3 Lc = C - Dim * ivec3(floor(vec3(C) / vec3(Dim)));      // (GLSL's % of a negative is undefined)
+        const uint  b = 16u + 16u * uint(Lc.x + Dim.x * (Lc.y + Dim.y * Lc.z));
+        if (b + 16u > uint(GIMesh.length())) continue;
+        if ((GIMesh[b + 15u] & 3u) != 1u || ivec3(int(GIMesh[b + 12u]), int(GIMesh[b + 13u]), int(GIMesh[b + 14u])) != C) continue;
+        const vec3  T = mix(vec3(1.0) - Fr, Fr, vec3(O));
+        const vec3  Dp = vec3(C) * Sp - Pw;
+        const float Face = dot(Dp, Dp) > 1e-8 ? 0.5 * (dot(normalize(Dp), N) + 1.0) : 1.0;
+        const float w = T.x * T.y * T.z * (Face * Face + 0.05);
+        // the irradiance of its L1 radiance toward N (the cosine lobe: pi, 2 pi / 3)
+        const vec3 c0 = vec3(uintBitsToFloat(GIMesh[b]),      uintBitsToFloat(GIMesh[b + 1u]),  uintBitsToFloat(GIMesh[b + 2u]));
+        const vec3 c1 = vec3(uintBitsToFloat(GIMesh[b + 3u]), uintBitsToFloat(GIMesh[b + 4u]),  uintBitsToFloat(GIMesh[b + 5u]));
+        const vec3 c2 = vec3(uintBitsToFloat(GIMesh[b + 6u]), uintBitsToFloat(GIMesh[b + 7u]),  uintBitsToFloat(GIMesh[b + 8u]));
+        const vec3 c3 = vec3(uintBitsToFloat(GIMesh[b + 9u]), uintBitsToFloat(GIMesh[b + 10u]), uintBitsToFloat(GIMesh[b + 11u]));
+        const vec3 E = max(vec3(0.0), 3.14159265 * 0.282095 * c0 + 2.0943951 * 0.488603 * (c1 * N.x + c2 * N.y + c3 * N.z));
+        Sum += E * w; W += w;
+    }
+    return W > 1e-4 ? vec4(Sum / W, 1.0) : vec4(0.0);
+}
 
 vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const uint LightOffset, in const uint Level, in const uint First, in const uint Count, in const vec3 PatchN, out vec4 Relaxed)
 {

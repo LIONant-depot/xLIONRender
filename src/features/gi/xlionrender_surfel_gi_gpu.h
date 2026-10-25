@@ -22,7 +22,7 @@ namespace xlionrender::gi
     public:
 
         // The SPIR-V of the shaders (shaders/xlionrender_gi_*_comp.glsl)
-        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links, m_Solve, m_Ghosts; };     // (m_Links, m_Solve: optional, experiment D)
+        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links, m_Solve, m_Ghosts, m_Probes; };     // (m_Links, m_Solve: optional, experiment D)
 
         bool Init(xgpu::device& Device, const shaders& S) noexcept
         {
@@ -38,7 +38,8 @@ namespace xlionrender::gi
                 && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 })
                 && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 15, 32)) || true)
                 && (S.m_Solve.empty() || (m_bSolve = Make(m_Shader[11], m_SolveC, S.m_Solve, 7, 16)) || true)
-                && (S.m_Ghosts.empty() || (m_bGhosts = Make(m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true);
+                && (S.m_Ghosts.empty() || (m_bGhosts = Make(m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true)
+                && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 6, 32)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
@@ -292,6 +293,49 @@ namespace xlionrender::gi
             Window.Dispatch(m_SolveC, B, &Push, sizeof(Push), Groups);
             return true;
         }
+        // The probe grid (xlionrender_gi_probes_comp.glsl): Dim probes Spacing apart around Eye, PerFrame of them updated a frame (round
+        // robin), each from the scene's GI as a ray's hit sees it. For what has no surfels of its own (skinned meshes: the material's
+        // SurfelGIProbes reads ProbeBuffer, bound as their GIMesh). The header is written every frame (the grid moves with the eye; the
+        // scene pass's positions are the eye's: its header carries it). After Submit
+        bool UpdateProbes(xgpu::window& Window, const v3& Eye, float Spacing, std::array<int, 3> Dim, int PerFrame, std::uint64_t Frame) noexcept
+        {
+            if (!m_bProbes || m_Data.empty() || m_Scene.m_bEmpty || Spacing <= 0) return false;     // (an empty scene's BVH is a placeholder: its root walked off the buffers)
+            const std::size_t n = std::size_t(Dim[0]) * Dim[1] * Dim[2];
+            if (!FitLocal(m_ProbeB, int(sizeof(std::uint32_t)), probe_header_v + probe_words_v * n)) return false;
+            std::array<std::uint32_t, probe_header_v> H{};
+            const float E[3] = { Eye.m_X, Eye.m_Y, Eye.m_Z };
+            for (int k = 0; k < 3; ++k) { H[std::size_t(k)] = std::uint32_t(int(std::floor(E[k] / Spacing)) - Dim[std::size_t(k)] / 2); H[std::size_t(4 + k)] = std::uint32_t(Dim[std::size_t(k)]); H[std::size_t(8 + k)] = std::bit_cast<std::uint32_t>(E[k]); }
+            H[3] = std::bit_cast<std::uint32_t>(Spacing); H[7] = std::uint32_t(n);
+            auto& HB = m_ProbeHdrB2[Frame % 2];          // (two: the frame in flight may still read the other; mapped without a wait)
+            if (!Fit(HB, int(sizeof(std::uint32_t)), probe_header_v) || HB.MemoryMapFrameRegion(0, int(probe_header_v), [&](void* p) { std::memcpy(p, H.data(), sizeof(H)); })) return false;
+            const xgpu::buffer::copy C{ 0, 0, int(probe_header_v) };
+            Window.CopyBuffer(HB, m_ProbeB, std::span{ &C, 1 });
+            const int Count = std::min(PerFrame, int(n));
+            const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(m_ProbeCursor % n), int(Frame), Count, 0, 0 };
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ProbeB };
+            Window.Dispatch(m_ProbesC, B, &Push, sizeof(Push), Count);
+            m_ProbeCursor = (m_ProbeCursor + std::size_t(Count)) % n;
+            return true;
+        }
+        xgpu::buffer* ProbeBuffer(void) noexcept { return m_bProbes && m_ProbeB.m_Private ? &m_ProbeB : nullptr; }
+        // (tests) The probe buffer copied out (a frame after its update), then read (a frame after this one)
+        bool CopyProbesOut(xgpu::window& Window) noexcept
+        {
+            if (!m_ProbeB.m_Private) return false;
+            const int n = m_ProbeB.getEntryCount();
+            const xgpu::buffer::copy C{ 0, 0, n };
+            if (!Fit(m_ProbeReadB, int(sizeof(std::uint32_t)), std::size_t(n))) return false;
+            Window.CopyBuffer(m_ProbeB, m_ProbeReadB, std::span{ &C, 1 });
+            return true;
+        }
+        std::vector<std::uint32_t> ReadProbes(void) noexcept
+        {
+            std::vector<std::uint32_t> V(m_ProbeB.m_Private ? std::size_t(m_ProbeB.getEntryCount()) : 0);
+            if (V.empty() || m_ProbeReadB.MemoryMap(0, int(V.size()), [&](void* p) { std::memcpy(V.data(), p, V.size() * 4); })) V.clear();
+            return V;
+        }
+        static constexpr std::size_t probe_header_v = 16, probe_words_v = 16;      // (xlionrender_gi_probes_comp.glsl)
+
         // The local rebuild's buffers bound by every links / solve dispatch (one word each until used)
         bool LinkAux() noexcept
         {
@@ -928,7 +972,7 @@ namespace xlionrender::gi
         }
 
         xgpu::device*                       m_pDevice = nullptr;
-        xgpu::shader                        m_Shader[13];
+        xgpu::shader                        m_Shader[14];
         xgpu::compute                       m_LinksC;           // experiment D: the link build (optional: shaders::m_Links)
         xgpu::buffer                        m_LinkItemB, m_LinkB, m_LinkDB, m_LinkNextB;
         xgpu::buffer                        m_LinkDLocalB, m_LinkItemLocalB;     // (the device-local copies: CopyLinksLocal; m_LinkB is device-local)
@@ -959,6 +1003,10 @@ namespace xlionrender::gi
         xgpu::compute                       m_Pass, m_Scatter, m_Commit, m_OpsC, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBackC;
         std::array<double, 3>               m_CpuTrace{}; int m_nCpuTrace = 0;       // (XLION_GI_CPU_TRACE)
         xgpu::compute                       m_GhostsC;          // GI sections: the ghosts take their owners' set (xlionrender_gi_ghosts_comp.glsl)
+        xgpu::compute                       m_ProbesC;          // the probe grid (UpdateProbes)
+        xgpu::buffer                        m_ProbeB, m_ProbeHdrB2[2], m_ProbeReadB;
+        std::size_t                         m_ProbeCursor = 0;
+        bool                                m_bProbes = false;
         xgpu::buffer                        m_GhostB;
         std::size_t                         m_nGhosts = 0;
         bool                                m_bGhosts = false;

@@ -46,6 +46,9 @@ namespace xlionrender
         constexpr std::uint32_t s_GIGhostsComp[] = {        // GI sections: the ghosts' copy
             #include "xlionrender_gi_ghosts_comp.h"
         };
+        constexpr std::uint32_t s_GIProbesComp[] = {        // the probe grid (what has no surfels: skinned meshes)
+            #include "xlionrender_gi_probes_comp.h"
+        };
 
         // FNV-1a over a caster's identity and state: a different value is a different (or moved) caster
         std::uint64_t Hash(std::uint64_t H, const void* pData, std::size_t Size) noexcept
@@ -181,7 +184,7 @@ namespace xlionrender
         if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
         {
             m_pGITrace = std::make_unique<gi::gpu_trace>();
-            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp }) )
+            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp, s_GIProbesComp }) )
                 { m_pGITrace.reset(); m_bGITraceFailed = true; }
         }
         // The light lives on the GPU (m_bGPUOwned). Turned off, the GPU's light comes back into the world first (a read back: one frame
@@ -422,6 +425,9 @@ namespace xlionrender
             // frame]] changes it; XLION_GI_LINKS=0 turns it off
             static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 64, 30, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
             if( s_Links[0] > 0 ) m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]);
+            // The probe grid (skinned meshes' GI): 32 x 16 x 32 probes a meter apart around the eye, 1024 updated a frame
+            static const bool s_bNoProbes = std::getenv("XLION_GI_NO_PROBES") != nullptr;     // (measurement: A/B)
+            if( Scene.m_GI.m_bProbes && !s_bNoProbes ) (void)m_pGITrace->UpdateProbes(Window, Eye, Scene.m_GI.m_ProbeSpacing, { 32, 16, 32 }, 1024, GIFrame);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 1);
             if( (m_bGIToCPU && !m_bGIToCPUAsked) || (!m_GIDumpPath.empty() && !m_bGIDumpAsked) )     // the GPU's light back into the world (the next Collect)
                 if( m_pGITrace->ReadBack(Window, GIFrame) ) { if( m_bGIToCPU ) m_bGIToCPUAsked = true; if( !m_GIDumpPath.empty() ) m_bGIDumpAsked = true; }
@@ -1393,6 +1399,9 @@ namespace xlionrender
                 const auto* pMesh = findMesh(D.m_Mesh);
                 const bool  bSections = !bSkin && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
                 // its GI buffer: the geometry's, or (GI sections) the cluster's section's
+                // a skinned mesh's GI: the probe grid (no surfels of its own; the dummy: none). ponytail: the main view's only (its header carries
+                // the main eye: the reflection views' positions are their own eye's)
+                xgpu::buffer* const SkinGI = bSkin && bMain && Scene.m_GI.m_bEnable && Scene.m_GI.m_bProbes && m_pGITrace && m_pGITrace->ProbeBuffer() ? m_pGITrace->ProbeBuffer() : &m_GIDummy;
                 const auto GIBufferOf = [&](std::uint32_t c) -> xgpu::buffer*
                 {
                     if( bSections ) return const_cast<xgpu::buffer*>(&pMesh->m_GISections[pMesh->m_GIClusterSection[c]].m_Buffer);
@@ -1410,8 +1419,8 @@ namespace xlionrender
                     }
                     else
                     {
-                        std::array<xgpu::buffer*, 11> Static{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams };
-                        Cmd.setPipelineInstance(*pInstance, std::span{ Static });      // SKIN: the GI bindings of the material fragment (no surfels), the BoneMap, the parameters
+                        std::array<xgpu::buffer*, 11> Static{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, SkinGI, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams };
+                        Cmd.setPipelineInstance(*pInstance, std::span{ Static });      // SKIN: the GI bindings of the material fragment (no surfels: the probe grid), the BoneMap, the parameters
                     }
                     Cmd.setDynamicUBO(m_LightUBO, 1);
                     Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
@@ -1428,7 +1437,7 @@ namespace xlionrender
                 {
                     if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
                     const auto& C = G.m_Clusters[c];
-                    if( bSkin ) { Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase }); }
+                    if( bSkin ) { Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, SkinGI != &m_GIDummy ? 1u : 0u, MaterialBase }); }
                     else if( bSections )        // GI sections: the cluster's section - its buffer, its place in the light ring, its vertices
                     {
                         const std::uint16_t k = pMesh->m_GIClusterSection[c];
