@@ -1103,7 +1103,7 @@ namespace xlionrender
 
         const auto& Sun = Scene.m_Sun;
         if( Sun.m_bCastShadows ) m_Clipmap.Update(Sun.m_Direction, Sun.m_ShadowTileSize, Eye, Changed, m_bShadowCache, m_ShadowTiles);
-        else                     m_ShadowTiles.clear();
+        else                   { m_ShadowTiles.clear(); m_Clipmap.Invalidate(); }      // the casters changing meanwhile reach no tile: all of them when it casts again
         m_LocalShadows.Update(Scene.m_LocalLights, Changed, m_bShadowCache, Eye, ProjScale, m_ShadowUpdatesPerFrame, m_LocalMaps, m_LocalToRender);
 
         m_nShadowTilesRendered = static_cast<int>(m_ShadowTiles.size() + m_LocalToRender.size());

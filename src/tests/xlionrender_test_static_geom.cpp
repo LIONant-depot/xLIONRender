@@ -270,7 +270,6 @@ int main()
         };
         const auto Darker = [](const std::vector<float>& On, const std::vector<float>& Off) { int n = 0; for (std::size_t i = 0; i < On.size(); ++i) n += On[i] < Off[i] * 0.8f; return n; };
         std::vector<float> On, Off;
-        Renderer.m_bShadowCache = false;           // every tile each frame: the sun turned off and on keeps no stale tile
         CHECK(Shadowed(Opaque, On, Off) && Darker(On, Off) > 50, "An opaque material casts a shadow (%d darker texels)", Darker(On, Off));
         CHECK(Shadowed(NoShadow, On, Off) && Darker(On, Off) == 0, "Cast Shadows off: %d darker texels", Darker(On, Off));
         CHECK(Shadowed(Cut, On, Off) && Darker(On, Off) == 0, "A masked material cut out everywhere casts no shadow: %d darker texels", Darker(On, Off));

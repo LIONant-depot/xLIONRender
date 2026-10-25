@@ -128,6 +128,9 @@ namespace xlionrender::shadows
             }
         }
 
+        // Every tile renders on the next Update: what changed while no Update ran (the sun not casting) never reached the tiles
+        void Invalidate(void) noexcept { m_bHasBasis = false; }
+
         xmath::fvec3 ToLight(const xmath::fvec3& P) const noexcept { return { P.Dot(m_X), P.Dot(m_Y), P.Dot(m_Z) }; }
 
         // Light-space bounds of a world box
