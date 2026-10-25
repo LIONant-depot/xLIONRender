@@ -120,6 +120,11 @@ namespace xlionrender
         // A texture-table material's slot i (Textures[i + 1] of CreateMaterial) now reads Texture: the id in its block and its table (bindless: the
         // block only - a texture swap costs what a color change does)
         [[nodiscard]] xgpu::device::error* SetMaterialTexture( material_id Id, int iSlot, xgpu::texture& Texture ) noexcept;
+        // The material's parameter block (CreateMaterial's Params) from vec4 FirstVec4 on: the frames recorded from now read it (a private
+        // block's value changed in place: material_overrides)
+        [[nodiscard]] xgpu::device::error* SetMaterialParams( material_id Id, std::span<const float> Params, std::uint32_t FirstVec4 = 0 ) noexcept;
+        // How many materials exist (tests)
+                      int                  getMaterialCount( void ) const                                       noexcept { int n = 0; for (const auto& M : m_Materials) n += M.m_bAlive; return n; }
         // The renderer's default material (shaders/xlionrender_default_material_frag.glsl: PBR with a diffuse texture), for a slot whose
         // material does not resolve. Textures: slot 0 the shadow map (the renderer's atlas), slot 1 the diffuse texture.
         [[nodiscard]] xgpu::device::error* CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept;

@@ -960,6 +960,17 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    xgpu::device::error* instance::SetMaterialParams( material_id Id, std::span<const float> Params, std::uint32_t FirstVec4 ) noexcept
+    {
+        auto* pM = findMaterial(Id);
+        const std::uint32_t nBlock = pM == nullptr ? 0 : pM->m_bTable ? pM->m_IDsAt : pM->m_ParamCount;     // (not a table's ids)
+        if( pM == nullptr || Params.size() % 4 || FirstVec4 + Params.size() / 4 > nBlock ) return VGPU_ERROR(xgpu::device::error::FAILURE, "Not a range of the material's parameter block");
+        if( !Params.empty() ) m_ParamPending.emplace_back(int(pM->m_ParamBase + FirstVec4), std::vector<float>(Params.begin(), Params.end()));
+        return nullptr;
+    }
+
+    //------------------------------------------------------------------------------------------------
+
     xgpu::device::error* instance::SetMaterialTexture( material_id Id, int iSlot, xgpu::texture& Texture ) noexcept
     {
         auto* pM = findMaterial(Id);
