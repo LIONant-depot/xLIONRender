@@ -43,8 +43,19 @@ namespace xlionrender
 
     // One parameter a Mesh slot overrides (sparse): a parameter of the slot's material instance, by its id - or only by its name when game code
     // set it that way (mesh::SetColor ...): the renderer finds it in the material's parameters. Values are linear; a texture by its resource
+    // The key a parameter's override and row are addressed by (xproperty::keyed_vector: "Overrides[G:key]", "Parameters[G:key]"): its id - stable
+    // across renames and reorders -, or a hash of its name when only the name is known (game code that set it by name)
+    inline std::uint64_t ParamKey( std::uint64_t ID, std::string_view Name ) noexcept
+    {
+        if (ID) return ID;
+        std::uint64_t H = 14695981039346656037ull;
+        for (const char c : Name) { H ^= std::uint8_t(c); H *= 1099511628211ull; }
+        return H;
+    }
+
     struct mesh_param
     {
+        std::uint64_t   m_Key       = 0;            // ParamKey: its address in the slot's Overrides (the path's, not saved as a property)
         std::uint64_t   m_ID        = 0;
         std::string     m_Name;
         float           m_X = 0, m_Y = 0, m_Z = 0, m_W = 0;
@@ -79,6 +90,7 @@ namespace xlionrender
     struct mesh_param_row
     {
         mesh_slot*      m_pSlot     = nullptr;
+        std::uint64_t   m_Key       = 0;            // ParamKey: its address ("Parameters[G:key]")
         std::uint64_t   m_ID        = 0;
         std::string     m_Name;
         std::uint8_t    m_Type      = 0;            // xmaterial::param_type
@@ -158,12 +170,12 @@ namespace xlionrender
     struct mesh_slot
     {
         material_instance_ref       m_Material;                     // the swap (empty: the geometry's own)
-        std::vector<mesh_param>     m_Params;
+        xproperty::keyed_vector<mesh_param, &mesh_param::m_Key> m_Params;      // by ParamKey: a path names a parameter, not a place
 
         // The inspector's (never saved): the slot's name, the geometry's own instance (mesh::Slots), the rows of the resolved instance's parameters
         std::string                 m_Name;
         material_instance_ref       m_Default;
-        std::vector<mesh_param_row> m_Rows;
+        xproperty::keyed_vector<mesh_param_row, &mesh_param_row::m_Key> m_Rows;
         const void*                 m_pRowsOf   = nullptr;          // the loaded instance the rows were made from
         std::size_t                 m_nRowsOf   = 0;                // ... and how many overrides there were (orphans come and go with them)
 
@@ -181,9 +193,8 @@ namespace xlionrender
         mesh_param& Set( std::uint64_t ID, std::string_view Name ) noexcept
         {
             if (auto* P = Find(ID, Name)) { if (ID) P->m_ID = ID; if (!Name.empty()) P->m_Name = std::string(Name); return *P; }
-            m_Params.emplace_back(mesh_param{ .m_ID = ID, .m_Name = std::string(Name) });
-            if (ID) std::ranges::sort(m_Params, {}, &mesh_param::m_ID);
-            return *Find(ID, Name);
+            m_Params.emplace_back(mesh_param{ .m_Key = ParamKey(ID, Name), .m_ID = ID, .m_Name = std::string(Name) });
+            return m_Params.back();
         }
         bool Revert( std::uint64_t ID, std::string_view Name = {} ) noexcept
         {
@@ -194,9 +205,13 @@ namespace xlionrender
         // The rows of the instance it draws with (its material's parameters in the order the Material Instance editor lists them - the compiled
         // list is in it, xmaterial::InspectorOrder - but the render settings, then the orphans), made again only when
         // that instance (as loaded) or the number of overrides changed: the inspector asks for them many times a frame, and holds on to them
-        std::vector<mesh_param_row>& Rows( void ) noexcept
+        xproperty::keyed_vector<mesh_param_row, &mesh_param_row::m_Key>& Rows( void ) noexcept
         {
             using namespace xlioncore::resources;
+            // A row a path adds (an override applied before the instance is loaded: a prefab instance's, at a load) is this slot's, the
+            // parameter its key names (ParamKey: the id); the rows made when the instance is loaded replace it
+            m_Rows.m_pOnAdd     = +[](mesh_param_row& R, void* pSlot) { R.m_pSlot = static_cast<mesh_slot*>(pSlot); R.m_ID = R.m_Key; R.m_Type = std::uint8_t(xmaterial::param_type::FLOAT4); };
+            m_Rows.m_pOnAddUser = this;
             const std::uint64_t MI = Instance();
             auto* pMI  = MI ? static_cast<xmaterial_instance::rt*>(GetResource(material_instance_type_guid_v.m_Value, MI)) : nullptr;
             auto* pMat = pMI ? static_cast<xmaterial::rt*>(GetResource(material_type_guid_v.m_Value, pMI->m_MaterialRef.m_Instance.m_Value)) : nullptr;
@@ -214,7 +229,9 @@ namespace xlionrender
                 if (xmaterial::isRenderSettingParam(Info.m_ID)) continue;          // (the instance's Render Settings, not a parameter row)
                 auto& Row  = m_Rows.emplace_back();
                 Row.m_pSlot = this;
+                Row.m_Key   = ParamKey(Info.m_ID, Info.m_Name);
                 Row.m_ID    = Info.m_ID;
+                if (auto* P = m_Params.find(Row.m_Key); P && P->m_Name.empty()) P->m_Name = Info.m_Name;      // (an override applied by its key alone: its name too)
                 Row.m_Name  = Info.m_Name;
                 Row.m_Type  = Info.m_Type;
                 if (xmaterial::param_type(Info.m_Type) == xmaterial::param_type::TEXTURE)
@@ -233,6 +250,7 @@ namespace xlionrender
                 if (std::ranges::any_of(Rows, [&](const mesh_param_row& R) { return (P.m_ID && R.m_ID == P.m_ID) || (!P.m_Name.empty() && R.m_Name == P.m_Name); })) continue;
                 auto& Row    = m_Rows.emplace_back();
                 Row.m_pSlot  = this;
+                Row.m_Key    = P.m_Key;
                 Row.m_ID     = P.m_ID;
                 Row.m_Name   = P.m_Name.empty() ? std::format("{:016X}", P.m_ID) : P.m_Name;
                 Row.m_Type   = std::uint8_t(P.m_Texture.empty() ? xmaterial::param_type::FLOAT4 : xmaterial::param_type::TEXTURE);
@@ -251,7 +269,7 @@ namespace xlionrender
                                     }
             , member_flags<flags::DONT_SAVE>, member_override_state<&MeshSlotOverrideState>
             , member_help<"The material instance this slot draws with: the geometry's own unless this entity picks another (then > goes back to the geometry's)">>
-        , obj_member<"Parameters",  +[](mesh_slot& O) -> std::vector<mesh_param_row>& { return O.Rows(); }, member_flags<flags::DONT_SAVE>, member_array_size_readonly<>, member_ui_open<true>
+        , obj_member<"Parameters",  +[](mesh_slot& O) -> xproperty::keyed_vector<mesh_param_row, &mesh_param_row::m_Key>& { return O.Rows(); }, member_flags<flags::DONT_SAVE>, member_array_size_readonly<>, member_ui_open<true>
             , member_override_state<&MeshSlotOverrideState>
             , member_help<"The parameters of the instance this slot draws with, at the values this entity draws with: an edit overrides the instance's value, > reverts it">>
         , obj_member<"MaterialOverride", &mesh_slot::m_Material, member_flags<flags::DONT_SHOW>, member_help<"Saved: the instance this entity swaps in (empty: the geometry's own)">>
@@ -435,10 +453,13 @@ namespace xlionrender
             return;
         }
 
-        const int iRow = IndexAfter("Parameters[G:", RowEnd);
-        auto& Rows = Slot.Rows();
-        if (iRow < 0 || std::size_t(iRow) >= Rows.size()) return;
-        const auto& Row  = Rows[iRow];
+        const auto RowAt = Path.find("Parameters[G:");
+        RowEnd = RowAt == std::string_view::npos ? std::string_view::npos : Path.find(']', RowAt);
+        if (RowEnd == std::string_view::npos) return;
+        const std::uint64_t RowKey = std::strtoull(std::string(Path.substr(RowAt + 13, RowEnd - RowAt - 13)).c_str(), nullptr, 10);     // (by key: "Parameters[G:key]")
+        const auto* pRow = Slot.Rows().find(RowKey);
+        if (pRow == nullptr) return;
+        const auto& Row  = *pRow;
         const auto* pOwn = Row.Entry();
         const std::string Text = Row.getOverride();
         const auto Choice = [&](const char* pLabel, std::string To)
