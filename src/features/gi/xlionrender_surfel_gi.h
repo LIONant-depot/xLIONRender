@@ -2076,6 +2076,9 @@ namespace xlionrender::gi
             int     m_GPUSliceRays  = 0;        // G3: the last slice's rays
             int     m_nScreenDraws  = 0;        // the half-resolution GI read's draws this frame (the renderer's: scene::gi_settings::m_bHalfRes)
             int     m_nScreenCalls  = 0;        // and its pass's draw calls (both phases: an indirect run a bind state)
+            // its pixels by kind (temporal, xlionrender_gi_screen_frag.glsl; a frame of a few frames ago): read by the pattern, reprojected,
+            // history rejected (read), history too old (read)
+            int     m_nScreenFresh = 0, m_nScreenReprojected = 0, m_nScreenRejected = 0, m_nScreenAged = 0;
             double  m_TimeMs        = 0;        // the renderer's time since its first GI frame (the frame log's clock: convergence over time)
             float   m_MeanLum       = 0;        // the luminance of the world's mean light (its valid surfels'): how far it has converged
             double  m_CaptureMs     = 0;        // the material capture (processGICapture)

@@ -451,6 +451,7 @@ namespace xlionrender
                 std::vector<xgpu::pipeline::uniform_binds> ScreenBinds(UniformBinds.begin(), UniformBinds.end());
                 ScreenBinds.push_back({ .m_BindIndex = 11, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC });
                 ScreenBinds.push_back(RecordsBind);
+                ScreenBinds.push_back({ .m_BindIndex = 13, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC });     // last frame's (temporal)
                 xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = ScreenShaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                            , .m_UniformBinds = ScreenBinds, .m_Samplers = Samplers };
                 Setup.m_Blend.m_ColorWriteMask = 0;
@@ -1267,10 +1268,14 @@ namespace xlionrender
             auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_GIScreenColor }, xgpu::renderpass::attachment{ View.m_GIScreenDepth } };
             if( auto Err = m_Device.Create(View.m_GIScreenPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
-        std::vector<std::array<std::uint32_t, 4>> Data(1 + std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
+        std::vector<std::array<std::uint32_t, 4>> Data(screen_header_v + std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
         if( auto Err = m_Device.Create(View.m_GIScreenZeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
         Data[0] = { std::uint32_t(W), std::uint32_t(H), 0u, 0u };
         if( auto Err = m_Device.Create(View.m_GIScreenBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenPrev, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenHeader, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * screen_header_v }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenCounters, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
+        View.m_bGIScreenPrev = false;
         if( auto Err = m_Device.Create(View.m_GIScreenRecords, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::push_static_geom), .m_EntryCount = ring_frames_v * screen_draws_v }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenCommands, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = ring_frames_v * screen_draws_v }); Err ) return Err;
         View.m_GIScreenWidth = W; View.m_GIScreenHeight = H;
@@ -1284,6 +1289,10 @@ namespace xlionrender
         if( View.m_GIScreenDepth.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenDepth));
         if( View.m_GIScreenBuffer.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenBuffer));
         if( View.m_GIScreenZeros.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenZeros));
+        if( View.m_GIScreenPrev.m_Private )   m_Device.Destroy(std::move(View.m_GIScreenPrev));
+        if( View.m_GIScreenHeader.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenHeader));
+        if( View.m_GIScreenCounters.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenCounters));
+        View.m_bGIScreenPrev = false;
         if( View.m_GIScreenRecords.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenRecords));
         if( View.m_GIScreenCommands.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenCommands));
         View.m_GIScreenWidth = View.m_GIScreenHeight = 0;

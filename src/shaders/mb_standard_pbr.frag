@@ -251,11 +251,11 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
     for (int k = 0; k < 4; ++k)
     {
         const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1u, H - 1u));
-        const uint  a = 4u * (1u + uint(P.y) * W + uint(P.x));
+        const uint  a = 4u * (8u + uint(P.y) * W + uint(P.x));     // (after the header: xlionrender_gi_screen_frag.glsl)
         const uvec4 Q = uvec4(GIMesh[a], GIMesh[a + 1u], GIMesh[a + 2u], GIMesh[a + 3u]);
         if ((Q.w & (1u << 30)) == 0u) continue;
         const float d = unpackHalf2x16(Q.y).y;
-        const vec2  o = vec2(float((Q.w >> 16) & 127u), float((Q.w >> 23) & 127u)) / 127.0 * 2.0 - 1.0;
+        const vec2  o = vec2(float((Q.w >> 16) & 63u), float((Q.w >> 22) & 63u)) / 63.0 * 2.0 - 1.0;     // (6 + 6 bits: xlionrender_gi_screen_frag.glsl)
         vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y));
         if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
         n = normalize(n);
@@ -278,6 +278,10 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
 // The GI at this pixel (g_GI, g_GIRefl, g_GIDebug, g_GISource): the vertex read, the probe grid, the pixel read of the surfels, the
 // local mean. Its own function: the half-resolution GI pass (xlionrender_gi_screen_frag.glsl) runs the same read
 //-------------------------------------------------------------------------------------------
+// The face normal's derivative product, taken by a caller where its whole quad still runs (xlionrender_gi_screen_frag.glsl: most of its
+// lanes return before the read; a derivative after that is undefined)
+bool g_bGIFaceD = false;
+vec3 g_GIFaceD  = vec3(0.0);
 void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in const vec3 inAlbedo, in const float inMetalic, in const vec3 inEmissiveColor)
 {
 #ifndef XLION_NO_GI_PIXEL
@@ -289,7 +293,8 @@ void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in cons
 	const uvec2 GIRef = InGIRef.y == gi_probes_v ? uvec2(0u, gi_none_v) : InGIRef;          // (the surfel reads below: none)
 	// The face's normal (mesh space, to the smoothed normal's side): the GI's geometry tests use the surface as it is - smoothed corner
 	// normals step along the triangles (a sawtooth); the normal map still reads the basis (GNmap)
-	const vec3 GFaceD = cross(dFdx(InGIPos), dFdy(InGIPos));
+	vec3 GFaceD;
+	if (g_bGIFaceD) GFaceD = g_GIFaceD; else GFaceD = cross(dFdx(InGIPos), dFdy(InGIPos));
 	const vec3 GN0    = normalize(InGINormal);
 	vec3       GFace  = dot(GFaceD, GFaceD) > 1e-24 ? normalize(dot(GFaceD, GN0) < 0.0 ? -GFaceD : GFaceD) : GN0;
 	if (dot(GFace, GN0) < 0.7) GFace = GN0;          // a pixel quad across a crease (a floor's edge at a wall's foot): its derivatives mix both faces

@@ -47,6 +47,15 @@ namespace xlionrender
         xgpu::texture           m_GIScreenDepth;        // DEPTH_F32, half size
         xgpu::renderpass        m_GIScreenPass;
         xgpu::buffer            m_GIScreenBuffer, m_GIScreenZeros;
+        // Temporal: last frame's buffer (swapped with m_GIScreenBuffer each frame: this frame's pixels off the pattern reproject from it),
+        // the header's ring (host visible, instance::screen_header_v entries a frame: xlionrender_gi_screen_frag.glsl), last frame's
+        // camera-centered world to clip and eye, and whether the last buffer holds a frame of this size
+        xgpu::buffer            m_GIScreenPrev, m_GIScreenHeader, m_GIScreenCounters;     // (the counters: host visible, an entry a ring frame)
+        xmath::fmat4            m_GIScreenPrevW2C;
+        xmath::fvec3            m_GIScreenPrevEye;
+        std::uint32_t           m_GIScreenFrame     = 0;
+        bool                    m_bGIScreenPrev     = false;
+        bool                    m_bGIScreenPerPixel = true;     // the read it was (scene::gi_settings::m_bPerPixel): a change drops it
         // and its draws (instance::renderScenePass): a record a cluster (details::push_static_geom, read by gl_InstanceIndex) and an
         // indirect command (details::draw_indexed_indirect), host visible, a region per ring frame (instance::screen_draws_v each)
         xgpu::buffer            m_GIScreenRecords, m_GIScreenCommands;

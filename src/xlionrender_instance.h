@@ -434,6 +434,7 @@ namespace xlionrender
         struct visible_draw { const mesh_slot* m_pMesh; std::uint32_t m_Material; std::uint32_t m_iDraw; };
         std::vector<visible_draw>   m_Visible;              // this view's visible draws, sorted by state
         // The half-resolution GI pass's draws (renderScenePass): a record and a command a cluster, the runs that share a bind state
+        static constexpr int        screen_header_v         = 8;        // the half-resolution GI buffers' header entries (xlionrender_gi_screen_frag.glsl)
         static constexpr int        screen_draws_v          = 1 << 16;  // ponytail: a frame's cap (both phases); past it the rest of the pass is not drawn
         struct screen_run { int m_Phase; const cluster_geom* m_pGeom; const xgpu::buffer* m_pGI; int m_First, m_Count; };
         std::vector<details::push_static_geom>      m_ScreenRecords;

@@ -1398,12 +1398,52 @@ namespace xlionrender
             const bool bScreen = bMain && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
                               && !(bPlan && m_bBoxesOnly) && createGIScreenTargets(View) == nullptr;
             if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
+            if( bMain && !bScreen ) View.m_bGIScreenPrev = false;      // (a frame without it: nothing to reproject from)
             if( bScreen )
             {
-                {   // (cleared: a pixel no GI surface covers this frame keeps nothing of the last)
-                    const xgpu::buffer::copy C{ 1, 1, View.m_GIScreenWidth * View.m_GIScreenHeight };
+                // Temporal (XLION_GI_TEMPORAL=0: off): last frame's buffer becomes the one reprojected from; this frame's is cleared (a pixel no
+                // GI surface covers keeps nothing of an older frame) and gets the header: the size, the frame's 2x2 pattern, whether last
+                // frame's is there, its world to clip and the eye's move (xlionrender_gi_screen_frag.glsl)
+                static const int s_TemporalEnv = [] { const char* p = std::getenv("XLION_GI_TEMPORAL"); return p ? std::atoi(p) : -1; }();     // (0 off, 1/2/4 the rate)
+                const bool bTemporal = s_TemporalEnv >= 0 ? s_TemporalEnv != 0 : Scene.m_GI.m_bTemporal;
+                const int  Rate      = s_TemporalEnv > 0 ? s_TemporalEnv : Scene.m_GI.m_TemporalRate;
+                const std::uint32_t RateLog2 = Rate >= 4 ? 2u : Rate >= 2 ? 1u : 0u;
+                const int  CSlot = int(m_Device.getFrameIndex() % ring_frames_v);
+                (void)View.m_GIScreenCounters.MemoryMapFrameRegion(CSlot, 1, [&](void* p)         // (this slot's frame is done: its counters)
+                {
+                    const auto* pC = static_cast<const std::uint32_t*>(p);
+                    m_GIStats.m_nScreenFresh = int(pC[0]); m_GIStats.m_nScreenReprojected = int(pC[1]); m_GIStats.m_nScreenRejected = int(pC[2]); m_GIStats.m_nScreenAged = int(pC[3]);
+                });
+                std::swap(View.m_GIScreenBuffer, View.m_GIScreenPrev);
+                if( View.m_bGIScreenPerPixel != Scene.m_GI.m_bPerPixel ) View.m_bGIScreenPrev = false;
+                View.m_bGIScreenPerPixel = Scene.m_GI.m_bPerPixel;
+                {   // A camera cut (a jump past 2 m, or the view turned past 45 degrees): no history - a surface seen from both sides of a
+                    // cut would reproject, its reflection read toward the old eye. The forward: clip w's row of world to clip (column major)
+                    const auto Fwd = []( const xmath::fmat4& M ) { const float* p = reinterpret_cast<const float*>(&M); const xmath::fvec3 F{ p[3], p[7], p[11] }; return F / std::max(F.Length(), 1e-12f); };
+                    const xmath::fvec3 Jump = Eye - View.m_GIScreenPrevEye;
+                    if( View.m_bGIScreenPrev && (Jump.Dot(Jump) > 4.0f || Fwd(W2C).Dot(Fwd(View.m_GIScreenPrevW2C)) < 0.7071f) ) View.m_bGIScreenPrev = false;
+                }
+                {
+                    const xgpu::buffer::copy C{ screen_header_v, screen_header_v, View.m_GIScreenWidth * View.m_GIScreenHeight };
                     Window.CopyBuffer(View.m_GIScreenZeros, View.m_GIScreenBuffer, std::span{ &C, 1 });
                 }
+                {
+                    const int HBase = int(m_Device.getFrameIndex() % ring_frames_v) * screen_header_v;
+                    const xmath::fvec3 Move = Eye - View.m_GIScreenPrevEye;
+                    (void)View.m_GIScreenHeader.MemoryMapFrameRegion(HBase, screen_header_v, [&](void* p)
+                    {
+                        auto* pH = static_cast<std::uint32_t*>(p);
+                        std::memset(pH, 0, screen_header_v * 16);
+                        pH[0] = std::uint32_t(View.m_GIScreenWidth); pH[1] = std::uint32_t(View.m_GIScreenHeight);
+                        pH[2] = View.m_GIScreenFrame; pH[3] = (bTemporal && View.m_bGIScreenPrev ? 1u : 0u) | (RateLog2 << 1);
+                        std::memcpy(pH + 4, &View.m_GIScreenPrevW2C, sizeof(float) * 16);        // (entries 1-4: its columns, as the UBO's mat4)
+                        const float M[3] = { Move[0], Move[1], Move[2] };
+                        std::memcpy(pH + 20, M, sizeof(M));
+                    });
+                    const xgpu::buffer::copy C{ HBase, 0, screen_header_v };
+                    Window.CopyBuffer(View.m_GIScreenHeader, View.m_GIScreenBuffer, std::span{ &C, 1 });
+                }
+                View.m_GIScreenPrevW2C = W2C; View.m_GIScreenPrevEye = Eye; View.m_bGIScreenPrev = true; ++View.m_GIScreenFrame;
                 // Its draws: a record (the cluster's push constants) and a command a cluster, in runs of one bind state - phase 0 a run a
                 // geometry, phase 1 a run a geometry and GI buffer - each run one indirect draw (this frame's region of the view's buffers)
                 m_ScreenRecords.clear(); m_ScreenCommands.clear(); m_ScreenRuns.clear();
@@ -1474,13 +1514,18 @@ namespace xlionrender
                     }
                     else
                     {
-                        std::array<xgpu::buffer*, 11> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(Run.m_pGI), &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenBuffer, &View.m_GIScreenRecords };
+                        std::array<xgpu::buffer*, 12> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(Run.m_pGI), &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenBuffer, &View.m_GIScreenRecords, &View.m_GIScreenPrev };
                         SCmd.setPipelineInstance(m_GIScreenInstance, std::span{ Buffers });
                     }
                     SCmd.setDynamicUBO(m_LightUBO, 1);
                     SCmd.setDynamicUBO(m_StaticGeomUBO, 0);
                     BindClusterStreams(SCmd, G);
                     SCmd.DrawIndexedIndirect(View.m_GIScreenCommands, Base + Run.m_First, Run.m_Count);
+                }
+                SCmd.Release();         // (the pass ends: a copy goes outside it)
+                {   // (its counters into this frame's slot: read a ring later, above)
+                    const xgpu::buffer::copy C{ 6, CSlot, 1 };
+                    Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });
                 }
             }
 

@@ -157,6 +157,67 @@ int main()
         }
         CHECK(nCalls > 0 && nCalls <= 2 * nMeshes, "the half-resolution GI pass made %d calls for %d meshes: not batched", nCalls, nMeshes);
         CHECK(S < 0.03 * R, "the GI read at half resolution is %.2f%% off the full read", 100 * S / std::max(R, 1e-9));
+
+        // Temporal (scene::gi_settings::m_bTemporal): 1 in m_TemporalRate of the 8x8 tiles read a frame, the rest reprojected from the
+        // last (rejected - another surface there, or too old - read too). The camera moving every frame: its last frame against a full
+        // read from there - reprojected right (the moved points found again), the same room - at each rate and without it; the
+        // counters (a frame's pixels by kind) add up, and at rate 4 most pixels reproject. Then a cut: nothing reprojects
+        const auto Off = [&](const auto& A, const auto& B)
+        {
+            double s = 0, r = 0;
+            for (std::size_t i = 0; i < A.size(); ++i)
+            {
+                const double a = 0.2126 * B[i][0] + 0.7152 * B[i][1] + 0.0722 * B[i][2], b = 0.2126 * A[i][0] + 0.7152 * A[i][1] + 0.0722 * A[i][2];
+                s += std::abs(b - a); r += a;
+            }
+            return 100 * s / std::max(r, 1e-9);
+        };
+        const auto At = [&](int f) { Camera.LookAt(xmath::fvec3{ 0.04f * float(f), 1.6f, -1.9f + 0.03f * float(f) }, xmath::fvec3{ 0, 0.6f, 1.0f }); };
+        bool bMoved = true;
+        xlionrender::gi::world::stats St{};
+        const auto Moving = [&](bool bTemporal, int Rate)
+        {
+            Scene.m_GI.m_bTemporal = bTemporal; Scene.m_GI.m_TemporalRate = std::uint8_t(Rate);
+            for (int f = 0; f <= 16; ++f) { At(f); bMoved = App.RenderFrame(Scene, View, Camera) && bMoved; }
+            St = Renderer.getGIStats();          // (the counters: a frame a few frames back, the camera moving then too)
+            return ReadRGB(Device, View, W, H);
+        };
+        const auto Fresh = Moving(false, 4);
+        std::array<std::vector<std::array<float, 3>>, 3> Temporal;
+        std::array<xlionrender::gi::world::stats, 3> TSt;
+        for (int r = 0; r < 3; ++r) { Temporal[r] = Moving(true, 1 << r); TSt[r] = St; }
+        CHECK(bMoved, "Render, the camera moving");
+        Scene.m_GI.m_bHalfRes = false;
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, the full read where the camera stopped");
+        const auto FullEnd = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bHalfRes = true; Scene.m_GI.m_bTemporal = true; Scene.m_GI.m_TemporalRate = 4;
+        DumpRGB("gi_half_res_temporal", Temporal[2], W, H);
+        const double FOff = Off(Fresh, FullEnd);
+        for (int r = 0; r < 3; ++r)
+        {
+            const auto& C = TSt[r];
+            const int   n = C.m_nScreenFresh + C.m_nScreenReprojected + C.m_nScreenRejected + C.m_nScreenAged;
+            const double TOff = Off(Temporal[r], FullEnd);
+            std::printf("the half-resolution GI read, the camera moving, fresh 1 in %d tiles: %.2f%% off the full read (%.2f%% without it); pixels %d: "
+                        "fresh %.1f%%, reprojected %.1f%%, rejected %.1f%%, too old %.1f%%\n", 1 << r, TOff, FOff, n,
+                        100.0 * C.m_nScreenFresh / std::max(n, 1), 100.0 * C.m_nScreenReprojected / std::max(n, 1), 100.0 * C.m_nScreenRejected / std::max(n, 1), 100.0 * C.m_nScreenAged / std::max(n, 1));
+            CHECK(TOff < 3.0 && TOff < FOff + 1.0, "the temporal GI read (1 in %d) with the camera moving is %.2f%% off the full read (%.2f%% without it)", 1 << r, TOff, FOff);
+            CHECK(n > 0, "the temporal GI read counted no pixels");
+            if (r == 0) CHECK(C.m_nScreenReprojected == 0, "every tile fresh, yet %d pixels reprojected", C.m_nScreenReprojected);
+            if (r == 2) CHECK(C.m_nScreenReprojected > n / 2, "1 in 4 tiles fresh with the camera moving slowly, yet only %d of %d pixels reprojected", C.m_nScreenReprojected, n);
+        }
+        // A cut: the camera elsewhere, looking back - its first frames reproject nothing of the frame before (rejected, then read)
+        At(0);
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render before the cut");
+        Camera.LookAt(xmath::fvec3{ 0.3f, 1.2f, 1.9f }, xmath::fvec3{ 0, 0.6f, -1.0f });
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render after the cut");     // (the counters come 3 frames late: the 4th reads the cut's)
+        {
+            const auto C = Renderer.getGIStats();          // (the cut's own frame)
+            const int  n = C.m_nScreenFresh + C.m_nScreenReprojected + C.m_nScreenRejected + C.m_nScreenAged;
+            std::printf("the frame of a camera cut: %d pixels, %d reprojected\n", n, C.m_nScreenReprojected);
+            CHECK(n > 0 && C.m_nScreenReprojected < n / 20, "a camera cut reprojected %d of %d pixels", C.m_nScreenReprojected, n);
+        }
+        At(0);
     }
 
     // A light with GI off (a bullet, a muzzle flash): its direct light only - left out of the GI's lights, the GI's light is as without
