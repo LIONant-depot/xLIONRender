@@ -419,6 +419,10 @@ int main()
         CHECK(G.BuildLinks(App.m_Window, W, L, Items, 256, 0, Items.size()), "BuildLinks");
         { auto Cmd = App.m_Window.getCmdBuffer(); }
         App.m_Window.PageFlip();
+        while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+        CHECK(G.CopyLinksOut(App.m_Window, Items.size()), "CopyLinksOut");      // (the links live in device-local memory)
+        { auto Cmd = App.m_Window.getCmdBuffer(); }
+        App.m_Window.PageFlip();
         world::transport Tg; double Dropped = 0;
         CHECK(G.ReadLinks(W, Items, Tg, &Dropped), "ReadLinks");
         W.RelightTransport(Tg, L);                                       // (the GPU's first bounce: its hit clusters lit)
