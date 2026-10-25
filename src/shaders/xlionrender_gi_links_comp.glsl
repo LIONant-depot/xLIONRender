@@ -5,10 +5,12 @@
 // gi_links_v heaviest links; the rest goes to a tail per instance (their mean light: world::TruncateTransport's tail through the
 // instances), its gi_links_v heaviest kept. What no surfel carries (the sky, the direct light at the hits, the emission, the emitters'
 // light the pass adds besides its rays) is its D. Level-0 instances only (a hit on a level-1 instance is dropped: counted)
-// Relightable: D bakes the direct light at the hits (exact for the lights it was built with); a light that changes after adds the
-// difference of the surfels' own direct light through the same weights, E = D + T (E + Dir - Dir0) (Dir: mode 1, each surfel's at its
-// center; Dir0: the same at the build). Through the 16 links and the instances' tail the difference is approximate, the rest exact.
-// Mode 1: one invocation per item, its Dir. Mode 2: the build of the items GIList names (from m_First: a workgroup each) - what a moved
+// Relightable: no light is in D (the sky and the emission only). Each item keeps its rays' hits as gi_hits_v clusters (position,
+// normal, albedo / rays): its first bounce of the lights, F = sum albedo x Direct(hit), is made again from them whenever a light changes
+// (mode 1) - E = D + F + T E. The surfels' own direct light read through the links instead (one point each, through 16 links and an
+// instance's mean) was 32-37% off per surfel on the Police level; the hits' baked and relit by a difference left a moved lamp's spot lit.
+// Mode 1: one invocation per item, its F (into GIDirTmp). Mode 4: one invocation per item, F with its mesh neighbors' (the display
+// filter's lists and weights): each item picks one hit a cluster, its own noise (15% a surfel on the Police level); the light is smooth. Mode 2: the build of the items GIList names (from m_First: a workgroup each) - what a moved
 // object or a changed material touches (gpu_trace::PumpLinks' local rebuild). Mode 3: one invocation per item, flagged when it or one of
 // its links or its tail reads an instance GIChanged names
 layout(local_size_x = 64) in;
@@ -17,16 +19,21 @@ const uint gi_links_v  = 16u;                 // the links a surfel keeps, and t
 const uint gi_slots_v  = 1024u;               // the shared table of the surfels its rays read
 const uint gi_tslots_v = 64u;                 // the tail's table (per instance)
 const uint gi_empty_v  = 0xFFFFFFFFu;
+const uint gi_hits_v   = 8u;                  // the hit clusters an item keeps (its first bounce)
+const uint gi_hitcap_v = 256u;                // the hits clustered (its rays' first 256)
 const float gi_fixed_v = 67108864.0;          // the weights' fixed point (2^26): integer atomics, the same sums in any order
 
 struct GIItem { ivec4 m_Ids; vec4 m_Offsets; };     // instance, surfel, level, rays; off1, off2, shift (bits), -
 layout(std430, set = 0, binding = 5) readonly  buffer items_b { GIItem GIItems[]; };
 layout(std430, set = 0, binding = 6)           buffer links_b { uvec4  GILinks[]; };     // per item 2 x gi_links_v: { key, r, g, b (float bits) }; key: instance << 16 | surfel (empty: ~0); the tail's: 1 << 31 | instance
 layout(std430, set = 0, binding = 7) writeonly buffer d_b     { vec4   GILinkD[]; };     // per item: D, the dropped weight's luminance
-layout(std430, set = 0, binding = 8) writeonly buffer dir_b   { vec4   GIDir[]; };       // per item: its direct light (mode 1)
+layout(std430, set = 0, binding = 8)           buffer dir_b   { vec4   GIDir[]; };       // per item: its first bounce of the lights, F (mode 4: smoothed)
 layout(std430, set = 0, binding = 9)  readonly buffer list_b  { uint   GIList[]; };      // mode 2: the items to build
 layout(std430, set = 0, binding = 10) readonly buffer chg_b   { uint   GIChanged[]; };   // mode 3: per instance 1 when it changed
 layout(std430, set = 0, binding = 11) writeonly buffer flag_b { uint   GIFlag[]; };      // mode 3: per item 1 when the change touches it
+layout(std430, set = 0, binding = 12)           buffer hits_b { uvec4  GIHits[]; };
+layout(std430, set = 0, binding = 13) readonly  buffer first_b { uint  GIInstFirst[]; };  // per instance its first item (+1: the total)
+layout(std430, set = 0, binding = 14)           buffer ftmp_b  { vec4  GIDirTmp[]; };     // mode 1: F as its clusters make it; mode 4 smooths it into GIDir      // per item gi_hits_v: { half2 offset xy, half2 (offset z, albedo r), half2 albedo gb, snorm2 octahedral normal }
 layout(push_constant) uniform push_t { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad0, m_Pad1, m_Pad2; } Push;
 
 shared uint s_Key[gi_slots_v];
@@ -36,6 +43,10 @@ shared uint s_TVal[gi_tslots_v * 3u];
 shared uint s_Dropped[3];
 shared uint s_Best;
 shared vec3 s_D[64];
+shared vec3 s_HP[gi_hitcap_v], s_HN[gi_hitcap_v], s_HA[gi_hitcap_v];   // the hits: offset from the item's center, normal, albedo / rays
+shared uint s_HC[gi_hitcap_v];                                          // their cluster (gi_empty_v: no hit there)
+shared uint s_nH;                                                       // the rays (their slots: the first gi_hitcap_v)
+shared vec3 s_CP[gi_hits_v], s_CN[gi_hits_v];
 vec3 g_CapColor = vec3(0);                    // the hit's albedo / rays (GI_EMIT multiplies it by the read's normalized weight)
 
 void AddFixed(uint Base, vec3 c, bool bTail)
@@ -71,6 +82,8 @@ void LinkEmit(int Inst, int s, float w)
 #include "xlionrender_gi_pass_common.glsl"
 
 float Lum(vec3 c) { return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z; }
+vec2 OctEnc(vec3 n) { n /= abs(n.x) + abs(n.y) + abs(n.z); vec2 e = n.xy; if (n.z < 0.0) e = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0); return e; }
+vec3 OctDec(vec2 e) { vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y)); if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0); return normalize(n); }
 vec3  Unfix(uint a, uint b, uint c) { return vec3(float(a), float(b), float(c)) * (1.0 / gi_fixed_v); }
 
 void main()
@@ -99,7 +112,37 @@ void main()
         const uint Rd = InstRec(Id);
         if (GD[Rd + 40u] == 0u || GD[Rd + 1u] != 0u) { GIDir[kd] = vec4(0.0); return; }
         const uint Sd = MSurfel(MeshOf(Rd), 0u, sd);
-        GIDir[kd] = vec4(Direct(ToWorld(Rd, GV(Sd)), NormalToWorld(Rd, GV(Sd + 3u))), 0.0);
+        const vec3 Cd = ToWorld(Rd, GV(Sd));
+        vec3 F = vec3(0);
+        for (uint q = 0u; q < gi_hits_v; ++q)
+        {
+            const uvec4 h = GIHits[uint(kd) * gi_hits_v + q];
+            const vec2 xy = unpackHalf2x16(h.x), zr = unpackHalf2x16(h.y), gb = unpackHalf2x16(h.z);
+            const vec3 A = vec3(zr.y, gb);
+            if (A.x + A.y + A.z <= 0.0) continue;
+            const vec3 Nh = OctDec(unpackSnorm2x16(h.w));
+            F += A * Direct(Cd + vec3(xy, zr.x), Nh);
+        }
+        GIDirTmp[kd] = vec4(F, 0.0);
+        return;
+    }
+    if (Push.m_Mode == 4)
+    {
+        const int kd = Push.m_First + int(gl_GlobalInvocationID.x);
+        if (kd >= Push.m_nItems) return;
+        const int Id = GIItems[kd].m_Ids.x, sd = GIItems[kd].m_Ids.y;
+        const uint Rd = InstRec(Id), Md = MeshOf(Rd), Nf = GD[Md + 18u];
+        vec3 F = GIDirTmp[kd].xyz; float W = 1.0;
+        if (Nf != gi_none_v && GD[Rd + 40u] != 0u && GD[Rd + 1u] == 0u)
+        {
+            const uint Ni = GD[Md + 19u], Nw = GD[Md + 20u], First = GIInstFirst[uint(Id)];
+            for (uint q = GD[Nf + uint(sd)], q1 = GD[Nf + uint(sd) + 1u]; q < q1; ++q)
+            {
+                const float w = GF(Nw + q);
+                F += GIDirTmp[First + GD[Ni + q]].xyz * w; W += w;
+            }
+        }
+        GIDir[kd] = vec4(F / W, 0.0);
         return;
     }
     const uint lid = gl_LocalInvocationID.x;
@@ -107,8 +150,11 @@ void main()
     for (uint j = lid; j < gi_slots_v; j += 64u) { s_Key[j] = gi_empty_v; s_Val[3u * j] = 0u; s_Val[3u * j + 1u] = 0u; s_Val[3u * j + 2u] = 0u; }
     if (lid < gi_tslots_v) { s_TKey[lid] = gi_empty_v; s_TVal[3u * lid] = 0u; s_TVal[3u * lid + 1u] = 0u; s_TVal[3u * lid + 2u] = 0u; }
     if (lid < 3u) s_Dropped[lid] = 0u;
+    for (uint j = lid; j < gi_hitcap_v; j += 64u) s_HC[j] = gi_empty_v;
+    if (lid == 0u) s_nH = 0u;
     barrier();
     vec3 Dsum = vec3(0);
+    vec3 C = vec3(0);
     const bool bItem = k < Push.m_nItems && GD[InstRec(GIItems[k].m_Ids.x) + 40u] != 0u && GD[InstRec(GIItems[k].m_Ids.x) + 1u] == 0u;
     if (bItem)
     {
@@ -117,7 +163,8 @@ void main()
         const uint R = InstRec(Id), M = MeshOf(R);
         const uint Sb = MSurfel(M, 0u, s);
         const vec3 Sc = GV(Sb), Sn = GV(Sb + 3u);
-        const vec3 C = ToWorld(R, Sc), N = NormalToWorld(R, Sn);
+        C = ToWorld(R, Sc);
+        const vec3 N = NormalToWorld(R, Sn);
         const bool bSpread = GD[6] != 0u && GD[M + 14u] != gi_none_v;
         const uint o0 = bSpread ? GD[GD[M + 14u] + uint(s)] : 0u, nO = bSpread ? GD[GD[M + 14u] + uint(s) + 1u] - o0 + 1u : 0u;     // (+1: its center)
         for (int r = int(lid); r < Rn; r += 64)
@@ -137,7 +184,8 @@ void main()
             SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
             const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
             const vec3 Em = GD[13] == 0u && (GD[R + 47u] & 32u) == 0u ? Emission : vec3(0);
-            Dsum += (Albedo * Direct(Ph, Nh) + Em * gi_pi_v) * (1.0 / float(Rn));
+            Dsum += Em * (gi_pi_v / float(Rn));
+            if (uint(r) < gi_hitcap_v) { s_HP[r] = Ph - C; s_HN[r] = Nh; s_HA[r] = Albedo * (1.0 / float(Rn)); s_HC[r] = 0u; }
             vec3 Q;
             g_CapTier = 0u;
             if (Indirect(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Q))
@@ -180,7 +228,63 @@ void main()
         }
     }
     s_D[lid] = Dsum;
+    if (lid == 0u && bItem) s_nH = uint(GIItems[k].m_Ids.w);
     barrier();
+    // its hits in gi_hits_v clusters (k-means: by position, normals apart by a surfel's reach), their albedo summed: what mode 1 lights;
+    // each lit at one of its hits picked by albedo (a stratum: the light through its mean point was 10% over in the Cornell box at 8
+    // clusters - lit and shadowed hits merged). The hits by their ray (slots in ray order: the same clusters every build)
+    {
+        const uint nS = min(s_nH, gi_hitcap_v);
+        uint nV = 0u;                                 // (the valid slots, the clusters' seeds evenly among them)
+        for (uint i = 0u; i < nS; ++i) if (s_HC[i] != gi_empty_v) ++nV;
+        const uint nC = min(gi_hits_v, nV);
+        if (lid < nC)
+        {
+            const uint Want = (lid * nV) / gi_hits_v;
+            for (uint i = 0u, v = 0u; i < nS; ++i) if (s_HC[i] != gi_empty_v) { if (v == Want) { s_CP[lid] = s_HP[i]; s_CN[lid] = s_HN[i]; break; } ++v; }
+        }
+        barrier();
+        float Scale = 0.0;                            // (the normals' weight: the hits' spread around their first, squared)
+        vec3 P0 = vec3(0);
+        for (uint i = 0u; i < nS; ++i) if (s_HC[i] != gi_empty_v) { P0 = s_HP[i]; break; }
+        for (uint i = 0u; i < nS; ++i) if (s_HC[i] != gi_empty_v) Scale += dot(s_HP[i] - P0, s_HP[i] - P0);
+        Scale = nV > 0u ? 4.0 * Scale / float(nV) + 1e-6 : 1.0;
+        for (int it = 0; it < 4; ++it)
+        {
+            for (uint i = lid; i < nS; i += 64u)
+            {
+                if (s_HC[i] == gi_empty_v) continue;
+                uint Best = 0u; float Bd = 1e30;
+                for (uint q = 0u; q < nC; ++q)
+                {
+                    const vec3 d = s_HP[i] - s_CP[q];
+                    const float e = dot(d, d) + Scale * (1.0 - dot(s_HN[i], s_CN[q]));
+                    if (e < Bd) { Bd = e; Best = q; }
+                }
+                s_HC[i] = Best;
+            }
+            barrier();
+            if (lid < nC)
+            {
+                vec3 P = vec3(0), Nn = vec3(0); float W = 0.0;
+                for (uint i = 0u; i < nS; ++i) if (s_HC[i] == lid) { const float w = Lum(s_HA[i]) + 1e-9; P += s_HP[i] * w; Nn += s_HN[i] * w; W += w; }
+                if (W > 0.0) { s_CP[lid] = P / W; s_CN[lid] = length(Nn) > 1e-12 ? normalize(Nn) : s_CN[lid]; }
+            }
+            barrier();
+        }
+        if (lid < gi_hits_v && bItem)
+        {
+            vec3 A = vec3(0); float Tot = 0.0;
+            for (uint i = 0u; i < nS; ++i) if (s_HC[i] == lid) { A += s_HA[i]; Tot += Lum(s_HA[i]) + 1e-9; }
+            if (lid >= nC) A = vec3(0);
+            if (s_nH > gi_hitcap_v) A *= float(s_nH) / float(gi_hitcap_v);    // (the rays past the slots: their share scaled in)
+            const float u = fract(float((uint(k) * 2654435761u) ^ (lid * 2246822519u)) * (1.0 / 4294967296.0)) * Tot;
+            uint Pick = gi_empty_v; float Acc = 0.0;
+            for (uint i = 0u; i < nS; ++i) if (s_HC[i] == lid) { Pick = i; Acc += Lum(s_HA[i]) + 1e-9; if (Acc >= u) break; }
+            const vec3 P = Pick != gi_empty_v ? s_HP[Pick] : vec3(0), Nh = Pick != gi_empty_v ? s_HN[Pick] : vec3(0, 0, 1);
+            GIHits[uint(k) * gi_hits_v + lid] = uvec4(packHalf2x16(P.xy), packHalf2x16(vec2(P.z, A.x)), packHalf2x16(A.yz), packSnorm2x16(OctEnc(Nh)));
+        }
+    }
     // the gi_links_v heaviest: rounds of an atomic max over (luminance bits, slot)
     const uint Base = uint(max(k, 0)) * 2u * gi_links_v;
     for (uint q = 0u; q < gi_links_v; ++q)

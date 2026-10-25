@@ -36,8 +36,8 @@ namespace xlionrender::gi
                 && Make(m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make(m_Shader[4], m_Filter, S.m_Filter, 6, 32) && Make(m_Shader[5], m_Expand, S.m_Expand, 4, 32)
                 && Make(m_Shader[6], m_Means, S.m_Means, 2, 16) && Make(m_Shader[7], m_Cube, S.m_Cube, 2, 16) && Make(m_Shader[8], m_Migrate, S.m_Migrate, 3, 16)
                 && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 })
-                && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 12, 32)) || true)
-                && (S.m_Solve.empty() || (m_bSolve = Make(m_Shader[11], m_SolveC, S.m_Solve, 12, 16)) || true)
+                && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 15, 32)) || true)
+                && (S.m_Solve.empty() || (m_bSolve = Make(m_Shader[11], m_SolveC, S.m_Solve, 7, 16)) || true)
                 && (S.m_Ghosts.empty() || (m_bGhosts = Make(m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true);
         }
 
@@ -206,6 +206,7 @@ namespace xlionrender::gi
         // (xlionrender_gi_links_comp.glsl): Items { instance, surfel }, Rays each, into a host-visible table (2 x links_v a surfel: the
         // heaviest links, the tail per instance) and D. Packs the scene first if it must. First / Count: a range of Items (a frame's share)
         static constexpr int links_v = 16;
+        static constexpr std::size_t hits_v = 8;       // the hit clusters a link row keeps: its first bounce (xlionrender_gi_links_comp.glsl gi_hits_v)
         bool BuildLinks(xgpu::window& Window, world& W, const lights& L, std::span<const std::array<int, 2>> Items, int Rays, std::size_t First, std::size_t Count, unsigned Seed = 1) noexcept
         {
             if (!m_bLinks || Items.empty()) return false;
@@ -219,43 +220,51 @@ namespace xlionrender::gi
                 for (std::size_t k = 0; k < Items.size(); ++k) It[k] = { { Items[k][0], Items[k][1], 0, Rays }, { R.Next(), R.Next(), 0, 0 } };
                 if (!Fit(m_LinkItemB, int(sizeof(item)), It.size()) || m_LinkItemB.MemoryMap(0, int(It.size()), [&](void* p) { std::memcpy(p, It.data(), It.size() * sizeof(item)); })) return false;
                 if (!Fit(m_LinkB, int(4 * sizeof(std::uint32_t)), 2 * links_v * Items.size()) || !Fit(m_LinkDB, int(4 * sizeof(float)), Items.size())) return false;
-                if (!Local(m_LinkDirB, std::vector<std::array<float, 4>>(Items.size())) || !Local(m_LinkDir0B, std::vector<std::array<float, 4>>(Items.size()))) return false;
-                // per instance its first item (+1: the total): the solve finds a link's surfel's direct light by it
+                // per instance its first item (+1: the total): mode 4 finds a neighbor's item by it
                 std::vector<std::uint32_t> InstFirst(std::size_t(W.InstanceCount()) + 1, 0);
                 for (const auto& It2 : Items) if (std::size_t(It2[0]) < InstFirst.size() - 1) ++InstFirst[std::size_t(It2[0]) + 1];
                 for (std::size_t i = 1; i < InstFirst.size(); ++i) InstFirst[i] += InstFirst[i - 1];
-                if (!Local(m_LinkInstFirstB, InstFirst) || !Local(m_LinkDirMeanB, std::vector<std::array<float, 4>>(std::size_t(W.InstanceCount()) + 1))
-                 || !Local(m_LinkDirMean0B, std::vector<std::array<float, 4>>(std::size_t(W.InstanceCount()) + 1))) return false;
+                if (!Local(m_LinkDirB, std::vector<std::array<float, 4>>(Items.size())) || !Local(m_LinkDirTmpB, std::vector<std::array<float, 4>>(Items.size()))
+                 || !Local(m_LinkInstFirstB, InstFirst) || !Fit(m_LinkHitB, int(4 * sizeof(std::uint32_t)), hits_v * Items.size())) return false;
                 m_bLinkDirValid = false;
             }
             Count = std::min(Count, Items.size() - std::min(First, Items.size()));
             if (Count == 0) return true;
             const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(Items.size()), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First), 0, {} };
             if (!LinkAux()) return false;
-            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB };
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
             Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int(Count));
             return true;
         }
-        // The links' direct light (E = D + T (Dir + E)): each surfel's own (the links shader's mode 1: a shadow ray to the sun and to each
-        // lamp), then per instance its mean (the tail's: the solve's mode 2). After a build and whenever a light changes: the links stay
+        // The links' first bounce of the lights (E = D + F + T E): each item's hit clusters lit (the links shader's mode 1: a shadow ray to
+        // the sun and to each lamp from each cluster). After a build and whenever a light changes: the links stay
         bool RelightLinks(xgpu::window& Window, std::size_t nItems) noexcept
         {
-            if (!m_bLinks || !m_bSolve || nItems == 0 || m_Data.empty() || m_LastMeans < 0 || !m_LinkDirMeanB.m_Private) return false;      // (the means bound: one made)
+            if (!m_bLinks || !m_bSolve || nItems == 0 || m_Data.empty() || !CopyLinksLocal(Window, nItems)) return false;
             const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, 1, {} };
             if (!LinkAux()) return false;
-            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB };
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitLocalB, &m_LinkInstFirstB, &m_LinkDirTmpB };
             Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int((nItems + 63) / 64));
-            if (!FitLocal(m_LinkNextB, int(4 * sizeof(float)), nItems)) return false;
-            xgpu::buffer* SB[] = { &m_DataB, &m_LinkB, &m_LinkDB, &m_LinkItemB, &m_MeansB2[m_LastMeans], &m_LinkNextB, &m_LinkDirB, &m_LinkInstFirstB, &m_LinkDirMeanB, &m_LinkDir0B, &m_LinkDirMean0B, &m_LinkListB };
-            struct { int m_nItems, m_Mode, m_nInst, m_Links; } SPush{ int(nItems), 2, int(m_Data[1]), links_v };
-            Window.Dispatch(m_SolveC, SB, &SPush, sizeof(SPush), std::max(int(m_Data[1]), 1));
-            if (!m_bLinkDirValid)           // the first after a build: the lights D was built with (Dir0, its means)
-            {
-                const xgpu::buffer::copy CN{ 0, 0, int(nItems) }, CI{ 0, 0, std::min(int(m_Data[1]) + 1, int(m_LinkDirMeanB.getEntryCount())) };
-                Window.CopyBuffer(m_LinkDirB, m_LinkDir0B, std::span{ &CN, 1 });
-                Window.CopyBuffer(m_LinkDirMeanB, m_LinkDirMean0B, std::span{ &CI, 1 });
-            }
+            const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Smooth{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, 4, {} };
+            Window.Dispatch(m_LinksC, B, &Smooth, sizeof(Smooth), int((nItems + 63) / 64));
             m_bLinkDirValid = true;
+            ++m_nRelights;
+            return true;
+        }
+        // The links, their D, items and hit clusters copied once into device-local buffers: built into host-visible ones (ReadLinks maps
+        // them), every frame's solve read them over the bus - the Bistro's 506k surfels took 49 ms a frame
+        bool CopyLinksLocal(xgpu::window& Window, std::size_t nItems) noexcept
+        {
+            if (m_bLinksLocal) return true;
+            const std::size_t nLinks = 2 * std::size_t(links_v) * nItems;
+            if (!Local(m_LinkLocalB, std::vector<std::array<std::uint32_t, 4>>(nLinks)) || !Local(m_LinkDLocalB, std::vector<std::array<std::uint32_t, 4>>(nItems))
+             || !Local(m_LinkItemLocalB, std::vector<std::array<std::uint32_t, 8>>(nItems)) || !Local(m_LinkHitLocalB, std::vector<std::array<std::uint32_t, 4>>(hits_v * nItems))) return false;
+            const xgpu::buffer::copy CL{ 0, 0, int(nLinks) }, CN{ 0, 0, int(nItems) }, CH{ 0, 0, int(hits_v * nItems) };
+            Window.CopyBuffer(m_LinkB, m_LinkLocalB, std::span{ &CL, 1 });
+            Window.CopyBuffer(m_LinkDB, m_LinkDLocalB, std::span{ &CN, 1 });
+            Window.CopyBuffer(m_LinkItemB, m_LinkItemLocalB, std::span{ &CN, 1 });
+            Window.CopyBuffer(m_LinkHitB, m_LinkHitLocalB, std::span{ &CH, 1 });
+            m_bLinksLocal = true;
             return true;
         }
         // One Jacobi iteration over the links built (xlionrender_gi_solve_comp.glsl): into a scratch, then into the surfels' light. After
@@ -264,22 +273,10 @@ namespace xlionrender::gi
         {
             if (!m_bSolve || nItems == 0 || m_Data.empty() || m_LastMeans < 0) return false;
             if (!FitLocal(m_LinkNextB, int(4 * sizeof(float)), nItems)) return false;
-            // The links, their D and items copied once into device-local buffers: built into host-visible ones (ReadLinks maps them), every
-            // frame's solve read them over the bus - the Bistro's 506k surfels took 49 ms a frame
-            if (!m_bLinksLocal)
-            {
-                const std::size_t nLinks = 2 * std::size_t(links_v) * nItems;
-                if (!Local(m_LinkLocalB, std::vector<std::array<std::uint32_t, 4>>(nLinks)) || !Local(m_LinkDLocalB, std::vector<std::array<std::uint32_t, 4>>(nItems))
-                 || !Local(m_LinkItemLocalB, std::vector<std::array<std::uint32_t, 8>>(nItems))) return false;
-                const xgpu::buffer::copy CL{ 0, 0, int(nLinks) }, CN{ 0, 0, int(nItems) };
-                Window.CopyBuffer(m_LinkB, m_LinkLocalB, std::span{ &CL, 1 });
-                Window.CopyBuffer(m_LinkDB, m_LinkDLocalB, std::span{ &CN, 1 });
-                Window.CopyBuffer(m_LinkItemB, m_LinkItemLocalB, std::span{ &CN, 1 });
-                m_bLinksLocal = true;
-            }
+            if (!CopyLinksLocal(Window, nItems)) return false;
             const int Groups = int((nItems + 63) / 64);
             if (!LinkAux()) return false;
-            xgpu::buffer* B[] = { &m_DataB, &m_LinkLocalB, &m_LinkDLocalB, &m_LinkItemLocalB, &m_MeansB2[m_LastMeans], &m_LinkNextB, &m_LinkDirB, &m_LinkInstFirstB, &m_LinkDirMeanB, &m_LinkDir0B, &m_LinkDirMean0B, &m_LinkListB };
+            xgpu::buffer* B[] = { &m_DataB, &m_LinkLocalB, &m_LinkDLocalB, &m_LinkItemLocalB, &m_MeansB2[m_LastMeans], &m_LinkNextB, &m_LinkDirB };
             struct { int m_nItems, m_Mode, m_nInst, m_Links; } Push{ int(nItems), 0, int(m_Data[1]), links_v };
             Window.Dispatch(m_SolveC, B, &Push, sizeof(Push), Groups);
             Push.m_Mode = 1;
@@ -301,8 +298,8 @@ namespace xlionrender::gi
         }
         // A static object moved or a material changed once the links solve: only the rows it touches are built again - its own, the rows
         // whose links or tail read it (the GPU flags them: mode 3, read back), and for a move the rows near it, before and after (their
-        // rays may meet it now, or no more). The others keep their links and the solve goes on; the rows built again bake the direct
-        // light of now (their Dir0 follows: the solve's modes 3 and 4). The rays stay off. Moving objects are the ray solver's (not here)
+        // rays may meet it now, or no more). The others keep their links and the solve goes on; the rows built again have new hit
+        // clusters, lit at once (RelightLinks). The rays stay off. Moving objects are the ray solver's (not here)
         void LocalRebuild(xgpu::window& Window, world& W, const lights& L, std::uint64_t Frame, int Rays, int PerFrame) noexcept
         {
             const std::size_t nItems = m_LinkItems.size(), nInst = std::size_t(W.InstanceCount());
@@ -338,7 +335,7 @@ namespace xlionrender::gi
                 SnapshotLinked(W);                  // (a change while this one is built: the next round)
                 if (!Local(m_LinkChangedB, Changed) || !Fit(m_LinkFlagB, int(sizeof(std::uint32_t)), nItems)) return;
                 const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, 3, {} };
-                xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB };
+                xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
                 Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int((nItems + 63) / 64));
                 m_LocalFrame = Frame; m_LocalState = 1;
                 return;
@@ -358,7 +355,7 @@ namespace xlionrender::gi
             {
                 const std::size_t n = std::min(std::size_t(PerFrame), m_LocalList.size() - m_LocalCursor);
                 const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(m_LocalCursor), 2, {} };
-                xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB };
+                xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
                 if (n) Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int(n));
                 m_LocalCursor += n;
                 if (m_LocalCursor >= m_LocalList.size()) { m_LocalState = 3; m_LocalFrame = Frame; }
@@ -366,18 +363,10 @@ namespace xlionrender::gi
             }
             if (m_LocalState == 3)
             {
-                // the solve's copies again (the rows built again are in the host-visible ones), their direct light now, their Dir0 now
+                // the solve's copies again (the rows built again are in the host-visible ones), their first bounce now
                 m_bLinksLocal = false;
                 (void)Rays; (void)L;
-                if (RelightLinks(Window, nItems))
-                {
-                    if (!FitLocal(m_LinkNextB, int(4 * sizeof(float)), nItems)) return;
-                    xgpu::buffer* SB[] = { &m_DataB, &m_LinkB, &m_LinkDB, &m_LinkItemB, &m_MeansB2[m_LastMeans], &m_LinkNextB, &m_LinkDirB, &m_LinkInstFirstB, &m_LinkDirMeanB, &m_LinkDir0B, &m_LinkDirMean0B, &m_LinkListB };
-                    struct { int m_nItems, m_Mode, m_nInst, m_Links; } SPush{ int(m_LocalList.size()), 3, int(m_Data[1]), links_v };
-                    Window.Dispatch(m_SolveC, SB, &SPush, sizeof(SPush), int((m_LocalList.size() + 63) / 64));
-                    SPush.m_Mode = 4;
-                    Window.Dispatch(m_SolveC, SB, &SPush, sizeof(SPush), std::max(int(m_Data[1]), 1));
-                }
+                (void)RelightLinks(Window, nItems);
                 ++m_nLocalRebuilds; m_nLocalRows += m_LocalList.size();
                 if (std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS rebuilt %zu of %zu rows (a move or a material)\n", m_LocalList.size(), nItems); std::fflush(stdout); }
                 m_LocalState = 0;
@@ -387,6 +376,7 @@ namespace xlionrender::gi
         std::size_t LocalRebuilds(void) const noexcept { return m_nLocalRebuilds; }      // (tests)
         std::size_t LocalRows(void) const noexcept { return m_nLocalRows; }
         std::size_t LinkBuilds(void) const noexcept { return m_nLinkBuilds; }
+        std::size_t Relights(void) const noexcept { return m_nRelights; }
         // Experiment D in a renderer (XLION_GI_LINKS): after Settle frames of the ray solver (the reads' validity and moments), the links of
         // every level-0 surfel are built, PerFrame surfels a frame; two frames after the last slice they are solved, one iteration a frame.
         // A pack, a move or a level switch drops them (built again Settle frames on). After Submit, before Show
@@ -402,15 +392,11 @@ namespace xlionrender::gi
             std::uint64_t DirKey = Hash(1469598103934665603ull, &L.m_SunDirection, sizeof(L.m_SunDirection));
             DirKey = Hash(DirKey, &L.m_SunColor, sizeof(L.m_SunColor));
             if (!L.m_Points.empty()) DirKey = Hash(DirKey, L.m_Points.data(), L.m_Points.size() * sizeof(L.m_Points[0]));
-            // (the relight is a delta at the surfels' centres: D keeps the old lights as its rays saw them, and near a lamp the two do not
-            // cancel - the Police level's old lamp spot stayed 64% too bright. Lights still for Settle frames: the links are built again)
-            if (DirKey != m_PendingDirKey) { m_PendingDirKey = DirKey; m_PendingDirSince = Frame; }
-            if (Frame >= m_PendingDirSince + std::uint64_t(Settle) || m_LinkKey == ~0ull) m_StableDirKey = m_PendingDirKey;  // (the first lights: at once)
             // (a move or a material while the links settle or build: all of them again; once they solve, the rows the change touches -
             // LocalRebuild - the rest of the scene keeps its links)
             const std::uint64_t Local = m_LinkState == 2 ? m_LinkLocalKey : ((m_XformGen << 20) * 0x9E3779B97F4A7C15ull ^ W.MaterialGenSum());
             if (m_LinkState != 2) m_LinkLocalKey = Local;
-            const std::uint64_t Key = (((m_Gen ^ (m_LevelGen << 40)) * 0x9E3779B97F4A7C15ull ^ Local) * 0xC2B2AE3D27D4EB4Full ^ SkyKey) * 0x9E3779B97F4A7C15ull ^ m_StableDirKey;
+            const std::uint64_t Key = ((m_Gen ^ (m_LevelGen << 40)) * 0x9E3779B97F4A7C15ull ^ Local) * 0xC2B2AE3D27D4EB4Full ^ SkyKey;
             if (Key != m_LinkKey && std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS dropped at frame %llu: gen %llu xform %llu level %llu materials %llu sky %llx (state %d)\n", (unsigned long long)Frame, (unsigned long long)m_Gen, (unsigned long long)m_XformGen, (unsigned long long)m_LevelGen, (unsigned long long)W.MaterialGenSum(), (unsigned long long)SkyKey, m_LinkState); std::fflush(stdout); }     // (measurement)
             if (Key != m_LinkKey) { m_LinkKey = Key; m_LinkState = 0; m_LinkSince = Frame; m_LinkItems.clear(); m_bLinksLocal = false; }
             if (m_LinkState == 0 && Frame >= m_LinkSince + std::uint64_t(Settle))
@@ -449,21 +435,44 @@ namespace xlionrender::gi
 
         // What BuildLinks wrote (its frame done) as the world's transport: rows in Items' order (all of the world's level-0 surfels, in
         // order: the CPU's rows), the tail grouped by instance (world::TruncateTransport's tail through the instances)
+        static float HalfToFloat(std::uint16_t h) noexcept
+        {
+            const std::uint32_t e = (h >> 10) & 31u, m = h & 1023u;
+            const float v = e == 0 ? std::ldexp(float(m), -24) : e == 31 ? std::numeric_limits<float>::infinity() : std::ldexp(float(m | 1024u), int(e) - 25);
+            return (h & 0x8000u) ? -v : v;
+        }
         bool ReadLinks(const world& W, std::span<const std::array<int, 2>> Items, world::transport& T, double* pDropped = nullptr) noexcept
         {
             if (!m_bLinks || Items.empty()) return false;
             std::vector<std::array<std::uint32_t, 4>> Lk(2 * links_v * Items.size());
             std::vector<std::array<float, 4>> Dk(Items.size());
+            std::vector<std::array<std::uint32_t, 4>> Hk(hits_v * Items.size());
             if (m_LinkB.MemoryMap(0, int(Lk.size()), [&](void* p) { std::memcpy(Lk.data(), p, Lk.size() * 16); })) return false;
             if (m_LinkDB.MemoryMap(0, int(Dk.size()), [&](void* p) { std::memcpy(Dk.data(), p, Dk.size() * 16); })) return false;
+            if (m_LinkHitB.MemoryMap(0, int(Hk.size()), [&](void* p) { std::memcpy(Hk.data(), p, Hk.size() * 16); })) return false;
             T = {};
             T.m_InstFirst.push_back(0);
             for (int i = 0; i < W.InstanceCount(); ++i) T.m_InstFirst.push_back(T.m_InstFirst.back() + std::uint32_t(W.IsAlive(i) ? W.InstanceSurfels0(i) : 0));
-            T.m_First.push_back(0); T.m_AFirst.push_back(0);
+            T.m_First.push_back(0); T.m_AFirst.push_back(0); T.m_HitFirst.push_back(0);
             double Drop = 0;
             for (std::size_t k = 0; k < Items.size(); ++k)
             {
                 T.m_D.push_back(v3{ Dk[k][0], Dk[k][1], Dk[k][2] }); Drop += Dk[k][3];
+                // its hit clusters (the shader's packing: half offsets from its center, half albedo, an octahedral snorm normal)
+                const v3 C = W.InstanceL2W(Items[k][0]) * W.InstanceMesh(Items[k][0]).m_Levels[0][std::size_t(Items[k][1])].m_Center;
+                for (std::size_t q = 0; q < hits_v; ++q)
+                {
+                    const auto& h = Hk[hits_v * k + q];
+                    const auto Half = [](std::uint32_t u) { return HalfToFloat(std::uint16_t(u & 0xFFFFu)); };
+                    const v3 A{ Half(h[1] >> 16), Half(h[2]), Half(h[2] >> 16) };
+                    if (A.m_X + A.m_Y + A.m_Z <= 0) continue;
+                    const auto Sn = [](std::uint32_t u) { return std::max(float(std::int16_t(u & 0xFFFFu)) / 32767.0f, -1.0f); };
+                    float ex = Sn(h[3]), ey = Sn(h[3] >> 16);
+                    v3 Nn{ ex, ey, 1 - std::abs(ex) - std::abs(ey) };
+                    if (Nn.m_Z < 0) { const float x = Nn.m_X, y = Nn.m_Y; Nn.m_X = (1 - std::abs(y)) * (x >= 0 ? 1.0f : -1.0f); Nn.m_Y = (1 - std::abs(x)) * (y >= 0 ? 1.0f : -1.0f); }
+                    T.m_Hits.push_back({ C + v3{ Half(h[0]), Half(h[0] >> 16), Half(h[1]) }, Nn.NormalizeCopy(), A });
+                }
+                T.m_HitFirst.push_back(std::uint32_t(T.m_Hits.size()));
                 T.m_Group.push_back(std::uint32_t(Items[k][0]));
                 for (int q = 0; q < 2 * links_v; ++q)
                 {
@@ -905,9 +914,10 @@ namespace xlionrender::gi
         xgpu::shader                        m_Shader[13];
         xgpu::compute                       m_LinksC;           // experiment D: the link build (optional: shaders::m_Links)
         xgpu::buffer                        m_LinkItemB, m_LinkB, m_LinkDB, m_LinkNextB;
-        xgpu::buffer                        m_LinkLocalB, m_LinkDLocalB, m_LinkItemLocalB;     // (the solve's copies, device-local: SolveLinks)
-        xgpu::buffer                        m_LinkDirB, m_LinkInstFirstB, m_LinkDirMeanB;      // the links' direct light: per item, per instance first item, per instance mean
-        xgpu::buffer                        m_LinkDir0B, m_LinkDirMean0B;                      // ... as it was when the links were built (D has it)
+        xgpu::buffer                        m_LinkLocalB, m_LinkDLocalB, m_LinkItemLocalB, m_LinkHitLocalB;   // (the device-local copies: CopyLinksLocal)
+        xgpu::buffer                        m_LinkHitB;         // per item its hit clusters (hits_v): its first bounce, lit again on a light change
+        xgpu::buffer                        m_LinkDirB;         // per item its first bounce of the lights, F (RelightLinks)
+        xgpu::buffer                        m_LinkDirTmpB, m_LinkInstFirstB;   // F before its neighbors (mode 1 -> 4); per instance its first item
         xgpu::buffer                        m_LinkListB, m_LinkChangedB, m_LinkFlagB;          // the local rebuild: its items, the changed instances, the flags read back
         std::vector<std::uint32_t>          m_LinkedMatGen;                                    // per instance its material's version the links were built against
         std::vector<xmath::fmat4>           m_LinkedL2W;                                       // ... and its placement
@@ -919,7 +929,7 @@ namespace xlionrender::gi
         bool                                m_bLinkDirValid = false;
         std::uint64_t                       m_LinkDirKey = 0;
         std::size_t                         m_nLinkBuilds = 0;
-        std::uint64_t                       m_PendingDirKey = 0, m_PendingDirSince = 0, m_StableDirKey = 0;     // the lights the links' D is built with
+        std::size_t                         m_nRelights = 0;
         bool                                m_bLinksLocal = false;
         bool                                m_bLinks = false, m_bSolve = false;
         xgpu::compute                       m_SolveC;

@@ -3237,10 +3237,13 @@ namespace xlionrender::gi
             std::vector<std::uint32_t>  m_Col;           // per link: the row it reads
             std::vector<v3>             m_W;             // per link: its weight (albedo x read share / rays)
             std::vector<v3>             m_D;             // per row: the part no surfel carries (sky, direct, emission)
-            // Relightable (CompileTransport bRelight; the GPU's links always): D has the hits' direct light at the lights it was compiled
-            // with; when they change, the difference of the surfels' own direct light goes through the same weights - E = D + T (E + Dir
-            // - Dir0) (m_Dir: RelightTransport, m_Dir0: at the compile)
-            std::vector<v3>             m_Dir, m_Dir0;
+            // Relightable (CompileTransport bRelight; the GPU's links always): no light in D; each row keeps its rays' hits (the GPU: 8
+            // clusters of them) and its first bounce of the lights, F = sum albedo x Direct(hit), is made again from them (RelightTransport,
+            // into m_Dir): E = D + F + T E. Exact at any light (the GPU: as close as its clusters)
+            struct hit_pt { v3 m_P, m_N, m_A; };     // (world space; m_A: albedo / rays)
+            std::vector<std::uint32_t>  m_HitFirst;  // per row its first hit (+1)
+            std::vector<hit_pt>         m_Hits;
+            std::vector<v3>             m_Dir;
             std::size_t                 m_nRays = 0, m_nUnsupported = 0, m_nDropped = 0, m_nBack = 0, m_nSky = 0, m_nFar = 0;
             // TruncateTransport: per row its aggregate links (the tail) to groups (a surfel's parent: its level-1 surfel); per row its group
             std::vector<std::uint32_t>  m_AFirst, m_AGroup, m_Group, m_GroupSize;
@@ -3255,6 +3258,7 @@ namespace xlionrender::gi
             T.m_InstFirst.push_back(0);
             for (const auto& I : m_Instances) T.m_InstFirst.push_back(T.m_InstFirst.back() + std::uint32_t(I.m_bAlive ? I.m_pMesh->m_Levels[0].size() : 0));
             T.m_First.push_back(0);
+            if (bRelight) T.m_HitFirst.push_back(0);
             std::vector<std::pair<int, float>> Cap;
             std::unordered_map<std::uint32_t, v3> Row;
             rng R(Seed);
@@ -3284,10 +3288,14 @@ namespace xlionrender::gi
                         if (m_Instances[std::size_t(H.m_Inst)].m_Level != 0) { ++T.m_nFar; continue; }      // (the prototype's rows are level 0)
                         v3 Albedo, Emission;
                         SurfaceAt(H, Albedo, Emission);
-                        const v3 Dl = Direct(HitPosition(H), Nh, L);
                         const v3 Em = I.m_EmitB.empty() && !m_Setup.m_bEmitterSampling ? Emission : v3{ 0, 0, 0 };
-                        const v3 AD = v3{ Albedo.m_X * Dl.m_X, Albedo.m_Y * Dl.m_Y, Albedo.m_Z * Dl.m_Z } * (1.0f / float(Rays));
-                        D = D + Em * (pi_v / float(Rays)) + AD;
+                        D = D + Em * (pi_v / float(Rays));
+                        if (bRelight) T.m_Hits.push_back({ HitPosition(H), Nh, Albedo * (1.0f / float(Rays)) });
+                        else
+                        {
+                            const v3 Dl = Direct(HitPosition(H), Nh, L);
+                            D = D + v3{ Albedo.m_X * Dl.m_X, Albedo.m_Y * Dl.m_Y, Albedo.m_Z * Dl.m_Z } * (1.0f / float(Rays));
+                        }
                         Cap.clear();
                         m_pReadCapture = &Cap;
                         const query Q = Indirect(H);
@@ -3318,27 +3326,26 @@ namespace xlionrender::gi
                     }
                     else if (s < I.m_EmitB.size()) D = D + (I.m_EmitB[s][0] + I.m_EmitB[s][1] + I.m_EmitB[s][2]) * (1.0f / 3.0f);
                     T.m_D.push_back(D);
+                    if (bRelight) T.m_HitFirst.push_back(std::uint32_t(T.m_Hits.size()));
                     for (const auto& [j, w] : Row) { T.m_Col.push_back(j); T.m_W.push_back(w); }
                     T.m_First.push_back(std::uint32_t(T.m_Col.size()));
                 }
             }
             T.m_CompileMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
-            if (bRelight) { RelightTransport(T, L); T.m_Dir0 = T.m_Dir; }
+            if (bRelight) RelightTransport(T, L);
             return T;
         }
-        // A relightable transport's direct light (m_Dir): each row's surfel's, at its center (the GPU's links mode 1, a shadow ray a light)
+        // A relightable transport's first bounce of the lights (m_Dir): each row's hits lit (the GPU's links mode 1, a shadow ray a light)
         void RelightTransport(transport& T, const lights& L) const noexcept
         {
             T.m_Dir.assign(T.m_D.size(), v3{ 0, 0, 0 });
-            for (std::size_t i = 0; i < m_Instances.size() && i + 1 < T.m_InstFirst.size(); ++i)
-            {
-                const auto& I = m_Instances[i];
-                for (std::uint32_t r = T.m_InstFirst[i]; r < T.m_InstFirst[i + 1] && r < T.m_Dir.size(); ++r)
+            for (std::size_t r = 0; r < T.m_Dir.size() && r + 1 < T.m_HitFirst.size(); ++r)
+                for (std::uint32_t h = T.m_HitFirst[r]; h < T.m_HitFirst[r + 1]; ++h)
                 {
-                    const auto& S = I.m_pMesh->m_Levels[0][r - T.m_InstFirst[i]];
-                    T.m_Dir[r] = Direct(I.m_L2W * S.m_Center, NormalToWorld(I, S.m_Normal), L);
+                    const auto& H = T.m_Hits[h];
+                    const v3 Dl = Direct(H.m_P, H.m_N, L);
+                    T.m_Dir[r] = T.m_Dir[r] + v3{ H.m_A.m_X * Dl.m_X, H.m_A.m_Y * Dl.m_Y, H.m_A.m_Z * Dl.m_Z };
                 }
-            }
         }
         // Iterations of E = D + T E (Jacobi), from E (empty: from zero)
         static void SolveTransport(const transport& T, std::vector<v3>& E, int Iterations) noexcept
@@ -3347,11 +3354,9 @@ namespace xlionrender::gi
             if (E.size() != n) E.assign(n, v3{ 0, 0, 0 });
             std::vector<v3> Next(n), Mean(T.m_GroupSize.size());
             const bool bTail = !T.m_AFirst.empty(), bDir = T.m_Dir.size() == n;
-            std::vector<v3> In;                     // (relightable: what the links read, Dir + E)
             for (int it = 0; it < Iterations; ++it)
             {
-                if (bDir) { In.resize(n); for (std::size_t r = 0; r < n; ++r) In[r] = E[r] + T.m_Dir[r] - (r < T.m_Dir0.size() ? T.m_Dir0[r] : v3{ 0, 0, 0 }); }
-                const auto& Src = bDir ? In : E;
+                const auto& Src = E;
                 if (bTail)
                 {
                     std::fill(Mean.begin(), Mean.end(), v3{ 0, 0, 0 });
@@ -3360,7 +3365,7 @@ namespace xlionrender::gi
                 }
                 for (std::size_t r = 0; r < n; ++r)
                 {
-                    v3 Sum = T.m_D[r];
+                    v3 Sum = bDir ? T.m_D[r] + T.m_Dir[r] : T.m_D[r];
                     for (std::uint32_t k = T.m_First[r]; k < T.m_First[r + 1]; ++k) { const v3& w = T.m_W[k]; const v3& e = Src[T.m_Col[k]]; Sum = Sum + v3{ w.m_X * e.m_X, w.m_Y * e.m_Y, w.m_Z * e.m_Z }; }
                     if (bTail) for (std::uint32_t k = T.m_AFirst[r]; k < T.m_AFirst[r + 1]; ++k) { const v3& w = T.m_AW[k]; const v3& m = Mean[T.m_AGroup[k]]; Sum = Sum + v3{ w.m_X * m.m_X, w.m_Y * m.m_Y, w.m_Z * m.m_Z }; }
                     Next[r] = Sum;
@@ -3373,7 +3378,7 @@ namespace xlionrender::gi
         transport TruncateTransport(const transport& T, int K, bool bInstances = false) const noexcept     // (bInstances: the tail to whole instances)
         {
             transport O;
-            O.m_InstFirst = T.m_InstFirst; O.m_D = T.m_D; O.m_Dir = T.m_Dir; O.m_Dir0 = T.m_Dir0; O.m_nRays = T.m_nRays; O.m_nUnsupported = T.m_nUnsupported; O.m_nDropped = T.m_nDropped;
+            O.m_InstFirst = T.m_InstFirst; O.m_D = T.m_D; O.m_Dir = T.m_Dir; O.m_HitFirst = T.m_HitFirst; O.m_Hits = T.m_Hits; O.m_nRays = T.m_nRays; O.m_nUnsupported = T.m_nUnsupported; O.m_nDropped = T.m_nDropped;
             O.m_nBack = T.m_nBack; O.m_nSky = T.m_nSky; O.m_nFar = T.m_nFar; O.m_CompileMs = T.m_CompileMs;
             const std::size_t n = T.m_D.size();
             O.m_Group.resize(n);

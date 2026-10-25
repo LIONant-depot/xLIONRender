@@ -421,7 +421,7 @@ int main()
         App.m_Window.PageFlip();
         world::transport Tg; double Dropped = 0;
         CHECK(G.ReadLinks(W, Items, Tg, &Dropped), "ReadLinks");
-        W.RelightTransport(Tg, L); Tg.m_Dir0 = Tg.m_Dir;                 // (the GPU's links are relightable: at their own lights, no change)
+        W.RelightTransport(Tg, L);                                       // (the GPU's first bounce: its hit clusters lit)
         const auto Tf = W.CompileTransport(L, 256, 1, true);
         const auto Tb = W.CompileTransport(L, 256, 1, false);            // (the direct light baked at the hits: what relightable costs)
         const auto Tc = W.TruncateTransport(Tf, gpu_trace::links_v, true);
@@ -446,11 +446,18 @@ int main()
         std::printf("links on the GPU (Cornell, %s): %zu links + %zu tail entries (the CPU's %zu + %zu), %.4f of the weight dropped; solved, the instances off the converged world by %.2f%% (the CPU's links %.2f%%, every link %.2f%%), off the CPU's by %.2f%%\n",
                     bPanel ? "the emissive panel, sampled" : "a point light", Tg.m_Col.size(), Tg.m_AGroup.size(), Tc.m_Col.size(), Tc.m_AGroup.size(), Dropped, 100 * Off(Eg, Ref), 100 * Off(Ec, Ref), 100 * Off(Ef, Ref), 100 * Off(Eg, Ec));
         // (the same rays as the CPU's: the same offsets and origins; a closed box is the worst case of the top 16 - surfel_gi 6k: 4.8%)
-        CHECK(Off(Eg, Ec) < 0.005, "the GPU's links are %.2f%% off the CPU's (the same rays)", 100 * Off(Eg, Ec));
+        // The links with the CPU's exact hits: the same; with the GPU's 8 hit clusters a row (one hit each, picked): their own error
+        {
+            auto Tx = Tg; Tx.m_HitFirst = Tc.m_HitFirst; Tx.m_Hits = Tc.m_Hits; W.RelightTransport(Tx, L);
+            std::vector<v3> Ex; world::SolveTransport(Tx, Ex, 20);
+            std::printf("  the GPU's links with the CPU's hits off the CPU's by %.2f%%; its hit clusters' first bounce: %.2f%%\n", 100 * Off(Ex, Ec), 100 * Off(Eg, Ec));
+            CHECK(Off(Ex, Ec) < 0.005, "the GPU's links are %.2f%% off the CPU's (the same rays and hits)", 100 * Off(Ex, Ec));
+            CHECK(Off(Eg, Ec) < 0.03, "the GPU's hit clusters are %.2f%% off the CPU's hits", 100 * Off(Eg, Ec));
+        }
         // relightable (the direct light at each surfel, not at each hit) against baked: close to the converged world as well
         CHECK(Off(Ef, Eb) < 1e-4, "relightable links at their own lights are %.3f%% off the baked ones", 100 * Off(Ef, Eb));
-        // A light moved (relit: the difference of the surfels' direct light through the same links) against the links compiled again
-        // at the new light, and against the old links left as they were (the light did not follow)
+        // A light moved (relit: each row's hits lit again, nothing light-dependent in the links) against the links compiled again at the
+        // new light, and against the old links left as they were (the light did not follow). The GPU's: its 8 hit clusters a row
         if (!bPanel)
         {
             lights L2 = L; L2.m_Points[0].m_Position = { -0.3f, 0.5f, 0.3f };
@@ -458,8 +465,11 @@ int main()
             const auto Tn = W.TruncateTransport(W.CompileTransport(L2, 256, 1, false), gpu_trace::links_v, true);
             std::vector<v3> Er, En, Es;
             world::SolveTransport(Tr, Er, 20); world::SolveTransport(Tn, En, 20); world::SolveTransport(Tc, Es, 20);
-            std::printf("  a light moved: relit links off the links compiled again by %.2f%% (the old links, not relit: %.2f%%)\n", 100 * Off(Er, En), 100 * Off(Es, En));
-            CHECK(Off(Er, En) < 0.5 * Off(Es, En), "a light moved: the relit links are %.2f%% off (not relit %.2f%%)", 100 * Off(Er, En), 100 * Off(Es, En));
+            auto Tgr = Tg; W.RelightTransport(Tgr, L2);
+            std::vector<v3> Egr; world::SolveTransport(Tgr, Egr, 20);
+            std::printf("  a light moved: relit links off the links compiled again by %.2f%% (the GPU's hit clusters: %.2f%%; the old links, not relit: %.2f%%)\n", 100 * Off(Er, En), 100 * Off(Egr, En), 100 * Off(Es, En));
+            CHECK(Off(Er, En) < 0.005, "a light moved: the relit links are %.2f%% off (not relit %.2f%%)", 100 * Off(Er, En), 100 * Off(Es, En));
+            CHECK(Off(Egr, En) < 0.25 * Off(Es, En), "a light moved: the GPU's relit links are %.2f%% off (not relit %.2f%%)", 100 * Off(Egr, En), 100 * Off(Es, En));
         }
         CHECK(Off(Ef, Ref) < 0.02, "every link: %.1f%% off the converged world", 100 * Off(Ef, Ref));
         CHECK(Off(Eg, Ref) < 0.15, "the GPU's links: %.1f%% off the converged world (the tail through whole instances: a closed box of big walls is its worst case)", 100 * Off(Eg, Ref));
@@ -527,7 +537,7 @@ int main()
         // A light moved: the links (they carry each surfel's direct light) are dropped and the rays relight the room (they were kept: the
         // light never followed the lamp)
         CHECK(T.LinkState() == 2, "the links were not solving before the light moved (state %d)", T.LinkState());
-        const std::size_t nBuildsBefore = T.LinkBuilds();
+        const std::size_t nBuildsBefore = T.LinkBuilds(), nRelightsBefore = T.Relights();
         std::vector<v3> Before;
         for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i)) Before.push_back(e);
         L.m_Points[0].m_Position = { -1.5f, 1.0f, -1.0f };
@@ -553,9 +563,9 @@ int main()
         }
         std::printf("a light moved: the surfels' light changed by %.1f%% (the links relit: state %d)\n", 100.0 * Diff / std::max(Sum, 1e-9), T.LinkState());
         CHECK(Diff > 0.05 * Sum, "a light moved and the GI did not follow it (%.2f%% of the light changed)", 100.0 * Diff / std::max(Sum, 1e-9));
-        // ... and once it holds still the links are built again: D (the light their rays saw) is at the new lamp. The relight alone
-        // left the Police level's old lamp spot 64% too bright (its delta is at the surfels' centres, D's light where the rays hit)
-        CHECK(T.LinkBuilds() > nBuildsBefore && T.LinkState() == 2, "a light moved and held still: the links were not built again (%zu builds, state %d)", T.LinkBuilds() - nBuildsBefore, T.LinkState());
+        // ... by relighting the links' hits, not by building them again: nothing light-dependent is in them (with the lamp's light baked
+        // and relit by a difference, the Police level's old lamp spot stayed 64% too bright; built again, the Bistro waited 6 s)
+        CHECK(T.LinkBuilds() == nBuildsBefore && T.LinkState() == 2 && T.Relights() > nRelightsBefore, "a light moved: the links were built again (%zu builds, %zu relights, state %d)", T.LinkBuilds() - nBuildsBefore, T.Relights() - nRelightsBefore, T.LinkState());
 
         // A material changed (an instance recolored) once the links solve: only the rows that read it are built again - the links stay
         // (state 2 throughout), the rest of the room keeps its rows, and its light follows the new color
