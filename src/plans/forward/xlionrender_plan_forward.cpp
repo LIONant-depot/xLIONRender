@@ -1159,6 +1159,7 @@ namespace xlionrender
                             std::array<xgpu::buffer*, 11> Buffers = bSkin ? std::array<xgpu::buffer*, 11>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams }
                                                                           : std::array<xgpu::buffer*, 11>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, nullptr, nullptr };
                             Cmd.setPipelineInstance(*pCut, std::span{ Buffers.data(), bSkin ? std::size_t{11} : std::size_t{9} });
+                            if( pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);
                             Cmd.setDynamicUBO(m_LightUBO, 1);
                         }
                         else
@@ -1585,6 +1586,7 @@ namespace xlionrender
                         std::array<xgpu::buffer*, 11> Static{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, SkinGI, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams };
                         Cmd.setPipelineInstance(*pInstance, std::span{ Static });      // SKIN: the GI bindings of the material fragment (no surfels: the probe grid), the BoneMap, the parameters
                     }
+                    if( pMat && pMat->m_bTable && pInstance != &m_StaticGeomInstance ) Cmd.setTextureTable(pMat->m_Table);
                     Cmd.setDynamicUBO(m_LightUBO, 1);
                     Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                     BindClusterStreams(Cmd, G);
@@ -1973,6 +1975,7 @@ namespace xlionrender
                 auto* pInst = pMat ? getCaptureInstance(*pMat) : &m_GIConstCaptureInstance;
                 if( pInst == nullptr ) pInst = &m_GIConstCaptureInstance;
                 Cmd.setPipelineInstance(*pInst, std::span{ Buffers });
+                if( pMat && pMat->m_bTable && pInst != &m_GIConstCaptureInstance ) Cmd.setTextureTable(pMat->m_Table);
                 Cmd.setDynamicUBO(m_LightUBO, 1);
                 Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                 Cmd.setBuffer(m_GICaptureVB);

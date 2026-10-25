@@ -181,6 +181,64 @@ int main()
         for (auto& T : Textures) Device.Destroy(std::move(T));
     }
 
+    // Texture-table materials (CreateMaterial bTextureTable, what the material compiler makes of a graph with textures): the textures come from
+    // an xgpu::texture_table at set 3 - bindless, by the ids the renderer wrote after the block - so two materials of one shader and state
+    // with other textures and parameters are one pipeline, each drawing its own; a texture swapped at run time (SetMaterialTexture) is an
+    // id change. Both shader variants are compiled; the device's kind picks one (the material loader does the same)
+    {
+        static constexpr std::uint32_t s_Table[] = {
+            #include "xlionrender_test_table_frag.h"
+        };
+        static constexpr std::uint32_t s_TableBindless[] = {
+            #include "xlionrender_test_table_bindless_frag.h"
+        };
+        xgpu::shader Frag;
+        const auto Words = Device.isBindless() ? std::span<const std::uint32_t>{ s_TableBindless } : std::span<const std::uint32_t>{ s_Table };
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(Words.data()), Words.size() } } }), "table shader");
+
+        const std::uint32_t Texels[3] = { 0xff0000ffu, 0xff000080u, 0xff000040u };      // red 1, ~0.5, ~0.25
+        std::array<xgpu::texture, 3> T;
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto Mips = std::array{ xgpu::texture::setup::mip_size{ sizeof(Texels[i]) } };
+            CHECK(!Device.Create(T[i], { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
+                                       , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Texels[i]), sizeof(Texels[i]) }, .m_isGamma = false }), "table texture %d", i);
+        }
+        const auto Red = [&](int i) { return 3.0f * float(Texels[i] & 0xff) / 255.0f; };
+
+        // A reads slot 0 (red 1), B slot 1 (red 0.5)
+        const int Before = Renderer.getPipelineCount();
+        xlionrender::material_id A, B;
+        const auto TA = std::array<xgpu::texture*, 3>{ nullptr, &T[0], &T[2] }, TB = std::array<xgpu::texture*, 3>{ nullptr, &T[2], &T[1] };
+        const float PA[] = { 1, 0, 0, 0 }, PB[] = { 0, 1, 0, 0 };
+        CHECK(!Renderer.CreateMaterial(A, Frag, TA, {}, PA, true) && !Renderer.CreateMaterial(B, Frag, TB, {}, PB, true), "CreateMaterial with a texture table");
+        CHECK(Renderer.getPipelineCount() == Before + 1, "Two texture-table materials of one shader and state: %d new pipelines, expected 1", Renderer.getPipelineCount() - Before);
+
+        std::vector<float> M;
+        const auto Expect = [&](xlionrender::material_id Id, float Value, const char* pWhat) -> bool
+        {
+            Scene.m_Draws = { { .m_Mesh = Static, .m_Material = Mat, .m_Materials = { Id } } };
+            if (!App.RenderFrame(Scene, View, Camera) || !ReadHDR(Device, View, M)) return false;
+            int n = 0, nOff = 0;
+            for (float v : M) if (v != 0) { ++n; nOff += std::abs(v - Value) > 0.01f; }
+            std::printf("%s: %d texels, %d off %.3f\n", pWhat, n, nOff, Value);
+            return n == nCovered && nOff == 0;
+        };
+        CHECK(Expect(A, Red(0), "table A"), "Texture-table material A draws its slot 0 (%.3f)", Red(0));
+        CHECK(Expect(B, Red(1), "table B"), "Texture-table material B draws its slot 1 (%.3f)", Red(1));
+
+        // A's slot 0 swapped: the next frames read the new texture (bindless: an id in the block; else a new set), the pipeline count unchanged
+        CHECK(!Renderer.SetMaterialTexture(A, 0, T[2]), "SetMaterialTexture");
+        CHECK(Expect(A, Red(2), "table A swapped"), "The swapped texture is drawn (%.3f)", Red(2));
+        CHECK(Expect(B, Red(1), "table B again"), "The other material keeps its own");
+        CHECK(Renderer.getPipelineCount() == Before + 1, "A texture swap made no pipeline");
+
+        Renderer.DestroyMaterial(A);
+        Renderer.DestroyMaterial(B);
+        CHECK(Renderer.getPipelineCount() == Before, "Both destroyed: %d pipelines left over", Renderer.getPipelineCount() - Before);
+        for (auto& X : T) Device.Destroy(std::move(X));
+    }
+
     // Material parameters (MaterialParams, set 1 binding 9): the second material's block sits after the first's; the shader finds it by MaterialBase
     {
         static constexpr std::uint32_t s_Frag[] = {
@@ -484,6 +542,47 @@ int main()
         const xmath::fvec3 Far{ 5000, 0, -3000 };
         Camera.LookAt(xmath::fvec3{ 0.6f, 0.4f, -1.8f } + Far, Far);
         CHECK(RenderBoth(xmath::fmat4::fromTranslation(Far), "far"), "Instance id: far from the origin");
+    }
+
+    // xGPU's texture ids and sampler table (the bindless heap or, without it, the per-material sets built from the same ids): a texture
+    // gets a valid id of its own, its default sampler is its address modes' table entry, one description is one sampler, a destroyed
+    // texture's id is taken again once its destroy has retired, a texture_table takes ids and swaps one
+    {
+        const std::uint32_t Texel = 0xffffffffu;
+        const auto          Mips  = std::array{ xgpu::texture::setup::mip_size{ sizeof(Texel) } };
+        const auto MakeTexture = [&](xgpu::texture& T, xgpu::texture::address_mode Mode)
+        {
+            return !Device.Create(T, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_AdressModes = { Mode, Mode, Mode }, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
+                                     , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Texel), sizeof(Texel) }, .m_isGamma = false });
+        };
+        xgpu::texture A, B;
+        CHECK(MakeTexture(A, xgpu::texture::address_mode::TILE) && MakeTexture(B, xgpu::texture::address_mode::CLAMP), "id textures");
+        CHECK(A.getID().isValid() && B.getID().isValid() && !(A.getID() == B.getID()), "Two textures, two valid ids (%u, %u)", A.getID().m_Value, B.getID().m_Value);
+
+        using sm = xgpu::pipeline::sampler;
+        constexpr auto Clamp = std::array{ sm::address_mode::CLAMP, sm::address_mode::CLAMP, sm::address_mode::CLAMP };
+        const auto S1 = Device.getSampler({ .m_AddressMode = Clamp }), S2 = Device.getSampler({ .m_AddressMode = Clamp });
+        const auto S3 = Device.getSampler({ .m_MipmapMag = sm::mipmap_sampler::NEAREST });
+        CHECK(S1.isValid() && S1 == S2 && !(S1 == S3), "One sampler per description (%u, %u, %u)", S1.m_Value, S2.m_Value, S3.m_Value);
+        CHECK(B.getSampler() == S1 && !(A.getSampler() == S1), "A texture's default sampler is its address modes' entry");
+
+        // A texture_table of both, then its first slot swapped to B with the nearest sampler
+        xgpu::texture_table Table;
+        const auto Slots = std::array{ xgpu::texture_table::slot{ A.getID() }, xgpu::texture_table::slot{ B.getID(), S3 } };
+        CHECK(!Device.Create(Table, { .m_Slots = Slots }), "texture_table");
+        CHECK(Table.getSlotCount() == 2 && Table.getSlot(1).m_Sampler == S3, "texture_table slots");
+        CHECK(!Table.Update(0, { B.getID(), S3 }) && Table.getSlot(0).m_Texture == B.getID(), "texture_table Update");
+        Device.Destroy(std::move(Table));
+
+        const auto OldID = A.getID();
+        Device.Destroy(std::move(A));
+        A.m_Private.reset();
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Frames for the destroy to retire");
+        xgpu::texture C;
+        CHECK(MakeTexture(C, xgpu::texture::address_mode::TILE) && C.getID() == OldID, "A destroyed texture's id is taken again (%u, was %u)", C.getID().m_Value, OldID.m_Value);
+        std::printf("texture ids: %s, samplers %u %u %u\n", Device.isBindless() ? "bindless" : "per-material sets", S1.m_Value, S2.m_Value, S3.m_Value);
+        Device.Destroy(std::move(B));
+        Device.Destroy(std::move(C));
     }
 
     Renderer.DestroyView(View);

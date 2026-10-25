@@ -903,7 +903,7 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    xgpu::device::error* instance::CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, const material_state& State, std::span<const float> Params ) noexcept
+    xgpu::device::error* instance::CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, const material_state& State, std::span<const float> Params, bool bTextureTable ) noexcept
     {
         assert(m_bReady && !Textures.empty() && Params.size() % 4 == 0);
 
@@ -913,10 +913,32 @@ namespace xlionrender
         M.m_Textures.clear();
         for( auto* p : Textures ) M.m_Textures.push_back(p ? *p : xgpu::texture{});
 
+        // A texture-table material: its textures (all but slot 0, the shadow atlas) into its table, their ids after its parameter block
+        std::vector<float> Block(Params.begin(), Params.end());
+        if( bTextureTable )
+        {
+            std::vector<xgpu::texture_table::slot> Slots;
+            for( std::size_t i = 1; i < M.m_Textures.size(); ++i )
+            {
+                const auto& T = M.m_Textures[i];
+                Slots.push_back(T.m_Private ? xgpu::texture_table::slot{ T.getID(), T.getSampler() } : xgpu::texture_table::slot{});
+            }
+            if( auto Err = m_Device.Create(M.m_Table, { .m_Slots = Slots }); Err ) return Err;
+            M.m_bTable = true;
+            M.m_IDsAt  = std::uint32_t(Block.size() / 4);
+            Block.resize(Block.size() + 4 * ((Slots.size() + 1) / 2), 0.0f);
+            for( std::size_t i = 0; i < Slots.size(); ++i )
+            {
+                Block[4 * M.m_IDsAt + 2 * i + 0] = std::bit_cast<float>(Slots[i].m_Texture.m_Value);
+                Block[4 * M.m_IDsAt + 2 * i + 1] = std::bit_cast<float>(Slots[i].m_Sampler.m_Value);
+            }
+        }
+
         // The rigid pipeline now, so a material that cannot build reports it here (the skin one is built on its first skinned draw)
         if( getMaterialInstance(M, geom_kind::RIGID) == nullptr ) return VGPU_ERROR(xgpu::device::error::FAILURE, "The material's pipeline could not be created");
 
         // Its parameter block: a range of MaterialParams (first fit, else the top), copied over by the next updateInstances
+        Params = Block;
         if( const int n = int(Params.size() / 4); n > 0 )
         {
             int At = -1;
@@ -935,6 +957,31 @@ namespace xlionrender
 
         const auto [Index, Gen] = AddSlot(m_Materials, std::move(M));
         Id = { Index, Gen };
+        return nullptr;
+    }
+
+    //------------------------------------------------------------------------------------------------
+
+    xgpu::device::error* instance::SetMaterialTexture( material_id Id, int iSlot, xgpu::texture& Texture ) noexcept
+    {
+        auto* pM = findMaterial(Id);
+        if( pM == nullptr || !pM->m_bTable || iSlot < 0 || iSlot >= pM->m_Table.getSlotCount() ) return VGPU_ERROR(xgpu::device::error::FAILURE, "Not a texture slot of a texture-table material");
+        const xgpu::texture_table::slot Slot{ Texture.getID(), Texture.getSampler() };
+        if( pM->m_Table.Update(iSlot, Slot) ) return VGPU_ERROR(xgpu::device::error::FAILURE, "The material's texture table could not be updated");
+        m_Device.Destroy(std::move(pM->m_Textures[iSlot + 1]));      // (a frame in flight may still read it)
+        pM->m_Textures[iSlot + 1] = Texture;
+
+        // The ids in the block: one vec4 through the ring (written whole: its other slot as it is)
+        const std::uint32_t At = pM->m_IDsAt + std::uint32_t(iSlot / 2);
+        std::vector<float> V(4, 0.0f);
+        for( int j = 0; j < 2; ++j )
+            if( const int s = (iSlot & ~1) + j; s < pM->m_Table.getSlotCount() )
+            {
+                const auto S = pM->m_Table.getSlot(s);
+                V[2 * j + 0] = std::bit_cast<float>(S.m_Texture.m_Value);
+                V[2 * j + 1] = std::bit_cast<float>(S.m_Sampler.m_Value);
+            }
+        m_ParamPending.emplace_back(int(pM->m_ParamBase + At), std::move(V));
         return nullptr;
     }
 
@@ -976,8 +1023,9 @@ namespace xlionrender
     {
         const bool bSkin = Kind == geom_kind::SKIN;
 
-        // Slot 0 (shadow map) clamps, the material textures use the default sampler - as the geom editors
-        assert(M.m_Textures.size() <= 8);       // slots 8, 9: the environment
+        // Slot 0 (shadow map) clamps, the material textures use the default sampler - as the geom editors (a texture-table material: no
+        // material texture in set 0)
+        assert(M.m_bTable || M.m_Textures.size() <= 8);       // slots 8, 9: the environment
         const auto Samplers = LitSamplers();
 
         auto Shaders      = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, bSkin ? &m_SkinGeomVert : &m_StaticGeomGIVert };
@@ -1003,7 +1051,7 @@ namespace xlionrender
         const auto Binds = std::span{ UniformBinds };
         xgpu::pipeline::setup Setup{ .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                    , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
-                                   , .m_UniformBinds = Binds, .m_Samplers = Samplers };
+                                   , .m_UniformBinds = Binds, .m_Samplers = Samplers, .m_nTextureSlots = TableSlots(M) };
         if( bShadow )       // the casters' state (instance::Init MakeCaster); the fragment cuts out and stops (ubo_lighting m_LightParams.w)
         {
             Setup.m_Primitive.m_Cull                        = xgpu::pipeline::primitive::cull::NONE;
@@ -1038,14 +1086,28 @@ namespace xlionrender
         auto& P = m_SharedPipelines[Key];
         if( P.m_Pipeline.m_Private == nullptr && Build(P.m_Pipeline) ) { m_SharedPipelines.erase(Key); return nullptr; }
 
-        auto Bindings = LitBindings(M.TexturePointers(), bShadowAtlas);
-        if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = P.m_Pipeline, .m_SamplersBindings = Bindings }) )
+        // A texture-table material's set 0 holds the renderer's textures only: the same for every material of the pipeline (its copy)
+        if( M.m_bTable && P.m_Globals.m_Private ) M.m_Instance[k] = P.m_Globals;
+        else
         {
-            if( P.m_nUsers == 0 ) { m_Device.Destroy(std::move(P.m_Pipeline)); m_SharedPipelines.erase(Key); }
-            return nullptr;
+            auto Bindings = LitBindings(M.m_bTable ? std::vector<xgpu::texture*>{} : M.TexturePointers(), bShadowAtlas);
+            if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = P.m_Pipeline, .m_SamplersBindings = Bindings }) )
+            {
+                if( P.m_nUsers == 0 ) { m_Device.Destroy(std::move(P.m_Pipeline)); m_SharedPipelines.erase(Key); }
+                return nullptr;
+            }
+            if( M.m_bTable ) P.m_Globals = M.m_Instance[k];
         }
         ++P.m_nUsers;
         return &M.m_Instance[k];
+    }
+
+    // Set 3's size: a texture-table material's slots (bindless: the heaps, any count), 0 otherwise. The pipeline key needs no part of it: the
+    // fragment shader decides it
+    std::uint8_t instance::TableSlots( const material_slot& M ) const noexcept
+    {
+        if( !M.m_bTable ) return 0;
+        return std::uint8_t(std::max(1, M.m_Table.getSlotCount()));
     }
 
     // Its instances, and the pipelines no other material uses
@@ -1058,7 +1120,12 @@ namespace xlionrender
             M.m_Instance[k].m_Private.reset();      // (no move: Destroy queued a copy)
             const auto It = m_SharedPipelines.find(PipelineKey(M, k));
             assert(It != m_SharedPipelines.end());
-            if( --It->second.m_nUsers == 0 ) { m_Device.Destroy(std::move(It->second.m_Pipeline)); m_SharedPipelines.erase(It); }
+            if( --It->second.m_nUsers == 0 )
+            {
+                if( It->second.m_Globals.m_Private ) m_Device.Destroy(std::move(It->second.m_Globals));
+                m_Device.Destroy(std::move(It->second.m_Pipeline));
+                m_SharedPipelines.erase(It);
+            }
         }
     }
 
@@ -1091,7 +1158,7 @@ namespace xlionrender
             , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7), FragmentSSBO(9), FragmentSSBO(10)
             };
             xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
-                                       , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers };
+                                       , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers, .m_nTextureSlots = TableSlots(M) };
             Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
             return m_Device.Create(Pipeline, Setup);
         });
@@ -1106,12 +1173,13 @@ namespace xlionrender
         releaseInstances(*pM);
         if( pM->m_ParamCount )
         {
-            std::erase_if(m_ParamPending, [&](const auto& P) { return P.first == int(pM->m_ParamBase); });     // created and destroyed before a render
+            std::erase_if(m_ParamPending, [&](const auto& P) { return P.first >= int(pM->m_ParamBase) && P.first < int(pM->m_ParamBase + pM->m_ParamCount); });     // created (or a texture set) and destroyed before a render
             m_ParamFree.push_back({ int(pM->m_ParamBase), int(pM->m_ParamCount) });
             pM->m_ParamCount = 0;
         }
         pM->m_Textures.clear();
         pM->m_Fragment = {};
+        if( pM->m_bTable ) { m_Device.Destroy(std::move(pM->m_Table)); pM->m_Table.m_Private.reset(); pM->m_bTable = false; }
         pM->m_bAlive = false;
     }
 

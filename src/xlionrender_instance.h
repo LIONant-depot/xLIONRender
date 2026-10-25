@@ -112,7 +112,13 @@ namespace xlionrender
         // GI's rays pass through it (gi::world::SetSeeThrough)
         // Params: its parameter block (vec4s as floats: xmaterial::data_file::m_pDefaultBlock, m_BlockBytes / 4), copied into
         // MaterialParams (set 1 binding 9); the shader reads it from g_Mat.P[MaterialBase + n]. Empty: the shader reads none.
-        [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, const material_state& State = {}, std::span<const float> Params = {} ) noexcept;
+        // TextureTable (xmaterial::data_file::flags::m_bTextureTable): the shader reads the textures (Textures[1..]) through an xgpu::texture_table at
+        // set 3 instead of samplers 1-7 - bindless, by the ids the renderer writes after the parameter block (two slots a vec4: texture_id,
+        // sampler_id; the sampler: the texture's own); otherwise binding i of the table's set. No limit of 7 textures
+        [[nodiscard]] xgpu::device::error* CreateMaterial( material_id& Id, const xgpu::shader& FragmentHDR, std::span<xgpu::texture* const> Textures, const material_state& State = {}, std::span<const float> Params = {}, bool bTextureTable = false ) noexcept;
+        // A texture-table material's slot i (Textures[i + 1] of CreateMaterial) now reads Texture: the id in its block and its table (bindless: the
+        // block only - a texture swap costs what a color change does)
+        [[nodiscard]] xgpu::device::error* SetMaterialTexture( material_id Id, int iSlot, xgpu::texture& Texture ) noexcept;
         // The renderer's default material (shaders/xlionrender_default_material_frag.glsl: PBR with a diffuse texture), for a slot whose
         // material does not resolve. Textures: slot 0 the shadow map (the renderer's atlas), slot 1 the diffuse texture.
         [[nodiscard]] xgpu::device::error* CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept;
@@ -253,6 +259,10 @@ namespace xlionrender
             material_state          m_State;                        // CreateMaterial: its pipelines' settings
             std::uint32_t           m_ParamBase     = 0;            // its block in MaterialParams: the first vec4 (push constant MaterialBase), how many
             std::uint32_t           m_ParamCount    = 0;
+            // A texture-table material (CreateMaterial bTextureTable): its textures' table (set 3), their ids from vec4 m_IDsAt of its block
+            bool                    m_bTable        = false;
+            xgpu::texture_table     m_Table;
+            std::uint32_t           m_IDsAt         = 0;
         };
 
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
@@ -277,13 +287,14 @@ namespace xlionrender
         xgpu::pipeline_instance*    getCaptureInstance ( material_slot& Material )                              noexcept;
         // The materials' pipelines, shared by (fragment shader, the state the path uses, path): materials differ by their instances (textures)
         using pipeline_key = std::tuple<const void*, std::uint32_t, std::size_t>;
-        struct shared_pipeline { xgpu::pipeline m_Pipeline; int m_nUsers = 0; };
+        struct shared_pipeline { xgpu::pipeline m_Pipeline; xgpu::pipeline_instance m_Globals; int m_nUsers = 0; };      // m_Globals: the texture-table materials' set 0 (the renderer's textures only)
         std::map<pipeline_key, shared_pipeline> m_SharedPipelines;
         static pipeline_key         PipelineKey        ( const material_slot& Material, std::size_t k )         noexcept;
         // Material's instance k on the shared pipeline (made by Build when it is new); nullptr when either could not be created
         xgpu::pipeline_instance*    makeInstance       ( material_slot& Material, std::size_t k, bool bShadowAtlas, const std::function<xgpu::device::error*(xgpu::pipeline&)>& Build ) noexcept;
         void                        releaseInstances   ( material_slot& Material )                              noexcept;
         xgpu::device::error*        buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& Material, geom_kind Kind, bool bShadow ) noexcept;
+        std::uint8_t                TableSlots         ( const material_slot& Material ) const                  noexcept;
         xgpu::shader                m_StaticGeomGIVert, m_SkinGeomVert, m_GICaptureVert;     // the material pipelines' vertex shaders
         void                        BindClusterStreams ( xgpu::cmd_buffer& Cmd, const cluster_geom& Geom )      noexcept;   // the core + optional streams (m_StaticGeomVD / m_SkinGeomVD)
         void                        processGICapture( xgpu::window& Window )                                    noexcept;

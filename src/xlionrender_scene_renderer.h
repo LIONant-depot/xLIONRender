@@ -158,7 +158,7 @@ namespace xlionrender
                 return {};
             }
             material_id Id;
-            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, xmaterial::RenderState(pMat->m_Render, pMI->m_DoubleSided), { pMI->m_pParams, pMI->m_BlockBytes / 4u })) return {};
+            if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, xmaterial::RenderState(pMat->m_Render, pMI->m_DoubleSided), { pMI->m_pParams, pMI->m_BlockBytes / 4u }, pMat->m_Flags.m_bTextureTable)) return {};
             m_Materials[MIInstance] = { Id, std::move(From) };
             return Id;
         }

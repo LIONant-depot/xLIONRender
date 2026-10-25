@@ -36,14 +36,14 @@ endforeach()
 
 # Test-only shaders (src/tests/shaders), compiled against the same shader library
 set(TEST_SHADER_DIR "${XLIONRENDER_DIR}/src/tests/shaders")
-foreach(PAIR xlionrender_test_material_frag:fragment xlionrender_test_normal_frag:fragment xlionrender_test_cutout_frag:fragment xlionrender_test_params_frag:fragment xlionrender_test_entity_frag:fragment xlionrender_test_vertcolor_frag:fragment xlionrender_test_uv1_frag:fragment)
+foreach(PAIR xlionrender_test_material_frag:fragment xlionrender_test_normal_frag:fragment xlionrender_test_cutout_frag:fragment xlionrender_test_params_frag:fragment xlionrender_test_entity_frag:fragment xlionrender_test_vertcolor_frag:fragment xlionrender_test_uv1_frag:fragment xlionrender_test_table_frag:fragment xlionrender_test_table_bindless_frag:fragment)
   string(REPLACE ":" ";" PAIR ${PAIR})
   list(GET PAIR 0 NAME)
   list(GET PAIR 1 STAGE)
   set(OUT "${SHADER_OUT_DIR}/${NAME}.h")
   add_custom_command(OUTPUT ${OUT}
     COMMAND ${GLSLC} -fshader-stage=${STAGE} -I "${SHADER_DIR}" "${TEST_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${OUT}
-    DEPENDS "${TEST_SHADER_DIR}/${NAME}.glsl" ${SHADER_LIBRARY}
+    DEPENDS "${TEST_SHADER_DIR}/${NAME}.glsl" "${TEST_SHADER_DIR}/xlionrender_test_table_body.glsl" ${SHADER_LIBRARY}
     COMMENT "glslc ${NAME}")
   list(APPEND TEST_SHADER_HEADERS ${OUT})
 endforeach()
