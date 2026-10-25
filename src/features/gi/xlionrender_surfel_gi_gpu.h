@@ -386,6 +386,7 @@ namespace xlionrender::gi
     public:
         std::size_t LocalRebuilds(void) const noexcept { return m_nLocalRebuilds; }      // (tests)
         std::size_t LocalRows(void) const noexcept { return m_nLocalRows; }
+        std::size_t LinkBuilds(void) const noexcept { return m_nLinkBuilds; }
         // Experiment D in a renderer (XLION_GI_LINKS): after Settle frames of the ray solver (the reads' validity and moments), the links of
         // every level-0 surfel are built, PerFrame surfels a frame; two frames after the last slice they are solved, one iteration a frame.
         // A pack, a move or a level switch drops them (built again Settle frames on). After Submit, before Show
@@ -401,11 +402,15 @@ namespace xlionrender::gi
             std::uint64_t DirKey = Hash(1469598103934665603ull, &L.m_SunDirection, sizeof(L.m_SunDirection));
             DirKey = Hash(DirKey, &L.m_SunColor, sizeof(L.m_SunColor));
             if (!L.m_Points.empty()) DirKey = Hash(DirKey, L.m_Points.data(), L.m_Points.size() * sizeof(L.m_Points[0]));
+            // (the relight is a delta at the surfels' centres: D keeps the old lights as its rays saw them, and near a lamp the two do not
+            // cancel - the Police level's old lamp spot stayed 64% too bright. Lights still for Settle frames: the links are built again)
+            if (DirKey != m_PendingDirKey) { m_PendingDirKey = DirKey; m_PendingDirSince = Frame; }
+            if (Frame >= m_PendingDirSince + std::uint64_t(Settle) || m_LinkKey == ~0ull) m_StableDirKey = m_PendingDirKey;  // (the first lights: at once)
             // (a move or a material while the links settle or build: all of them again; once they solve, the rows the change touches -
             // LocalRebuild - the rest of the scene keeps its links)
             const std::uint64_t Local = m_LinkState == 2 ? m_LinkLocalKey : ((m_XformGen << 20) * 0x9E3779B97F4A7C15ull ^ W.MaterialGenSum());
             if (m_LinkState != 2) m_LinkLocalKey = Local;
-            const std::uint64_t Key = ((m_Gen ^ (m_LevelGen << 40)) * 0x9E3779B97F4A7C15ull ^ Local) * 0xC2B2AE3D27D4EB4Full ^ SkyKey;
+            const std::uint64_t Key = (((m_Gen ^ (m_LevelGen << 40)) * 0x9E3779B97F4A7C15ull ^ Local) * 0xC2B2AE3D27D4EB4Full ^ SkyKey) * 0x9E3779B97F4A7C15ull ^ m_StableDirKey;
             if (Key != m_LinkKey && std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS dropped at frame %llu: gen %llu xform %llu level %llu materials %llu sky %llx (state %d)\n", (unsigned long long)Frame, (unsigned long long)m_Gen, (unsigned long long)m_XformGen, (unsigned long long)m_LevelGen, (unsigned long long)W.MaterialGenSum(), (unsigned long long)SkyKey, m_LinkState); std::fflush(stdout); }     // (measurement)
             if (Key != m_LinkKey) { m_LinkKey = Key; m_LinkState = 0; m_LinkSince = Frame; m_LinkItems.clear(); m_bLinksLocal = false; }
             if (m_LinkState == 0 && Frame >= m_LinkSince + std::uint64_t(Settle))
@@ -413,6 +418,7 @@ namespace xlionrender::gi
                 for (int i = 0; i < W.InstanceCount(); ++i)
                     if (W.IsAlive(i) && W.Level(i) == 0) for (std::size_t s = 0; s < W.InstanceSurfels0(i); ++s) m_LinkItems.push_back({ i, int(s) });
                 m_LinkCursor = 0; m_LinkState = m_LinkItems.empty() ? 3 : 1;
+                ++m_nLinkBuilds;
                 SnapshotLinked(W);                  // (what the links are built against: each instance's placement and material)
                 m_LocalState = 0;
                 m_LinkT0 = std::chrono::steady_clock::now();
@@ -912,6 +918,8 @@ namespace xlionrender::gi
         std::vector<char>                   m_LocalNear;                                       // per item: near a moved object (the CPU's part of the flags)
         bool                                m_bLinkDirValid = false;
         std::uint64_t                       m_LinkDirKey = 0;
+        std::size_t                         m_nLinkBuilds = 0;
+        std::uint64_t                       m_PendingDirKey = 0, m_PendingDirSince = 0, m_StableDirKey = 0;     // the lights the links' D is built with
         bool                                m_bLinksLocal = false;
         bool                                m_bLinks = false, m_bSolve = false;
         xgpu::compute                       m_SolveC;

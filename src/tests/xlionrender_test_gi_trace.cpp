@@ -527,6 +527,7 @@ int main()
         // A light moved: the links (they carry each surfel's direct light) are dropped and the rays relight the room (they were kept: the
         // light never followed the lamp)
         CHECK(T.LinkState() == 2, "the links were not solving before the light moved (state %d)", T.LinkState());
+        const std::size_t nBuildsBefore = T.LinkBuilds();
         std::vector<v3> Before;
         for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i)) Before.push_back(e);
         L.m_Points[0].m_Position = { -1.5f, 1.0f, -1.0f };
@@ -552,6 +553,9 @@ int main()
         }
         std::printf("a light moved: the surfels' light changed by %.1f%% (the links relit: state %d)\n", 100.0 * Diff / std::max(Sum, 1e-9), T.LinkState());
         CHECK(Diff > 0.05 * Sum, "a light moved and the GI did not follow it (%.2f%% of the light changed)", 100.0 * Diff / std::max(Sum, 1e-9));
+        // ... and once it holds still the links are built again: D (the light their rays saw) is at the new lamp. The relight alone
+        // left the Police level's old lamp spot 64% too bright (its delta is at the surfels' centres, D's light where the rays hit)
+        CHECK(T.LinkBuilds() > nBuildsBefore && T.LinkState() == 2, "a light moved and held still: the links were not built again (%zu builds, state %d)", T.LinkBuilds() - nBuildsBefore, T.LinkState());
 
         // A material changed (an instance recolored) once the links solve: only the rows that read it are built again - the links stay
         // (state 2 throughout), the rest of the room keeps its rows, and its light follows the new color
