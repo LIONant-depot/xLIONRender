@@ -144,8 +144,18 @@ int main()
             S += std::abs(b - a); R += a;
         }
         DumpRGB("gi_half_res", Half, W, H);
-        std::printf("the GI read at half resolution: %d draws in its pass, the image %.2f%% off the full read\n", nScreen, 100 * S / std::max(R, 1e-9));
+        const int nCalls = Renderer.getGIStats().m_nScreenCalls;
+        std::printf("the GI read at half resolution: %d draws in its pass (%d calls), the image %.2f%% off the full read\n", nScreen, nCalls, 100 * S / std::max(R, 1e-9));
         CHECK(nScreen > 0, "the half-resolution GI pass drew nothing");
+        // its draws go in indirect runs, one a bind state: at most a call a mesh a phase, whatever its clusters
+        int nMeshes = 0;
+        for (std::size_t i = 0; i < Scene.m_Draws.size(); ++i)
+        {
+            bool bSeen = false;
+            for (std::size_t j = 0; j < i; ++j) bSeen = bSeen || Scene.m_Draws[j].m_Mesh.m_Index == Scene.m_Draws[i].m_Mesh.m_Index;
+            nMeshes += bSeen ? 0 : 1;
+        }
+        CHECK(nCalls > 0 && nCalls <= 2 * nMeshes, "the half-resolution GI pass made %d calls for %d meshes: not batched", nCalls, nMeshes);
         CHECK(S < 0.03 * R, "the GI read at half resolution is %.2f%% off the full read", 100 * S / std::max(R, 1e-9));
     }
 

@@ -21,6 +21,9 @@ namespace xlionrender
         constexpr std::uint32_t s_StaticGeomGIVert[] = {
             #include "xlionrender_static_geom_gi_vert.h"
         };
+        constexpr std::uint32_t s_StaticGeomGIRecordsVert[] = {
+            #include "xlionrender_static_geom_gi_records_vert.h"
+        };
         constexpr std::uint32_t s_SkinGeomVert[] = {
             #include "xlionrender_skin_geom_vert.h"
         };
@@ -161,6 +164,8 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_DepthPrepassPipeline));
         m_Device.Destroy(std::move(m_GIScreenInstance));
         m_Device.Destroy(std::move(m_GIScreenPipeline));
+        m_Device.Destroy(std::move(m_GIScreenDepthInstance));
+        m_Device.Destroy(std::move(m_GIScreenDepthPipeline));
         ReleaseBuffer(m_StaticGeomUBO);
         ReleaseBuffer(m_InstanceBuffer);
         ReleaseBuffer(m_InstanceRing);
@@ -423,13 +428,29 @@ namespace xlionrender
                 if( auto Err = Device.Create(m_DepthPrepassInstance, { .m_PipeLine = m_DepthPrepassPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
             }
 
-            // the GI read at half resolution: the same vertex shader and layout, + the buffer it writes; at the depth laid first, no color
+            // the GI read at half resolution: the same layout + the buffer it writes; at the depth laid first, no color. Both of its phases
+            // read each draw's push constants from the view's records (binding 12): a run of clusters is one indirect draw
             {
+                xgpu::shader RecordsVert, DepthOnly;
+                if( auto Err = Device.Create(RecordsVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_StaticGeomGIRecordsVert) }); Err ) return Err;
+                if( auto Err = Device.Create(DepthOnly, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DepthFrag) }); Err ) return Err;
+                const xgpu::pipeline::uniform_binds RecordsBind{ .m_BindIndex = 12, .m_Usage = { .m_bVertex = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC };
+                {
+                    auto DepthShaders = std::array<const xgpu::shader*, 2>{ &DepthOnly, &RecordsVert };
+                    std::vector<xgpu::pipeline::uniform_binds> DepthBinds(UniformBinds.begin(), UniformBinds.end());
+                    DepthBinds.push_back(RecordsBind);
+                    xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = DepthShaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
+                                               , .m_UniformBinds = DepthBinds, .m_Samplers = Samplers };
+                    Setup.m_Blend.m_ColorWriteMask = 0;
+                    if( auto Err = Device.Create(m_GIScreenDepthPipeline, Setup); Err ) return Err;
+                    if( auto Err = Device.Create(m_GIScreenDepthInstance, { .m_PipeLine = m_GIScreenDepthPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+                }
                 xgpu::shader ScreenFrag;
                 if( auto Err = Device.Create(ScreenFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIScreenFrag) }); Err ) return Err;
-                auto ScreenShaders = std::array<const xgpu::shader*, 2>{ &ScreenFrag, &Vert };
+                auto ScreenShaders = std::array<const xgpu::shader*, 2>{ &ScreenFrag, &RecordsVert };
                 std::vector<xgpu::pipeline::uniform_binds> ScreenBinds(UniformBinds.begin(), UniformBinds.end());
                 ScreenBinds.push_back({ .m_BindIndex = 11, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC });
+                ScreenBinds.push_back(RecordsBind);
                 xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = ScreenShaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                            , .m_UniformBinds = ScreenBinds, .m_Samplers = Samplers };
                 Setup.m_Blend.m_ColorWriteMask = 0;
@@ -1250,6 +1271,8 @@ namespace xlionrender
         if( auto Err = m_Device.Create(View.m_GIScreenZeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
         Data[0] = { std::uint32_t(W), std::uint32_t(H), 0u, 0u };
         if( auto Err = m_Device.Create(View.m_GIScreenBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenRecords, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::push_static_geom), .m_EntryCount = ring_frames_v * screen_draws_v }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenCommands, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = ring_frames_v * screen_draws_v }); Err ) return Err;
         View.m_GIScreenWidth = W; View.m_GIScreenHeight = H;
         return nullptr;
     }
@@ -1261,6 +1284,8 @@ namespace xlionrender
         if( View.m_GIScreenDepth.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenDepth));
         if( View.m_GIScreenBuffer.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenBuffer));
         if( View.m_GIScreenZeros.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenZeros));
+        if( View.m_GIScreenRecords.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenRecords));
+        if( View.m_GIScreenCommands.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenCommands));
         View.m_GIScreenWidth = View.m_GIScreenHeight = 0;
     }
 

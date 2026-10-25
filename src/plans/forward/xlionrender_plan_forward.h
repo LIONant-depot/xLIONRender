@@ -75,6 +75,18 @@ namespace xlionrender::details
         std::int32_t    m_GIVertexDelta = 0;            // GI sections: the cluster's vertex in its section's GIMesh is its own plus this
     };
     static_assert(offsetof(push_static_geom, m_MaterialBase) == 16 && offsetof(push_static_geom, m_GIVertexDelta) == 20);
+    static_assert(sizeof(push_static_geom) == 24);         // (xgeom_static_mb_clusters.vert DrawRecord, std430)
+
+    // xgpu::cmd_buffer::DrawIndexedIndirect's command (VkDrawIndexedIndirectCommand)
+    struct draw_indexed_indirect
+    {
+        std::uint32_t   m_nIndices;
+        std::uint32_t   m_nInstances;
+        std::uint32_t   m_iFirstIndex;
+        std::int32_t    m_VertexOffset;
+        std::uint32_t   m_iFirstInstance;       // (gl_InstanceIndex: the draw's record)
+    };
+    static_assert(sizeof(draw_indexed_indirect) == 20);
 
     // xlionrender_skin_geom_vert.glsl (xgeom_skin_mb_clusters.vert) push constant
     struct push_skin_geom

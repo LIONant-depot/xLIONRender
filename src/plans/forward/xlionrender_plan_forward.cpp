@@ -1397,18 +1397,19 @@ namespace xlionrender
             static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
             const bool bScreen = bMain && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
                               && !(bPlan && m_bBoxesOnly) && createGIScreenTargets(View) == nullptr;
-            if( bMain ) m_GIStats.m_nScreenDraws = 0;
+            if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
             if( bScreen )
             {
                 {   // (cleared: a pixel no GI surface covers this frame keeps nothing of the last)
                     const xgpu::buffer::copy C{ 1, 1, View.m_GIScreenWidth * View.m_GIScreenHeight };
                     Window.CopyBuffer(View.m_GIScreenZeros, View.m_GIScreenBuffer, std::span{ &C, 1 });
                 }
-                auto SCmd = Window.StartRenderPass(View.m_GIScreenPass);
+                // Its draws: a record (the cluster's push constants) and a command a cluster, in runs of one bind state - phase 0 a run a
+                // geometry, phase 1 a run a geometry and GI buffer - each run one indirect draw (this frame's region of the view's buffers)
+                m_ScreenRecords.clear(); m_ScreenCommands.clear(); m_ScreenRuns.clear();
+                const int Base = int(m_Device.getFrameIndex() % ring_frames_v) * screen_draws_v;
                 for( int Phase = 0; Phase < 2; ++Phase )        // 0: the depth, 1: the GI read at it
                 {
-                    const cluster_geom* pGeomBound = nullptr;
-                    const xgpu::buffer* pGIBound   = nullptr;
                     for( const auto& Vis : m_Visible )
                     {
                         const std::size_t iDraw = Vis.m_iDraw;
@@ -1428,45 +1429,58 @@ namespace xlionrender
                             for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                             {
                                 if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
-                                const auto& C = G.m_Clusters[c];
-                                if( Phase == 0 )
-                                {
-                                    if( &G != pGeomBound )
-                                    {
-                                        std::array<xgpu::buffer*, 9> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
-                                        SCmd.setPipelineInstance(m_DepthPrepassInstance, std::span{ Buffers });
-                                        SCmd.setDynamicUBO(m_LightUBO, 1);
-                                        SCmd.setDynamicUBO(m_StaticGeomUBO, 0);
-                                        BindClusterStreams(SCmd, G);
-                                        pGeomBound = &G;
-                                    }
-                                    SCmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, 0u });
-                                }
-                                else
+                                if( m_ScreenRecords.size() == std::size_t(screen_draws_v) ) break;
+                                const xgpu::buffer*        pBuf = nullptr;
+                                details::push_static_geom  Rec{ c, Slot, 0u, 0xFFFFFFFFu, 0u };
+                                if( Phase == 1 )
                                 {
                                     const std::uint16_t k = bSections ? pMesh->m_GIClusterSection[c] : 0;
-                                    const xgpu::buffer* pBuf = bSections ? &pMesh->m_GISections[k].m_Buffer : &pMesh->m_GIBuffer;
-                                    if( &G != pGeomBound || pBuf != pGIBound )
-                                    {
-                                        std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(pBuf), &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenBuffer };
-                                        SCmd.setPipelineInstance(m_GIScreenInstance, std::span{ Buffers });
-                                        SCmd.setDynamicUBO(m_LightUBO, 1);
-                                        SCmd.setDynamicUBO(m_StaticGeomUBO, 0);
-                                        BindClusterStreams(SCmd, G);
-                                        pGeomBound = &G; pGIBound = pBuf;
-                                    }
+                                    pBuf = bSections ? &pMesh->m_GISections[k].m_Buffer : &pMesh->m_GIBuffer;
                                     if( bSections )
                                     {
                                         const auto SGI = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                                         if( SGI.second == 0xFFFFFFFFu ) continue;
-                                        SCmd.setPushConstants(details::push_static_geom{ c, Slot, SGI.first, SGI.second, 0u, pMesh->m_GIClusterVertexDelta[c] });
+                                        Rec = { c, Slot, SGI.first, SGI.second, 0u, pMesh->m_GIClusterVertexDelta[c] };
                                     }
-                                    else SCmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second, 0u });
+                                    else Rec = { c, Slot, GI.first, GI.second, 0u };
                                 }
-                                SCmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex)); m_GIStats.m_nScreenDraws += Phase;
+                                const auto& C = G.m_Clusters[c];
+                                if( m_ScreenRuns.empty() || m_ScreenRuns.back().m_Phase != Phase || m_ScreenRuns.back().m_pGeom != &G || m_ScreenRuns.back().m_pGI != pBuf )
+                                    m_ScreenRuns.push_back({ Phase, &G, pBuf, int(m_ScreenRecords.size()), 0 });
+                                ++m_ScreenRuns.back().m_Count;
+                                m_ScreenCommands.push_back({ C.m_nIndices, 1u, C.m_iIndex, std::int32_t(C.m_iVertex), std::uint32_t(Base + int(m_ScreenRecords.size())) });
+                                m_ScreenRecords.push_back(Rec);
+                                m_GIStats.m_nScreenDraws += Phase;
                             }
                         }
                     }
+                }
+                const int nScreen = int(m_ScreenRecords.size());
+                if( nScreen )
+                {
+                    (void)View.m_GIScreenRecords.MemoryMapFrameRegion(Base, nScreen, [&](void* p) { std::memcpy(p, m_ScreenRecords.data(), m_ScreenRecords.size() * sizeof(m_ScreenRecords[0])); });
+                    (void)View.m_GIScreenCommands.MemoryMapFrameRegion(Base, nScreen, [&](void* p) { std::memcpy(p, m_ScreenCommands.data(), m_ScreenCommands.size() * sizeof(m_ScreenCommands[0])); });
+                }
+                m_GIStats.m_nScreenCalls = int(m_ScreenRuns.size());
+
+                auto SCmd = Window.StartRenderPass(View.m_GIScreenPass);
+                for( const auto& Run : m_ScreenRuns )
+                {
+                    const auto& G = *Run.m_pGeom;
+                    if( Run.m_Phase == 0 )
+                    {
+                        std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenRecords };
+                        SCmd.setPipelineInstance(m_GIScreenDepthInstance, std::span{ Buffers });
+                    }
+                    else
+                    {
+                        std::array<xgpu::buffer*, 11> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(Run.m_pGI), &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenBuffer, &View.m_GIScreenRecords };
+                        SCmd.setPipelineInstance(m_GIScreenInstance, std::span{ Buffers });
+                    }
+                    SCmd.setDynamicUBO(m_LightUBO, 1);
+                    SCmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                    BindClusterStreams(SCmd, G);
+                    SCmd.DrawIndexedIndirect(View.m_GIScreenCommands, Base + Run.m_First, Run.m_Count);
                 }
             }
 
@@ -1548,8 +1562,8 @@ namespace xlionrender
                         const auto SGI = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                         Cmd.setPushConstants(details::push_static_geom{ c, Slot, SGI.first, SGI.second, MaterialBase, pMesh->m_GIClusterVertexDelta[c] });
                     }
-                    else if( bScreenSub ) Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFDu, MaterialBase });     // (xlionrender_surfel_gi.glsl gi_screen_v)     // (xlionrender_surfel_gi.glsl gi_screen_v)
-                    else Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, bRigidProbes ? 0xFFFFFFFEu : GI.second, MaterialBase });     // (0xFFFFFFFE: xlionrender_surfel_gi.glsl gi_probes_v)     // (0xFFFFFFFE: xlionrender_surfel_gi.glsl gi_probes_v)
+                    else if( bScreenSub ) Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFDu, MaterialBase });     // (xlionrender_surfel_gi.glsl gi_screen_v)
+                    else Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, bRigidProbes ? 0xFFFFFFFEu : GI.second, MaterialBase });     // (0xFFFFFFFE: xlionrender_surfel_gi.glsl gi_probes_v)
                     { const auto TD = std::chrono::steady_clock::now(); Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex)); g_DrawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TD).count(); }
                     ++g_nSceneDraws;
                 }

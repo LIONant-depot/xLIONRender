@@ -47,6 +47,9 @@ namespace xlionrender
         xgpu::texture           m_GIScreenDepth;        // DEPTH_F32, half size
         xgpu::renderpass        m_GIScreenPass;
         xgpu::buffer            m_GIScreenBuffer, m_GIScreenZeros;
+        // and its draws (instance::renderScenePass): a record a cluster (details::push_static_geom, read by gl_InstanceIndex) and an
+        // indirect command (details::draw_indexed_indirect), host visible, a region per ring frame (instance::screen_draws_v each)
+        xgpu::buffer            m_GIScreenRecords, m_GIScreenCommands;
         int                     m_GIScreenWidth  = 0;
         int                     m_GIScreenHeight = 0;
         int                     m_MaskWidth  = 0;

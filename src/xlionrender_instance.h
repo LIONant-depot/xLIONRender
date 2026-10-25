@@ -16,6 +16,7 @@
 #include "features/culling/xlionrender_frustum.h"
 #include "features/gi/xlionrender_surfel_gi_gpu.h"
 #include "features/gi/xlionrender_surfel_gi_chunks.h"
+#include "plans/forward/xlionrender_plan_forward.h"     // (details::push_static_geom, draw_indexed_indirect: the half-resolution GI pass's lists)
 #include "xlionrender_view.h"
 #include <chrono>
 #include <memory>
@@ -331,6 +332,10 @@ namespace xlionrender
         // the material's GI read in the fragment (xlionrender_gi_screen_frag.glsl), at the depth the prepass wrote, no color
         xgpu::pipeline              m_GIScreenPipeline;
         xgpu::pipeline_instance     m_GIScreenInstance;
+        // Both phases of that pass draw in indirect runs: their vertex shader reads each draw's push constants from the view's record
+        // buffer (xlionrender_static_geom_gi_records_vert.glsl, binding 12); the depth phase's pipeline is m_DepthPrepassPipeline's with it
+        xgpu::pipeline              m_GIScreenDepthPipeline;
+        xgpu::pipeline_instance     m_GIScreenDepthInstance;
         xgpu::buffer                m_StaticGeomUBO;        // the view block of both cluster vertex paths (details::ubo_geom_view)
 
         // Instance data (features/instances): a device-local buffer (persistent slots, then this frame's transient ones) kept up to
@@ -428,6 +433,12 @@ namespace xlionrender
         std::vector<xmath::fbbox>   m_DrawWorld;            // per scene draw: its world bounds this frame (computed with the shadow casters)
         struct visible_draw { const mesh_slot* m_pMesh; std::uint32_t m_Material; std::uint32_t m_iDraw; };
         std::vector<visible_draw>   m_Visible;              // this view's visible draws, sorted by state
+        // The half-resolution GI pass's draws (renderScenePass): a record and a command a cluster, the runs that share a bind state
+        static constexpr int        screen_draws_v          = 1 << 16;  // ponytail: a frame's cap (both phases); past it the rest of the pass is not drawn
+        struct screen_run { int m_Phase; const cluster_geom* m_pGeom; const xgpu::buffer* m_pGI; int m_First, m_Count; };
+        std::vector<details::push_static_geom>      m_ScreenRecords;
+        std::vector<details::draw_indexed_indirect> m_ScreenCommands;
+        std::vector<screen_run>                     m_ScreenRuns;
         int                         m_nDrawsRendered        = 0;
         // The editor's view of huge meshes (m_bBoxesOnly, m_FrameBudgetMs): planClusters, updateBudget
         void                        planClusters    ( const scene& Scene, const xmath::fvec3& Eye, const frustum& Frustum ) noexcept;
