@@ -181,7 +181,7 @@ namespace xlionrender
         float           m_TraceAllowanceMs = 1.0f;  // the GI trace's main-thread time per frame (documentation/gi_dynamic_master_plan.md, Phase 1); 0: no limit
         bool            m_bGPUTrace     = true;     // the GI's rays on the GPU (Part II, G3: gi::gpu_trace); off, or no compute: on the CPU within m_TraceAllowanceMs
         bool            m_bEmitterSampling = true;  // the emitters' light by light sampling in each pass (G5), not the links the CPU builds (a minute for Police)
-        bool            m_bHalfRes      = true;     // the opaque pixels' GI read at half resolution, upsampled by depth and normal (the main view; not the debug views)
+        bool            m_bHalfRes      = false;    // the opaque pixels' GI read at half resolution, upsampled by depth and normal (the main view; not the debug views)
         bool            m_bProbes       = true;     // the probe grid: the GI of what has no surfels of its own (skinned meshes), around the eye
         float           m_ProbeSpacing  = 1.0f;     // its probes' spacing (32 x 16 x 32 of them)
         float           m_GPUBudgetMs   = 2.0f;     // the GPU time a frame's GI slice may take (its rays: the measured rays per ms times this); 0: no limit, every batch (m_RayBudget) in one slice

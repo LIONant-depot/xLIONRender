@@ -127,7 +127,7 @@ int main()
     CHECK(OnR > OnL * 1.15, "no color bleeding with GI (near red %.2f, near green %.2f)", OnR, OnL);
     CHECK(MOn[1] > MOff[1] * 1.05, "GI adds no light");
 
-    // The GI read at half resolution (on by default: scene::gi_settings::m_bHalfRes), upsampled by depth and normal, against the read every
+    // The GI read at half resolution (scene::gi_settings::m_bHalfRes), upsampled by depth and normal, against the read every
     // pixel makes: the same room within a few percent (its edges: the upsample's), and its pass drew
     {
         Scene.m_GI.m_bHalfRes = false;

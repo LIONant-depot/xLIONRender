@@ -190,7 +190,7 @@ namespace xlionrender
         bool            m_bGI           = false;           // surfel GI: the meshes with surfels (baked by their GeomStatic compiler) are lit by it
         int             m_GIRayBudget   = 16384;
         bool            m_bGIPerPixel   = true;            // near, every pixel reads the surfels (no extra vertices needed); off: the vertices only
-        bool            m_bGIHalfRes    = true;            // that read at half resolution, upsampled (a quarter of the reads)
+        bool            m_bGIHalfRes    = false;           // that read at half resolution, upsampled (a quarter of the reads; off until the cluster draws are batched: its pass doubles them)
         gi_debug        m_GIDebug       = gi_debug::NONE;
         float           m_GIEmissiveScale = 100.0f;         // self-illumination as lights: their emission x this, for the GI
         int             m_GIRaysPerSurfel = 8;              // rays per surfel update
