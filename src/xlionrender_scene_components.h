@@ -20,6 +20,7 @@
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_xgpu_rsc_loader.h"
 #include "plugins/xmaterial.plugin/source/xmaterial_runtime.h"
 #include "plugins/xmaterial.plugin/source/xmaterial_params.h"
+#include "plugins/xmaterial.plugin/source/xmaterial_render_settings.h"
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_runtime.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_rsc_loader.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_runtime.h"
@@ -190,7 +191,8 @@ namespace xlionrender
             return false;
         }
 
-        // The rows of the instance it draws with (its material's parameters, in the material's order, then the orphans), made again only when
+        // The rows of the instance it draws with (its material's parameters in the order the Material Instance editor lists them - the compiled
+        // list is in it, xmaterial::InspectorOrder - but the render settings, then the orphans), made again only when
         // that instance (as loaded) or the number of overrides changed: the inspector asks for them many times a frame, and holds on to them
         std::vector<mesh_param_row>& Rows( void ) noexcept
         {
@@ -209,6 +211,7 @@ namespace xlionrender
             m_Rows.clear();
             for (const auto& Info : pMat->getParams())
             {
+                if (xmaterial::isRenderSettingParam(Info.m_ID)) continue;          // (the instance's Render Settings, not a parameter row)
                 auto& Row  = m_Rows.emplace_back();
                 Row.m_pSlot = this;
                 Row.m_ID    = Info.m_ID;
