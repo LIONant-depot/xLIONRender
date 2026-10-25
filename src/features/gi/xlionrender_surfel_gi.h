@@ -39,6 +39,7 @@
 #include <cstring>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <span>
 #include <string>
 #include <deque>
@@ -645,11 +646,11 @@ namespace xlionrender::gi
         {
             if (std::getenv("XLION_GI_GRIDSTATS"))     // measurement: each loaded or built read grid (GI review)
             {
-                std::size_t nCells = 0, nPatch = 0, MaxPatch = 0, nEnt = 0, MaxEnt = 0;
+                std::size_t nCells = 0, nPatch = 0, MaxPatch = 0, nEnt = 0, MaxEnt = 0, nPast32 = 0, nPast16 = 0;
                 for (const auto& E : m_ReadTable) { if (E[1] == 0xFFFFFFFFu) continue; ++nCells; nPatch += E[3]; MaxPatch = std::max<std::size_t>(MaxPatch, E[3]);
-                    for (std::uint32_t p = 0; p < E[3]; ++p) { const std::size_t n = m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu; nEnt += n; MaxEnt = std::max(MaxEnt, n); } }
-                std::printf("GIGRID cells %zu (table %zu), patches/cell mean %.1f max %zu, entries/patch mean %.1f max %zu, cell %.3f, surfels %zu\n", nCells, m_ReadTable.size(),
-                            nCells ? double(nPatch) / nCells : 0.0, MaxPatch, nPatch ? double(nEnt) / nPatch : 0.0, MaxEnt, m_ReadCell, m_Levels.empty() ? 0 : m_Levels[0].size()); std::fflush(stdout);
+                    for (std::uint32_t p = 0; p < E[3]; ++p) { const std::size_t n = m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu; nEnt += n; MaxEnt = std::max(MaxEnt, n); nPast32 += n > 32 ? n - 32 : 0; nPast16 += n > 16 ? n - 16 : 0; } }
+                std::printf("GIGRID cells %zu (table %zu), patches/cell mean %.1f max %zu, entries/patch mean %.1f max %zu (past 32: %zu, past 16: %zu of %zu), cell %.3f, surfels %zu\n", nCells, m_ReadTable.size(),
+                            nCells ? double(nPatch) / nCells : 0.0, MaxPatch, nPatch ? double(nEnt) / nPatch : 0.0, MaxEnt, nPast32, nPast16, nEnt, m_ReadCell, m_Levels.empty() ? 0 : m_Levels[0].size()); std::fflush(stdout);
             }
             const auto Sx = [](std::uint64_t v) { const int i = int(v & 0x1FFFFF); return i >= 0x100000 ? i - 0x200000 : i; };
             for (const auto& E : m_ReadTable)
@@ -729,6 +730,49 @@ namespace xlionrender::gi
         std::vector<std::array<std::uint32_t, 4>>   m_PackedReadTable;
         std::vector<std::uint32_t>                  m_PackedReadList;
         void RefreshPackedReadGrid() noexcept { PackReadGrid(true, m_ReadTable, m_ReadList, m_PackedReadTable, m_PackedReadList); }
+        // Experiment (XLION_GI_SPARSEGRID=<ratio>): the read grid only where the triangles are coarse - a triangle whose longest edge passes
+        // Ratio x the surfels' radius keeps the cells it crosses (and their neighbors); the others' cells are emptied (no patch: the pixel
+        // reads its triangle's vertex surfels, as off the grid). The vertex read is the grid's within 2% on dense meshes (gi_render)
+        void SparsifyReadGrid(float Ratio) noexcept
+        {
+            if (m_ReadTable.empty() || m_Levels[0].empty()) return;
+            const float Cell = m_ReadCell, Long = Ratio * m_Levels[0][0].m_Radius;
+            std::unordered_set<std::uint64_t> Keep;
+            for (const auto& T : m_Tris)
+            {
+                const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], C = m_Pos[T[2]];
+                const float Edge = std::max({ (B - A).Length(), (C - B).Length(), (A - C).Length() });
+                if (Edge <= Long) continue;
+                v3 N = (B - A).Cross(C - A); const float l = N.Length(); if (l <= 0) continue; N = N * (1.0f / l);
+                const int n = std::max(1, int(std::ceil(Edge / (0.5f * Cell))));
+                for (int i = 0; i <= n; ++i) for (int j = 0; i + j <= n; ++j)
+                {
+                    const v3 P = A + (B - A) * (float(i) / n) + (C - A) * (float(j) / n);
+                    const auto Ck = ReadCellAt(P, N, Cell);
+                    for (int dx = -1; dx <= 1; ++dx) for (int dy = -1; dy <= 1; ++dy) for (int dz = -1; dz <= 1; ++dz)
+                        Keep.insert(surfel_grid::Key(Ck[0] + dx, Ck[1] + dy, Ck[2] + dz));
+                }
+            }
+            std::vector<std::uint32_t> List;
+            List.reserve(m_ReadList.size() / 4);
+            for (auto& E : m_ReadTable)
+            {
+                if (E[1] == 0xFFFFFFFFu) continue;
+                if (!Keep.contains(std::uint64_t(E[0]) | (std::uint64_t(E[1]) << 32))) { E[2] = 0; E[3] = 0; continue; }
+                const std::uint32_t At = std::uint32_t(List.size());
+                List.insert(List.end(), m_ReadList.begin() + E[2], m_ReadList.begin() + E[2] + 4 * E[3]);
+                for (std::uint32_t p = 0; p < E[3]; ++p)
+                {
+                    const std::uint32_t First = m_ReadList[E[2] + 4 * p + 2], n = m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu;
+                    List[At + 4 * p + 2] = std::uint32_t(List.size());
+                    List.insert(List.end(), m_ReadList.begin() + First, m_ReadList.begin() + First + n);
+                }
+                E[2] = At;
+            }
+            if (std::getenv("XLION_GI_GRIDSTATS")) std::printf("GISPARSE ratio %.1f: lists %zu -> %zu words (%.1f%%)\n", Ratio, m_ReadList.size(), List.size(), 100.0 * double(List.size()) / std::max<double>(1, double(m_ReadList.size()))), std::fflush(stdout);
+            m_ReadList = std::move(List);
+            RefreshPackedReadGrid();
+        }
         static std::array<int, 3> ReadAxes(const v3& N) noexcept             // the 2 axes across a plane, then the one along its normal
         {
             const float x = std::abs(N.m_X), y = std::abs(N.m_Y), z = std::abs(N.m_Z);
@@ -1642,6 +1686,7 @@ namespace xlionrender::gi
             if (bTag3) BuildOrigins();                                  // (a GID3 resource: its origins made again from the vertex surfels, the same ones)
             else { m_OriginFirst.assign(pOF, pOF + nOFirst); m_OriginVert.assign(pOV, pOV + nO); }
             SortReadLists();
+            if (const char* pS = std::getenv("XLION_GI_SPARSEGRID")) SparsifyReadGrid(float(std::atof(pS)));     // (experiment)
             return true;
         }
 

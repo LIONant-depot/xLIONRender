@@ -414,6 +414,16 @@ int main()
             for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k)
                 nCross += L0[s].m_Normal.m_Y > 0.9f && Side(L0[s].m_Center.m_X) * Side(L0[Nb.m_Index[k]].m_Center.m_X) < 0;
         CHECK(nCross == 0, "%d floor surfels are filtered with the other side of the wall", nCross);
+
+        // The sparse-grid experiment (XLION_GI_SPARSEGRID): every triangle coarse (ratio 0) keeps every list; none (a huge ratio) empties
+        // every cell (their pixels read the vertex surfels)
+        {
+            auto All = Room, None = Room;
+            All.SparsifyReadGrid(0.0f); None.SparsifyReadGrid(1e6f);
+            std::size_t nPatches = 0; for (const auto& E : None.m_ReadTable) if (E[1] != 0xFFFFFFFFu) nPatches += E[3];
+            CHECK(All.m_ReadList.size() == Room.m_ReadList.size() && None.m_ReadList.empty() && nPatches == 0,
+                  "the sparse grid: %zu -> %zu words at ratio 0, %zu words / %zu patches at a huge ratio", Room.m_ReadList.size(), All.m_ReadList.size(), None.m_ReadList.size(), nPatches);
+        }
     }
 
     // 6o. The filter's neighbors are one surface layer (SameLayer), not merely in sight from half a radius off the surface: a 10 cm step
