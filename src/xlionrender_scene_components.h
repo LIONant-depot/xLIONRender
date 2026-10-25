@@ -63,32 +63,48 @@ namespace xlionrender
     XPROPERTY_REG(mesh_param)
 
     struct mesh_slot;
+    struct mesh;
 
-    // The inspector's row of one parameter of a slot's material instance (never saved): its name, whether the slot overrides it, and its value -
-    // the override's, else the instance's - through a view of its type (the Material Instance editor's widgets: drag bars, color groups, a texture).
-    // An edit sets the slot's override; Override off removes it
+    // The marker and the revert of a slot's rows (member_override_state): a parameter row is overridden when the slot sets it, the Material row when
+    // the slot swaps the instance; the revert sets the row's Override text to empty / the Material to the geometry's own (defined after mesh)
+    inline void MeshSlotOverrideState( const xproperty::type::object&, void* pMesh, void* pBase, std::string_view Path, bool& bOverridden
+                                     , std::vector<xproperty::settings::member_override_state_t::revert>* pChoices ) noexcept;
+
+    // The inspector's row of one parameter of a slot's material instance (never saved): its name and the value the entity draws with - its
+    // override's, else the instance's - through a view of its type (the Material Instance editor's widgets: drag bars, color groups, a texture).
+    // An edit sets the slot's override; the marker (>) reverts it. Override: the whole override as text ("" inherits; numbers "x, y, z, w"; a
+    // texture "#guid") - one property for undo, prefabs and the AI; Source: where the value comes from. An orphan row: an override of a parameter
+    // the material does not have (a swapped instance) - kept, not applied, read only until reverted
     struct mesh_param_row
     {
         mesh_slot*      m_pSlot     = nullptr;
         std::uint64_t   m_ID        = 0;
         std::string     m_Name;
         std::uint8_t    m_Type      = 0;            // xmaterial::param_type
+        bool            m_bOrphan   = false;
         float           m_Default[4]= { 0, 0, 0, 0 };
         texture_ref     m_DefaultTexture;
 
-        inline bool         isOverride  ( void ) const noexcept;
-        inline void         setOverride ( bool b ) noexcept;
+        inline const mesh_param* Entry       ( void ) const noexcept;
         inline float        Get         ( int i ) const noexcept;
         inline void         Set         ( int i, float V ) noexcept;
         inline texture_ref  getTexture  ( void ) const noexcept;
         inline void         setTexture  ( const texture_ref& T ) noexcept;
+        inline std::string  getOverride ( void ) const noexcept;
+        inline static std::string FormatOverride( std::uint8_t Type, const mesh_param* P ) noexcept;        // an override as the Override text ("" for none)
+        inline void         setOverride ( const std::string& Text ) noexcept;
+        inline std::string  Source      ( void ) const noexcept;
         static std::pair<const xproperty::type::object*, void*> ValueView( mesh_param_row& O ) noexcept;
 
         XPROPERTY_DEF
         ( "MeshParamRow", mesh_param_row, xproperty::settings::sprop_union_group
         , obj_member<"Name",     &mesh_param_row::m_Name, member_flags<flags::SHOW_READONLY>>
-        , obj_member<"Override", +[](mesh_param_row& O, bool bRead, bool& V) { if (bRead) V = O.isOverride(); else O.setOverride(V); }, member_help<"On: this entity's value; off: the material instance's">>
-        , obj_member<"Value",    +[](mesh_param_row& O) -> std::pair<const xproperty::type::object*, void*> { return ValueView(O); }>
+        , obj_member<"Value",    +[](mesh_param_row& O) -> std::pair<const xproperty::type::object*, void*> { return ValueView(O); }
+            , member_dynamic_flags<+[](const mesh_param_row& O) { xproperty::flags::type F{}; F.m_bShowReadOnly = O.m_bOrphan; return F; }>>
+        , obj_member<"Override", +[](mesh_param_row& O, bool bRead, std::string& V) { if (bRead) V = O.getOverride(); else O.setOverride(V); }, member_flags<flags::DONT_SHOW>
+            , member_help<"The entity's own value as text: empty inherits the material instance's; \"x, y, z, w\" (as many numbers as the type has); \"#guid\" a texture">>
+        , obj_member<"Source",   +[](mesh_param_row& O, bool bRead, std::string& V) { if (bRead) V = O.Source(); }, member_flags<flags::DONT_SHOW, flags::SHOW_READONLY>
+            , member_help<"Where the value comes from: material instance, entity, or not applied (the material has no such parameter)">>
         )
     };
     XPROPERTY_REG(mesh_param_row)
@@ -112,7 +128,8 @@ namespace xlionrender
         , obj_member<"B", +[](mesh_param_color_view& O, bool bRead, float& V) { if (bRead) V = O.Get(2); else O.Set(2, V); }, member_ui<float>::drag_bar<0.005f>>
         , obj_member<"A", +[](mesh_param_color_view& O, bool bRead, float& V) { if (bRead) V = O.Get(3); else O.Set(3, V); }, member_ui<float>::drag_bar<0.005f>>) };
     struct mesh_param_texture_view : mesh_param_row { XPROPERTY_DEF("mesh param: texture", mesh_param_texture_view
-        , obj_member<"Value", +[](mesh_param_texture_view& O, bool bRead, texture_ref& V) { if (bRead) V = O.getTexture(); else O.setTexture(V); }>) };
+        , obj_member<"Value", +[](mesh_param_texture_view& O, bool bRead, xresource::full_guid& V)                      // (a full guid: a lambda's value is one, with its type)
+            { if (bRead) V = { .m_Instance = O.getTexture().m_Instance, .m_Type = texture_ref::m_Type }; else O.setTexture(texture_ref{ .m_Instance = V.m_Instance }); }>) };
     XPROPERTY_REG(mesh_param_float_view)
     XPROPERTY_REG(mesh_param_float2_view)
     XPROPERTY_REG(mesh_param_float3_view)
@@ -135,11 +152,11 @@ namespace xlionrender
         return { nullptr, nullptr };
     }
 
-    // One material slot of a Mesh with "Override materials" on: a material instance replacing the geometry's (empty: the geometry's own) and the
-    // entity's own values for its parameters (sparse: only what it overrides)
+    // One material slot of a Mesh: the instance it draws with - the geometry's own unless the entity swaps it (m_Material) - and the entity's own
+    // values for its parameters (sparse: only what it overrides; kept across a swap, applied where the new material has the parameter)
     struct mesh_slot
     {
-        material_instance_ref       m_Material;
+        material_instance_ref       m_Material;                     // the swap (empty: the geometry's own)
         std::vector<mesh_param>     m_Params;
 
         // The inspector's (never saved): the slot's name, the geometry's own instance (mesh::Slots), the rows of the resolved instance's parameters
@@ -147,42 +164,48 @@ namespace xlionrender
         material_instance_ref       m_Default;
         std::vector<mesh_param_row> m_Rows;
         const void*                 m_pRowsOf   = nullptr;          // the loaded instance the rows were made from
+        std::size_t                 m_nRowsOf   = 0;                // ... and how many overrides there were (orphans come and go with them)
 
         // The instance it draws with: its own, else the geometry's
         std::uint64_t Instance( void ) const noexcept { return m_Material.m_Instance.m_Value ? m_Material.m_Instance.m_Value : m_Default.m_Instance.m_Value; }
 
+        // An override by the parameter's id, else by its name (an override set by name, or a parameter the material renamed keeps its value by id)
         mesh_param*       Find( std::uint64_t ID, std::string_view Name = {} ) noexcept
         {
-            for (auto& P : m_Params) if ((ID && P.m_ID == ID) || (!Name.empty() && P.m_Name == Name)) return &P;
+            if (ID) for (auto& P : m_Params) if (P.m_ID == ID) return &P;
+            if (!Name.empty()) for (auto& P : m_Params) if (P.m_Name == Name) return &P;
             return nullptr;
         }
+        const mesh_param* Find( std::uint64_t ID, std::string_view Name = {} ) const noexcept { return const_cast<mesh_slot*>(this)->Find(ID, Name); }
         mesh_param& Set( std::uint64_t ID, std::string_view Name ) noexcept
         {
-            if (auto* P = Find(ID, Name)) { if (ID) P->m_ID = ID; return *P; }
-            auto& P = m_Params.emplace_back(mesh_param{ .m_ID = ID, .m_Name = std::string(Name) });
+            if (auto* P = Find(ID, Name)) { if (ID) P->m_ID = ID; if (!Name.empty()) P->m_Name = std::string(Name); return *P; }
+            m_Params.emplace_back(mesh_param{ .m_ID = ID, .m_Name = std::string(Name) });
             if (ID) std::ranges::sort(m_Params, {}, &mesh_param::m_ID);
             return *Find(ID, Name);
         }
-        bool Clear( std::uint64_t ID, std::string_view Name = {} ) noexcept
+        bool Revert( std::uint64_t ID, std::string_view Name = {} ) noexcept
         {
-            return std::erase_if(m_Params, [&](const mesh_param& P) { return (ID && P.m_ID == ID) || (!Name.empty() && P.m_Name == Name); }) > 0;
+            if (auto* P = Find(ID, Name)) { m_Params.erase(m_Params.begin() + (P - m_Params.data())); return true; }
+            return false;
         }
 
-        // The rows of the instance it draws with (its material's parameters, in the material's order), made again only when that instance (as
-        // loaded) changed: the inspector asks for them many times a frame, and holds on to them while it walks them
+        // The rows of the instance it draws with (its material's parameters, in the material's order, then the orphans), made again only when
+        // that instance (as loaded) or the number of overrides changed: the inspector asks for them many times a frame, and holds on to them
         std::vector<mesh_param_row>& Rows( void ) noexcept
         {
             using namespace xlioncore::resources;
             const std::uint64_t MI = Instance();
             auto* pMI  = MI ? static_cast<xmaterial_instance::rt*>(GetResource(material_instance_type_guid_v.m_Value, MI)) : nullptr;
             auto* pMat = pMI ? static_cast<xmaterial::rt*>(GetResource(material_type_guid_v.m_Value, pMI->m_MaterialRef.m_Instance.m_Value)) : nullptr;
-            if (pMat == nullptr || pMI == m_pRowsOf)
+            if (pMat == nullptr || (pMI == m_pRowsOf && m_Params.size() == m_nRowsOf))
             {
                 for (auto& R : m_Rows) R.m_pSlot = this;            // (the component may have moved)
                 if (pMat == nullptr && m_pRowsOf) { m_Rows.clear(); m_pRowsOf = nullptr; }
                 return m_Rows;
             }
             m_pRowsOf = pMI;
+            m_nRowsOf = m_Params.size();
             m_Rows.clear();
             for (const auto& Info : pMat->getParams())
             {
@@ -193,13 +216,24 @@ namespace xlionrender
                 Row.m_Type  = Info.m_Type;
                 if (xmaterial::param_type(Info.m_Type) == xmaterial::param_type::TEXTURE)
                 {
-                    // the instance's texture of that slot (its list has the textures from slot 1 when the material keeps slot 0 for the shadow atlas)
-                    // (a loaded instance holds its textures by pointer, and nothing here turns one back into its guid: then the row shows none, which
-                    // means the instance's own until the slot overrides it)
+                    // the instance's texture of that slot (its list has the textures from slot 1 when the material keeps slot 0 for the shadow atlas),
+                    // by its guid (a loaded instance holds it as a pointer)
                     const std::size_t i = Info.m_Slot + (pMat->m_Flags.m_bSamplersFrom1 ? 0u : 1u);
-                    if (i < pMI->getTextures().size() && !pMI->getTextures()[i].m_TexureRef.m_Instance.isPointer()) Row.m_DefaultTexture.m_Instance = pMI->getTextures()[i].m_TexureRef.m_Instance;
+                    if (i < pMI->getTextures().size()) Row.m_DefaultTexture.m_Instance.m_Value = GuidOf(texture_type_guid_v.m_Value, pMI->getTextures()[i].m_TexureRef.m_Instance.m_Value);
                 }
                 else for (int c = 0; c < 4 && Info.m_ByteOffset / 4u + c < pMI->m_BlockBytes / 4u; ++c) Row.m_Default[c] = pMI->m_pParams[Info.m_ByteOffset / 4u + c];
+            }
+            const std::size_t nParams = m_Rows.size();
+            for (const auto& P : m_Params)
+            {
+                const auto Rows = std::span(m_Rows.data(), nParams);
+                if (std::ranges::any_of(Rows, [&](const mesh_param_row& R) { return (P.m_ID && R.m_ID == P.m_ID) || (!P.m_Name.empty() && R.m_Name == P.m_Name); })) continue;
+                auto& Row    = m_Rows.emplace_back();
+                Row.m_pSlot  = this;
+                Row.m_ID     = P.m_ID;
+                Row.m_Name   = P.m_Name.empty() ? std::format("{:016X}", P.m_ID) : P.m_Name;
+                Row.m_Type   = std::uint8_t(P.m_Texture.empty() ? xmaterial::param_type::FLOAT4 : xmaterial::param_type::TEXTURE);
+                Row.m_bOrphan = true;
             }
             return m_Rows;
         }
@@ -207,46 +241,82 @@ namespace xlionrender
         XPROPERTY_DEF
         ( "MeshSlot", mesh_slot
         , obj_member<"Name",        &mesh_slot::m_Name,     member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>>
-        , obj_member<"Material",    &mesh_slot::m_Material, member_help<"A material instance replacing the geometry's for this slot (empty: the geometry's own)">>
+        , obj_member<"Material",    +[](mesh_slot& O, bool bRead, xresource::full_guid& V)
+                                    {
+                                        if (bRead) V = { .m_Instance = (O.m_Material.m_Instance.m_Value ? O.m_Material : O.m_Default).m_Instance, .m_Type = material_instance_ref::m_Type };
+                                        else       O.m_Material.m_Instance = V.m_Instance.m_Value == O.m_Default.m_Instance.m_Value ? xresource::instance_guid{} : V.m_Instance;
+                                    }
+            , member_flags<flags::DONT_SAVE>, member_override_state<&MeshSlotOverrideState>
+            , member_help<"The material instance this slot draws with: the geometry's own unless this entity picks another (then > goes back to the geometry's)">>
         , obj_member<"Parameters",  +[](mesh_slot& O) -> std::vector<mesh_param_row>& { return O.Rows(); }, member_flags<flags::DONT_SAVE>, member_array_size_readonly<>, member_ui_open<true>
-            , member_help<"The parameters of the instance this slot draws with: Override on, this entity's value; off, the instance's">>
-        , obj_member<"Overrides",   &mesh_slot::m_Params,   member_flags<flags::DONT_SHOW>>
+            , member_override_state<&MeshSlotOverrideState>
+            , member_help<"The parameters of the instance this slot draws with, at the values this entity draws with: an edit overrides the instance's value, > reverts it">>
+        , obj_member<"MaterialOverride", &mesh_slot::m_Material, member_flags<flags::DONT_SHOW>, member_help<"Saved: the instance this entity swaps in (empty: the geometry's own)">>
+        , obj_member<"Overrides",   &mesh_slot::m_Params,   member_flags<flags::DONT_SHOW>, member_help<"Saved: the parameters this entity overrides, by id and name">>
         )
     };
     XPROPERTY_REG(mesh_slot)
 
-    bool mesh_param_row::isOverride( void ) const noexcept { return m_pSlot && m_pSlot->Find(m_ID, m_Name) != nullptr; }
-    void mesh_param_row::setOverride( bool b ) noexcept
-    {
-        if (!m_pSlot) return;
-        if (!b) { m_pSlot->Clear(m_ID, m_Name); return; }
-        if (isOverride()) return;
-        auto& P = m_pSlot->Set(m_ID, m_Name);            // starts at the instance's value
-        P.m_X = m_Default[0]; P.m_Y = m_Default[1]; P.m_Z = m_Default[2]; P.m_W = m_Default[3];
-        P.m_Texture = m_DefaultTexture;
-    }
+    const mesh_param* mesh_param_row::Entry( void ) const noexcept { return m_pSlot ? std::as_const(*m_pSlot).Find(m_ID, m_Name) : nullptr; }
     float mesh_param_row::Get( int i ) const noexcept
     {
-        if (const auto* P = m_pSlot ? m_pSlot->Find(m_ID, m_Name) : nullptr) return i == 0 ? P->m_X : i == 1 ? P->m_Y : i == 2 ? P->m_Z : P->m_W;
+        if (const auto* P = Entry()) return i == 0 ? P->m_X : i == 1 ? P->m_Y : i == 2 ? P->m_Z : P->m_W;
         return m_Default[i];
     }
     void mesh_param_row::Set( int i, float V ) noexcept
     {
-        if (!m_pSlot) return;
-        setOverride(true);
-        auto& P = *m_pSlot->Find(m_ID, m_Name);
+        if (!m_pSlot || m_bOrphan) return;
+        const bool bNew = Entry() == nullptr;
+        auto& P = m_pSlot->Set(m_ID, m_Name);
+        if (bNew) { P.m_X = m_Default[0]; P.m_Y = m_Default[1]; P.m_Z = m_Default[2]; P.m_W = m_Default[3]; }        // starts at the instance's value
         (i == 0 ? P.m_X : i == 1 ? P.m_Y : i == 2 ? P.m_Z : P.m_W) = V;
     }
     texture_ref mesh_param_row::getTexture( void ) const noexcept
     {
-        if (const auto* P = m_pSlot ? m_pSlot->Find(m_ID, m_Name) : nullptr) return P->m_Texture;
+        if (const auto* P = Entry()) return P->m_Texture;
         return m_DefaultTexture;
     }
     void mesh_param_row::setTexture( const texture_ref& T ) noexcept
     {
+        if (!m_pSlot || m_bOrphan) return;
+        if (T.m_Instance.m_Value == m_DefaultTexture.m_Instance.m_Value || T.empty()) { m_pSlot->Revert(m_ID, m_Name); return; }        // the instance's own (or none picked): inherits
+        m_pSlot->Set(m_ID, m_Name).m_Texture = T;
+    }
+    std::string mesh_param_row::getOverride( void ) const noexcept { return FormatOverride(m_Type, Entry()); }
+    std::string mesh_param_row::FormatOverride( std::uint8_t Type, const mesh_param* P ) noexcept
+    {
+        if (P == nullptr) return {};
+        if (!P->m_Texture.empty()) return std::format("#{:016X}", P->m_Texture.m_Instance.m_Value);
+        using T = xmaterial::param_type;
+        const int n = T(Type) == T::FLOAT ? 1 : T(Type) == T::FLOAT2 ? 2 : T(Type) == T::FLOAT3 ? 3 : 4;
+        const float V[] = { P->m_X, P->m_Y, P->m_Z, P->m_W };
+        std::string S;
+        for (int c = 0; c < n; ++c) S += std::format("{}{}", c ? ", " : "", V[c]);
+        return S;
+    }
+    void mesh_param_row::setOverride( const std::string& Text ) noexcept
+    {
         if (!m_pSlot) return;
-        setOverride(true);
-        m_pSlot->Find(m_ID, m_Name)->m_Texture = T;
+        if (Text.empty()) { m_pSlot->Revert(m_ID, m_Name); return; }
+        auto& P = m_pSlot->Set(m_ID, m_Name);
+        if (Text[0] == '#') { P.m_Texture.m_Instance.m_Value = std::strtoull(Text.c_str() + 1, nullptr, 16); return; }
+        P.m_Texture = {};
+        float V[4] = { m_Default[0], m_Default[1], m_Default[2], m_Default[3] };
+        const char* p = Text.c_str();
+        for (int c = 0; c < 4 && *p; ++c)
+        {
+            char* pEnd = nullptr;
+            V[c] = std::strtof(p, &pEnd);
+            if (pEnd == p) break;
+            p = pEnd;
+            while (*p == ',' || *p == ' ') ++p;
+        }
+        P.m_X = V[0]; P.m_Y = V[1]; P.m_Z = V[2]; P.m_W = V[3];
+    }
+    std::string mesh_param_row::Source( void ) const noexcept
+    {
+        if (m_bOrphan) return "not applied (the material has no such parameter)";
+        return Entry() ? "entity" : "material instance";
     }
 
     static constexpr auto gi_role_v = std::array
@@ -255,16 +325,17 @@ namespace xlionrender
     , xproperty::settings::enum_item("FULL",     gi_role::FULL)
     };
 
-    // A static geometry drawn with its materials (which ones, and the entity's own values for them: its MeshMaterial)
+    // A static geometry drawn with its materials: per material slot the geometry's own instance, or one the entity swaps in, with the entity's own
+    // values for the parameters it overrides (mesh_slot). Old files: the MeshMaterial / Materials list, moved in by UpgradeOldMaterials
     struct mesh
     {
         constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "Mesh" };
 
         geom_static_ref                     m_Geom;
-        std::vector<material_instance_ref>  m_Materials;    // DEPRECATED: slot swaps live in MeshMaterial::m_Slots (which wins per slot); still read from old files and drawn
+        std::vector<material_instance_ref>  m_Materials;    // DEPRECATED (old files): slot swaps, moved into m_Slots by UpgradeOldMaterials
         gi_role                             m_GIRole = gi_role::ASSET;
-        bool                                m_bOverrideMaterials = false;
-        std::vector<mesh_slot>              m_Slots;        // with m_bOverrideMaterials: per material slot of the geometry
+        bool                                m_bOverrideMaterials = false;   // off (most Meshes): the geometry's materials, no slots shown, saved or drawn
+        std::vector<mesh_slot>              m_Slots;        // with m_bOverrideMaterials: per material slot of the geometry (fewer: the rest are the geometry's own)
 
         // The slots, one per material slot of the geometry (as loaded: until then as they are), each knowing the geometry's own instance
         std::vector<mesh_slot>& Slots( void ) noexcept
@@ -275,14 +346,15 @@ namespace xlionrender
             if (m_Slots.size() != Defaults.size()) m_Slots.resize(Defaults.size());
             for (std::size_t i = 0; i < Defaults.size(); ++i)
             {
-                m_Slots[i].m_Default.m_Instance = Defaults[i].m_Instance;
+                m_Slots[i].m_Default.m_Instance.m_Value = xlioncore::resources::GuidOf(material_instance_type_guid_v.m_Value, Defaults[i].m_Instance.m_Value);   // (a loaded geometry holds it as a pointer: the editor shows guids)
                 if (m_Slots[i].m_Name.empty()) m_Slots[i].m_Name = std::format("Slot {}", i);
             }
             return m_Slots;
         }
 
         // Game code: the entity's own value of a parameter of slot iSlot's material instance, by the parameter's name (as the material names it)
-        // or its id; Override Materials turns on. Values are linear; a color's alpha in A. Clear: back to the instance's value
+        // or its id; Override Materials turns on. Values are linear; a color's alpha in A. Revert: back to the instance's value. SetMaterial: another
+        // instance for the slot (an empty reference: the geometry's own); the overrides stay, applied where the new material has the parameter
         mesh_param& Param( int iSlot, std::uint64_t ID, std::string_view Name ) noexcept
         {
             m_bOverrideMaterials = true;
@@ -296,23 +368,96 @@ namespace xlionrender
         void SetFloat  ( int iSlot, std::uint64_t ID, float V ) noexcept                            { Param(iSlot, ID, {}).m_X = V; }
         void SetColor  ( int iSlot, std::uint64_t ID, const xmath::fvec4& C ) noexcept              { auto& P = Param(iSlot, ID, {}); P.m_X = C.m_X; P.m_Y = C.m_Y; P.m_Z = C.m_Z; P.m_W = C.m_W; }
         void SetTexture( int iSlot, std::uint64_t ID, const texture_ref& T ) noexcept               { Param(iSlot, ID, {}).m_Texture = T; }
-        void Clear     ( int iSlot, std::string_view Name ) noexcept                                { if (std::size_t(iSlot) < m_Slots.size()) m_Slots[iSlot].Clear(0, Name); }
+        bool Revert    ( int iSlot, std::string_view Name ) noexcept                                { return std::size_t(iSlot) < m_Slots.size() && m_Slots[iSlot].Revert(0, Name); }
+        bool Revert    ( int iSlot, std::uint64_t ID ) noexcept                                     { return std::size_t(iSlot) < m_Slots.size() && m_Slots[iSlot].Revert(ID, {}); }
         void SetMaterial( int iSlot, const material_instance_ref& MI ) noexcept                     { m_bOverrideMaterials = true; if (m_Slots.size() <= std::size_t(iSlot)) m_Slots.resize(std::size_t(iSlot) + 1); m_Slots[iSlot].m_Material = MI; }
-
-        // ponytail: old files keep their swaps here, shown and saved only while there are any. Moving them into a MeshMaterial at load
-        // needs an archetype change in the scene loader (xECSV2 xecs_scene_inline.h ReadEntityFile); do it there if the old field must go
 
         XPROPERTY_DEF
         ( "Mesh", mesh
         , obj_member<"Geom",      &mesh::m_Geom,      member_help<"The GeomStatic resource to draw">>
-        , obj_member<"Materials", &mesh::m_Materials, member_dynamic_flags<+[](const mesh& M) { xproperty::flags::type F{}; F.m_bDontShow = F.m_bDontSave = M.m_Materials.empty(); return F; }>, member_help<"Deprecated (old levels): use the MeshMaterial component's Slots, which win per slot. Material instances per material slot of the geometry, replacing the geometry's own">>
+        , obj_member<"Materials", &mesh::m_Materials, member_dynamic_flags<+[](const mesh& M) { xproperty::flags::type F{}; F.m_bDontShow = F.m_bDontSave = M.m_Materials.empty(); return F; }>, member_help<"Deprecated (old levels): the editor moves these into the Slots">>
         , obj_member<"GIRole",    &mesh::m_GIRole,    member_enum_span<gi_role_v>, member_help<"What it does in the GI: ASSET as its geometry says; RECEIVER lit by it but neither blocking nor bouncing light (a prop, a character: moving it costs the GI nothing elsewhere); FULL blocks, bounces and emits">>
-        , obj_member<"Override Materials", &mesh::m_bOverrideMaterials, member_help<"This entity's own materials: per material slot of the geometry, another material instance and its own values for the parameters it chooses">>
+        , obj_member<"Override Materials", &mesh::m_bOverrideMaterials, member_help<"This entity's own materials: per material slot of the geometry, another material instance and its own values for the parameters it chooses. Off: the geometry's materials (the slots are not saved)">>
         , obj_member<"Slots", +[](mesh& O) -> std::vector<mesh_slot>& { return O.Slots(); }, member_array_size_readonly<>, member_ui_open<true>
             , member_dynamic_flags<+[](const mesh& M) { xproperty::flags::type F{}; F.m_bDontShow = !M.m_bOverrideMaterials; F.m_bDontSave = !M.m_bOverrideMaterials; return F; }>
-            , member_help<"The geometry's material slots: each a material instance (empty: the geometry's own) and the parameters this entity overrides">>
+            , member_help<"The geometry's material slots: the material instance each draws with and the values this entity draws its parameters with. An edit overrides; > reverts">>
         )
     };
+
+    // The rows' marker and revert (member_override_state): Path names the slot and the row ("...Slots[G:s]/Parameters[G:r]..." or ".../Material").
+    // The levels a row inherits through: the material (and its instances), the geometry's instance or the slot's swap, a prefab (pBase: the
+    // prefab's Mesh, when this one is a prefab instance's), the entity. Overridden: the entity differs from what it inherits (from the prefab
+    // when there is one). The revert goes one level up; when the prefab overrides the row too, a second choice goes past it
+    inline void MeshSlotOverrideState( const xproperty::type::object&, void* pMesh, void* pBase, std::string_view Path, bool& bOverridden
+                                     , std::vector<xproperty::settings::member_override_state_t::revert>* pChoices ) noexcept
+    {
+        bOverridden = false;
+        const auto IndexAfter = [&](std::string_view Key, std::size_t& End) -> int
+        {
+            const auto At = Path.find(Key);
+            if (At == std::string_view::npos) return -1;
+            End = Path.find(']', At);
+            return End == std::string_view::npos ? -1 : std::atoi(std::string(Path.substr(At + Key.size(), End - At - Key.size())).c_str());
+        };
+        std::size_t SlotEnd = 0, RowEnd = 0;
+        const int iSlot = IndexAfter("Slots[G:", SlotEnd);
+        auto& M = *static_cast<mesh*>(pMesh);
+        if (iSlot < 0 || std::size_t(iSlot) >= M.m_Slots.size()) return;
+        auto& Slot = M.m_Slots[iSlot];
+        static const mesh_slot s_None{};
+        const auto* pB        = static_cast<const mesh*>(pBase);
+        const auto& BaseSlot  = pB && std::size_t(iSlot) < pB->m_Slots.size() ? pB->m_Slots[iSlot] : s_None;     // (a prefab without the slot: nothing set there)
+        using revert          = xproperty::settings::member_override_state_t::revert;
+
+        if (Path.substr(SlotEnd + 1).starts_with("/Material"))
+        {
+            const std::string Row = std::string(Path.substr(0, SlotEnd + 1)) + "/Material";
+            const auto Choice = [&](const char* pLabel, const material_instance_ref& To)
+            {
+                revert R{ .m_Label = pLabel, .m_Path = Row };
+                R.m_Before.set<xresource::full_guid>({ .m_Instance = (Slot.m_Material.m_Instance.m_Value ? Slot.m_Material : Slot.m_Default).m_Instance, .m_Type = material_instance_ref::m_Type });
+                R.m_After.set<xresource::full_guid>({ .m_Instance = To.m_Instance, .m_Type = material_instance_ref::m_Type });
+                pChoices->push_back(std::move(R));
+            };
+            if (pB)
+            {
+                bOverridden = Slot.m_Material.m_Instance.m_Value != BaseSlot.m_Material.m_Instance.m_Value;
+                if (!pChoices || !bOverridden) return;
+                Choice("Revert to the prefab", BaseSlot.m_Material.m_Instance.m_Value ? BaseSlot.m_Material : Slot.m_Default);
+                if (BaseSlot.m_Material.m_Instance.m_Value && Slot.m_Material.m_Instance.m_Value) Choice("Revert to the geometry's material instance", Slot.m_Default);
+                return;
+            }
+            bOverridden = Slot.m_Material.m_Instance.m_Value != 0;
+            if (pChoices && bOverridden) Choice("Revert to the geometry's material instance", Slot.m_Default);
+            return;
+        }
+
+        const int iRow = IndexAfter("Parameters[G:", RowEnd);
+        auto& Rows = Slot.Rows();
+        if (iRow < 0 || std::size_t(iRow) >= Rows.size()) return;
+        const auto& Row  = Rows[iRow];
+        const auto* pOwn = Row.Entry();
+        const std::string Text = Row.getOverride();
+        const auto Choice = [&](const char* pLabel, std::string To)
+        {
+            revert R{ .m_Label = pLabel, .m_Path = std::string(Path.substr(0, RowEnd + 1)) + "/Override" };
+            R.m_Before.set<std::string>(Text);
+            R.m_After.set<std::string>(std::move(To));
+            pChoices->push_back(std::move(R));
+        };
+        const char* pToInstance = Row.m_bOrphan ? "Clear (not applied: the material has no such parameter)" : "Revert to the material instance";
+        if (pB)
+        {
+            const std::string BaseText = mesh_param_row::FormatOverride(Row.m_Type, BaseSlot.Find(Row.m_ID, Row.m_Name));
+            bOverridden = Text != BaseText;
+            if (!pChoices || !bOverridden) return;
+            Choice("Revert to the prefab", BaseText);
+            if (!BaseText.empty() && !Text.empty()) Choice(pToInstance, {});           // (past the prefab: unless it is there already)
+            return;
+        }
+        bOverridden = pOwn != nullptr;
+        if (pChoices && bOverridden) Choice(pToInstance, {});
+    }
 
     // One entity value of a MeshMaterial (linear; a color's alpha in W): with Override on, it replaces the material's value for this
     // entity wherever the material lets that field override a parameter (plugins/xmaterial.plugin/documentation/material_contract.md section 4)

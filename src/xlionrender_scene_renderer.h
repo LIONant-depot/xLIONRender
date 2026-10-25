@@ -218,7 +218,8 @@ namespace xlionrender
             for (const auto& P : Params)
             {
                 const auto Ps = pMat->getParams();
-                const auto It = std::ranges::find_if(Ps, [&](const auto& I) { return (P.m_ID && I.m_ID == P.m_ID) || (!P.m_ID && P.m_Name == I.m_Name); });
+                auto It = P.m_ID ? std::ranges::find_if(Ps, [&](const auto& I) { return I.m_ID == P.m_ID; }) : Ps.end();       // by id, else by name (set by name; renamed)
+                if (It == Ps.end() && !P.m_Name.empty()) It = std::ranges::find_if(Ps, [&](const auto& I) { return P.m_Name == I.m_Name; });
                 if (It == Ps.end()) continue;                                                       // (no such parameter any more)
                 const auto* pInfo = &*It;
                 param_override O{ .m_ID = pInfo->m_ID, .m_V = { P.m_X, P.m_Y, P.m_Z, P.m_W } };
@@ -292,8 +293,9 @@ namespace xlionrender
             D.m_Materials.resize(Defaults.size());
             for (std::size_t i = 0; i < Defaults.size(); ++i)
             {
-                // Override Materials: the slot's instance (else the geometry's) with the entity's own values
-                if (Mesh.m_bOverrideMaterials)
+                // The slot's instance (its swap, else the geometry's) with the entity's own values; old files (a MeshMaterial, the Materials list) as
+                // they were, until the editor moves them into the slots (UpgradeOldMaterials)
+                if (Mesh.m_bOverrideMaterials && !HasOldMaterials(Mesh, pMaterial))
                 {
                     const auto* pSlot = i < Mesh.m_Slots.size() ? &Mesh.m_Slots[i] : nullptr;
                     const std::uint64_t MI = pSlot && pSlot->m_Material.m_Instance.m_Value ? pSlot->m_Material.m_Instance.m_Value : Defaults[i].m_Instance.m_Value;
