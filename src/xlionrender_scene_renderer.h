@@ -12,6 +12,7 @@
 // ponytail: renderer meshes/materials are kept until the world closes (a recompiled resource is a new pointer: a new entry); evict when it shows.
 #include "xlionrender_instance.h"
 #include "xlionrender_scene_components.h"
+#include "scene/xlionrender_material_overrides.h"
 #include "dependencies/xLIONCore/src/resources/xlioncore_resources_api.h"
 
 #include "plugins/xtexture.plugin/source/xtexture_xgpu_rsc_loader.h"
@@ -42,6 +43,12 @@ namespace xlionrender
         std::uint32_t                                   m_UpdateCount = 0;              // xlioncore::resources::UpdateCount when the materials were last checked
         instance_ids                                    m_InstanceIds;                  // per drawn entity: its draw's instance id
         std::unordered_set<std::uint64_t>               m_StaleReported;                // the instances E_LAYOUT_STALE was said for (once each)
+        // The Meshes' "Override materials": the entity slots' own materials (shared when equal, copy on write), per (entity, slot) the one it
+        // draws with and the frame it last did (a slot not drawn for a frame lets it go)
+        material_overrides                              m_Overrides;
+        struct override_slot { material_overrides::slot m_Slot; std::uint32_t m_Frame = 0; };
+        std::unordered_map<std::uint64_t, override_slot> m_OverrideSlots;
+        std::uint32_t                                   m_Frame = 0;
 
         struct stats
         {
@@ -163,6 +170,55 @@ namespace xlionrender
             return Id;
         }
 
+        // An entity slot's material with its overrides (the instance's own when it overrides nothing): the instance as material_overrides needs it
+        material_id OverrideOf(std::uint64_t Entity, std::size_t iSlot, std::uint64_t MIInstance, const std::vector<mesh_param>& Params) noexcept
+        {
+            if (Params.empty() || MIInstance == 0) return MaterialOf(MIInstance);
+            std::vector<const void*> From;
+            if (!MaterialSources(MIInstance, From)) return {};
+            auto* pMI  = static_cast<xmaterial_instance::rt*>(const_cast<void*>(From[0]));
+            auto* pMat = static_cast<xmaterial::rt*>(const_cast<void*>(From[1]));
+            if (pMI->m_LayoutHash != pMat->m_LayoutHash) return {};
+            std::vector<xgpu::texture*> Textures;
+            if (pMat->m_Flags.m_bSamplersFrom1) Textures.push_back(nullptr);
+            for (auto& E : pMI->getTextures())
+            {
+                if (!pMat->m_Flags.m_bSamplersFrom1 && &E == pMI->getTextures().data()) { Textures.push_back(nullptr); continue; }
+                Textures.push_back(static_cast<xgpu::texture*>(const_cast<void*>(From[1 + Textures.size()])));
+            }
+            if (Textures.empty()) return {};
+
+            // What the overrides address (the material's parameters) and the overrides themselves, by id (a name alone: found here), in id order
+            std::vector<material_param> Info;
+            for (const auto& P : pMat->getParams()) Info.push_back({ .m_ID = P.m_ID, .m_Type = material_param::type(P.m_Type), .m_ByteOffset = P.m_ByteOffset, .m_Slot = P.m_Slot });
+            std::vector<param_override> Overrides;
+            for (const auto& P : Params)
+            {
+                const auto Ps = pMat->getParams();
+                const auto It = std::ranges::find_if(Ps, [&](const auto& I) { return (P.m_ID && I.m_ID == P.m_ID) || (!P.m_ID && P.m_Name == I.m_Name); });
+                if (It == Ps.end()) continue;                                                       // (no such parameter any more)
+                const auto* pInfo = &*It;
+                param_override O{ .m_ID = pInfo->m_ID, .m_V = { P.m_X, P.m_Y, P.m_Z, P.m_W } };
+                if (xmaterial::param_type(pInfo->m_Type) == xmaterial::param_type::TEXTURE)
+                {
+                    auto* pTex = P.m_Texture.empty() ? nullptr : static_cast<xgpu::texture*>(xlioncore::resources::GetResource(texture_type_guid_v.m_Value, P.m_Texture.m_Instance.m_Value));
+                    if (pTex == nullptr) continue;                                                 // (not loaded yet: the instance's until it is)
+                    O = { .m_ID = pInfo->m_ID, .m_pTexture = pTex, .m_TextureKey = reinterpret_cast<std::uint64_t>(pTex) };
+                }
+                Overrides.push_back(O);
+            }
+            if (Overrides.empty()) return MaterialOf(MIInstance);
+            std::ranges::sort(Overrides, {}, &param_override::m_ID);
+
+            std::uint64_t Key = 14695981039346656037ull;                                            // the instance as loaded now: what it is made of
+            for (auto p : From) { Key ^= reinterpret_cast<std::uint64_t>(p); Key *= 1099511628211ull; }
+            const material_source Source{ .m_Key = Key, .m_pFragment = &pMat->getShaderHDR(), .m_Textures = Textures, .m_State = xmaterial::RenderState(pMat->m_Render, pMI->m_DoubleSided)
+                                        , .m_Block = { pMI->m_pParams, pMI->m_BlockBytes / 4u }, .m_bTextureTable = pMat->m_Flags.m_bTextureTable, .m_Params = Info };
+            auto& S = m_OverrideSlots[(Entity << 8) ^ iSlot];
+            S.m_Frame = m_Frame;
+            return m_Overrides.Acquire(m_Renderer, Source, Overrides, S.m_Slot);
+        }
+
         // What a material instance's renderer material is made from, as loaded now: the instance, its material, its textures (but slot 0's).
         // False while one of them cannot be had.
         static bool MaterialSources(std::uint64_t MIInstance, std::vector<const void*>& From) noexcept
@@ -213,6 +269,15 @@ namespace xlionrender
             D.m_Materials.resize(Defaults.size());
             for (std::size_t i = 0; i < Defaults.size(); ++i)
             {
+                // Override Materials: the slot's instance (else the geometry's) with the entity's own values
+                if (Mesh.m_bOverrideMaterials)
+                {
+                    const auto* pSlot = i < Mesh.m_Slots.size() ? &Mesh.m_Slots[i] : nullptr;
+                    const std::uint64_t MI = pSlot && pSlot->m_Material.m_Instance.m_Value ? pSlot->m_Material.m_Instance.m_Value : Defaults[i].m_Instance.m_Value;
+                    D.m_Materials[i] = pSlot ? OverrideOf(Entity, i, MI, pSlot->m_Params) : MaterialOf(MI);
+                    m_Stats.m_ConstantSlots += !D.m_Materials[i].isValid();
+                    continue;
+                }
                 const auto Swap = [i](const std::vector<material_instance_ref>& V) -> std::uint64_t { return i < V.size() ? V[i].m_Instance.m_Value : 0; };
                 const std::uint64_t Override = pMaterial && Swap(pMaterial->m_Slots) ? Swap(pMaterial->m_Slots) : Swap(Mesh.m_Materials);
                 D.m_Materials[i] = MaterialOf(Override ? Override : Defaults[i].m_Instance.m_Value);
@@ -263,6 +328,12 @@ namespace xlionrender
             m_Stats           = {};
             m_InstanceIds.Begin();
 
+            // The override slots not drawn last frame let their materials go
+            for (auto It = m_OverrideSlots.begin(); It != m_OverrideSlots.end();)
+                if (It->second.m_Frame != m_Frame) { m_Overrides.Release(m_Renderer, It->second.m_Slot); It = m_OverrideSlots.erase(It); }
+                else ++It;
+            ++m_Frame;
+
             // Something was compiled again (xlioncore::resources::MarkUpdated): a material made from what changed is made again when next asked for
             if (const auto n = xlioncore::resources::UpdateCount(); n != m_UpdateCount)
             {
@@ -274,6 +345,7 @@ namespace xlionrender
                     m_Renderer.DestroyMaterial(It->second.m_Id);
                     It = m_Materials.erase(It);
                 }
+                // (an override slot whose instance was compiled again: a new source key, a new material when next drawn)
             }
         }
 
@@ -299,6 +371,7 @@ namespace xlionrender
         {
             if (!m_bReady) return;
             m_Renderer.DestroyView(m_View);
+            m_Overrides.Clear(m_Renderer);
             for (auto& [Key, M] : m_Materials) m_Renderer.DestroyMaterial(M.m_Id);
             for (auto& [Key, Id] : m_Meshes)    m_Renderer.DestroyMesh(Id);
         }
