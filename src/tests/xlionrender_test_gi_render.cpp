@@ -127,6 +127,28 @@ int main()
     CHECK(OnR > OnL * 1.15, "no color bleeding with GI (near red %.2f, near green %.2f)", OnR, OnL);
     CHECK(MOn[1] > MOff[1] * 1.05, "GI adds no light");
 
+    // The GI read at half resolution (on by default: scene::gi_settings::m_bHalfRes), upsampled by depth and normal, against the read every
+    // pixel makes: the same room within a few percent (its edges: the upsample's), and its pass drew
+    {
+        Scene.m_GI.m_bHalfRes = false;
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, the full-resolution read");
+        const auto Full = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bHalfRes = true;
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, the half-resolution read");
+        const auto Half = ReadRGB(Device, View, W, H);
+        const int nScreen = Renderer.getGIStats().m_nScreenDraws;
+        double S = 0, R = 0;
+        for (std::size_t i = 0; i < Half.size(); ++i)
+        {
+            const double a = 0.2126 * Full[i][0] + 0.7152 * Full[i][1] + 0.0722 * Full[i][2], b = 0.2126 * Half[i][0] + 0.7152 * Half[i][1] + 0.0722 * Half[i][2];
+            S += std::abs(b - a); R += a;
+        }
+        DumpRGB("gi_half_res", Half, W, H);
+        std::printf("the GI read at half resolution: %d draws in its pass, the image %.2f%% off the full read\n", nScreen, 100 * S / std::max(R, 1e-9));
+        CHECK(nScreen > 0, "the half-resolution GI pass drew nothing");
+        CHECK(S < 0.03 * R, "the GI read at half resolution is %.2f%% off the full read", 100 * S / std::max(R, 1e-9));
+    }
+
     // A light with GI off (a bullet, a muzzle flash): its direct light only - left out of the GI's lights, the GI's light is as without
     // it. The same light with GI on brings its bounce (the GI's light alone, its debug view)
     {

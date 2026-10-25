@@ -30,6 +30,9 @@ namespace xlionrender
         constexpr std::uint32_t s_DepthFrag[] = {
             #include "xlionrender_depth_frag.h"
         };
+        constexpr std::uint32_t s_GIScreenFrag[] = {
+            #include "xlionrender_gi_screen_frag.h"
+        };
         constexpr std::uint32_t s_EnvSkyFrag[] = {
             #include "xlionrender_env_sky_frag.h"
         };
@@ -156,6 +159,8 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_StaticGeomPipeline));
         m_Device.Destroy(std::move(m_DepthPrepassInstance));
         m_Device.Destroy(std::move(m_DepthPrepassPipeline));
+        m_Device.Destroy(std::move(m_GIScreenInstance));
+        m_Device.Destroy(std::move(m_GIScreenPipeline));
         ReleaseBuffer(m_StaticGeomUBO);
         ReleaseBuffer(m_InstanceBuffer);
         ReleaseBuffer(m_InstanceRing);
@@ -416,6 +421,22 @@ namespace xlionrender
                 Setup.m_Blend.m_ColorWriteMask = 0;
                 if( auto Err = Device.Create(m_DepthPrepassPipeline, Setup); Err ) return Err;
                 if( auto Err = Device.Create(m_DepthPrepassInstance, { .m_PipeLine = m_DepthPrepassPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+            }
+
+            // the GI read at half resolution: the same vertex shader and layout, + the buffer it writes; at the depth laid first, no color
+            {
+                xgpu::shader ScreenFrag;
+                if( auto Err = Device.Create(ScreenFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIScreenFrag) }); Err ) return Err;
+                auto ScreenShaders = std::array<const xgpu::shader*, 2>{ &ScreenFrag, &Vert };
+                std::vector<xgpu::pipeline::uniform_binds> ScreenBinds(UniformBinds.begin(), UniformBinds.end());
+                ScreenBinds.push_back({ .m_BindIndex = 11, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC });
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = ScreenShaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
+                                           , .m_UniformBinds = ScreenBinds, .m_Samplers = Samplers };
+                Setup.m_Blend.m_ColorWriteMask = 0;
+                Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+                Setup.m_DepthStencil.m_DepthCompare      = xgpu::pipeline::depth_stencil::depth_compare::LESS_OR_EQUAL;
+                if( auto Err = Device.Create(m_GIScreenPipeline, Setup); Err ) return Err;
+                if( auto Err = Device.Create(m_GIScreenInstance, { .m_PipeLine = m_GIScreenPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
             }
 
             // and its GI capture (the constant material's albedo and emission, from the instance record)
@@ -1214,9 +1235,39 @@ namespace xlionrender
         View.m_MaskWidth = View.m_MaskHeight = 0;
     }
 
+    xgpu::device::error* instance::createGIScreenTargets( render_view& View ) noexcept
+    {
+        const int W = (View.m_Width + 1) / 2, H = (View.m_Height + 1) / 2;
+        if( View.m_GIScreenPass.m_Private && View.m_GIScreenWidth == W && View.m_GIScreenHeight == H ) return nullptr;
+        destroyGIScreenTargets(View);
+        if( auto Err = m_Device.Create(View.m_GIScreenColor, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenDepth, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        {
+            auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_GIScreenColor }, xgpu::renderpass::attachment{ View.m_GIScreenDepth } };
+            if( auto Err = m_Device.Create(View.m_GIScreenPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
+        }
+        std::vector<std::array<std::uint32_t, 4>> Data(1 + std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
+        if( auto Err = m_Device.Create(View.m_GIScreenZeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
+        Data[0] = { std::uint32_t(W), std::uint32_t(H), 0u, 0u };
+        if( auto Err = m_Device.Create(View.m_GIScreenBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
+        View.m_GIScreenWidth = W; View.m_GIScreenHeight = H;
+        return nullptr;
+    }
+
+    void instance::destroyGIScreenTargets( render_view& View ) noexcept
+    {
+        if( View.m_GIScreenPass.m_Private )   m_Device.Destroy(std::move(View.m_GIScreenPass));
+        if( View.m_GIScreenColor.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenColor));
+        if( View.m_GIScreenDepth.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenDepth));
+        if( View.m_GIScreenBuffer.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenBuffer));
+        if( View.m_GIScreenZeros.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenZeros));
+        View.m_GIScreenWidth = View.m_GIScreenHeight = 0;
+    }
+
     void instance::DestroyView( render_view& View ) noexcept
     {
         destroyOutlineTargets(View);
+        destroyGIScreenTargets(View);
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));

@@ -1313,9 +1313,6 @@ namespace xlionrender
         const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
         // Scene -> HDR
         {
-            auto Cmd = Window.StartRenderPass(View.m_ScenePass);
-            if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
-
             {
                 const auto& L     = Scene.m_Sun;
                 auto&       Light = m_LightUBO.allocEntry<details::ubo_lighting>();
@@ -1386,6 +1383,96 @@ namespace xlionrender
                 if( bPlan ) planClusters(Scene, Eye, Frustum);
             }
 
+            // A submesh the half-resolution GI pass reads (and the depth prepass lays): opaque, single sided, depth written and tested, filled
+            const auto Opaque = [&]( const material_slot* pMat )
+            {
+                if( pMat == nullptr ) return true;
+                const auto& St = pMat->m_State;
+                return !(St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided || !St.m_bDepthWrite || !St.m_bDepthTest || St.m_bWireframe);
+            };
+            // The GI read at half resolution (scene::gi_settings::m_bHalfRes; XLION_GI_HALFRES=0/1 overrides): the main view, no GI debug view. The rigid
+            // opaque clusters' depth into the view's half-size target, then the GI draws' own read at it (the material's: GIPixelGI, with
+            // the surface's normal) into the view's buffer; the scene pass's GI draws below upsample it (SurfelGIScreen) instead of reading
+            // the surfels each pixel - a quarter of the reads
+            static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
+            const bool bScreen = bMain && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
+                              && !(bPlan && m_bBoxesOnly) && createGIScreenTargets(View) == nullptr;
+            if( bMain ) m_GIStats.m_nScreenDraws = 0;
+            if( bScreen )
+            {
+                {   // (cleared: a pixel no GI surface covers this frame keeps nothing of the last)
+                    const xgpu::buffer::copy C{ 1, 1, View.m_GIScreenWidth * View.m_GIScreenHeight };
+                    Window.CopyBuffer(View.m_GIScreenZeros, View.m_GIScreenBuffer, std::span{ &C, 1 });
+                }
+                auto SCmd = Window.StartRenderPass(View.m_GIScreenPass);
+                for( int Phase = 0; Phase < 2; ++Phase )        // 0: the depth, 1: the GI read at it
+                {
+                    const cluster_geom* pGeomBound = nullptr;
+                    const xgpu::buffer* pGIBound   = nullptr;
+                    for( const auto& Vis : m_Visible )
+                    {
+                        const std::size_t iDraw = Vis.m_iDraw;
+                        const auto&       D     = Scene.m_Draws[iDraw];
+                        const auto*       pMesh = Vis.m_pMesh;
+                        const std::uint32_t Slot = m_DrawSlot[iDraw];
+                        if( !pMesh->m_bCluster || Slot == instance_slots::none_v ) continue;
+                        const auto& G = pMesh->m_Geom;
+                        if( G.m_Kind == geom_kind::SKIN ) continue;
+                        const bool bSections = !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
+                        const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
+                        if( Phase == 1 && !(bSections ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu) ) continue;
+                        const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
+                        for( const auto& Sub : G.m_Submeshes )
+                        {
+                            if( !Opaque(Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr) ) continue;
+                            for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                            {
+                                if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
+                                const auto& C = G.m_Clusters[c];
+                                if( Phase == 0 )
+                                {
+                                    if( &G != pGeomBound )
+                                    {
+                                        std::array<xgpu::buffer*, 9> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
+                                        SCmd.setPipelineInstance(m_DepthPrepassInstance, std::span{ Buffers });
+                                        SCmd.setDynamicUBO(m_LightUBO, 1);
+                                        SCmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                                        BindClusterStreams(SCmd, G);
+                                        pGeomBound = &G;
+                                    }
+                                    SCmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, 0u });
+                                }
+                                else
+                                {
+                                    const std::uint16_t k = bSections ? pMesh->m_GIClusterSection[c] : 0;
+                                    const xgpu::buffer* pBuf = bSections ? &pMesh->m_GISections[k].m_Buffer : &pMesh->m_GIBuffer;
+                                    if( &G != pGeomBound || pBuf != pGIBound )
+                                    {
+                                        std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(pBuf), &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenBuffer };
+                                        SCmd.setPipelineInstance(m_GIScreenInstance, std::span{ Buffers });
+                                        SCmd.setDynamicUBO(m_LightUBO, 1);
+                                        SCmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                                        BindClusterStreams(SCmd, G);
+                                        pGeomBound = &G; pGIBound = pBuf;
+                                    }
+                                    if( bSections )
+                                    {
+                                        const auto SGI = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
+                                        if( SGI.second == 0xFFFFFFFFu ) continue;
+                                        SCmd.setPushConstants(details::push_static_geom{ c, Slot, SGI.first, SGI.second, 0u, pMesh->m_GIClusterVertexDelta[c] });
+                                    }
+                                    else SCmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second, 0u });
+                                }
+                                SCmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex)); m_GIStats.m_nScreenDraws += Phase;
+                            }
+                        }
+                    }
+                }
+            }
+
+            auto Cmd = Window.StartRenderPass(View.m_ScenePass);
+            if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
+
             const xgpu::pipeline_instance* pBound     = nullptr;      // the state the last cluster draw left bound
             const cluster_geom*            pBoundGeom = nullptr;
             const xgpu::buffer*            pBoundGIBuf = nullptr;     // (GI sections: its section's buffer)
@@ -1406,7 +1493,11 @@ namespace xlionrender
                 }
                 const std::uint32_t MaterialBase = pMat ? pMat->m_ParamBase : 0u;
                 const auto* pMesh = findMesh(D.m_Mesh);
-                const bool  bSections = !bSkin && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
+                const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
+                const bool  bSections0 = !bSkin && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
+                // read at half resolution (the pass above): the buffer as its GI buffer, gi_screen_v as its level - one buffer for every section
+                const bool  bScreenSub = bScreen && !bSkin && Opaque(pMat) && (bSections0 ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu);
+                const bool  bSections = bSections0 && !bScreenSub;
                 // its GI buffer: the geometry's, or (GI sections) the cluster's section's
                 // a skinned mesh's GI: the probe grid (no surfels of its own; the dummy: none). ponytail: the main view's only (its header carries
                 // the main eye: the reflection views' positions are their own eye's)
@@ -1416,6 +1507,7 @@ namespace xlionrender
                 const bool bRigidProbes = !bSkin && Probes && !pMesh->m_pGI;
                 const auto GIBufferOf = [&](std::uint32_t c) -> xgpu::buffer*
                 {
+                    if( bScreenSub ) return &View.m_GIScreenBuffer;
                     if( bSections ) return const_cast<xgpu::buffer*>(&pMesh->m_GISections[pMesh->m_GIClusterSection[c]].m_Buffer);
                     return pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : bRigidProbes ? Probes : &m_GIDummy;
                 };
@@ -1442,9 +1534,8 @@ namespace xlionrender
                     pBoundGIBuf  = pGIBuffer;
                     ++g_nSceneBinds;
                 };
-                if( pInstance != pBound || &G != pBoundGeom ) Bind(GIBufferOf(Sub.m_iCluster));
+                if( pInstance != pBound || &G != pBoundGeom || (bScreenSub && pBoundGIBuf != &View.m_GIScreenBuffer) ) Bind(GIBufferOf(Sub.m_iCluster));
 
-                const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                 for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                 {
                     if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
@@ -1457,7 +1548,8 @@ namespace xlionrender
                         const auto SGI = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                         Cmd.setPushConstants(details::push_static_geom{ c, Slot, SGI.first, SGI.second, MaterialBase, pMesh->m_GIClusterVertexDelta[c] });
                     }
-                    else Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, bRigidProbes ? 0xFFFFFFFEu : GI.second, MaterialBase });     // (0xFFFFFFFE: xlionrender_surfel_gi.glsl gi_probes_v)
+                    else if( bScreenSub ) Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFDu, MaterialBase });     // (xlionrender_surfel_gi.glsl gi_screen_v)     // (xlionrender_surfel_gi.glsl gi_screen_v)
+                    else Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, bRigidProbes ? 0xFFFFFFFEu : GI.second, MaterialBase });     // (0xFFFFFFFE: xlionrender_surfel_gi.glsl gi_probes_v)     // (0xFFFFFFFE: xlionrender_surfel_gi.glsl gi_probes_v)
                     { const auto TD = std::chrono::steady_clock::now(); Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex)); g_DrawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TD).count(); }
                     ++g_nSceneDraws;
                 }

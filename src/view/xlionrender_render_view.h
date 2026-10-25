@@ -40,6 +40,15 @@ namespace xlionrender
         xgpu::renderpass        m_OutlinePass;          // m_Output, loaded
         xgpu::pipeline_instance m_MaskInstance[3];      // per geometry path: CreateMesh meshes, rigid, skin
         xgpu::pipeline_instance m_OutlineInstance;
+        // The GI read at half resolution (instance::renderScenePass, scene::gi_settings::m_bHalfRes): its depth and a color of the scene's
+        // format (the pass's layout is the scene pass's: the same pipelines), the pass, the buffer the read writes (entry 0: its size, then
+        // a uvec4 a pixel: xlionrender_gi_screen_frag.glsl) and zeros to clear it with
+        xgpu::texture           m_GIScreenColor;        // R16G16B16A16_SFLOAT, half size (not written)
+        xgpu::texture           m_GIScreenDepth;        // DEPTH_F32, half size
+        xgpu::renderpass        m_GIScreenPass;
+        xgpu::buffer            m_GIScreenBuffer, m_GIScreenZeros;
+        int                     m_GIScreenWidth  = 0;
+        int                     m_GIScreenHeight = 0;
         int                     m_MaskWidth  = 0;
         int                     m_MaskHeight = 0;
         int                     m_Width     = 0;

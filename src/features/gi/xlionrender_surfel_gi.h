@@ -2074,6 +2074,7 @@ namespace xlionrender::gi
             int     m_GPUPacks      = 0;        // G3: the times the GPU's scene was packed in full
             double  m_GPUCpuMs      = 0;        // G3: the main thread's part of it (gpu_trace Collect and Submit: the packing, the uploads)
             int     m_GPUSliceRays  = 0;        // G3: the last slice's rays
+            int     m_nScreenDraws  = 0;        // the half-resolution GI read's draws this frame (the renderer's: scene::gi_settings::m_bHalfRes)
             double  m_TimeMs        = 0;        // the renderer's time since its first GI frame (the frame log's clock: convergence over time)
             float   m_MeanLum       = 0;        // the luminance of the world's mean light (its valid surfels'): how far it has converged
             double  m_CaptureMs     = 0;        // the material capture (processGICapture)

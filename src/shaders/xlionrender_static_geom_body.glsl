@@ -41,7 +41,7 @@ layout(location = 13) out vec4 OutGITangent;        //   and the tangent (w: the
 // The weighted sum over the vertex's surfels at the instance's level (world space distances: any scale)
 vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4 L2wRows, in const float MeanScale)
 {
-    if (push.giLevel == gi_none_v || push.giLevel == gi_probes_v) return vec4(0.0);     // (no surfels: the fragment reads the probe grid)
+    if (push.giLevel == gi_none_v || push.giLevel == gi_probes_v || push.giLevel == gi_screen_v) return vec4(0.0);     // (no surfels: the probe grid; read at half resolution: the fragment upsamples)
     g_GIMoments = (push.giLevel & gi_no_moments_v) == 0u;
     const uint Level = push.giLevel & 0xFFu, LevelBase = GIMesh[Level];
     const uint GIVertex = uint(int(gl_VertexIndex) + push.giVertexDelta);       // (GI sections: the vertex in its section's mesh)
@@ -125,7 +125,7 @@ void main()
 
 #ifdef XLION_GI
     OutGI       = SurfelGI(VertData.LocalPos.xyz, normalize(VertData.Normal.xyz), L2wRows, (scales.x + scales.y + scales.z) / 3.0);
-    OutGIRef    = push.giLevel == gi_probes_v ? uvec2(0u, gi_probes_v) : uvec2(GIDebugCode(push.giLevel) == 4u ? push.clusterIndex : push.giOffset, push.giLevel);     // SURFACE_COLOR: the cluster (SurfelGITriangleColor)
+    OutGIRef    = push.giLevel == gi_probes_v || push.giLevel == gi_screen_v ? uvec2(0u, push.giLevel) : uvec2(GIDebugCode(push.giLevel) == 4u ? push.clusterIndex : push.giOffset, push.giLevel);     // SURFACE_COLOR: the cluster (SurfelGITriangleColor)
 #else
     OutGI       = vec4(0.0);
     OutGIRef    = uvec2(0u, 0xFFFFFFFFu);

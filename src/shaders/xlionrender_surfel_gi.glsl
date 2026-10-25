@@ -19,7 +19,8 @@ layout(std430, set = 1, binding = 7) readonly buffer GIMomentBuffer { uint GIMom
 // The GI reference a vertex shader passes on (giLevel of the push constants): the level in the low 8 bits, gi_per_pixel_v when the
 // pixels may read the grid, 0xFFFFFFFF: no GI
 const uint gi_none_v      = 0xFFFFFFFFu;
-const uint gi_probes_v    = 0xFFFFFFFEu;     // no surfels of its own: the probe grid's light (GIMesh is the probe buffer: SurfelGIProbes)
+const uint gi_probes_v    = 0xFFFFFFFEu;
+const uint gi_screen_v    = 0xFFFFFFFDu;     // the GI read at half resolution (GIMesh is its buffer: SurfelGIScreen)     // no surfels of its own: the probe grid's light (GIMesh is the probe buffer: SurfelGIProbes)
 const uint gi_per_pixel_v = 0x100u;
 const uint gi_debug_shift_v = 9u;        // 2 bits (scene::gi_debug): 1 the surfels (each pixel the color of its dominant surfel), 2 the GI light only,
                                          // 3 the material capture (0x800: its emission pass); then 0x1000 the captured color of each pixel's triangle (what a

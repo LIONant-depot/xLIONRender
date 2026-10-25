@@ -265,6 +265,8 @@ namespace xlionrender
         void                        renderOutline   ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
         xgpu::device::error*        createOutlineTargets( render_view& View ) noexcept;
         void                        destroyOutlineTargets( render_view& View ) noexcept;
+        xgpu::device::error*        createGIScreenTargets( render_view& View ) noexcept;
+        void                        destroyGIScreenTargets( render_view& View ) noexcept;
         void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        prefilterInto   ( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept;
         std::vector<xgpu::pipeline::sampler>                    LitSamplers ( void ) const                     noexcept;
@@ -325,6 +327,10 @@ namespace xlionrender
         // before their shading - which then runs once a pixel, at the depth it wrote (LESS_OR_EQUAL). Its layout is m_StaticGeomPipeline's
         xgpu::pipeline              m_DepthPrepassPipeline;
         xgpu::pipeline_instance     m_DepthPrepassInstance;
+        // The GI read at half resolution (render_view::m_GIScreenPass): the same vertex shader and layout + the buffer it writes (binding 11),
+        // the material's GI read in the fragment (xlionrender_gi_screen_frag.glsl), at the depth the prepass wrote, no color
+        xgpu::pipeline              m_GIScreenPipeline;
+        xgpu::pipeline_instance     m_GIScreenInstance;
         xgpu::buffer                m_StaticGeomUBO;        // the view block of both cluster vertex paths (details::ubo_geom_view)
 
         // Instance data (features/instances): a device-local buffer (persistent slots, then this frame's transient ones) kept up to

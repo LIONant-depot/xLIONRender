@@ -235,35 +235,54 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 #include "xlionrender_environment.glsl"
 #endif
 
-//-------------------------------------------------------------------------------------------
-// PBRLighting: 2025-Inspired, Quality/Perf Optimized
-//-------------------------------------------------------------------------------------------
-// Insights from 2020-2025: EON diffuse (energy/reciprocity over Burley; fixes 30% loss/dark edges); multiscatter compensation (UE5/Filament 2020s, neural-validated).
-// Neural BRDF approx skipped (GLSL perf); added simple energy scale for rough spec (avoids 20-30% loss, per 2025 papers).
-// Stochastic-inspired early culls (shadow=0, NdotL=0, att=0) save 50%+ cycles in umbra/far (2025 AVBOIT/MegaLights style).
-vec3 PBRLighting
-( in const vec3  inNormal
-, in const vec3  inAlbedo
-, in const float inAO
-, in const float inF0
-, in const float inRoughness
-, in const float inMetalic
-, in const vec3  inEmissiveColor
-)
-{
-	vec3 emissive = inEmissiveColor * inAO; // Modulate early for occlusion
-
-
-	// Ambient baseline: Compute always�cheap; 2025 grazing approx for subtle IBL hack (neural-inspired, no cubemap).
-	vec3    N                   = TransformNotmalToWorld(inNormal);
-	vec3	V					= normalize(UBOLight.wSpaceEyePos.xyz - In.wSpacePosition.xyz);
-	float	NdotV				= saturate(dot(N, V));
-	vec3	ambientDiffuse		= (1.0 - inMetalic) * inAlbedo * UBOLight.AmbientLightColor.rgb * inAO / PI;
-	vec3	F0					= mix(vec3(inF0), inAlbedo, inMetalic);
-	vec3	F_grazing			= FresnelSchlick(0.0, F0);
-	vec3	ambientSpec			= F_grazing * UBOLight.AmbientLightColor.rgb * inAO * (1.0 - inRoughness) * 0.04;
-	vec3	ambient				= ambientDiffuse + ambientSpec;
 #ifndef XLION_LDR_OUTPUT
+#ifndef XLION_NO_GI_PIXEL
+// The GI read at half resolution (xlionrender_gi_screen_frag.glsl's buffer, bound as GIMesh), upsampled to this pixel: its 4 half
+// resolution neighbors, bilinear, each weighed by how close its distance to the eye is to this pixel's and how much its normal agrees
+// (an edge keeps its side's light). g_GI and g_GIRefl, as the full read gives them; none of the 4 alike: the most alike
+void SurfelGIScreen(in const vec3 Ng, in const float Dist)
+{
+    const uint W = GIMesh[0], H = GIMesh[1];
+    if (W == 0u || H == 0u) return;
+    const vec2  hp = gl_FragCoord.xy * 0.5 - 0.5;
+    const vec2  i0 = floor(hp), f = hp - i0;
+    vec4 Se = vec4(0.0), Sr = vec4(0.0);
+    float Best = -1.0; uvec4 BestQ = uvec4(0u);
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1u, H - 1u));
+        const uint  a = 4u * (1u + uint(P.y) * W + uint(P.x));
+        const uvec4 Q = uvec4(GIMesh[a], GIMesh[a + 1u], GIMesh[a + 2u], GIMesh[a + 3u]);
+        if ((Q.w & (1u << 30)) == 0u) continue;
+        const float d = unpackHalf2x16(Q.y).y;
+        const vec2  o = vec2(float((Q.w >> 16) & 127u), float((Q.w >> 23) & 127u)) / 127.0 * 2.0 - 1.0;
+        vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y));
+        if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+        n = normalize(n);
+        const float wd = max(0.0, 1.0 - abs(d - Dist) / max(0.05 * Dist, 1e-3)), wn = pow(max(dot(n, Ng), 0.0), 8.0);
+        const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
+        const float w = wb * wd * wd * wn;
+        if (wd * wn > Best) { Best = wd * wn; BestQ = Q; }
+        const vec3 E = vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
+        Se += vec4(E * w, w);
+        if ((Q.w & (1u << 31)) != 0u) Sr += vec4(vec3(unpackHalf2x16(Q.z), unpackHalf2x16(Q.w & 0xFFFFu).x) * w, w);
+    }
+    if (Se.w > 1e-4) { g_GI = vec4(Se.rgb / Se.w, 1.0); g_GISource = 2u; }
+    else if (Best >= 0.0) { g_GI = vec4(unpackHalf2x16(BestQ.x), unpackHalf2x16(BestQ.y).x, 1.0); g_GISource = 2u; }
+    if (Sr.w > 1e-4) g_GIRefl = vec4(Sr.rgb / Sr.w, 1.0);
+}
+
+#endif
+
+//-------------------------------------------------------------------------------------------
+// The GI at this pixel (g_GI, g_GIRefl, g_GIDebug, g_GISource): the vertex read, the probe grid, the pixel read of the surfels, the
+// local mean. Its own function: the half-resolution GI pass (xlionrender_gi_screen_frag.glsl) runs the same read
+//-------------------------------------------------------------------------------------------
+void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in const vec3 inAlbedo, in const float inMetalic, in const vec3 inEmissiveColor)
+{
+#ifndef XLION_NO_GI_PIXEL
+	if (InGIRef.y == gi_screen_v) { SurfelGIScreen(normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0), length(In.wSpacePosition.xyz)); return; }     // read at half resolution: upsampled
+#endif
 	if (InGI.w > 1e-6) { g_GI = vec4(InGI.rgb / InGI.w, 1.0); g_GISource = 1u; }
 #ifndef XLION_NO_GI_PIXEL
 	if (InGIRef.y == gi_probes_v) { g_GI = SurfelGIProbes(InGIPos, N); g_GISource = g_GI.w > 0.5 ? 1u : 0u; }     // no surfels of its own (a skinned mesh): the probe grid
@@ -303,6 +322,39 @@ vec3 PBRLighting
 	if (GIDebug == 5u) g_GIDebug = vec4(g_GISource == 2u ? (SurfelGIIsPatch(SurfelGIDominant(InGIPos, GFace)) ? vec3(1.0, 0.85, 0.0) : vec3(0.0, 0.6, 0.0)) : g_GISource == 1u ? vec3(0.0, 0.0, 0.8) : (GIRef.y & gi_per_pixel_v) != 0u ? SurfelGIWhyUnsupported(InGIPos, GFace, GIRef.x, GIRef.y & 0xFFu) : vec3(1.0, 0.0, 1.0), 1.0);     // yellow: a patch surfel (PatchDefects: a defect of the model); unsupported: why (SurfelGIWhyUnsupported)     // COVERAGE: green the pixel read, blue the vertex read, magenta unsupported (the mean light)
 	if (GIDebug == 4u) g_GIDebug = vec4(SurfelGITriangleColor(GIRef.x, uint(gl_PrimitiveID)), 1.0);        // the pixel's triangle's captured color     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
 #endif
+}
+#endif
+
+//-------------------------------------------------------------------------------------------
+// PBRLighting: 2025-Inspired, Quality/Perf Optimized
+//-------------------------------------------------------------------------------------------
+// Insights from 2020-2025: EON diffuse (energy/reciprocity over Burley; fixes 30% loss/dark edges); multiscatter compensation (UE5/Filament 2020s, neural-validated).
+// Neural BRDF approx skipped (GLSL perf); added simple energy scale for rough spec (avoids 20-30% loss, per 2025 papers).
+// Stochastic-inspired early culls (shadow=0, NdotL=0, att=0) save 50%+ cycles in umbra/far (2025 AVBOIT/MegaLights style).
+vec3 PBRLighting
+( in const vec3  inNormal
+, in const vec3  inAlbedo
+, in const float inAO
+, in const float inF0
+, in const float inRoughness
+, in const float inMetalic
+, in const vec3  inEmissiveColor
+)
+{
+	vec3 emissive = inEmissiveColor * inAO; // Modulate early for occlusion
+
+
+	// Ambient baseline: Compute always�cheap; 2025 grazing approx for subtle IBL hack (neural-inspired, no cubemap).
+	vec3    N                   = TransformNotmalToWorld(inNormal);
+	vec3	V					= normalize(UBOLight.wSpaceEyePos.xyz - In.wSpacePosition.xyz);
+	float	NdotV				= saturate(dot(N, V));
+	vec3	ambientDiffuse		= (1.0 - inMetalic) * inAlbedo * UBOLight.AmbientLightColor.rgb * inAO / PI;
+	vec3	F0					= mix(vec3(inF0), inAlbedo, inMetalic);
+	vec3	F_grazing			= FresnelSchlick(0.0, F0);
+	vec3	ambientSpec			= F_grazing * UBOLight.AmbientLightColor.rgb * inAO * (1.0 - inRoughness) * 0.04;
+	vec3	ambient				= ambientDiffuse + ambientSpec;
+#ifndef XLION_LDR_OUTPUT
+	GIPixelGI(inNormal, N, V, inAlbedo, inMetalic, inEmissiveColor);
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
 #endif
 

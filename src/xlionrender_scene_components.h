@@ -190,6 +190,7 @@ namespace xlionrender
         bool            m_bGI           = false;           // surfel GI: the meshes with surfels (baked by their GeomStatic compiler) are lit by it
         int             m_GIRayBudget   = 16384;
         bool            m_bGIPerPixel   = true;            // near, every pixel reads the surfels (no extra vertices needed); off: the vertices only
+        bool            m_bGIHalfRes    = true;            // that read at half resolution, upsampled (a quarter of the reads)
         gi_debug        m_GIDebug       = gi_debug::NONE;
         float           m_GIEmissiveScale = 100.0f;         // self-illumination as lights: their emission x this, for the GI
         int             m_GIRaysPerSurfel = 8;              // rays per surfel update
@@ -211,6 +212,7 @@ namespace xlionrender
         , obj_member<"GIEmissiveScale", &environment::m_GIEmissiveScale, member_help<"Self-illuminated materials light the scene through the GI with their emission times this (0: they light nothing; their own look does not change)">>
         , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone; SURFACE_COLOR: the surface color of the surfel each pixel reads most (the material capture: what the GI bounces); COVERAGE: which read lights each pixel - green its own surfels (per pixel), blue the vertices' (per pixel unsupported there), magenta none (no GI there: the ambient as without GI)">>
         , obj_member<"GIPerPixel",   &environment::m_bGIPerPixel, member_help<"Near meshes read the GI per pixel (a mesh needs no extra vertices for it); off: per vertex only (cheaper, needs dense meshes)">>
+        , obj_member<"GIHalfRes",    &environment::m_bGIHalfRes, member_help<"The per-pixel GI read at half resolution, upsampled by depth and normal: a quarter of the reads (opaque surfaces; not in the GI debug views)">>
         )
     };
 
