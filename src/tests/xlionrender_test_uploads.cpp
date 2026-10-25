@@ -99,6 +99,32 @@ int main()
         Renderer.DestroyView(View);
     }
 
+    // Device-local memory in blocks (xGPU Details/Vulkan/xgpu_vulkan_vram.cpp): 200 textures of 64 KB take ranges of the blocks (at most one
+    // new block), not 200 allocations; destroyed, their ranges come back (the free bytes as before); made again, no new block
+    {
+        xlionrender::scene Empty;                                           // (frames to retire the destroys: a view made before counting)
+        xlionrender::render_view View;
+        CHECK(!Renderer.CreateView(View, { .m_Width = 16, .m_Height = 16 }), "CreateView");
+        xgpu::tools::view Camera;
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Empty, View, Camera), "frames before counting");
+        const auto Before = Device.getMemoryStats();
+        std::vector<xgpu::texture> Many(200);
+        for (auto& T : Many) CHECK(MakeTexture(T, 128, 7), "block texture");
+        const auto Full = Device.getMemoryStats();
+        std::printf("VRAM: %d blocks, %d ranges, %d of their own -> %d blocks, %d ranges, %d of their own\n", Before.m_nBlocks, Before.m_nRanges, Before.m_nDedicated, Full.m_nBlocks, Full.m_nRanges, Full.m_nDedicated);
+        CHECK(Full.m_nRanges == Before.m_nRanges + 200 && Full.m_nBlocks <= Before.m_nBlocks + 1 && Full.m_nDedicated == Before.m_nDedicated, "200 textures: %d ranges, %d blocks more", Full.m_nRanges - Before.m_nRanges, Full.m_nBlocks - Before.m_nBlocks);
+
+        for (auto& T : Many) { Device.Destroy(std::move(T)); T.m_Private.reset(); }
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Empty, View, Camera), "frames for the destroys to retire");
+        const auto Freed = Device.getMemoryStats();
+        CHECK(Freed.m_nRanges == Before.m_nRanges && Freed.m_FreeBytes >= Before.m_FreeBytes, "Destroyed: %d ranges (was %d), %llu free bytes (was %llu)", Freed.m_nRanges, Before.m_nRanges, (unsigned long long)Freed.m_FreeBytes, (unsigned long long)Before.m_FreeBytes);
+
+        for (auto& T : Many) CHECK(MakeTexture(T, 128, 9), "block texture again");
+        CHECK(Device.getMemoryStats().m_nBlocks == Full.m_nBlocks, "Made again: %d blocks, was %d (the freed ranges reused)", Device.getMemoryStats().m_nBlocks, Full.m_nBlocks);
+        for (auto& T : Many) Device.Destroy(std::move(T));
+        Renderer.DestroyView(View);
+    }
+
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");
     return 0;
