@@ -320,6 +320,22 @@ int main()
         std::printf("  the CPU's light state: CPU-solved %.0f B a surfel, GPU-owned %.0f B\n", double(R.m_CpuBytes) / std::max(R.m_Surfels, 1), double(R.m_OwnedBytes) / std::max(R.m_Surfels, 1));
         CHECK(R.m_OwnedBytes * 10 < R.m_CpuBytes * 6, "%s: GPU-owned, the CPU keeps %zu B of light state (CPU-solved %zu B): its solver's arrays", pName, R.m_OwnedBytes, R.m_CpuBytes);
     }
+    // A spot light (a torch): the GI lights only its cone - pointing down from under the ceiling, a 25 degree cone. The CPU's direct
+    // light: the floor under it lit, the ceiling and the walls' tops (outside the cone) not. The GPU's (xlionrender_gi_pass_common.glsl
+    // Direct) against the CPU world over 24 updates
+    {
+        lights L; L.m_Points = { { { 0.0f, 0.8f, 0.0f }, { 3.0f, 3.0f, 3.0f }, 4.0f } };
+        L.m_Points[0].m_Dir = { 0, -1, 0 }; L.m_Points[0].m_CosOuter = std::cos(0.44f); L.m_Points[0].m_CosInner = std::cos(0.3f);
+        std::vector<surfel_mesh> M; world W;
+        MakeCornell(M, W, false);
+        const v3 Floor = W.Direct({ 0.0f, -1.0f, 0.0f }, { 0, 1, 0 }, L), Wall = W.Direct({ -1.0f, 0.6f, 0.0f }, { 1, 0, 0 }, L), Ceiling = W.Direct({ 0.5f, 1.0f, 0.5f }, { 0, -1, 0 }, L);
+        std::printf("a spot light: the direct light on the floor under it %.3f, on a wall's top %.3f, on the ceiling %.3f\n", Floor.m_X, Wall.m_X, Ceiling.m_X);
+        CHECK(Floor.m_X > 0.1f && Wall.m_X == 0 && Ceiling.m_X == 0, "a spot light lights outside its cone (floor %.3f, wall %.3f, ceiling %.3f)", Floor.m_X, Wall.m_X, Ceiling.m_X);
+        result R;
+        if (Compare(App, L, false, 24, R)) return 1;
+        std::printf("GPU trace, Cornell box, a spot light, 24 updates: %d surfels, %d differ from the CPU world, the worst of the others %.1e\n", R.m_Surfels, R.m_Mismatch, R.m_Worst);
+        CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "a spot light: %d of %d surfels differ from the CPU world", R.m_Mismatch, R.m_Surfels);
+    }
     {
         lights L; L.m_Points = { { { 0.2f, 0.4f, -0.3f }, { 1.5f, 1.5f, 1.5f }, 4.0f } };
         result R;

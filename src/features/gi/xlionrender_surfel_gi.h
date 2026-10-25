@@ -1933,6 +1933,9 @@ namespace xlionrender::gi
             v3      m_Position;
             v3      m_Color;            // color x intensity
             float   m_Radius = 1;
+            v3      m_Dir{ 0, 0, 0 };   // a spot: where it points (unit)
+            float   m_CosOuter = -2;    // a spot: no light outside this cone (< -1: a point light, all around)
+            float   m_CosInner = -2;    //   full light inside this one (the renderer's falloff: smoothstep outer -> inner)
         };
         v3                  m_SunDirection{ 0, -1, 0 };     // the direction the light travels
         v3                  m_SunColor{ 0, 0, 0 };
@@ -2971,7 +2974,7 @@ namespace xlionrender::gi
             D[2] = std::uint32_t(D.size()); D[3] = std::uint32_t(L.m_Points.size());
             PushV(L.m_SunDirection); PushV(L.m_SunColor); PushV(L.m_Sky);
             for (const auto& s : L.m_SkyOct) PushV(s);
-            for (const auto& P : L.m_Points) { PushV(P.m_Position); PushV(P.m_Color); D.push_back(F(P.m_Radius)); }
+            for (const auto& P : L.m_Points) { PushV(P.m_Position); PushV(P.m_Color); D.push_back(F(P.m_Radius)); PushV(P.m_Dir); D.push_back(F(P.m_CosOuter)); D.push_back(F(P.m_CosInner)); }     // (gpu_light_words_v)
             {   // G5: the emitter table, with room (gpu_trace writes it every slice; past its room: packed again)
                 std::vector<std::uint32_t> Em;
                 GPUEmitters(Em);
@@ -3264,8 +3267,15 @@ namespace xlionrender::gi
                 if (s >= 1 || d < 1e-6f) return;
                 const float c = N.Dot(D) / d;
                 if (c <= 0) return;
+                float Cone = 1;
+                if (Pt.m_CosOuter > -1.5f)          // a spot: its cone (xlionrender_local_lights.glsl)
+                {
+                    const float t = std::clamp((-D.Dot(Pt.m_Dir) / d - Pt.m_CosOuter) / std::max(Pt.m_CosInner - Pt.m_CosOuter, 1e-6f), 0.0f, 1.0f);
+                    Cone = t * t * (3 - 2 * t);
+                    if (Cone <= 0) return;
+                }
                 if (Occluded(O, D * (1.0f / d), d - 2e-3f)) return;
-                E = E + Pt.m_Color * ((1 - s * s * s * s) / (1 + 2 * s * s) * c);
+                E = E + Pt.m_Color * ((1 - s * s * s * s) / (1 + 2 * s * s) * c * Cone);
             });
             return E;
         }

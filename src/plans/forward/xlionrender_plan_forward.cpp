@@ -330,7 +330,16 @@ namespace xlionrender
             L.m_bSkyOct = true;
         }
         L.m_Points.reserve(Scene.m_LocalLights.size());
-        for( const auto& LL : Scene.m_LocalLights ) if( LL.m_bGI ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });     // ponytail: a spot is a point in the GI (its cone ignored)
+        for( const auto& LL : Scene.m_LocalLights ) if( LL.m_bGI )
+        {
+            gi::lights::point P{ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius };
+            if( LL.m_Type == local_light::type::SPOT )      // its cone, as the renderer's (local_light_data: cos outer, cos inner)
+            {
+                const auto Dn = LL.m_Direction.NormalizeCopy();
+                P.m_Dir = { Dn.m_X, Dn.m_Y, Dn.m_Z }; P.m_CosOuter = std::cos(std::max(LL.m_OuterAngle, LL.m_InnerAngle)); P.m_CosInner = std::cos(LL.m_InnerAngle);
+            }
+            L.m_Points.push_back(P);
+        }
         if( auto It = s_TransportAsked.find(this); It != s_TransportAsked.end() && It->second )      // measurement: experiment D at a real size
         {
             It->second = false;

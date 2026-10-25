@@ -135,14 +135,17 @@ vec3 Direct(vec3 P, vec3 N)
     const uint nP = GD[3];
     for (uint i = 0u; i < nP; ++i)
     {
-        const uint b = Lt + 57u + 7u * i;
+        const uint b = Lt + 57u + 12u * i;              // (12 words a light: position, color, radius, the spot's direction, cos outer, cos inner)
         const vec3 D = GV(b) - P;
         const float d = length(D), s = d / GF(b + 6u);
         if (s >= 1.0 || d < 1e-6) continue;
         const float c = dot(N, D) / d;
         if (c <= 0.0) continue;
+        const float Co = GF(b + 10u);
+        const float Cone = Co > -1.5 ? smoothstep(Co, max(GF(b + 11u), Co + 1e-6), dot(-D, GV(b + 7u)) / d) : 1.0;     // a spot's cone (xlionrender_local_lights.glsl)
+        if (Cone <= 0.0) continue;
         if (Occluded(O, D * (1.0 / d), d - 2e-3)) continue;
-        E += GV(b + 3u) * ((1.0 - s * s * s * s) / (1.0 + 2.0 * s * s) * c);
+        E += GV(b + 3u) * ((1.0 - s * s * s * s) / (1.0 + 2.0 * s * s) * c * Cone);
     }
     return E;
 }

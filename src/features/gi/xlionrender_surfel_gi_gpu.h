@@ -935,7 +935,7 @@ namespace xlionrender::gi
             const auto V = [&](const v3& v) { Put(At, v.m_X); Put(At + 1, v.m_Y); Put(At + 2, v.m_Z); At += 3; };
             V(L.m_SunDirection); V(L.m_SunColor); V(L.m_Sky);
             for (const auto& s : L.m_SkyOct) V(s);
-            for (const auto& P : L.m_Points) { V(P.m_Position); V(P.m_Color); Put(At++, P.m_Radius); }
+            for (const auto& P : L.m_Points) { V(P.m_Position); V(P.m_Color); Put(At++, P.m_Radius); V(P.m_Dir); Put(At++, P.m_CosOuter); Put(At++, P.m_CosInner); }
             PutU(4, L.m_bSkyOct ? 1u : 0u);
             m_bPlaced = false;
             const int nPairs = int(m_Stage.size() / 2);
