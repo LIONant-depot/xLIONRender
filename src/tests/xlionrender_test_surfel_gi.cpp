@@ -5,6 +5,7 @@
 //  - a city (400 buildings, sun + sky): cost per update, coverage, LOD levels, and a moved building dirtying only its block
 //  - surfels saved by the GeomStatic compiler load back as baked, and a receive-only mesh is not in the rays' way
 #include "features/gi/xlionrender_surfel_gi.h"
+#include "features/gi/xlionrender_surfel_gi_chunks.h"
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -334,9 +335,7 @@ int main()
             {
                 for (int Lv = 0; Lv < 2; ++Lv)
                     if (A.m_Neighbors[Lv].m_First != B.m_Neighbors[Lv].m_First || A.m_Neighbors[Lv].m_Index != B.m_Neighbors[Lv].m_Index || A.m_Neighbors[Lv].m_Weight != B.m_Neighbors[Lv].m_Weight) return false;
-                if (A.m_OriginFirst != B.m_OriginFirst || A.m_OriginPos.size() != B.m_OriginPos.size()) return false;
-                for (std::size_t k = 0; k < A.m_OriginPos.size(); ++k) if ((A.m_OriginPos[k] - B.m_OriginPos[k]).Length() > 0 || (A.m_OriginNrm[k] - B.m_OriginNrm[k]).Length() > 0) return false;
-                return true;
+                return A.m_OriginFirst == B.m_OriginFirst && A.m_OriginVert == B.m_OriginVert;
             };
             const bool bGrid = Fast.m_ReadTable == Loaded.m_ReadTable && Fast.m_ReadList == Loaded.m_ReadList && Fast.m_ReadCell == Loaded.m_ReadCell && Fast.m_ReadMaxProbe == Loaded.m_ReadMaxProbe;
             std::printf("packed load-time structures: %zu words; read grid %s, neighbors and origins %s as built at load\n", G.m_Derived.size(), bGrid ? "the same" : "DIFFERENT", SameNb(Fast, Loaded) ? "the same" : "DIFFERENT");
@@ -627,6 +626,35 @@ int main()
         for (auto e : StripList) bReadsPatch = bReadsPatch || (e & 0xFFFFu) >= Strip.m_FirstPatch;
         std::printf("defects: %zu empty pieces; patched with %d surfels; the strip reads a patch: %d\n", nEmpty, Strip.m_FirstPatch == 0xFFFFFFFFu ? 0 : int(Strip.m_Levels[0].size() - Strip.m_FirstPatch), int(bReadsPatch));
         CHECK(nEmpty > 0 && Strip.m_FirstPatch != 0xFFFFFFFFu && bReadsPatch, "a strip no surfel serves is not patched");
+
+        // Ivy pressed on a wall: the wall's surfels under its leaves are buried (they see the leaves' backs: validity 0, no light). In a
+        // list's nearest slots they left the wall around them reading next to nothing - the Bistro's dark and bright cell blocks behind its
+        // ivy, 2026-10-24. Listed after the others: in crowded lists, few (the ones a list needs to fill)
+        surfel_mesh Ivy;
+        AddQuad(Ivy, { 0, 0, -2 }, { 0, 0, 4 }, { 0, 2, 0 }, 0.25f);                                      // the wall at x = 0, facing -x
+        for (int i = 0; i < 19; ++i) for (int j = 0; j < 9; ++j)
+            if ((i + j) % 4 != 0) AddQuad(Ivy, { -0.01f, 0.2f * float(j) + 0.02f, -1.9f + 0.2f * float(i) }, { 0, 0, 0.18f }, { 0, 0.18f, 0 }, 1);     // leaves, 1 cm off it
+        Ivy.Bake(0.15f, 0.45f);
+        Ivy.m_ReadListCap = 8;                                                                              // (crowded: the Bistro's 32 were)
+        Ivy.BuildReadGrid();
+        int nBuried = 0, nListedBuried = 0, nEntries = 0;
+        for (const auto& S : Ivy.m_Levels[0]) nBuried += Ivy.Occluded(S.m_Center + S.m_Normal * (0.02f * Ivy.m_ReadCell), S.m_Normal, 0.1f * Ivy.m_ReadCell);
+        for (const auto& E : Ivy.m_ReadTable)
+        {
+            if (E[1] == 0xFFFFFFFFu) continue;
+            for (std::uint32_t p = 0; p < E[3]; ++p)
+            {
+                const std::uint32_t F = Ivy.m_ReadList[E[2] + 4 * p + 2], n = Ivy.m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu;
+                if (n < Ivy.m_ReadListCap) continue;                                                       // (a list with room may name them)
+                for (std::uint32_t k = 0; k < n; ++k)
+                {
+                    const auto& S = Ivy.m_Levels[0][surfel_mesh::ReadEntrySurfel(Ivy.m_ReadList[F + k])];
+                    ++nEntries; nListedBuried += Ivy.Occluded(S.m_Center + S.m_Normal * (0.02f * Ivy.m_ReadCell), S.m_Normal, 0.1f * Ivy.m_ReadCell);
+                }
+            }
+        }
+        std::printf("ivy pressed on a wall: %d buried surfels, %d of %d list entries name one\n", nBuried, nListedBuried, nEntries);
+        CHECK(nBuried > 20 && nEntries > 0 && nListedBuried * 20 < nEntries, "the full lists name %d buried surfels (%d buried): the wall's own slots taken", nListedBuried, nBuried);
         CHECK(nRead == nBeside, "the wall beside a door frame reads no surfel at %d of %d points", nBeside - nRead, nBeside);
     }
 
@@ -1050,6 +1078,198 @@ int main()
         CHECK(FineUnread <= CoarseUnread, "the finer grid loses quads (%d read nothing, %d before)", FineUnread, CoarseUnread);
     }
 
+    // 6j2e. The read lists are bounded (GI working set, job 1: the Bistro's layered surface listed thousands of surfels a part, 5 GB of lists,
+    //       a 19 GB peak): a bush (1,500 leaves of 10 cm facing about up, in 2 x 1 x 2 m: what the Bistro's trees are to 1 m surfels: many
+    //       layers that see each other), every part's list at most read_list_cap_v (its nearest seen surfels from the cell's center) against
+    //       the unbounded lists; the words, the build's time, and the converged light at every leaf (the solver reads whole lists, the pixel
+    //       its 32 nearest) against a second unbounded world's noise
+    {
+        surfel_mesh M;
+        std::mt19937 Rng(11);
+        std::uniform_real_distribution<float> U(-1, 1);
+        for (int k = 0; k < 1500; ++k)
+        {
+            const v3 N = v3{ 0.5f * U(Rng), 1, 0.5f * U(Rng) }.NormalizeCopy();
+            const v3 T = v3{ 1, 0, 0 }.Cross(N).NormalizeCopy(), Bt = N.Cross(T);
+            AddQuad(M, v3{ U(Rng), 0.5f + 0.5f * U(Rng), U(Rng) } - (T + Bt) * 0.05f, T * 0.1f, Bt * 0.1f, 0.1f);     // (T x Bt: facing N)
+        }
+        // (leak protection on, the default and the Bistro's: the solver's hits read the lists, world::Indirect)
+        M.Bake(1.0f, 3.0f);
+        surfel_mesh B = M;                                      // the same surfels: only the lists differ
+        const auto Lists = [](const surfel_mesh& X)
+        {
+            std::size_t nParts = 0, nEnt = 0, Max = 0;
+            for (const auto& E : X.m_ReadTable)
+            {
+                if (E[1] == 0xFFFFFFFFu) continue;
+                for (std::uint32_t p = 0; p < E[3]; ++p) { const std::size_t n = X.m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu; ++nParts; nEnt += n; Max = std::max(Max, n); }
+            }
+            return std::array<std::size_t, 3>{ nParts, nEnt, Max };
+        };
+        const auto Timed = [](surfel_mesh& X) { const auto T0 = std::chrono::steady_clock::now(); X.BuildReadGridAt(1.0f); return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count(); };
+        M.m_ReadListCap = ~std::size_t(0);
+        const double Tm = Timed(M), Tb = Timed(B);
+        const auto Lm = Lists(M), Lb = Lists(B);
+        CHECK(Lm[0] == Lb[0], "the bound changed the parts (%zu, %zu)", Lm[0], Lb[0]);
+        CHECK(Lm[2] > 2 * surfel_mesh::read_list_cap_v, "the test's cluster lists only %zu surfels a part: no worst case", Lm[2]);
+        CHECK(Lb[2] <= surfel_mesh::read_list_cap_v, "a bounded part lists %zu surfels (cap %zu)", Lb[2], surfel_mesh::read_list_cap_v);
+        CHECK(B.m_ReadList.size() <= Lb[0] * (4 + surfel_mesh::read_list_cap_v), "the bounded lists hold %zu words for %zu parts", B.m_ReadList.size(), Lb[0]);
+        // the packed lists (the GPU's and the resource's: all-seen entries 16 bits): unpacked, the same table and lists; the unbounded ones
+        // stay as they are (longer than the fallback's walk: their order is the nearest first)
+        for (auto* X : { &B, &M })
+        {
+            std::vector<std::array<std::uint32_t, 4>> PT, UT; std::vector<std::uint32_t> PL, UL;
+            surfel_mesh::PackReadGrid(true, X->m_ReadTable, X->m_ReadList, PT, PL);
+            surfel_mesh::PackReadGrid(false, PT, PL, UT, UL);
+            std::size_t nAllSeen = 0;
+            for (const auto& E : X->m_ReadTable) if (E[1] != 0xFFFFFFFFu) for (std::uint32_t p = 0; p < E[3]; ++p)
+            {
+                const std::uint32_t F = X->m_ReadList[E[2] + 4 * p + 2], n = X->m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu;
+                if (n <= std::uint32_t(fallback_cap_v)) for (std::uint32_t k = 0; k < n; ++k) nAllSeen += (X->m_ReadList[F + k] >> 16) == 0xFFFFu;
+            }
+            // (unpacked, a list has its entries with corner weights first, then its all-seen ones: the same entries - SortReadLists orders them again)
+            bool bSame = UT == X->m_ReadTable && UL.size() == X->m_ReadList.size();
+            for (const auto& E : X->m_ReadTable) if (bSame && E[1] != 0xFFFFFFFFu) for (std::uint32_t p = 0; p < 4 * E[3]; p += 4)
+            {
+                const std::uint32_t F = X->m_ReadList[E[2] + p + 2], n = X->m_ReadList[E[2] + p + 3] & 0xFFFFu;
+                bSame = bSame && std::equal(UL.begin() + E[2] + p, UL.begin() + E[2] + p + 4, X->m_ReadList.begin() + E[2] + p)
+                     && std::is_permutation(UL.begin() + F, UL.begin() + F + n, X->m_ReadList.begin() + F);
+            }
+            CHECK(bSame, "the packed lists unpacked are not the lists (%s)", X == &B ? "bounded" : "unbounded");
+            CHECK(X->m_ReadList.size() - PL.size() >= nAllSeen / 4, "packed %zu words of %zu, %zu all-seen entries", PL.size(), X->m_ReadList.size(), nAllSeen);
+            std::printf("packed read lists (%s): %zu words of %zu, %zu entries all-seen\n", X == &B ? "bounded" : "unbounded", PL.size(), X->m_ReadList.size(), nAllSeen);
+        }
+        // the unsupported parts are the same (a part that sees no surfel lists none either way)
+        CHECK(M.m_ReadUnsupported == B.m_ReadUnsupported, "the bound changed the unsupported parts (%u, %u)", M.m_ReadUnsupported, B.m_ReadUnsupported);
+
+        lights Lt; Lt.m_SunDirection = v3{ 0.3f, -1, 0.2f }.NormalizeCopy(); Lt.m_SunColor = { 3, 3, 3 }; Lt.m_Sky = { 0.2f, 0.2f, 0.2f };
+        world Wa, Wb, Wc;
+        Wa.Add(M, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f }); Wb.Add(M, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        Wc.Add(B, xmath::fmat4::fromIdentity(), { 0.6f, 0.6f, 0.6f });
+        const auto Run = [&](world& W, unsigned Seed)
+        {
+            W.m_Setup.m_RaysPerSurfel = 64; W.m_Setup.m_MinBlend = 1;
+            for (int u = 0; u < 8; ++u) W.Update(Lt, { 0, 3, 0 }, 1 << 30, Seed + unsigned(u));
+            W.m_Setup.m_MinBlend = 0;
+            for (int u = 0; u < 150; ++u) W.Update(Lt, { 0, 3, 0 }, 1 << 30, Seed + 100 + unsigned(u));
+        };
+        Run(Wa, 1000); Run(Wb, 5000); Run(Wc, 1000);
+        // Against the path-traced reference at the leaves (the reads are a kernel: the unbounded one blurs the canopy's light into the leaves
+        // under it, so "off the unbounded" is not an error by itself)
+        std::vector<std::pair<v3, v3>> Pts;
+        for (std::size_t t = 0; t < M.m_Tris.size(); t += 20)
+        {
+            const auto& T = M.m_Tris[t];
+            Pts.push_back({ (M.m_Pos[T[0]] + M.m_Pos[T[1]] + M.m_Pos[T[2]]) * (1.0f / 3.0f), (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy() });
+        }
+        std::vector<v3> Ref(Pts.size());
+        ParallelFor(int(Pts.size()), [&](int i) { rng Rng(77 + i); Ref[i] = Reference(Wa, Lt, Pts[i].first, Pts[i].second, 1024, 4, Rng); });
+        double Top = 1e-9;
+        for (const auto& R : Ref) Top = std::max<double>(Top, Lum(R));
+        std::vector<double> Ea, Eb, Ec;
+        for (std::size_t i = 0; i < Pts.size(); ++i)
+        {
+            const v3 a = CacheAt(Wa, Pts[i].first, Pts[i].second), b = CacheAt(Wb, Pts[i].first, Pts[i].second), c = CacheAt(Wc, Pts[i].first, Pts[i].second);
+            if (a.m_X < 0 || b.m_X < 0 || c.m_X < 0) continue;
+            Ea.push_back(std::abs(Lum(a) - Lum(Ref[i])) / Top); Eb.push_back(std::abs(Lum(b) - Lum(Ref[i])) / Top); Ec.push_back(std::abs(Lum(c) - Lum(Ref[i])) / Top);
+        }
+        const auto Pct = [](std::vector<double> V, double p) { std::sort(V.begin(), V.end()); return V.empty() ? 0.0 : V[std::size_t(p * double(V.size() - 1))]; };
+        const auto Mean = [](const std::vector<double>& V) { return V.empty() ? 0.0 : std::accumulate(V.begin(), V.end(), 0.0) / double(V.size()); };
+        std::printf("read lists bounded: %zu parts, unbounded %zu entries (max %zu a part, %.1f ms), bounded %zu (max %zu, %.1f ms); off the path-traced light at %zu leaves "
+                    "(of the brightest): unbounded %.2f%% mean, %.2f%% 95th (a second world %.2f%%, %.2f%%), bounded %.2f%% mean, %.2f%% 95th\n",
+                    Lm[0], Lm[1], Lm[2], Tm, Lb[1], Lb[2], Tb, Ec.size(), 100 * Mean(Ea), 100 * Pct(Ea, 0.95), 100 * Mean(Eb), 100 * Pct(Eb, 0.95), 100 * Mean(Ec), 100 * Pct(Ec, 0.95));
+        CHECK(Ec.size() > Pts.size() / 2, "too few leaves read light (%zu of %zu)", Ec.size(), Pts.size());
+        const double Noise = std::abs(Mean(Ea) - Mean(Eb));
+        CHECK(Mean(Ec) <= Mean(Ea) + 2 * Noise + 0.005, "the bounded lists are farther from the path-traced light (%.2f%%) than the unbounded (%.2f%%)", 100 * Mean(Ec), 100 * Mean(Ea));
+    }
+
+    // 6j2f. The bake's speedups keep the same surfels (GI working set, job 4: the Bistro's bake was 17 min, 11 of them the vertex surfels'
+    //       nearest search, 3 the parents' darts): the vertex surfels and the parents of a bake against the rule tested one surfel at a time
+    //       (every compatible surfel in reach seen or not, the 4 nearest kept), on the bush of 6j2e (layers that see each other)
+    {
+        surfel_mesh M;
+        std::mt19937 Rng(11);
+        std::uniform_real_distribution<float> U(-1, 1);
+        for (int k = 0; k < 1500; ++k)
+        {
+            const v3 N = v3{ 0.5f * U(Rng), 1, 0.5f * U(Rng) }.NormalizeCopy();
+            const v3 T = v3{ 1, 0, 0 }.Cross(N).NormalizeCopy(), Bt = N.Cross(T);
+            AddQuad(M, v3{ U(Rng), 0.5f + 0.5f * U(Rng), U(Rng) } - (T + Bt) * 0.05f, T * 0.1f, Bt * 0.1f, 0.1f);
+        }
+        M.Bake(0.25f, 0.75f);
+        const auto& L = M.m_Levels[0];
+        surfel_grid G{ L[0].m_Radius, {} };
+        for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
+        int nDiff = 0;
+        for (std::size_t v = 0; v < M.m_Pos.size(); ++v)
+        {
+            std::array<std::pair<float, int>, 4> Best; Best.fill({ 1e30f, -1 });
+            for (int Ring = 1; Ring <= 4 && Best[0].second < 0; ++Ring)
+                G.Near(M.m_Pos[v], Ring, [&](int s)
+                {
+                    if (L[s].m_Normal.Dot(M.m_Nrm[v]) < 0.5f) return;
+                    const float d = (M.m_Pos[v] - L[s].m_Center).Length();
+                    if (d >= Best[3].first || std::any_of(Best.begin(), Best.end(), [&](const auto& b) { return b.second == s; })) return;
+                    if (!M.Sees(M.m_Pos[v], M.m_Nrm[v], L[s])) return;
+                    Best[3] = { d, s }; std::sort(Best.begin(), Best.end());
+                });
+            nDiff += M.m_VertSurfels[v] != std::array<int, 4>{ Best[0].second, Best[1].second, Best[2].second, Best[3].second };
+        }
+        // The darts one at a time (the bake's candidates, its shuffle, its rule), the fine level and then the parents: every center and
+        // normal the same, bit for bit; each surfel's parent the nearest seen one, every one tested
+        const auto Darts = [&](const std::vector<v3>& P, const std::vector<v3>& N, float R)
+        {
+            std::vector<surfel> Out; surfel_grid Gd{ R, {} };
+            std::vector<int> Order(P.size());
+            for (std::size_t i = 0; i < Order.size(); ++i) Order[i] = int(i);
+            rng Shuffle(0x5EEDu);
+            for (std::size_t i = Order.size(); i > 1; --i) std::swap(Order[i - 1], Order[std::size_t(Shuffle.Next() * float(i)) % i]);
+            for (const int i : Order)
+            {
+                bool bTaken = false;
+                Gd.Near(P[std::size_t(i)], 1, [&](int s) { bTaken = bTaken || ((P[std::size_t(i)] - Out[std::size_t(s)].m_Center).Length() < R && Out[std::size_t(s)].m_Normal.Dot(N[std::size_t(i)]) > 0.8f
+                                         && std::abs((Out[std::size_t(s)].m_Center - P[std::size_t(i)]).Dot(N[std::size_t(i)])) < 0.1f * R && M.Sees(P[std::size_t(i)], N[std::size_t(i)], Out[std::size_t(s)])); });
+                if (bTaken) continue;
+                Gd.Add(P[std::size_t(i)], int(Out.size())); Out.push_back({ P[std::size_t(i)], N[std::size_t(i)], R });
+            }
+            return Out;
+        };
+        const auto Same = [](const std::vector<surfel>& A, const std::vector<surfel>& B)
+        {
+            if (A.size() != B.size()) return false;
+            for (std::size_t s = 0; s < A.size(); ++s)
+                if (std::memcmp(&A[s].m_Center, &B[s].m_Center, sizeof(v3)) || std::memcmp(&A[s].m_Normal, &B[s].m_Normal, sizeof(v3)) || A[s].m_Radius != B[s].m_Radius) return false;
+            return true;
+        };
+        std::vector<v3> CP, CN; M.Candidates(0.25f, CP, CN, nullptr);
+        const auto Fine = Darts(CP, CN, 0.25f);
+        std::vector<v3> SP, SN; for (const auto& S : Fine) { SP.push_back(S.m_Center); SN.push_back(S.m_Normal); }
+        const auto Parents = Darts(SP, SN, 0.75f);
+        surfel_grid G1{ 0.75f, {} };
+        for (int s = 0; s < int(Parents.size()); ++s) G1.Add(Parents[std::size_t(s)].m_Center, s);
+        int nParentDiff = 0;
+        for (std::size_t s = 0; s < Fine.size() && s < M.m_ParentOf.size(); ++s)
+        {
+            std::pair<float, int> Best{ 1e30f, -1 };
+            for (int Ring = 1; Ring <= 4 && Best.second < 0; ++Ring)
+                G1.Near(SP[s], Ring, [&](int p)
+                {
+                    if (Parents[std::size_t(p)].m_Normal.Dot(SN[s]) < 0.5f) return;
+                    const float d = (SP[s] - Parents[std::size_t(p)].m_Center).Length();
+                    if (std::pair{ d, p } >= Best || !M.Sees(SP[s], SN[s], Parents[std::size_t(p)])) return;
+                    Best = { d, p };
+                });
+            nParentDiff += M.m_ParentOf[s] != std::max(Best.second, 0);
+        }
+        const bool bFine = Same(Fine, M.m_Levels[0]), bParents = Same(Parents, M.m_Levels[1]);
+        std::printf("bake speedups: %zu fine surfels (one at a time: %s), %zu parents (%s), %d parents of surfels differ; vertex surfels off the one-at-a-time rule at %d of %zu vertices; "
+                    "bake ms: candidates %.0f, darts %.0f, vertex surfels %.0f, parents %.0f, neighbours %.0f\n",
+                    L.size(), bFine ? "the same, bit for bit" : "DIFFERENT", M.m_Levels[1].size(), bParents ? "the same" : "DIFFERENT", nParentDiff, nDiff, M.m_Pos.size(),
+                    M.m_BakeMs[0], M.m_BakeMs[1], M.m_BakeMs[3], M.m_BakeMs[4], M.m_BakeMs[5]);
+        CHECK(bFine && bParents && nParentDiff == 0, "the parallel darts differ from one at a time (fine %d, parents %d, parent links %d)", int(bFine), int(bParents), nParentDiff);
+        CHECK(nDiff == 0, "the vertex surfels differ from the one-at-a-time rule at %d vertices", nDiff);
+    }
+
     // 6k. Experiment D, step 1 (GI review: compiled transport), the CPU prototype: the Cornell box converged by the solver (the reference),
     //     its transport compiled once from the solver's own rays and reads (world::CompileTransport) and solved with no ray at all
     //     (SolveTransport: E = D + T E). Per iteration the residual |D + T E - E| and the error against the converged world; the links
@@ -1171,6 +1391,142 @@ int main()
             }
             std::printf("  the solver from scratch: within 1%% of the converged world after %d updates (64 rays a surfel each: %zu rays; the compile cast %zu once)\n",
                         Updates + 1, std::size_t(Updates + 1) * 64 * n, T.m_nRays);
+        }
+    }
+
+    // 6l. GI chunks (documentation/gi_chunks_plan.md): a room as one mesh (6 x 6 m, 2.5 m high), its clusters 1 m tiles, baked whole and
+    //     partitioned into chunks of about a quarter of its surfels: every surfel owned once, every chunk within the local cap, its vertex
+    //     surfels local, its ghosts copies of their owners, and its reads covering its surface as the whole mesh's do
+    {
+        surfel_mesh M;
+        AddQuad(M, { -3, 0, -3 }, { 0, 0, 6 }, { 6, 0, 0 }, 0.125f);            // floor
+        AddQuad(M, { -3, 2.5f, -3 }, { 6, 0, 0 }, { 0, 0, 6 }, 0.125f);         // ceiling
+        AddQuad(M, { -3, 0, 3 }, { 0, 2.5f, 0 }, { 6, 0, 0 }, 0.125f);          // back
+        AddQuad(M, { -3, 0, -3 }, { 6, 0, 0 }, { 0, 2.5f, 0 }, 0.125f);         // front
+        AddQuad(M, { -3, 0, -3 }, { 0, 2.5f, 0 }, { 0, 0, 6 }, 0.125f);         // left
+        AddQuad(M, { 3, 0, -3 }, { 0, 0, 6 }, { 0, 2.5f, 0 }, 0.125f);          // right
+        M.Bake(0.3f, 0.75f);
+        M.BuildRays();
+        M.BuildReadGrid();
+        std::vector<int> TriCluster(M.m_Tris.size());
+        std::unordered_map<std::int64_t, int> Tile;
+        for (std::size_t t = 0; t < M.m_Tris.size(); ++t)
+        {
+            const v3 c = (M.m_Pos[M.m_Tris[t][0]] + M.m_Pos[M.m_Tris[t][1]] + M.m_Pos[M.m_Tris[t][2]]) * (1.0f / 3.0f);
+            const std::int64_t k = (std::int64_t(std::floor(c.m_X)) + 100) * 1000000 + (std::int64_t(std::floor(c.m_Y)) + 100) * 1000 + (std::int64_t(std::floor(c.m_Z)) + 100);
+            TriCluster[t] = Tile.try_emplace(k, int(Tile.size())).first->second;
+        }
+        const std::size_t nS = M.m_Levels[0].size();
+        chunked_mesh Ch; chunk_report Rep;
+        const bool bFits = PartitionChunks(M, TriCluster, int(Tile.size()), nS / 4, Ch, &Rep);
+        std::size_t Owned = 0; for (const auto n : Ch.m_nOwned) Owned += n;
+        int BadVS = 0, BadGhost = 0, EmptyGrid = 0;
+        for (std::size_t c = 0; c < Ch.m_Chunks.size(); ++c)
+        {
+            const auto& C = Ch.m_Chunks[c];
+            for (const auto& VS : C.m_VertSurfels) for (const int s : VS) if (s >= int(C.m_Levels[0].size())) ++BadVS;
+            for (std::size_t k = 0; k < Ch.m_Ghosts[c].size(); ++k)
+            {
+                const auto& G = Ch.m_Ghosts[c][k];
+                const auto& Own = Ch.m_Chunks[G.m_Chunk].m_Levels[0][G.m_Local];
+                const auto& Me  = C.m_Levels[0][Ch.m_nOwned[c] + k];
+                if (G.m_Chunk == c || G.m_Local >= Ch.m_nOwned[G.m_Chunk] || (Own.m_Center - Me.m_Center).Length() > 1e-6f) ++BadGhost;
+            }
+            if (C.m_ReadTable.empty()) ++EmptyGrid;
+        }
+        // the reads: on every chunk's triangles, the share of points whose read lists something, against the whole mesh's at the same points
+        std::size_t nP = 0, nWhole = 0, nChunk = 0;
+        for (const auto& C : Ch.m_Chunks)
+            for (std::size_t t = 0; t < C.m_Tris.size(); t += 3)
+            {
+                const auto& T = C.m_Tris[t];
+                const v3 P = (C.m_Pos[T[0]] + C.m_Pos[T[1]] + C.m_Pos[T[2]]) * (1.0f / 3.0f);
+                const v3 N = (C.m_Pos[T[1]] - C.m_Pos[T[0]]).Cross(C.m_Pos[T[2]] - C.m_Pos[T[0]]).NormalizeCopy();
+                ++nP; nWhole += !M.ReadCellList(P, N).empty(); nChunk += !C.ReadCellList(P, N).empty();
+            }
+        std::printf("GI chunks: %zu surfels, %zu clusters -> %d chunks (owned %zu..%zu, %d split again), %zu ghosts (%.0f%% of the owned; at most %zu a chunk), local at most %zu; "
+                    "the reads list something at %.1f%% of %zu points (the whole mesh %.1f%%); partition %.0f ms, chunks built %.0f ms\n",
+                    nS, Tile.size(), Rep.m_nChunks, Rep.m_OwnedMin, Rep.m_OwnedMax, Rep.m_nSplitsAgain, Rep.m_GhostsTotal, 100.0 * double(Rep.m_GhostsTotal) / double(nS), Rep.m_GhostsMax, Rep.m_LocalMax,
+                    100.0 * double(nChunk) / double(nP), nP, 100.0 * double(nWhole) / double(nP), Rep.m_PartitionMs, Rep.m_BuildMs);
+        CHECK(bFits && Rep.m_nChunks >= 4, "the room was not partitioned into fitting chunks (%d chunks, fits %d)", Rep.m_nChunks, int(bFits));
+        CHECK(Owned == nS, "the chunks own %zu surfels, the mesh has %zu", Owned, nS);
+        CHECK(BadVS == 0 && BadGhost == 0 && EmptyGrid == 0, "%d vertex surfels out of their chunk, %d ghosts not their owners' copies, %d chunks without a read grid", BadVS, BadGhost, EmptyGrid);
+        CHECK(Rep.m_GhostsTotal > 0, "no ghosts: the borders read nothing across them");
+        CHECK(nChunk + nP / 200 >= nWhole, "the chunks' reads list something at %zu points, the whole mesh's at %zu", nChunk, nWhole);
+
+        // The light: the whole room, a second whole room (another seed: the noise floor) and the chunked room (each chunk an instance, its
+        // ghosts synced from their owners), converged alike; at every chunk triangle's centre each one's read
+        lights Lt; Lt.m_Points = { { { 0.5f, 2.0f, 0.3f }, { 6, 6, 6 }, 8.0f } }; Lt.m_Sky = { 0.05f, 0.05f, 0.05f };
+        world Wa, Wb, Wc;
+        const int Ia = Wa.Add(M, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f }), Ib = Wb.Add(M, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f });
+        std::vector<int> ChunkId;
+        for (const auto& C : Ch.m_Chunks) ChunkId.push_back(Wc.Add(C, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f }));
+        for (std::size_t c = 0; c < Ch.m_Chunks.size(); ++c)
+        {
+            std::vector<std::array<int, 2>> Owners;
+            for (const auto& G : Ch.m_Ghosts[c]) Owners.push_back({ ChunkId[G.m_Chunk], int(G.m_Local) });
+            Wc.SetGhosts(ChunkId[c], Ch.m_nOwned[c], std::move(Owners));
+        }
+        const auto Run = [&](world& W, unsigned Seed)
+        {
+            W.m_Setup.m_RaysPerSurfel = 64; W.m_Setup.m_MinBlend = 1;
+            for (int u = 0; u < 8; ++u) W.Update(Lt, { 0, 1.5f, 0 }, 1 << 30, Seed + unsigned(u));
+            W.m_Setup.m_MinBlend = 0;
+            for (int u = 0; u < 150; ++u) W.Update(Lt, { 0, 1.5f, 0 }, 1 << 30, Seed + 100 + unsigned(u));
+        };
+        Run(Wa, 1000); Run(Wb, 5000); Run(Wc, 1000);
+        const auto Lum = [](const v3& e) { return 0.2126 * e.m_X + 0.7152 * e.m_Y + 0.0722 * e.m_Z; };
+        std::vector<double> Dab, Dac;
+        double Top = 1e-9;
+        for (std::size_t c = 0; c < Ch.m_Chunks.size(); ++c)
+            for (std::size_t t = 0; t < Ch.m_Chunks[c].m_Tris.size(); t += 3)
+            {
+                const auto& C = Ch.m_Chunks[c]; const auto& T = C.m_Tris[t];
+                const v3 Pp = (C.m_Pos[T[0]] + C.m_Pos[T[1]] + C.m_Pos[T[2]]) * (1.0f / 3.0f);
+                const v3 Nn = (C.m_Pos[T[1]] - C.m_Pos[T[0]]).Cross(C.m_Pos[T[2]] - C.m_Pos[T[0]]).NormalizeCopy();
+                const auto qa = Wa.ReadPoint(Ia, Pp, Nn), qb = Wb.ReadPoint(Ib, Pp, Nn), qc = Wc.ReadPoint(ChunkId[c], Pp, Nn);
+                if (!qa.m_bSupported || !qb.m_bSupported || !qc.m_bSupported) continue;
+                Top = std::max(Top, Lum(qa.m_E));
+                Dab.push_back(std::abs(Lum(qa.m_E) - Lum(qb.m_E))); Dac.push_back(std::abs(Lum(qa.m_E) - Lum(qc.m_E)));
+            }
+        const auto Pct = [&](std::vector<double> V, double p) { std::sort(V.begin(), V.end()); return V.empty() ? 0.0 : V[std::size_t(p * double(V.size() - 1))] / Top; };
+        double Ma = 0, Mc = 0;
+        for (int i = 0; i < Wa.InstanceCount(); ++i) for (const auto& e : Wa.InstanceLight(i)) Ma += Lum(e);
+        for (int i = 0; i < Wc.InstanceCount(); ++i) { const auto& E = Wc.InstanceLight(i); for (std::uint32_t k = 0; k < Wc.OwnedSurfels(i); ++k) Ma += 0, Mc += Lum(E[k]); }
+        std::printf("GI chunks, the light at %zu common points (of the brightest): the chunked room off the whole by %.2f%% median, %.2f%% 95th; "
+                    "two whole rooms (the noise) %.2f%% median, %.2f%% 95th; the owned surfels' total light %.2f%% off the whole's\n",
+                    Dac.size(), 100 * Pct(Dac, 0.5), 100 * Pct(Dac, 0.95), 100 * Pct(Dab, 0.5), 100 * Pct(Dab, 0.95), 100 * std::abs(Mc - Ma) / std::max(Ma, 1e-9));
+        CHECK(Pct(Dac, 0.95) < 2 * Pct(Dab, 0.95) + 0.01, "the chunked room's light is off the whole's by %.2f%% (95th), the noise %.2f%%", 100 * Pct(Dac, 0.95), 100 * Pct(Dab, 0.95));
+
+        // The sections through a resource (xgeom_static version 7): flattened as the compiler writes them, each loaded back as the renderer
+        // does (its geometry from the whole mesh, SectionGeometry), every array the same as the chunk's
+        {
+            const auto Flat = FlattenSections(Ch, M.m_Pos.size());
+            const auto View = ViewOf(Flat);
+            int nBad = 0;
+            std::size_t Words = 0;
+            std::vector<int> Uses(M.m_Pos.size(), 0);      // (this room's tiles share their border vertices; an xgeom_static's clusters never do)
+            for (const auto& VW : Ch.m_VertWhole) for (const std::uint32_t w : VW) ++Uses[w];
+            for (std::size_t c = 0; c < Ch.m_Chunks.size(); ++c)
+            {
+                surfel_mesh L;
+                const auto& C = Ch.m_Chunks[c];
+                if (!LoadSection(M, TriCluster, View, c, L)) { ++nBad; continue; }
+                const auto SameS = [](const std::vector<surfel>& A, const std::vector<surfel>& B) { if (A.size() != B.size()) return false; for (std::size_t s = 0; s < A.size(); ++s) if ((A[s].m_Center - B[s].m_Center).Length() > 0 || (A[s].m_Normal - B[s].m_Normal).Length() > 0 || A[s].m_Radius != B[s].m_Radius) return false; return true; };
+                bool bVS = L.m_VertSurfels.size() == C.m_VertSurfels.size();
+                for (std::size_t v = 0; bVS && v < C.m_VertSurfels.size(); ++v) bVS = Uses[Ch.m_VertWhole[c][v]] > 1 || L.m_VertSurfels[v] == C.m_VertSurfels[v];
+                const bool bOk = L.m_Pos.size() == C.m_Pos.size() && L.m_Tris == C.m_Tris && SameS(L.m_Levels[0], C.m_Levels[0]) && SameS(L.m_Levels[1], C.m_Levels[1])
+                              && L.m_ParentOf == C.m_ParentOf && bVS && L.m_ReadTable == C.m_ReadTable && L.m_ReadList == C.m_ReadList
+                              && L.m_OriginFirst == C.m_OriginFirst && L.m_OriginVert == C.m_OriginVert && L.m_Neighbors[0].m_Index == C.m_Neighbors[0].m_Index;
+                nBad += !bOk;
+                if (!bOk) std::printf("  section %zu: verts %d tris %d fine %d parents %d parentof %d vs %d table %d list %d origins %d/%d neighbours %d\n", c, int(L.m_Pos.size() == C.m_Pos.size()), int(L.m_Tris == C.m_Tris),
+                    int(SameS(L.m_Levels[0], C.m_Levels[0])), int(SameS(L.m_Levels[1], C.m_Levels[1])), int(L.m_ParentOf == C.m_ParentOf), int(bVS), int(L.m_ReadTable == C.m_ReadTable),
+                    int(L.m_ReadList == C.m_ReadList), int(L.m_OriginFirst == C.m_OriginFirst), int(L.m_OriginVert == C.m_OriginVert), int(L.m_Neighbors[0].m_Index == C.m_Neighbors[0].m_Index));
+                Words += Flat.m_Sections[c].m_nDerived;
+            }
+            std::printf("GI sections through a resource: %zu sections, %zu fine surfels (%zu owned), %zu ghosts, %zu derived words, %zu vertices shared by two sections; loaded back: %d differ\n",
+                        Flat.m_Sections.size(), Flat.m_Fine.size(), Owned, Flat.m_Ghosts.size(), Words, Flat.m_nSharedVerts, nBad);
+            CHECK(nBad == 0, "%d sections load back differently from their chunks", nBad);
         }
     }
 

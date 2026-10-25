@@ -26,6 +26,8 @@ layout(push_constant) uniform PushConstants
 #ifdef XLION_GI
     uint    giOffset;      // xLIONRender surfel GI: the instance's first surfel in GILight
     uint    giLevel;       // its active surfel level (0xFFFFFFFF: no GI)
+    uint    materialBase;  // (the fragment's: its MaterialParams base)
+    int     giVertexDelta; // GI sections: this cluster's vertex in its section's GIMesh is gl_VertexIndex + this (0: the geometry's own)
 #endif
 } push;
 

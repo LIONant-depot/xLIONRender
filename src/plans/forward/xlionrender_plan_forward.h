@@ -72,8 +72,9 @@ namespace xlionrender::details
         std::uint32_t   m_GIOffset      = 0;            // surfel GI (xlionrender_static_geom_gi_vert.glsl): the first surfel in GILight
         std::uint32_t   m_GILevel       = 0xFFFFFFFFu;  // its level (0xFFFFFFFF: none)
         std::uint32_t   m_MaterialBase  = 0;            // the material's first vec4 in MaterialParams (the fragment's "MaterialBase", offset 16)
+        std::int32_t    m_GIVertexDelta = 0;            // GI sections: the cluster's vertex in its section's GIMesh is its own plus this
     };
-    static_assert(offsetof(push_static_geom, m_MaterialBase) == 16);
+    static_assert(offsetof(push_static_geom, m_MaterialBase) == 16 && offsetof(push_static_geom, m_GIVertexDelta) == 20);
 
     // xlionrender_skin_geom_vert.glsl (xgeom_skin_mb_clusters.vert) push constant
     struct push_skin_geom

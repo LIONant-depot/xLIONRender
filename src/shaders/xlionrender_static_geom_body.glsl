@@ -25,6 +25,7 @@ layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 
 
 // Fragment shader inputs
+invariant gl_Position;                              // the depth prepass and the shading compute it alike (renderScenePass: LESS_OR_EQUAL)
 layout(location = 0) out VaryingFull Out;
 layout(location = 6) out vec2 OutUV1;                // the second UVs (mb_varying_definition_full.glsl)
 layout(location = 8) flat out uint OutInstance;     // the slot, for fragment shaders that read the instance record (geom standard)
@@ -43,7 +44,8 @@ vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4
     if (push.giLevel == gi_none_v) return vec4(0.0);
     g_GIMoments = (push.giLevel & gi_no_moments_v) == 0u;
     const uint Level = push.giLevel & 0xFFu, LevelBase = GIMesh[Level];
-    const uint P0 = GIMesh[8u + 2u * uint(gl_VertexIndex)], P1 = GIMesh[9u + 2u * uint(gl_VertexIndex)];
+    const uint GIVertex = uint(int(gl_VertexIndex) + push.giVertexDelta);       // (GI sections: the vertex in its section's mesh)
+    const uint P0 = GIMesh[8u + 2u * GIVertex], P1 = GIMesh[9u + 2u * GIVertex];
     const uint Idx[4] = uint[4](P0 & 0xFFFFu, P0 >> 16, P1 & 0xFFFFu, P1 >> 16);
     uint Seen[4] = uint[4](0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
     vec4 Sum = vec4(0.0);

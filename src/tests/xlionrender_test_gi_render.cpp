@@ -71,6 +71,14 @@ int main()
         const auto Prim = xprim_geom::cube::Generate(15, 15, 15, 15, Pieces[i].m_Size);
         CHECK(MakeStaticBuffers(Device, Prim, 2.2f, Buffers[i]), "buffers %d", i);
         CHECK(!Renderer.CreateClusterGeom(Meshes[i], Buffers[i].Geom()), "geom %d", i);
+        if (i == 3)     // the red wall in GI sections (one: its own, no ghosts) - a section's material capture must release it, or its hits
+        {               // bring nothing and the floor gets no red (the Bistro's grey bounce, 2026-10-24)
+            std::vector<xlionrender::instance::gi_section_in> In(1);
+            In[0].m_Surfels = MakeSurfels(Prim, 0.3f, 0.9f);
+            In[0].m_nOwned  = std::uint32_t(In[0].m_Surfels.m_Levels[0].size());
+            CHECK(!Renderer.SetMeshGISections(Meshes[i], std::move(In), { 0 }, { 0 }), "sections %d", i);
+            continue;
+        }
         CHECK(!Renderer.SetMeshGI(Meshes[i], MakeSurfels(Prim, 0.3f, 0.9f)), "surfels %d", i);
     }
 
@@ -195,12 +203,14 @@ int main()
         const auto* pW = Renderer.getGIWorld();
         CHECK(pW && !Renderer.isGICapturing(), "the captures did not finish");
         const auto Mean = [&](const std::vector<xmath::fvec3>& V) { xmath::fvec3 m{ 0, 0, 0 }; for (const auto& v : V) m = m + v; return V.empty() ? m : m * (1.0f / float(V.size())); };
-        const auto Red = Mean(pW->SurfelAlbedo(Renderer.getGIId(4))), Floor = Mean(pW->SurfelAlbedo(Renderer.getGIId(1))), Glow = Mean(pW->SurfelEmission(Renderer.getGIId(4)));
+        const int iRed = Renderer.getGISectionId(4, 0);       // (the red wall: its one GI section)
+        CHECK(iRed >= 0, "the red wall's section has no GI instance");
+        const auto Red = Mean(pW->SurfelAlbedo(iRed)), Floor = Mean(pW->SurfelAlbedo(Renderer.getGIId(1))), Glow = Mean(pW->SurfelEmission(iRed));
         std::printf("captured: red wall %.3f %.3f %.3f (0.8 0.05 0.05), floor %.3f %.3f %.3f (0.75), emission %.3f\n", Red.m_X, Red.m_Y, Red.m_Z, Floor.m_X, Floor.m_Y, Floor.m_Z, Glow.m_X + Glow.m_Y + Glow.m_Z);
         CHECK(std::abs(Red.m_X - 0.8f) < 0.05f && Red.m_Y < 0.1f && std::abs(Floor.m_X - 0.75f) < 0.05f, "the captured albedo is wrong");
         CHECK(Glow.m_X + Glow.m_Y + Glow.m_Z < 0.01f, "something emits");
         // ... and each triangle its own (what a ray hit bounces)
-        const auto& Tri = pW->TriangleAlbedo(Renderer.getGIId(4));
+        const auto& Tri = pW->TriangleAlbedo(iRed);
         const auto  TRed = Mean(Tri);
         std::printf("captured triangles: red wall %zu, %.3f %.3f %.3f\n", Tri.size(), TRed.m_X, TRed.m_Y, TRed.m_Z);
         CHECK(!Tri.empty() && std::abs(TRed.m_X - 0.8f) < 0.05f && TRed.m_Y < 0.1f, "the triangles' captured albedo is wrong");
@@ -224,9 +234,9 @@ int main()
         for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing the cut out wall");
         const auto* pW = Renderer.getGIWorld();
         const auto Sum = [](const std::vector<xmath::fvec3>& V) { float s = 0; for (const auto& v : V) s += v.m_X + v.m_Y + v.m_Z; return s; };
-        const float Albedo = Sum(pW->SurfelAlbedo(Renderer.getGIId(4))), Glow = Sum(pW->SurfelEmission(Renderer.getGIId(4)));
+        const float Albedo = Sum(pW->SurfelAlbedo(Renderer.getGISectionId(4, 0))), Glow = Sum(pW->SurfelEmission(Renderer.getGISectionId(4, 0)));
         std::printf("captured, cut out wall: albedo %.3f, emission %.3f (both 0)\n", Albedo, Glow);
-        CHECK(!pW->SurfelEmission(Renderer.getGIId(4)).empty() && Glow < 0.001f, "a cut out material's discarded texels emit (%.3f)", Glow);
+        CHECK(!pW->SurfelEmission(Renderer.getGISectionId(4, 0)).empty() && Glow < 0.001f, "a cut out material's discarded texels emit (%.3f)", Glow);
         CHECK(Albedo < 0.001f, "a cut out material's discarded texels have an albedo (%.3f)", Albedo);
 
         Scene.m_Draws[3].m_Materials = {};
@@ -260,8 +270,8 @@ int main()
         for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render while capturing it");
         const auto* pW = Renderer.getGIWorld();
         xmath::fvec3 Mean{ 0, 0, 0 };
-        for (const auto& v : pW->SurfelAlbedo(Renderer.getGIId(4))) Mean = Mean + v;
-        Mean = Mean * (1.0f / float(std::max<std::size_t>(pW->SurfelAlbedo(Renderer.getGIId(4)).size(), 1)));
+        for (const auto& v : pW->SurfelAlbedo(Renderer.getGISectionId(4, 0))) Mean = Mean + v;
+        Mean = Mean * (1.0f / float(std::max<std::size_t>(pW->SurfelAlbedo(Renderer.getGISectionId(4, 0)).size(), 1)));
         std::printf("captured with the material's own texture: %.3f %.3f %.3f (red: its shader x3)\n", Mean.m_X, Mean.m_Y, Mean.m_Z);
         CHECK(Mean.m_X > 0.5f && Mean.m_Y < 0.1f, "the material lost its texture");
 
@@ -295,18 +305,18 @@ int main()
             for (int f = 0; f < 200 && Renderer.isGICapturing(); ++f)
             {
                 bOk = App.RenderFrame(Scene, View, Camera) && bOk;
-                MaxBlue = std::max(MaxBlue, Mean(pW->SurfelAlbedo(Renderer.getGIId(4))).m_Z);
+                MaxBlue = std::max(MaxBlue, Mean(pW->SurfelAlbedo(Renderer.getGISectionId(4, 0))).m_Z);
             }
             return bOk && !Renderer.isGICapturing();
         };
         CHECK(Recapture({ Green }), "the green capture did not finish");
-        const auto G = Mean(pW->SurfelAlbedo(Renderer.getGIId(4))), GT = Mean(pW->TriangleAlbedo(Renderer.getGIId(4)));
+        const auto G = Mean(pW->SurfelAlbedo(Renderer.getGISectionId(4, 0))), GT = Mean(pW->TriangleAlbedo(Renderer.getGISectionId(4, 0)));
         Scene.m_Draws[3].m_Materials = { Blue };
         CHECK(App.RenderFrame(Scene, View, Camera), "Render blue");               // its capture queued (and maybe recorded): then the material changes back
         MaxBlue = 0;
         CHECK(Recapture({}), "the red capture did not finish");
         CHECK(MaxBlue < 0.1f, "the capture of the material it no longer has landed (blue %.2f)", MaxBlue);
-        const auto R = Mean(pW->SurfelAlbedo(Renderer.getGIId(4))), RT = Mean(pW->TriangleAlbedo(Renderer.getGIId(4)));
+        const auto R = Mean(pW->SurfelAlbedo(Renderer.getGISectionId(4, 0))), RT = Mean(pW->TriangleAlbedo(Renderer.getGISectionId(4, 0)));
         std::printf("recaptured: green %.2f %.2f %.2f (triangles %.2f %.2f %.2f); blue then red: %.2f %.2f %.2f (triangles %.2f %.2f %.2f)\n"
                    , G.m_X, G.m_Y, G.m_Z, GT.m_X, GT.m_Y, GT.m_Z, R.m_X, R.m_Y, R.m_Z, RT.m_X, RT.m_Y, RT.m_Z);
         CHECK(G.m_Y > 0.5f && G.m_X < 0.1f && GT.m_Y > 0.5f && GT.m_X < 0.1f, "the new material was not captured again");

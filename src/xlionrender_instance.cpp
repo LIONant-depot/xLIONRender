@@ -141,19 +141,21 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_ProbeAtlas));
         for( auto& M : m_Meshes ) if( M.m_bAlive && !M.m_bCluster ) { ReleaseBuffer(M.m_VertexBuffer); ReleaseBuffer(M.m_IndexBuffer); }
         for( auto& M : m_Meshes ) if( M.m_bAlive && M.m_pGI ) ReleaseBuffer(M.m_GIBuffer);
+        for( auto& M : m_Meshes ) if( M.m_bAlive ) for( auto& S : M.m_GISections ) ReleaseBuffer(S.m_Buffer);
         ReleaseBuffer(m_GILightRing);
         ReleaseBuffer(m_GIMomentRing);
+        if( m_GILightOther.m_Private ) ReleaseBuffer(m_GILightOther);
+        if( m_GIMomentOther.m_Private ) ReleaseBuffer(m_GIMomentOther);
         ReleaseBuffer(m_GIDummy);
         ReleaseBuffer(m_WhiteColorStream);
         ReleaseBuffer(m_NoUV1Stream);
-        for( auto& M : m_Materials ) if( M.m_bAlive ) for( std::size_t k = 0; k < M.m_Pipeline.size(); ++k )
-        {
-            if( M.m_Instance[k].m_Private ) m_Device.Destroy(std::move(M.m_Instance[k]));
-            if( M.m_Pipeline[k].m_Private ) m_Device.Destroy(std::move(M.m_Pipeline[k]));
-        }
+        for( auto& M : m_Materials ) if( M.m_bAlive ) releaseInstances(M);
+        assert(m_SharedPipelines.empty());
         m_Device.Destroy(std::move(m_ForwardInstance));
         m_Device.Destroy(std::move(m_StaticGeomInstance));
         m_Device.Destroy(std::move(m_StaticGeomPipeline));
+        m_Device.Destroy(std::move(m_DepthPrepassInstance));
+        m_Device.Destroy(std::move(m_DepthPrepassPipeline));
         ReleaseBuffer(m_StaticGeomUBO);
         ReleaseBuffer(m_InstanceBuffer);
         ReleaseBuffer(m_InstanceRing);
@@ -404,6 +406,18 @@ namespace xlionrender
             auto Bindings = LitBindings({});
             if( auto Err = Device.Create(m_StaticGeomInstance, { .m_PipeLine = m_StaticGeomPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
 
+            // the depth prepass: the same vertex shader and layout, depth only (no color written)
+            {
+                xgpu::shader DepthOnly;
+                if( auto Err = Device.Create(DepthOnly, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DepthFrag) }); Err ) return Err;
+                auto PrepassShaders = std::array<const xgpu::shader*, 2>{ &DepthOnly, &Vert };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = PrepassShaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
+                                           , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers };
+                Setup.m_Blend.m_ColorWriteMask = 0;
+                if( auto Err = Device.Create(m_DepthPrepassPipeline, Setup); Err ) return Err;
+                if( auto Err = Device.Create(m_DepthPrepassInstance, { .m_PipeLine = m_DepthPrepassPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+            }
+
             // and its GI capture (the constant material's albedo and emission, from the instance record)
             xgpu::shader CaptureVert;
             if( auto Err = Device.Create(CaptureVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
@@ -446,6 +460,9 @@ namespace xlionrender
         }
 
         if( auto Err = Device.Create(m_DefaultMaterialFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DefaultMaterialFrag) }); Err ) return Err;
+        if( auto Err = Device.Create(m_StaticGeomGIVert,    { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_StaticGeomGIVert) }); Err ) return Err;     // RIGID: reads the surfel GI
+        if( auto Err = Device.Create(m_SkinGeomVert,        { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_SkinGeomVert) }); Err ) return Err;
+        if( auto Err = Device.Create(m_GICaptureVert,       { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
 
         // Shadows: the atlas's passes (a clear for its first use - a never rendered attachment cannot be loaded -, then load), the
         // tile clear (depth 1, ALWAYS) and the casters' depth pipelines: depth bias against acne, depth clamp so casters nearer to the
@@ -702,6 +719,8 @@ namespace xlionrender
             ReleaseBuffer(M.m_IndexBuffer);
         }
         if( M.m_pGI ) { ReleaseBuffer(M.m_GIBuffer); M.m_pGI.reset(); }
+        for( auto& S : M.m_GISections ) ReleaseBuffer(S.m_Buffer);
+        M.m_GISections.clear(); M.m_GIClusterSection.clear(); M.m_GIClusterVertexDelta.clear();
         if( M.m_nOutlineIndices > 0 ) { ReleaseBuffer(M.m_OutlineVB); ReleaseBuffer(M.m_OutlineIB); M.m_nOutlineIndices = 0; }
         M.m_Geom = {};
         M.m_bAlive     = false;
@@ -772,9 +791,9 @@ namespace xlionrender
             Data[3] = std::uint32_t(Surfels.m_ReadTable.size() - 1);
             Data[4] = std::bit_cast<std::uint32_t>(Surfels.m_ReadCell);
             Data[6] = Surfels.m_ReadMaxProbe;
-            for( const auto& E : Surfels.m_ReadTable ) Data.insert(Data.end(), E.begin(), E.end());
+            for( const auto& E : Surfels.m_PackedReadTable ) Data.insert(Data.end(), E.begin(), E.end());       // the packed lists (surfel_mesh::PackReadGrid)
             Data[5] = std::uint32_t(Data.size());
-            Data.insert(Data.end(), Surfels.m_ReadList.begin(), Surfels.m_ReadList.end());
+            Data.insert(Data.end(), Surfels.m_PackedReadList.begin(), Surfels.m_PackedReadList.end());
         }
         if( !TriColors.empty() )
         {
@@ -785,6 +804,31 @@ namespace xlionrender
             for( const auto& c : TriColors ) Data.push_back(U8(c.m_X) | (U8(c.m_Y) << 8) | (U8(c.m_Z) << 16) | (255u << 24));
         }
         return Data;
+    }
+
+    xgpu::device::error* instance::SetMeshGISections( mesh_id Id, std::vector<gi_section_in>&& Sections, std::vector<std::uint16_t>&& ClusterSection, std::vector<int>&& ClusterVertexDelta ) noexcept
+    {
+        if( findMesh(Id) == nullptr ) return nullptr;
+        auto& M = m_Meshes[Id.m_Index];
+        assert(M.m_bCluster && M.m_Geom.m_Kind == geom_kind::RIGID && ClusterSection.size() == M.m_Geom.m_Clusters.size() && ClusterVertexDelta.size() == ClusterSection.size());
+        for( auto& S : M.m_GISections ) ReleaseBuffer(S.m_Buffer);
+        M.m_GISections.clear();
+        static std::uint64_t s_GIStamp = 1ull << 63;            // (apart from SetMeshGI's)
+        M.m_GIStamp = ++s_GIStamp;
+        for( auto& In : Sections )
+        {
+            assert(In.m_Surfels.m_Levels[0].size() < 0xFFFF);
+            auto& S = M.m_GISections.emplace_back();
+            if( In.m_Surfels.m_ReadTable.empty() ) In.m_Surfels.BuildReadGrid();
+            S.m_pGI    = std::make_unique<gi::surfel_mesh>(std::move(In.m_Surfels));
+            S.m_nOwned = In.m_nOwned;
+            S.m_Ghosts = std::move(In.m_Ghosts);
+            const auto Packed = In.m_Packed.empty() ? PackMeshGI(*S.m_pGI, {}, {}) : std::move(In.m_Packed);
+            if( auto Err = m_Device.Create(S.m_Buffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Packed.size()), .m_pData = const_cast<std::uint32_t*>(Packed.data()) }); Err ) return Err;
+        }
+        M.m_GIClusterSection     = std::move(ClusterSection);
+        M.m_GIClusterVertexDelta = std::move(ClusterVertexDelta);
+        return nullptr;
     }
 
     xgpu::device::error* instance::buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept
@@ -838,11 +882,7 @@ namespace xlionrender
             if( At < 0 && m_ParamTop + n <= max_material_params_v ) { At = m_ParamTop; m_ParamTop += n; }
             if( At < 0 )
             {
-                for( std::size_t k = 0; k < M.m_Pipeline.size(); ++k )
-                {
-                    if( M.m_Instance[k].m_Private ) m_Device.Destroy(std::move(M.m_Instance[k]));
-                    if( M.m_Pipeline[k].m_Private ) m_Device.Destroy(std::move(M.m_Pipeline[k]));
-                }
+                releaseInstances(M);
                 return VGPU_ERROR(xgpu::device::error::FAILURE, "No room left in MaterialParams for the material's parameters");
             }
             M.m_ParamBase  = std::uint32_t(At);
@@ -885,16 +925,19 @@ namespace xlionrender
     {
         const auto k = (bShadow ? shadow_path_v : 0) + static_cast<std::size_t>(Kind);
         if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
+        // a shadow caster renders into the atlas
+        return makeInstance(M, k, !bShadow, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, Kind, bShadow); });
+    }
 
+    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow ) noexcept
+    {
         const bool bSkin = Kind == geom_kind::SKIN;
-        xgpu::shader Vert;
-        if( m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = bSkin ? SPIRV(s_SkinGeomVert) : SPIRV(s_StaticGeomGIVert) }) ) return nullptr;     // RIGID: reads the surfel GI
 
         // Slot 0 (shadow map) clamps, the material textures use the default sampler - as the geom editors
         assert(M.m_Textures.size() <= 8);       // slots 8, 9: the environment
         const auto Samplers = LitSamplers();
 
-        auto Shaders      = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, &Vert };
+        auto Shaders      = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, bSkin ? &m_SkinGeomVert : &m_StaticGeomGIVert };
         using ub = xgpu::pipeline::uniform_binds;
         const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
         const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
@@ -927,16 +970,53 @@ namespace xlionrender
             Setup.m_DepthStencil.m_bDepthClampEnable        = true;
         }
         else ApplyState(Setup, M.m_State);
-        if( m_Device.Create(M.m_Pipeline[k], Setup) ) return nullptr;
+        return m_Device.Create(Pipeline, Setup);
+    }
 
-        std::vector<xgpu::pipeline_instance::sampler_binding> Bindings;
-        Bindings = LitBindings(M.TexturePointers(), !bShadow);     // a shadow caster renders into the atlas
-        if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
+    //------------------------------------------------------------------------------------------------
+
+    // What a path's pipeline depends on: the fragment shader, the state the vertex paths apply (ApplyState; the GI capture and the shadow
+    // casters use none), the path. The fragment's address is safe: every material of an entry holds a copy of the shader
+    instance::pipeline_key instance::PipelineKey( const material_slot& M, std::size_t k ) noexcept
+    {
+        std::uint32_t State = 0;
+        if( k < capture_path_v )
         {
-            m_Device.Destroy(std::move(M.m_Pipeline[k]));
+            const auto& S = M.m_State;
+            State = (S.isBlended() ? 1u + std::uint32_t(S.m_Blend) : 0u) | (S.m_bDoubleSided ? 1u << 4 : 0u) | (S.m_bWireframe ? 1u << 5 : 0u)
+                  | (S.m_bDepthTest ? 1u << 6 : 0u) | (S.m_bDepthWrite ? 1u << 7 : 0u);
+        }
+        return { M.m_Fragment.m_Private.get(), State, k };
+    }
+
+    xgpu::pipeline_instance* instance::makeInstance( material_slot& M, std::size_t k, bool bShadowAtlas, const std::function<xgpu::device::error*(xgpu::pipeline&)>& Build ) noexcept
+    {
+        const auto Key = PipelineKey(M, k);
+        auto& P = m_SharedPipelines[Key];
+        if( P.m_Pipeline.m_Private == nullptr && Build(P.m_Pipeline) ) { m_SharedPipelines.erase(Key); return nullptr; }
+
+        auto Bindings = LitBindings(M.TexturePointers(), bShadowAtlas);
+        if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = P.m_Pipeline, .m_SamplersBindings = Bindings }) )
+        {
+            if( P.m_nUsers == 0 ) { m_Device.Destroy(std::move(P.m_Pipeline)); m_SharedPipelines.erase(Key); }
             return nullptr;
         }
+        ++P.m_nUsers;
         return &M.m_Instance[k];
+    }
+
+    // Its instances, and the pipelines no other material uses
+    void instance::releaseInstances( material_slot& M ) noexcept
+    {
+        for( std::size_t k = 0; k < M.m_Instance.size(); ++k )
+        {
+            if( M.m_Instance[k].m_Private == nullptr ) continue;
+            m_Device.Destroy(std::move(M.m_Instance[k]));
+            M.m_Instance[k].m_Private.reset();      // (no move: Destroy queued a copy)
+            const auto It = m_SharedPipelines.find(PipelineKey(M, k));
+            assert(It != m_SharedPipelines.end());
+            if( --It->second.m_nUsers == 0 ) { m_Device.Destroy(std::move(It->second.m_Pipeline)); m_SharedPipelines.erase(It); }
+        }
     }
 
     //------------------------------------------------------------------------------------------------
@@ -954,30 +1034,24 @@ namespace xlionrender
     {
         constexpr auto k = capture_path_v;
         if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
-        xgpu::shader Vert;
-        if( m_Device.Create(Vert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_GICaptureVert) }) ) return nullptr;
-        const auto Samplers = LitSamplers();
-        auto Shaders = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, &Vert };
-        using ub = xgpu::pipeline::uniform_binds;
-        const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
-        const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
-        const auto BothSSBO     = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
-        auto Binds = std::array
-        { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
-        , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
-        , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7), FragmentSSBO(9), FragmentSSBO(10)
-        };
-        xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
-                                   , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers };
-        Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
-        if( m_Device.Create(M.m_Pipeline[k], Setup) ) return nullptr;
-        auto Bindings = LitBindings(M.TexturePointers());
-        if( m_Device.Create(M.m_Instance[k], { .m_PipeLine = M.m_Pipeline[k], .m_SamplersBindings = Bindings }) )
+        return makeInstance(M, k, true, [&](xgpu::pipeline& Pipeline) -> xgpu::device::error*
         {
-            m_Device.Destroy(std::move(M.m_Pipeline[k]));
-            return nullptr;
-        }
-        return &M.m_Instance[k];
+            const auto Samplers = LitSamplers();
+            auto Shaders = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, &m_GICaptureVert };
+            using ub = xgpu::pipeline::uniform_binds;
+            const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
+            const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
+            const auto BothSSBO     = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
+            auto Binds = std::array
+            { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
+            , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
+            , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7), FragmentSSBO(9), FragmentSSBO(10)
+            };
+            xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
+                                       , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers };
+            Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+            return m_Device.Create(Pipeline, Setup);
+        });
     }
 
     //------------------------------------------------------------------------------------------------
@@ -986,11 +1060,7 @@ namespace xlionrender
     {
         auto* pM = findMaterial(Id);
         if( pM == nullptr ) return;
-        for( std::size_t k = 0; k < pM->m_Pipeline.size(); ++k )
-        {
-            if( pM->m_Instance[k].m_Private ) m_Device.Destroy(std::move(pM->m_Instance[k]));
-            if( pM->m_Pipeline[k].m_Private ) m_Device.Destroy(std::move(pM->m_Pipeline[k]));
-        }
+        releaseInstances(*pM);
         if( pM->m_ParamCount )
         {
             std::erase_if(m_ParamPending, [&](const auto& P) { return P.first == int(pM->m_ParamBase); });     // created and destroyed before a render
@@ -1050,6 +1120,39 @@ namespace xlionrender
         const int n = m_pGIWorld->Dump(pPath);
         if( n >= 0 ) (void)DumpGIFrames((std::string(pPath) + ".frames.csv").c_str());
         return n;
+    }
+
+    std::string instance::DescribeGIRead( const xmath::fvec3& O, const xmath::fvec3& D ) const noexcept
+    {
+        if( !m_pGIWorld ) return "GIReadAt: no GI";
+        const auto& W = *m_pGIWorld;
+        const auto  H = W.Cast(gi::v3{ O.m_X, O.m_Y, O.m_Z }, gi::v3{ D.m_X, D.m_Y, D.m_Z });
+        if( H.m_Inst < 0 || std::size_t(H.m_Inst) >= m_GITrack.size() || !m_GITrack[std::size_t(H.m_Inst)].m_pMesh ) return "GIReadAt: no hit";
+        const auto& M = *m_GITrack[std::size_t(H.m_Inst)].m_pMesh;
+        const auto& T = M.m_Tris[std::size_t(H.m_Tri)];
+        const float B[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
+        const gi::v3 P = M.m_Pos[T[0]] * B[0] + M.m_Pos[T[1]] * B[1] + M.m_Pos[T[2]] * B[2];
+        gi::v3 N = (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy();
+        if( N.Dot(gi::v3{ D.m_X, D.m_Y, D.m_Z }) > 0 ) N = N * -1.0f;
+        const auto& E  = W.InstanceLight(H.m_Inst);
+        const auto& Va = W.InstanceValid(H.m_Inst);
+        const auto  Lum = [&](std::size_t s) { return s < E.size() ? 0.2126f * E[s].m_X + 0.7152f * E[s].m_Y + 0.0722f * E[s].m_Z : -1.0f; };
+        std::string S = std::format("GIReadAt: instance {} (surfels {}, owned {}), triangle {} (material slot {}), at {:.3f},{:.3f},{:.3f} facing {:.2f},{:.2f},{:.2f}, {:.2f} away\n",
+                                    H.m_Inst, E.size(), W.OwnedSurfels(H.m_Inst), H.m_Tri, std::size_t(H.m_Tri) < M.m_TriMaterial.size() ? int(M.m_TriMaterial[std::size_t(H.m_Tri)]) : -1, P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z, H.m_T);
+        gi::v3 PatchN = N;
+        const auto List = M.ReadCellList(P, N, &PatchN);
+        S += std::format("cell list: {} entries (patch facing {:.2f},{:.2f},{:.2f}); per entry: surfel, owned, its distance, its plane offset, its facing, corners (0-15), its light, validity\n", List.size(), PatchN.m_X, PatchN.m_Y, PatchN.m_Z);
+        for( const auto e : List )
+        {
+            const std::size_t s = e & 0xFFFFu;
+            const auto& Sf = M.m_Levels[0][s];
+            S += std::format("  {:5} {} {:6.3f} {:+6.3f} {:5.2f}  {:2} {:2} {:2} {:2}  {:8.4f} {:4.2f}\n", s, s < W.OwnedSurfels(H.m_Inst) ? "o" : "g", (Sf.m_Center - P).Length(), (Sf.m_Center - P).Dot(N), Sf.m_Normal.Dot(N),
+                             (e >> 16) & 15u, (e >> 20) & 15u, (e >> 24) & 15u, (e >> 28) & 15u, Lum(s), s < Va.size() ? Va[s] : -1.0f);
+        }
+        S += "vertex surfels:";
+        for( int k = 0; k < 3; ++k ) for( const int s : M.m_VertSurfels[std::size_t(T[std::size_t(k)])] )
+            if( s >= 0 ) S += std::format(" {}({:.4f})", s, Lum(std::size_t(s)));
+        return S;
     }
 
     int instance::DumpGIFrames( const char* pPath ) const noexcept

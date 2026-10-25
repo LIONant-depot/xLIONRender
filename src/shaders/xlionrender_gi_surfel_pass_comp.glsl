@@ -45,12 +45,12 @@ void main()
         const vec3 C = ToWorld(R, Sc), N = NormalToWorld(R, Sn);
         vec3 D0, D1, D2; BasisDirs(Sn, D0, D1, D2);
         const bool bSpread = GD[6] != 0u && Level == 0u && GD[M + 14u] != gi_none_v;
-        const uint o0 = bSpread ? GD[GD[M + 14u] + uint(s)] : 0u, nO = bSpread ? GD[GD[M + 14u] + uint(s) + 1u] - o0 : 0u;
+        const uint o0 = bSpread ? GD[GD[M + 14u] + uint(s)] : 0u, nO = bSpread ? GD[GD[M + 14u] + uint(s) + 1u] - o0 + 1u : 0u;     // (+1: its center)
         const float MeanScale = GF(R + 15u);
         for (int r = Lane; r < Rn; r += gi_lanes_v)
         {
             vec3 Cr = C, Nr = N;
-            if (nO > 1u) { const uint o = o0 + uint(r + Shift) % nO; Cr = ToWorld(R, GV(GD[M + 15u] + 3u * o)); Nr = NormalToWorld(R, GV(GD[M + 16u] + 3u * o)); }
+            if (nO > 1u) { vec3 Po, No; GIOrigin(M, o0, uint(r + Shift) % nO, s, Po, No); Cr = ToWorld(R, Po); Nr = NormalToWorld(R, No); }
             const vec3 D = StratifiedCosineDir(Nr, r, Rn, Off1, Off2);
             const gi_hit H = GICast(Cr + Nr * 1e-3, D, 1e30);
             vec3 Dm = DirToMesh(R, D);

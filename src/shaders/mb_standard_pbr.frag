@@ -278,6 +278,7 @@ vec3 PBRLighting
 		const vec3 GNmap = normalize(inNormal.x * GT + inNormal.y * (InGITangent.w * cross(GN, GT)) + inNormal.z * GN);     // as TransformNotmalToWorld, in mesh space
 		g_GIMoments = (InGIRef.y & gi_no_moments_v) == 0u;
 		g_GIPixelCap = GIPixelCap(InGIRef.y);
+		g_GINoCorners = (InGIRef.y & 0x01000000u) != 0u;
 		// The reflection direction in mesh space (through the two tangent frames: the world's and the mesh's), for the rough reflection's read
 		{
 			const vec3 Rw = reflect(-V, N), Tw = normalize(In.Tangent.xyz - In.Normal.xyz * dot(In.Normal.xyz, In.Tangent.xyz)), Nw = normalize(In.Normal.xyz), Bw = In.Tangent.w * cross(Nw, Tw);

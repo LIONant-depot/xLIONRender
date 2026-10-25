@@ -48,7 +48,12 @@ namespace xlionrender
             int m_Meshes = 0, m_Drawn = 0, m_Waiting = 0, m_Lights = 0, m_bSun = 0, m_Materials = 0, m_ConstantSlots = 0, m_GIMeshes = 0;
         };
         double                                          m_GILoadPartMs[3] = { 0, 0, 0 };   // the first uses: decode (main), surfels (worker), renderer (main) (Phase 7)
-        struct gi_load { std::atomic<bool> m_bDone{ false }; bool m_bOk = false; double m_WorkerMs = 0; gi::surfel_mesh m_Surfels; std::vector<std::uint32_t> m_Packed; };
+        struct gi_load
+        {
+            std::atomic<bool> m_bDone{ false }; bool m_bOk = false; double m_WorkerMs = 0; gi::surfel_mesh m_Surfels; std::vector<std::uint32_t> m_Packed;
+            std::vector<instance::gi_section_in> m_Sections;                                     // xgeom_static version 7: the GI in sections (m_Surfels: the whole geometry, no surfels)
+            std::vector<std::uint16_t> m_ClusterSection; std::vector<int> m_ClusterVertexDelta;
+        };
         std::unordered_map<const void*, std::shared_ptr<gi_load>>  m_GILoads;      // Phase 7: the surfels being made on a worker, per geometry
         double                                          m_TotalGILoadMs = 0;           // every geometry's surfels made ready so far (DescribeScene)
         std::unordered_map<const void*, int>            m_GIBaked;
@@ -90,6 +95,21 @@ namespace xlionrender
                     {
                         const auto T1 = std::chrono::steady_clock::now();
                         gi::FromXGeomStatic(P->m_Surfels, *Copy);              // decoded on the worker too
+                        if (!Copy->getGISections().empty())                    // over one GI mesh's cap: its sections (gi_chunks_plan.md)
+                        {
+                            std::vector<gi::loaded_section> L;
+                            P->m_bOk = gi::SectionsFromXGeomStatic(P->m_Surfels, *Copy, L, P->m_ClusterSection, P->m_ClusterVertexDelta);
+                            std::printf("GI sections loaded: %s, %zu sections, %.0f ms\n", P->m_bOk ? "ok" : "FAILED", L.size(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count()); std::fflush(stdout);
+                            for (auto& S : L)
+                            {
+                                if (S.m_Surfels.m_ReadTable.empty()) S.m_Surfels.BuildReadGrid();
+                                auto Packed = PackMeshGI(S.m_Surfels, {}, {});
+                                P->m_Sections.push_back({ std::move(S.m_Surfels), std::move(Packed), S.m_nOwned, std::move(S.m_Ghosts) });
+                            }
+                            P->m_WorkerMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
+                            P->m_bDone.store(true, std::memory_order_release);
+                            return;
+                        }
                         P->m_bOk = gi::SurfelsFromXGeomStatic(P->m_Surfels, *Copy) && P->m_Surfels.m_Levels[0].size() < 0xFFFF;
                         if (P->m_bOk && P->m_Surfels.m_ReadTable.empty()) P->m_Surfels.BuildReadGrid();
                         if (P->m_bOk) P->m_Packed = PackMeshGI(P->m_Surfels, {}, {});             // the GPU buffer's data too
@@ -100,7 +120,8 @@ namespace xlionrender
                 else if (P->m_bDone.load(std::memory_order_acquire))
                 {
                     m_GILoadPartMs[1] += P->m_WorkerMs;                        // the surfels and the rays' structures, on the worker
-                    const bool bGI = P->m_bOk && !m_Renderer.SetMeshGI(It->second, std::move(P->m_Surfels), std::move(P->m_Packed));
+                    const bool bGI = P->m_bOk && (P->m_Sections.empty() ? !m_Renderer.SetMeshGI(It->second, std::move(P->m_Surfels), std::move(P->m_Packed))
+                                                                         : !m_Renderer.SetMeshGISections(It->second, std::move(P->m_Sections), std::move(P->m_ClusterSection), std::move(P->m_ClusterVertexDelta)));
                     m_GILoadPartMs[2] += Ms(T0);                               // handed to the renderer (its GPU buffers), here
                     m_GIBaked[pGeom] = bGI;
                     m_GILoads.erase(pGeom);

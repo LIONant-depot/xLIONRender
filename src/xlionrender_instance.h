@@ -15,6 +15,7 @@
 #include "features/lights/xlionrender_light_cells.h"
 #include "features/culling/xlionrender_frustum.h"
 #include "features/gi/xlionrender_surfel_gi_gpu.h"
+#include "features/gi/xlionrender_surfel_gi_chunks.h"
 #include "xlionrender_view.h"
 #include <chrono>
 #include <memory>
@@ -23,6 +24,8 @@
 #include <vector>
 #include <functional>
 #include <unordered_map>
+#include <map>
+#include <tuple>
 #include <deque>
 
 namespace xlionrender
@@ -69,6 +72,16 @@ namespace xlionrender
         // Surfel GI for a cluster mesh (CreateClusterGeom, rigid): its baked surfels (gi::surfel_mesh::Bake) in the mesh's vertex
         // order - the resource pipeline's product (the xgeom GI options); kept by the renderer. scene::m_GI turns GI on.
         [[nodiscard]] xgpu::device::error* SetMeshGI    ( mesh_id Id, gi::surfel_mesh&& Surfels, std::vector<std::uint32_t>&& Packed = {} ) noexcept;     // Packed: PackMeshGI's data made on a worker (empty: packed here)
+        // A geometry over one GI mesh's cap (xgeom_static version 7): its GI in sections, each its own surfels (gi::LoadSection) and display
+        // buffer; per cluster its section and the delta from its vertices to its section's (gi::LoadSection's VMap)
+        struct gi_section_in
+        {
+            gi::surfel_mesh                 m_Surfels;
+            std::vector<std::uint32_t>      m_Packed;       // PackMeshGI's data (made on a worker)
+            std::uint32_t                   m_nOwned = 0;   // its owned fine surfels; its ghosts after them
+            std::vector<gi::chunk_ghost>    m_Ghosts;       // per ghost: its owner (section, local index)
+        };
+        [[nodiscard]] xgpu::device::error* SetMeshGISections( mesh_id Id, std::vector<gi_section_in>&& Sections, std::vector<std::uint16_t>&& ClusterSection, std::vector<int>&& ClusterVertexDelta ) noexcept;
         // The mesh the selection's outline is made from (the editor's outline shader draws it expanded in screen space): per vertex position and
         // normal (6 floats), the triangles, the local box (its center and half extents) the shader's cage is made from. Once per mesh.
         [[nodiscard]] xgpu::device::error* SetOutlineProxy( mesh_id Id, std::span<const float> PosNrm, std::span<const std::uint32_t> Indices, const xmath::fvec3& Center, const xmath::fvec3& Half ) noexcept;
@@ -77,12 +90,17 @@ namespace xlionrender
                       const gi::world::stats& getGIStats( void ) const                                      noexcept { return m_GIStats; }
                       const gi::world*        getGIWorld( void ) const                                      noexcept { return m_pGIWorld.get(); }      // tests, tools
                       bool                    isGICapturingAny( void ) const                                noexcept { return !m_GICaptures.empty(); }
-                      int                     DumpGI( const char* pPath ) const                             noexcept;      // gi::world::Dump, and the frame log to pPath + ".frames.csv" (DumpGIFrames)
+                      int                     DumpGI( const char* pPath ) const                             noexcept;
+                      // (diagnostics) What the GI reads where a ray from O along D first hits: the hit, its instance, its cell's list (each
+                      // surfel: where, facing, its corner weights, its light) and the triangle's vertex surfels. The light is the CPU's copy:
+                      // after DumpGI when the GPU owns it
+                      std::string             DescribeGIRead( const xmath::fvec3& O, const xmath::fvec3& D ) const          noexcept;      // gi::world::Dump, and the frame log to pPath + ".frames.csv" (DumpGIFrames)
         // The GI's frame log (Phase 0 of documentation/gi_dynamic_master_plan.md): the last gi_frame_log_v frames' stage times and counts, as CSV
                       int                     DumpGIFrames( const char* pPath ) const                       noexcept;
         // A mesh's GI was made ready on the main thread (scene_renderer::MeshOf): its time goes into this frame's record
                       void                    NoteGILoad( double Ms )                                       noexcept { m_GILoadMsAcc += Ms; }
                       int                     getGIId( std::uint64_t Instance ) const                       noexcept { const auto It = m_GIIds.find(std::uint32_t(Instance)); return It == m_GIIds.end() ? -1 : It->second; }    // a draw's instance in getGIWorld (-1: none)
+                      int                     getGISectionId( std::uint64_t Instance, int Section ) const   noexcept { const auto It = m_GISecIds.find((std::uint64_t(std::uint32_t(Instance)) << 16) | std::uint64_t(Section)); return It == m_GISecIds.end() ? -1 : It->second; }    // (GI sections: a draw's section's)
                       bool                    isGICapturing( void ) const                                   noexcept { return !m_GICaptures.empty(); }
 
         // A material: its HDR fragment shader (xmaterial::rt::getShaderHDR()) and its sampler bindings in shader order - slot 0
@@ -181,6 +199,8 @@ namespace xlionrender
         // true when a newer frame's timings arrived since the last call
                       bool                 getGPUTimes  ( gpu_times& Times )                                    noexcept;
                       const cpu_times&     getCPUTimes  ( void ) const                                          noexcept { return m_CPUTimes; }
+        // How many material pipelines exist (materials of one fragment shader and state share them; tests)
+                      int                  getPipelineCount( void ) const                                       noexcept { return int(m_SharedPipelines.size()); }
 
     private:
 
@@ -195,6 +215,17 @@ namespace xlionrender
             xgpu::buffer            m_GIBuffer;                         // ... and the vertex shader's copy (xlionrender_static_geom_body.glsl GIMesh)
             bool                    m_bTriColors = false;               // m_GIBuffer has its triangles' captured colors (the SURFACE_COLOR view)
             std::uint64_t           m_GIStamp    = 0;                   // which SetMeshGI made m_pGI (a new one can land at the old one's address)
+            // SetMeshGISections: the GI in sections (m_pGI empty); each section's surfels, display buffer, owned count and ghosts' owners
+            struct gi_section_slot
+            {
+                std::unique_ptr<gi::surfel_mesh>    m_pGI;
+                xgpu::buffer                        m_Buffer;
+                std::uint32_t                       m_nOwned = 0;
+                std::vector<gi::chunk_ghost>        m_Ghosts;
+            };
+            std::vector<gi_section_slot>    m_GISections;
+            std::vector<std::uint16_t>      m_GIClusterSection;         // per cluster its section
+            std::vector<int>                m_GIClusterVertexDelta;     // per cluster: its section's vertex is its own plus this (push_static_geom)
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             bool                    m_bCluster      = false;
@@ -213,8 +244,9 @@ namespace xlionrender
             xgpu::shader                                            m_Fragment;
             std::vector<xgpu::texture>                              m_Textures;     // slot 0 (shadow map) may be empty: white
             std::vector<xgpu::texture*> TexturePointers() noexcept { std::vector<xgpu::texture*> P; for (auto& T : m_Textures) P.push_back(T.m_Private ? &T : nullptr); return P; }
-            std::array<xgpu::pipeline,          shadow_path_v + capture_path_v> m_Pipeline;     // per vertex path (geom_kind), the GI capture, then the shadow
-            std::array<xgpu::pipeline_instance, shadow_path_v + capture_path_v> m_Instance;     // casters per vertex path: built on first use
+            // Per vertex path (geom_kind), the GI capture, then the shadow casters per vertex path: built on first use. Its own textures; the
+            // pipeline is shared with every material of the same fragment and state (m_SharedPipelines)
+            std::array<xgpu::pipeline_instance, shadow_path_v + capture_path_v> m_Instance;
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             material_state          m_State;                        // CreateMaterial: its pipelines' settings
@@ -240,6 +272,16 @@ namespace xlionrender
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind, bool bShadow = false ) noexcept;     // bShadow: its shadow caster (a masked material's cutout)
         static void                 ApplyState         ( xgpu::pipeline::setup& Setup, const material_state& S ) noexcept;
         xgpu::pipeline_instance*    getCaptureInstance ( material_slot& Material )                              noexcept;
+        // The materials' pipelines, shared by (fragment shader, the state the path uses, path): materials differ by their instances (textures)
+        using pipeline_key = std::tuple<const void*, std::uint32_t, std::size_t>;
+        struct shared_pipeline { xgpu::pipeline m_Pipeline; int m_nUsers = 0; };
+        std::map<pipeline_key, shared_pipeline> m_SharedPipelines;
+        static pipeline_key         PipelineKey        ( const material_slot& Material, std::size_t k )         noexcept;
+        // Material's instance k on the shared pipeline (made by Build when it is new); nullptr when either could not be created
+        xgpu::pipeline_instance*    makeInstance       ( material_slot& Material, std::size_t k, bool bShadowAtlas, const std::function<xgpu::device::error*(xgpu::pipeline&)>& Build ) noexcept;
+        void                        releaseInstances   ( material_slot& Material )                              noexcept;
+        xgpu::device::error*        buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& Material, geom_kind Kind, bool bShadow ) noexcept;
+        xgpu::shader                m_StaticGeomGIVert, m_SkinGeomVert, m_GICaptureVert;     // the material pipelines' vertex shaders
         void                        BindClusterStreams ( xgpu::cmd_buffer& Cmd, const cluster_geom& Geom )      noexcept;   // the core + optional streams (m_StaticGeomVD / m_SkinGeomVD)
         void                        processGICapture( xgpu::window& Window )                                    noexcept;
 
@@ -255,6 +297,7 @@ namespace xlionrender
             std::vector<int>            m_Order;                // placement -> surfel (sorted by material slot)
             bool                        m_bTriangles = false;   // the mesh's triangles m_First.. (else its surfels)
             std::uint32_t               m_First = 0;
+            int                         m_Section = -1;         // GI sections: the section's surfels and triangles (-1: the mesh's m_pGI)
             xgpu::buffer                m_Data;
             std::uint64_t               m_Frame = 0;
             bool                        m_bRecorded = false;
@@ -278,6 +321,10 @@ namespace xlionrender
         xgpu::vertex_descriptor     m_StaticGeomVD;                     // the core streams + the optional ones (dynamic strides): BindClusterStreams
         xgpu::pipeline              m_StaticGeomPipeline;
         xgpu::pipeline_instance     m_StaticGeomInstance;
+        // The depth prepass (renderScenePass): the rigid clusters' depth, through the same vertex shader (the same positions) and no color,
+        // before their shading - which then runs once a pixel, at the depth it wrote (LESS_OR_EQUAL). Its layout is m_StaticGeomPipeline's
+        xgpu::pipeline              m_DepthPrepassPipeline;
+        xgpu::pipeline_instance     m_DepthPrepassInstance;
         xgpu::buffer                m_StaticGeomUBO;        // the view block of both cluster vertex paths (details::ubo_geom_view)
 
         // Instance data (features/instances): a device-local buffer (persistent slots, then this frame's transient ones) kept up to
@@ -308,7 +355,8 @@ namespace xlionrender
         std::vector<std::pair<int, std::vector<float>>> m_ParamPending; // blocks not copied yet (first vec4, floats)
 
         // Surfel GI: the CPU world, draw id -> world instance, per draw this render's (first surfel in the light ring, level)
-        static constexpr int        gi_light_region_v       = 1 << 17;  // surfels per frame (a uvec4: the HL2 basis' colors in RGB9E5, the validity)
+        static constexpr int        gi_light_region_v       = 1 << 17;  // surfels per frame at the start (a uvec4: the HL2 basis' colors in RGB9E5, the validity)
+        int                         m_GIRegion              = gi_light_region_v;     // ... now: grown to the drawn surfels (updateGI; the Bistro in sections: 507k)
         struct gi_track
         {
             xmath::fmat4            m_L2W;
@@ -331,10 +379,18 @@ namespace xlionrender
         mutable bool                m_bGIDumpAsked = false;
         std::chrono::steady_clock::time_point m_GIStart{};      // the first GI frame (the frame log's clock)
         std::unordered_map<std::uint32_t, int> m_GIIds;
+        std::unordered_map<std::uint64_t, int> m_GISecIds;              // GI sections: (draw id << 16 | section) -> world instance
         std::vector<gi_track>       m_GITrack;                          // per world instance
         std::vector<std::pair<std::uint32_t, std::uint32_t>> m_DrawGI;  // per draw: offset, level (0xFFFFFFFF: none)
+        std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> m_DrawGISec;     // GI sections: per draw, per section the same
         xgpu::buffer                m_GILightRing;
         xgpu::buffer                m_GIMomentRing;             // per surfel of m_GILightRing: gi::moment_texels_v uints (half mean, half mean^2) - ponytail: 48 MB host-visible, size it to the scenes if it matters
+        // The rings the draws do not read now: while the GPU traces (its Show writes every surfel, every frame) the rings are device-local -
+        // host-visible memory written by the GPU and read by every pixel's GI read cost the Bistro 1.9 ms of Show alone - and these the
+        // host-visible pair the CPU world writes into (swapped in when the CPU takes over). Made at the first switch, dropped when the region grows
+        xgpu::buffer                m_GILightOther, m_GIMomentOther;
+        int                         m_GIOtherRegion = 0;
+        bool                        m_bGIRingsLocal = false;
         xgpu::buffer                m_GIDummy;                          // bound as GIMesh for meshes without surfels
         xgpu::buffer                m_WhiteColorStream;                 // one RGBA8 white: the COLOR0 stream of a cluster geom without colors (stride 0)
         xgpu::buffer                m_NoUV1Stream;                      // one float2 marker (mb_input_definition_full.vert: the shaders read UV0): the UV1 stream of a cluster geom without one (stride 0)

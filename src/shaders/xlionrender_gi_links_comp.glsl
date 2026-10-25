@@ -5,6 +5,12 @@
 // gi_links_v heaviest links; the rest goes to a tail per instance (their mean light: world::TruncateTransport's tail through the
 // instances), its gi_links_v heaviest kept. What no surfel carries (the sky, the direct light at the hits, the emission, the emitters'
 // light the pass adds besides its rays) is its D. Level-0 instances only (a hit on a level-1 instance is dropped: counted)
+// Relightable: D bakes the direct light at the hits (exact for the lights it was built with); a light that changes after adds the
+// difference of the surfels' own direct light through the same weights, E = D + T (E + Dir - Dir0) (Dir: mode 1, each surfel's at its
+// center; Dir0: the same at the build). Through the 16 links and the instances' tail the difference is approximate, the rest exact.
+// Mode 1: one invocation per item, its Dir. Mode 2: the build of the items GIList names (from m_First: a workgroup each) - what a moved
+// object or a changed material touches (gpu_trace::PumpLinks' local rebuild). Mode 3: one invocation per item, flagged when it or one of
+// its links or its tail reads an instance GIChanged names
 layout(local_size_x = 64) in;
 
 const uint gi_links_v  = 16u;                 // the links a surfel keeps, and the tail entries
@@ -15,9 +21,13 @@ const float gi_fixed_v = 67108864.0;          // the weights' fixed point (2^26)
 
 struct GIItem { ivec4 m_Ids; vec4 m_Offsets; };     // instance, surfel, level, rays; off1, off2, shift (bits), -
 layout(std430, set = 0, binding = 5) readonly  buffer items_b { GIItem GIItems[]; };
-layout(std430, set = 0, binding = 6) writeonly buffer links_b { uvec4  GILinks[]; };     // per item 2 x gi_links_v: { key, r, g, b (float bits) }; key: instance << 16 | surfel (empty: ~0); the tail's: 1 << 31 | instance
+layout(std430, set = 0, binding = 6)           buffer links_b { uvec4  GILinks[]; };     // per item 2 x gi_links_v: { key, r, g, b (float bits) }; key: instance << 16 | surfel (empty: ~0); the tail's: 1 << 31 | instance
 layout(std430, set = 0, binding = 7) writeonly buffer d_b     { vec4   GILinkD[]; };     // per item: D, the dropped weight's luminance
-layout(push_constant) uniform push_t { int m_nItems, m_TlasRoot, m_PrimOffset, m_First; } Push;
+layout(std430, set = 0, binding = 8) writeonly buffer dir_b   { vec4   GIDir[]; };       // per item: its direct light (mode 1)
+layout(std430, set = 0, binding = 9)  readonly buffer list_b  { uint   GIList[]; };      // mode 2: the items to build
+layout(std430, set = 0, binding = 10) readonly buffer chg_b   { uint   GIChanged[]; };   // mode 3: per instance 1 when it changed
+layout(std430, set = 0, binding = 11) writeonly buffer flag_b { uint   GIFlag[]; };      // mode 3: per item 1 when the change touches it
+layout(push_constant) uniform push_t { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad0, m_Pad1, m_Pad2; } Push;
 
 shared uint s_Key[gi_slots_v];
 shared uint s_Val[gi_slots_v * 3u];
@@ -65,13 +75,39 @@ vec3  Unfix(uint a, uint b, uint c) { return vec3(float(a), float(b), float(c)) 
 
 void main()
 {
+    g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
+    if (Push.m_Mode == 3)           // the items a change touches: its own instance changed, or a link or its tail reads one that did
+    {
+        const int kf = int(gl_GlobalInvocationID.x);
+        if (kf >= Push.m_nItems) return;
+        bool bHit = GIChanged[uint(GIItems[kf].m_Ids.x)] != 0u;
+        const uint Bf = uint(kf) * 2u * gi_links_v;
+        for (uint q = 0u; q < 2u * gi_links_v && !bHit; ++q)
+        {
+            const uint Kq = GILinks[Bf + q].x;
+            if (Kq == gi_empty_v) continue;
+            bHit = GIChanged[(Kq & 0x80000000u) != 0u ? (Kq & 0x7FFFFFFFu) : (Kq >> 16)] != 0u;
+        }
+        GIFlag[kf] = bHit ? 1u : 0u;
+        return;
+    }
+    if (Push.m_Mode == 1)           // the direct light at each item's surfel (world::Direct at its center): what its links' weights carry
+    {
+        const int kd = Push.m_First + int(gl_GlobalInvocationID.x);
+        if (kd >= Push.m_nItems) return;
+        const int Id = GIItems[kd].m_Ids.x, sd = GIItems[kd].m_Ids.y;
+        const uint Rd = InstRec(Id);
+        if (GD[Rd + 40u] == 0u || GD[Rd + 1u] != 0u) { GIDir[kd] = vec4(0.0); return; }
+        const uint Sd = MSurfel(MeshOf(Rd), 0u, sd);
+        GIDir[kd] = vec4(Direct(ToWorld(Rd, GV(Sd)), NormalToWorld(Rd, GV(Sd + 3u))), 0.0);
+        return;
+    }
     const uint lid = gl_LocalInvocationID.x;
-    const int  k   = Push.m_First + int(gl_WorkGroupID.x);
+    const int  k   = Push.m_Mode == 2 ? int(GIList[uint(Push.m_First) + gl_WorkGroupID.x]) : Push.m_First + int(gl_WorkGroupID.x);
     for (uint j = lid; j < gi_slots_v; j += 64u) { s_Key[j] = gi_empty_v; s_Val[3u * j] = 0u; s_Val[3u * j + 1u] = 0u; s_Val[3u * j + 2u] = 0u; }
     if (lid < gi_tslots_v) { s_TKey[lid] = gi_empty_v; s_TVal[3u * lid] = 0u; s_TVal[3u * lid + 1u] = 0u; s_TVal[3u * lid + 2u] = 0u; }
     if (lid < 3u) s_Dropped[lid] = 0u;
     barrier();
-    g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
     vec3 Dsum = vec3(0);
     const bool bItem = k < Push.m_nItems && GD[InstRec(GIItems[k].m_Ids.x) + 40u] != 0u && GD[InstRec(GIItems[k].m_Ids.x) + 1u] == 0u;
     if (bItem)
@@ -83,11 +119,11 @@ void main()
         const vec3 Sc = GV(Sb), Sn = GV(Sb + 3u);
         const vec3 C = ToWorld(R, Sc), N = NormalToWorld(R, Sn);
         const bool bSpread = GD[6] != 0u && GD[M + 14u] != gi_none_v;
-        const uint o0 = bSpread ? GD[GD[M + 14u] + uint(s)] : 0u, nO = bSpread ? GD[GD[M + 14u] + uint(s) + 1u] - o0 : 0u;
+        const uint o0 = bSpread ? GD[GD[M + 14u] + uint(s)] : 0u, nO = bSpread ? GD[GD[M + 14u] + uint(s) + 1u] - o0 + 1u : 0u;     // (+1: its center)
         for (int r = int(lid); r < Rn; r += 64)
         {
             vec3 Cr = C, Nr = N;
-            if (nO > 1u) { const uint o = o0 + uint(r) % nO; Cr = ToWorld(R, GV(GD[M + 15u] + 3u * o)); Nr = NormalToWorld(R, GV(GD[M + 16u] + 3u * o)); }
+            if (nO > 1u) { vec3 Po, No; GIOrigin(M, o0, uint(r) % nO, s, Po, No); Cr = ToWorld(R, Po); Nr = NormalToWorld(R, No); }
             const vec3 D = StratifiedCosineDir(Nr, r, Rn, Off1, Off2);
             const gi_hit H = GICast(Cr + Nr * 1e-3, D, 1e30);
             if (H.m_Inst < 0) { Dsum += SkyAt(D) * (gi_pi_v / float(Rn)); continue; }

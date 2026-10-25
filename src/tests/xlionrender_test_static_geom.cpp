@@ -129,6 +129,58 @@ int main()
         Device.Destroy(std::move(Texture));
     }
 
+    // Materials of one fragment shader and state share their pipelines (instance::m_SharedPipelines): three with their own textures make one
+    // rigid pipeline, and each still draws its own texture; another state is another pipeline; the last one destroyed lets it go
+    {
+        static constexpr std::uint32_t s_Frag[] = {
+            #include "xlionrender_test_material_frag.h"
+        };
+        xgpu::shader Frag;
+        CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "material shader");
+
+        const std::uint32_t Texels[3] = { 0xff0000ffu, 0xff000080u, 0xff000040u };      // red 1, ~0.5, ~0.25 (UNORM, little endian RGBA)
+        std::array<xgpu::texture, 3>            Textures;
+        std::array<xlionrender::material_id, 3> Materials;
+        const int Before = Renderer.getPipelineCount();
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto Mips = std::array{ xgpu::texture::setup::mip_size{ sizeof(Texels[i]) } };
+            CHECK(!Device.Create(Textures[i], { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
+                                              , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Texels[i]), sizeof(Texels[i]) }, .m_isGamma = false }), "shared material texture");
+            const auto Slots = std::array<xgpu::texture*, 2>{ nullptr, &Textures[i] };
+            CHECK(!Renderer.CreateMaterial(Materials[i], Frag, Slots), "CreateMaterial %d", i);
+        }
+        CHECK(Renderer.getPipelineCount() == Before + 1, "Three materials of one shader and state: %d new pipelines, expected 1", Renderer.getPipelineCount() - Before);
+
+        std::vector<float> M;
+        for (int i = 0; i < 3; ++i)
+        {
+            Scene.m_Draws = { { .m_Mesh = Static, .m_Material = Mat, .m_Materials = { Materials[i] } } };
+            CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, M), "Render shared material %d", i);
+            const float Expected = 3.0f * float(Texels[i] & 0xff) / 255.0f;
+            int n = 0;
+            for (float v : M) if (v != 0) { CHECK(std::abs(v - Expected) < 0.01f, "Shared material %d: texel %f, expected %f", i, v, Expected); ++n; }
+            CHECK(n == nCovered, "Shared material %d covered %d texels, the standard path %d", i, n, nCovered);
+        }
+        CHECK(Renderer.getPipelineCount() == Before + 1, "Drawing them made %d pipelines, expected 1", Renderer.getPipelineCount() - Before);
+
+        xlionrender::material_id Other;
+        const auto Slots = std::array<xgpu::texture*, 2>{ nullptr, &Textures[0] };
+        CHECK(!Renderer.CreateMaterial(Other, Frag, Slots, { .m_bDoubleSided = true }), "CreateMaterial double sided");
+        CHECK(Renderer.getPipelineCount() == Before + 2, "Another state: %d new pipelines, expected 2", Renderer.getPipelineCount() - Before);
+
+        Renderer.DestroyMaterial(Materials[0]);
+        Renderer.DestroyMaterial(Materials[1]);
+        CHECK(Renderer.getPipelineCount() == Before + 2, "A pipeline stays while a material uses it");
+        Scene.m_Draws = { { .m_Mesh = Static, .m_Material = Mat, .m_Materials = { Materials[2] } } };
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, M), "Render the last shared material");
+        for (float v : M) if (v != 0) CHECK(std::abs(v - 3.0f * 64 / 255) < 0.01f, "The last shared material: texel %f", v);
+        Renderer.DestroyMaterial(Materials[2]);
+        Renderer.DestroyMaterial(Other);
+        CHECK(Renderer.getPipelineCount() == Before, "Every material destroyed: %d pipelines left over", Renderer.getPipelineCount() - Before);
+        for (auto& T : Textures) Device.Destroy(std::move(T));
+    }
+
     // Material parameters (MaterialParams, set 1 binding 9): the second material's block sits after the first's; the shader finds it by MaterialBase
     {
         static constexpr std::uint32_t s_Frag[] = {

@@ -30,6 +30,7 @@ bool       g_GIMoments           = true;        // GIVisibility's moment test (t
 // lists 100+, the Golem 139 on average). Bits 16-23 of the GI reference override it (measurement: XLION_GI_PIXEL_CAP; 255: all)
 const uint gi_pixel_cap_v = 32u;
 uint       g_GIPixelCap   = gi_pixel_cap_v;
+bool       g_GINoCorners  = false;      // measurement (XLION_GI_ABLATE=pixel_nocorners, GI reference bit 24): the per-pixel read without the corner weights
 uint GIPixelCap(in const uint Ref) { const uint c = (Ref >> 16u) & 0xFFu; return c == 0u ? gi_pixel_cap_v : c == 255u ? 0xFFFFFFFFu : c; }
 uint GIDebugCode(in const uint Ref) { return Ref == gi_none_v ? 0u : ((Ref >> gi_debug_shift_v) & 3u) | ((Ref >> 10u) & 0x4u); }    // scene::gi_debug
 
@@ -166,6 +167,17 @@ bool GIReadCell(in const vec3 P, in const vec3 N, out uint First, out uint Count
     return g_GICellHit;
 }
 
+// A part's list (surfel_mesh::PackReadGrid): its count word (header word 3, low 16 bits) is 0x8000 | its entries with corner weights | its
+// all-seen ones << 7 (16 bits each, two to a word, after the others), else the count of entries as they are. At: the list's first word
+uint GIListCount(in const uint Code) { return (Code & 0x8000u) != 0u ? (Code & 0x7Fu) + ((Code >> 7u) & 0x7Fu) : Code; }
+uint GIListEntry(in const uint At, in const uint Code, in const uint i)
+{
+    const uint nF = (Code & 0x8000u) != 0u ? (Code & 0x7Fu) : 0xFFFFu;
+    if (i < nF) return GIMesh[At + i];
+    const uint h = i - nF, w = GIMesh[At + nF + (h >> 1u)];
+    return ((h & 1u) == 0u ? (w & 0xFFFFu) : (w >> 16u)) | 0xFFFF0000u;
+}
+
 // How much the surface at P sees a listed surfel (surfel_mesh::ReadEntryWeight): the entry's 4 corner weights (4 bits each, the cell's
 // corners in the patch's plane) blended by P's place in its cell
 float GIReadWeight(in const uint e, in const vec3 P, in const vec3 N, in const vec3 PatchN)
@@ -186,9 +198,9 @@ uint SurfelGIDominant(in const vec3 P, in const vec3 N)
     float BestW = 0.0;
     vec3 PatchN;
     GIReadCell(P, N, First, Count, PatchN, Patches, nPatches);
-    for (uint i = 0u; i < Count; ++i)
+    for (uint i = 0u; i < GIListCount(Count); ++i)
     {
-        const uint  e = GIMesh[GIMesh[5] + First + i], s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
+        const uint  e = GIListEntry(GIMesh[5] + First, Count, i), s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
         const uint  b = GIMesh[0] + 8u * s;
         const float c = dot(GISurfelNormal(b), N);
         const float f = max(0.0, 1.0 - length(P - GISurfelCenter(b)) / (2.0 * uintBitsToFloat(GIMesh[b + 3u])));
@@ -206,7 +218,7 @@ vec3 SurfelGIWhyUnsupported(in const vec3 P, in const vec3 N, in const uint Ligh
     uint First, Count, Patches, nPatches;
     vec3 PatchN;
     if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches)) return vec3(1.0, 0.0, 1.0);
-    if (Count == 0u) return vec3(0.45, 0.0, 0.75);
+    if (GIListCount(Count) == 0u) return vec3(0.45, 0.0, 0.75);
     return vec3(0.9, 0.05, 0.05);
 }
 bool SurfelGIIsPatch(in const uint s) { return s != 0xFFFFFFFFu && (GIMesh[GIMesh[0] + 8u * s + 7u] >> 31u) != 0u; }     // (PatchDefects: COVERAGE's yellow)
@@ -237,9 +249,9 @@ vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const
     Relaxed = vec4(0.0);                                            // the same without the moments' test (SurfelGIQuery's second tier)
     g_GIReflSum = vec3(0.0); g_GIReflRelaxed = vec3(0.0);
     const bool bRefl = dot(g_GIReflDir, g_GIReflDir) > 0.5;
-    for (uint i = 0u; i < min(Count, g_GIPixelCap); ++i)            // (the lists are nearest first: surfel_mesh::SortReadLists)
+    for (uint i = 0u; i < min(GIListCount(Count), g_GIPixelCap); ++i)            // (the lists are nearest first: surfel_mesh::SortReadLists)
     {
-        const uint  e = GIMesh[GIMesh[5] + First + i], s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
+        const uint  e = GIListEntry(GIMesh[5] + First, Count, i), s = e & 0xFFFFu;       // the surfel, and how much the surface sees it (GIReadWeight)
         const uint  b = GIMesh[0] + 8u * s;
         const float c = dot(GISurfelNormal(b), N);
         if (c < 0.5) continue;
@@ -250,7 +262,7 @@ vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const
         // levels: no pop at the switch)
         const uint  sl = Level == 1u ? (GIMesh[b + 7u] & 0xFFFFu) : s;      // (bit 31: a patch surfel)
         const uint  bl = Level == 1u ? GIMesh[1] + 8u * sl : b;
-        const float w0 = f * f * c * cn * GIReadWeight(e, P, N, PatchN) * GIValidity(LightOffset + sl);
+        const float w0 = f * f * c * cn * (g_GINoCorners ? 1.0 : GIReadWeight(e, P, N, PatchN)) * GIValidity(LightOffset + sl);
         if (w0 <= 0.0) continue;
         const vec3  B = GIBasisRead(LightOffset + sl, GISurfelNormal(bl), Nmap);           // the normal-mapped normal reads the basis
         const vec3  Br = bRefl ? GIBasisRead(LightOffset + sl, GISurfelNormal(bl), g_GIReflDir) : vec3(0.0);
@@ -288,9 +300,9 @@ vec3 SurfelGILocalMean(in const vec3 P, in const vec3 N, in const uint LightOffs
     vec3 PatchN;
     vec4 Sum = vec4(0.0);
     if (GIReadCell(P, N, First, Count, PatchN, Patches, nPatches))
-        for (uint i = 0u; i < min(Count, gi_fallback_cap_v); ++i)
+        for (uint i = 0u; i < min(GIListCount(Count), gi_fallback_cap_v); ++i)
         {
-            const uint  s  = GIMesh[GIMesh[5] + First + i] & 0xFFFFu;
+            const uint  s  = GIListEntry(GIMesh[5] + First, Count, i) & 0xFFFFu;
             const uint  b  = GIMesh[0] + 8u * s;
             const float f  = max(0.0, 1.0 - length(P - GISurfelCenter(b)) / (2.0 * uintBitsToFloat(GIMesh[b + 3u])));
             const uint  sl = Level == 1u ? (GIMesh[b + 7u] & 0xFFFFu) : s;

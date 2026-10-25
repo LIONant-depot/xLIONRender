@@ -43,6 +43,9 @@ namespace xlionrender
         constexpr std::uint32_t s_GISolveComp[] = {
             #include "xlionrender_gi_solve_comp.h"
         };
+        constexpr std::uint32_t s_GIGhostsComp[] = {        // GI sections: the ghosts' copy
+            #include "xlionrender_gi_ghosts_comp.h"
+        };
 
         // FNV-1a over a caster's identity and state: a different value is a different (or moved) caster
         std::uint64_t Hash(std::uint64_t H, const void* pData, std::size_t Size) noexcept
@@ -140,6 +143,8 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    static int g_nSceneBinds = 0, g_nSceneDraws = 0;
+    static double g_BindMs = 0, g_DrawMs = 0;     // measurement only (XLION_FRAME_TIMES): the main scene pass's binds and cluster draws
     // Measurement only (XLION_GPU_TIMES): GPU timestamps of the GI update's parts (slots: before Submit, after it, before Show, after it)
     namespace { struct gi_times { xgpu::timestamps m_T; bool m_bOk = false; std::vector<std::uint64_t> m_Ns; double m_Sum[3] = {}; int m_n = 0; }; }
     static gi_times* GITimes(const void* pKey, xgpu::device& Device) noexcept
@@ -166,6 +171,7 @@ namespace xlionrender
     void instance::updateGI( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
     {
         m_DrawGI.assign(Scene.m_Draws.size(), { 0u, 0xFFFFFFFFu });
+        m_DrawGISec.assign(Scene.m_Draws.size(), {});
         if( !Scene.m_GI.m_bEnable ) return;
         const auto TGI = std::chrono::steady_clock::now();
         const auto MsSince = [](std::chrono::steady_clock::time_point T) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T).count(); };
@@ -175,7 +181,7 @@ namespace xlionrender
         if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
         {
             m_pGITrace = std::make_unique<gi::gpu_trace>();
-            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp }) )
+            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp }) )
                 { m_pGITrace.reset(); m_bGITraceFailed = true; }
         }
         // The light lives on the GPU (m_bGPUOwned). Turned off, the GPU's light comes back into the world first (a read back: one frame
@@ -205,15 +211,19 @@ namespace xlionrender
         }
 
         std::vector<int> DrawId(Scene.m_Draws.size(), -1);
+        std::vector<std::vector<int>> DrawSecIds(Scene.m_Draws.size());     // GI sections: per draw its sections' world instances
         for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
         {
             const auto&         D  = Scene.m_Draws[i];
             const std::uint32_t ID = std::uint32_t(D.m_Instance);
             const auto*         pM = findMesh(D.m_Mesh);
-            if( ID == 0 || pM == nullptr || !pM->m_pGI ) continue;
-            auto [It, bNew] = m_GIIds.try_emplace(ID, -1);
+            if( ID == 0 || pM == nullptr || (!pM->m_pGI && pM->m_GISections.empty()) ) continue;
+            // One world instance for the geometry's surfels (Key: the draw's), or one a section (gi_chunks_plan.md: the object is still one -
+            // moved, recolored, removed as a whole; its sections' ghosts copy their owners). true: it was added
+            const auto Register = [&](int& Id, const gi::surfel_mesh& Mesh, bool bCapture, int Section)
+            {
             // New surfels (a recompile): by the stamp, not the address - the new ones can be allocated where the old ones were
-            if( It->second >= 0 && m_GITrack[It->second].m_GIStamp != pM->m_GIStamp ) { W.Remove(It->second); It->second = -1; }
+            if( Id >= 0 && m_GITrack[Id].m_GIStamp != pM->m_GIStamp ) { W.Remove(Id); Id = -1; }
             // What the GI takes from the draw's materials: which slots it sees through (transparent ones), and its colors (captured)
             const auto TakeMaterials = [&](int Id)
             {
@@ -223,54 +233,86 @@ namespace xlionrender
                 const_cast<mesh_slot*>(pM)->m_bTriColors = false;              // the SURFACE_COLOR view's table: made again from the new capture
                 // a capture still waiting for this instance is of materials it no longer has (one in flight does not publish: processGICapture)
                 std::erase_if(m_GICaptures, [&](const gi_capture_job& J) { return J.m_GIId == Id && !J.m_bRecorded; });
-                if( !pM->m_pGI->m_SurfelMaterial.empty() )      // its surfels' and its triangles' colors: captured from its materials (processGICapture)
+                if( bCapture && !Mesh.m_SurfelMaterial.empty() )      // its surfels' and its triangles' colors: captured from its materials (processGICapture; a section: its own)
                 {
-                    m_GICaptures.push_back({ .m_GIId = Id, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u });
-                    for( std::size_t t = 0; t < pM->m_pGI->m_Tris.size(); t += gi_capture_max_v )
+                    m_GICaptures.push_back({ .m_GIId = Id, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u, .m_Section = Section });
+                    for( std::size_t t = 0; t < Mesh.m_Tris.size(); t += gi_capture_max_v )
                         m_GICaptures.push_back({ .m_GIId = Id, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u
-                                               , .m_bTriangles = true, .m_First = std::uint32_t(t) });
+                                               , .m_bTriangles = true, .m_First = std::uint32_t(t), .m_Section = Section });
                 }
             };
             const auto Role = gi::role((D.m_Instance >> draw_gi_role_shift_v) & 3u);
-            if( It->second < 0 )
+            const bool bAdded = Id < 0;
+            if( Id < 0 )
             {
                 const auto& Mat = D.m_Material;
-                It->second = W.Add(*pM->m_pGI, D.m_L2W, Mat.m_BaseColor * (1 - Mat.m_Metallic));
-                W.SetRole(It->second, Role);
-                m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), It->second + 1));
-                m_GITrack[It->second] = { D.m_L2W, pM->m_pGI.get(), pM->m_GIStamp, 0, D.m_Materials };
-                TakeMaterials(It->second);
-                if( !pM->m_pGI->m_SurfelMaterial.empty() ) W.SetProvisional(It->second, true);     // (gi_dynamic_master_plan.md 7a: until its captures are in)
+                Id = W.Add(Mesh, D.m_L2W, Mat.m_BaseColor * (1 - Mat.m_Metallic));
+                W.SetRole(Id, Role);
+                m_GITrack.resize(std::max<std::size_t>(m_GITrack.size(), Id + 1));
+                m_GITrack[Id] = { D.m_L2W, &Mesh, pM->m_GIStamp, 0, D.m_Materials };
+                TakeMaterials(Id);
+                if( bCapture && !Mesh.m_SurfelMaterial.empty() ) W.SetProvisional(Id, true);     // (gi_dynamic_master_plan.md 7a: until its captures are in)
             }
             else
             {
-                if( m_GITrack[It->second].m_Materials != D.m_Materials )      // its materials were made again (a material compiled again) or changed
+                if( m_GITrack[Id].m_Materials != D.m_Materials )      // its materials were made again (a material compiled again) or changed
                 {
-                    m_GITrack[It->second].m_Materials = D.m_Materials;
-                    TakeMaterials(It->second);
+                    m_GITrack[Id].m_Materials = D.m_Materials;
+                    TakeMaterials(Id);
                 }
-                W.SetRole(It->second, Role);                                   // (nothing when it is the same)
-                if( std::memcmp(&m_GITrack[It->second].m_L2W, &D.m_L2W, sizeof(xmath::fmat4)) != 0 )
+                W.SetRole(Id, Role);                                   // (nothing when it is the same)
+                if( std::memcmp(&m_GITrack[Id].m_L2W, &D.m_L2W, sizeof(xmath::fmat4)) != 0 )
                 {
-                    W.SetTransform(It->second, D.m_L2W);
-                    m_GITrack[It->second].m_L2W = D.m_L2W;
+                    W.SetTransform(Id, D.m_L2W);
+                    m_GITrack[Id].m_L2W = D.m_L2W;
                 }
             }
-            m_GITrack[It->second].m_Render = m_GIRender;
-            DrawId[i] = It->second;
-        }
-        for( auto It = m_GIIds.begin(); It != m_GIIds.end(); )
-        {
-            if( m_GITrack[It->second].m_Render != m_GIRender )
+            m_GITrack[Id].m_Render = m_GIRender;
+            return bAdded;
+            };
+            if( pM->m_pGI )
             {
-                W.Remove(It->second);
-                auto& T = m_GITrack[It->second];
-                if( T.m_Offset >= 0 ) m_GIFree.push_back({ T.m_Offset, T.m_Size + 1 });     // its place in the rings
-                T.m_Offset = -1;
-                It = m_GIIds.erase(It);
+                auto [It, bNew] = m_GIIds.try_emplace(ID, -1);
+                (void)Register(It->second, *pM->m_pGI, true, -1);
+                DrawId[i] = It->second;
+                continue;
             }
-            else ++It;
+            // its sections: one world instance each, then their ghosts named by the owners' instances (equal levels: the plan's gate)
+            auto& Ids = DrawSecIds[i];
+            bool bAny = false;
+            for( std::size_t k = 0; k < pM->m_GISections.size(); ++k )
+            {
+                auto [It, bNew] = m_GISecIds.try_emplace((std::uint64_t(ID) << 16) | std::uint64_t(k), -1);
+                bAny |= Register(It->second, *pM->m_GISections[k].m_pGI, true, int(k));
+                Ids.push_back(It->second);
+            }
+            if( bAny )
+                for( std::size_t k = 0; k < pM->m_GISections.size(); ++k )
+                {
+                    const auto& S = pM->m_GISections[k];
+                    std::vector<std::array<int, 2>> Owners;
+                    Owners.reserve(S.m_Ghosts.size());
+                    for( const auto& G : S.m_Ghosts ) Owners.push_back({ G.m_Chunk < Ids.size() ? Ids[G.m_Chunk] : -1, int(G.m_Local) });
+                    W.SetGhosts(Ids[k], S.m_nOwned, std::move(Owners));
+                }
         }
+        const auto Retire = [&](auto& Ids)
+        {
+            for( auto It = Ids.begin(); It != Ids.end(); )
+            {
+                if( m_GITrack[It->second].m_Render != m_GIRender )
+                {
+                    W.Remove(It->second);
+                    auto& T = m_GITrack[It->second];
+                    if( T.m_Offset >= 0 ) m_GIFree.push_back({ T.m_Offset, T.m_Size + 1 });     // its place in the rings
+                    T.m_Offset = -1;
+                    It = Ids.erase(It);
+                }
+                else ++It;
+            }
+        };
+        Retire(m_GIIds);
+        Retire(m_GISecIds);
 
         // The lights: the sun, the sky (or the flat ambient as a sky), the local lights as points (ponytail: spots as points)
         gi::lights L;
@@ -346,7 +388,9 @@ namespace xlionrender
         {   // (gi_dynamic_master_plan.md 7a) an instance is provisional until no capture of it is queued: all of them in (or dropped)
             std::vector<char> Queued(std::size_t(W.InstanceCount()), 0);
             for( const auto& J : m_GICaptures ) if( std::size_t(J.m_GIId) < Queued.size() ) Queued[std::size_t(J.m_GIId)] = 1;
-            for( const auto& [Key, Id] : m_GIIds ) if( !Queued[std::size_t(Id)] && W.IsProvisional(Id) ) W.SetProvisional(Id, false);
+            const auto Release = [&](const auto& Ids) { for( const auto& [Key, Id] : Ids ) if( std::size_t(Id) < Queued.size() && !Queued[std::size_t(Id)] && W.IsProvisional(Id) ) W.SetProvisional(Id, false); };
+            Release(m_GIIds);
+            Release(m_GISecIds);        // (the sections' too: they were never released - their hits brought nothing, no colour bounce)
         }
         m_GICapturesQuiet = m_GICaptures.empty() ? m_GICapturesQuiet + 1 : 0;
         if( s_bHold && m_GICapturesQuiet < 10 ) return;
@@ -373,8 +417,10 @@ namespace xlionrender
             const auto TSubmit = std::chrono::steady_clock::now();
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 0);
             m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
-            // Experiment D (XLION_GI_LINKS=<rays>[,settle frames[,surfels a frame]]): the links built on the GPU once the rays settled, then solved every frame
-            static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 0, 30, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
+            // The link solve, on by default (Tomas 2026-10-24: it is what settles the light): the links built on the GPU once the rays settled (30
+            // frames), then solved every frame and the rays stop (moving objects still get them). XLION_GI_LINKS=<rays>[,settle frames[,surfels a
+            // frame]] changes it; XLION_GI_LINKS=0 turns it off
+            static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 64, 30, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
             if( s_Links[0] > 0 ) m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 1);
             if( (m_bGIToCPU && !m_bGIToCPUAsked) || (!m_GIDumpPath.empty() && !m_bGIDumpAsked) )     // the GPU's light back into the world (the next Collect)
@@ -412,7 +458,7 @@ namespace xlionrender
         {
             for( auto It = m_GIFree.begin(); It != m_GIFree.end(); ++It )
                 if( It->second >= Size ) { const int At = It->first; It->first += Size; It->second -= Size; if( It->second == 0 ) m_GIFree.erase(It); return At; }
-            if( m_GIAllocTop + Size > gi_light_region_v ) return -1;
+            if( m_GIAllocTop + Size > m_GIRegion ) return -1;
             const int At = m_GIAllocTop; m_GIAllocTop += Size; return At;
         };
         const auto Place = [&](gi_track& T, int n) -> bool
@@ -424,23 +470,48 @@ namespace xlionrender
             for( auto& P : T.m_MomPending ) P.clear();
             return T.m_Offset >= 0;
         };
+        // A device-local (GPU_READ) buffer is made from its data: zeros of its size (the host-visible one: none)
+        std::vector<std::uint32_t> ZeroWords;
+        const auto Zeros = [&](xgpu::buffer::setup::usage U, std::size_t nWords) -> std::optional<void*> { if( U != xgpu::buffer::setup::usage::GPU_READ ) return std::nullopt; ZeroWords.assign(nWords, 0u); return static_cast<void*>(ZeroWords.data()); };
+        const auto ForEachGIId = [&](auto&& Fn) { for( const auto& [K, Id] : m_GIIds ) Fn(Id); for( const auto& [K, Id] : m_GISecIds ) Fn(Id); };
         bool bCompact = false;
-        for( const auto& [ID, Id] : m_GIIds )
+        ForEachGIId([&](int Id)
         {
             auto& T = m_GITrack[Id];
             const int n = int(W.InstanceLight(Id).size());
             if( (T.m_Offset < 0 || T.m_Size != n) && !Place(T, n) ) bCompact = true;
-        }
+        });
         if( bCompact )
         {
+            // The region grown to what is drawn (a power of 2, 2^22 at most: 64 MB of light, 256 MB of moments host-visible) - its rings made
+            // again, every place given again (ponytail: never shrunk)
+            std::size_t Need = 0;
+            ForEachGIId([&](int Id) { Need += W.InstanceLight(Id).size() + 1; });
+            if( Need > std::size_t(m_GIRegion) && m_GIRegion < (1 << 22) )
+            {
+                int Region = m_GIRegion;
+                while( std::size_t(Region) < Need && Region < (1 << 22) ) Region <<= 1;
+                xgpu::buffer Light, Moments;
+                const auto Usage = m_bGIRingsLocal ? xgpu::buffer::setup::usage::GPU_READ : xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ;
+                if( !m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * Region, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * Region * 4) })
+                 && !m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * Region * gi::moment_texels_v, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * Region * gi::moment_texels_v) }) )
+                {
+                    // (xgpu::buffer has no move: the handles swapped; the old ones' destructors queue them in the device's deferred destroy)
+                    m_GILightRing.m_Private.swap(Light.m_Private); m_GIMomentRing.m_Private.swap(Moments.m_Private);
+                    m_GIRegion = Region;
+                    xgpu::buffer L2, M2;                                    // the other kind: made again at its next switch, at this size
+                    m_GILightOther.m_Private.swap(L2.m_Private); m_GIMomentOther.m_Private.swap(M2.m_Private);
+                    m_GIOtherRegion = 0;
+                }
+            }
             m_GIFree.clear(); m_GIAllocTop = 0;
             for( auto& T : m_GITrack ) T.m_Offset = -1;
-            for( const auto& [ID, Id] : m_GIIds ) (void)Place(m_GITrack[Id], int(W.InstanceLight(Id).size()));
+            ForEachGIId([&](int Id) { (void)Place(m_GITrack[Id], int(W.InstanceLight(Id).size())); });
         }
-        for( const auto& [ID, Id] : m_GIIds )
+        ForEachGIId([&](int Id)
         {
             auto& T = m_GITrack[Id];
-            if( bGPU ) { T.m_bFull.fill(true); T.m_bMomFull.fill(true); T.m_MomentsReset = ~0u; continue; }     // (the GPU writes them; back on the CPU: all of them again)
+            if( bGPU ) { T.m_bFull.fill(true); T.m_bMomFull.fill(true); T.m_MomentsReset = ~0u; return; }     // (the GPU writes them; back on the CPU: all of them again)
             const auto& M = W.InstanceMoments(Id);
             if( T.m_MomentsReset != W.MomentsReset(Id) || T.m_Moments.size() != M.size() * gi::moment_texels_v )     // all of them again
             {
@@ -451,26 +522,47 @@ namespace xlionrender
             }
             if( W.ShownFull(Id) ) T.m_bFull.fill(true);
             else for( int f = 0; f < ring_frames_v; ++f ) if( !T.m_bFull[f] ) T.m_Pending[f].insert(T.m_Pending[f].end(), W.ShownChanged(Id).begin(), W.ShownChanged(Id).end());
+        });
+
+        // The rings of the kind this frame writes: device-local while the GPU traces (Show writes them), host-visible for the CPU world
+        if( bGPU != m_bGIRingsLocal )
+        {
+            if( m_GIOtherRegion != m_GIRegion )
+            {
+                const auto Usage = bGPU ? xgpu::buffer::setup::usage::GPU_READ : xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ;
+                xgpu::buffer Light, Moments;
+                if( !m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * m_GIRegion, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * m_GIRegion * 4) })
+                 && !m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * m_GIRegion * gi::moment_texels_v, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * m_GIRegion * gi::moment_texels_v) }) )
+                {
+                    m_GILightOther.m_Private.swap(Light.m_Private); m_GIMomentOther.m_Private.swap(Moments.m_Private);
+                    m_GIOtherRegion = m_GIRegion;
+                }
+            }
+            if( m_GIOtherRegion == m_GIRegion )
+            {
+                m_GILightRing.m_Private.swap(m_GILightOther.m_Private); m_GIMomentRing.m_Private.swap(m_GIMomentOther.m_Private);
+                m_bGIRingsLocal = bGPU;
+                ForEachGIId([&](int Id) { m_GITrack[Id].m_bFull.fill(true); m_GITrack[Id].m_bMomFull.fill(true); });     // (the CPU's: all of it again)
+            }
         }
+        const bool bShowOnGPU = bGPU && m_bGIRingsLocal;
 
         // This frame's slot: what each drawn instance has not had
         const std::uint64_t Frame = m_Device.getFrameIndex();
         const int Slot = int(Frame % ring_frames_v);
-        const int Base = Slot * gi_light_region_v;
+        const int Base = Slot * m_GIRegion;
         // scene::gi_debug in the shaders' bits (xlionrender_surfel_gi.glsl GIDebugCode): 1..3 at bit 9, 4 and 8 at bits 12 and 13
         const std::uint32_t GIDebugBits = ((std::uint32_t(Scene.m_GI.m_Debug) & 3u) << 9) | ((std::uint32_t(Scene.m_GI.m_Debug) & 0xCu) << 10)
                                         | (Scene.m_GI.m_bMoments ? 0u : 0x4000u);                   // gi_no_moments_v
         const auto TRing = std::chrono::steady_clock::now();
         std::size_t Entries = 0, MomentUints = 0;
-        (void)m_GILightRing.MemoryMapFrameRegion(std::size_t(Base), std::size_t(gi_light_region_v), [&](void* pMemory)     // a uvec4 a surfel: 3 colors in RGB9E5, the validity's bits
+        const auto RingWrite = [&](void* pMemory)     // a uvec4 a surfel: 3 colors in RGB9E5, the validity's bits (null: the rings are local, Show writes them)
         {
             auto* pOut = static_cast<std::array<std::uint32_t, 4>*>(pMemory);
-            for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
+            const auto WriteOne = [&](int Id, std::pair<std::uint32_t, std::uint32_t>& DrawGI)
             {
-                const int Id = DrawId[i];
-                if( Id < 0 ) continue;
                 auto& T = m_GITrack[Id];
-                if( T.m_Offset < 0 ) { ++m_GIStats.m_nDropped; continue; }  // ponytail: no GI for what does not fit
+                if( T.m_Offset < 0 ) { ++m_GIStats.m_nDropped; return; }  // ponytail: no GI for what does not fit
                 const auto& E = W.BasisLight(Id);              // shown: the HL2 basis, spatially filtered (the solver keeps its own)
                 const auto& V = W.InstanceValid(Id);
                 const auto Write = [&](std::size_t k)
@@ -480,35 +572,45 @@ namespace xlionrender
                 // The slot before its surfels: its mean light, what a pixel no read supports shows (SurfelGIMean: the solver's policy too,
                 // gi::world::Unsupported). Then its surfels
                 const auto& Mean = W.MeanLight(Id);
-                { const std::uint32_t m = gi::PackRGB9E5(Mean); pOut[std::size_t(T.m_Offset)] = { m, m, m, std::bit_cast<std::uint32_t>(1.0f) }; }
+                if( pOut ) { const std::uint32_t m = gi::PackRGB9E5(Mean); pOut[std::size_t(T.m_Offset)] = { m, m, m, std::bit_cast<std::uint32_t>(1.0f) }; }
                 ++Entries;
                 if( bGPU ) {}                                       // (its surfels: Show)
                 else if( T.m_bFull[Slot] ) { for( std::size_t k = 0; k < E.size(); ++k ) Write(k); Entries += E.size(); T.m_bFull[Slot] = false; }
                 else { for( const int k : T.m_Pending[Slot] ) if( std::size_t(k) < E.size() ) Write(std::size_t(k)); Entries += T.m_Pending[Slot].size(); }
                 T.m_Pending[Slot].clear();
-                m_DrawGI[i] = { std::uint32_t(Base + T.m_Offset + 1), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
+                DrawGI = { std::uint32_t(Base + T.m_Offset + 1), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
                 {   // measurement only (XLION_GI_ABLATE, updateGI above): the pixel read's variants
                     static const std::string s_Px = [] { const char* p = std::getenv("XLION_GI_ABLATE"); return std::string(p ? p : ""); }();
-                    if( s_Px.find("pixel_vertex") != std::string::npos )    m_DrawGI[i].second &= ~0x100u;
-                    if( s_Px.find("pixel_nomoments") != std::string::npos ) m_DrawGI[i].second |= 0x4000u;
-                    if( s_Px.find("pixel_nolocal") != std::string::npos )   m_DrawGI[i].second |= 0x8000u;     // (mb_standard_pbr.frag: no SurfelGILocalMean)
-                    if( s_Px.find("pixel_none") != std::string::npos )      m_DrawGI[i] = { 0u, 0xFFFFFFFFu };
+                    if( s_Px.find("pixel_vertex") != std::string::npos )    DrawGI.second &= ~0x100u;
+                    if( s_Px.find("pixel_nomoments") != std::string::npos ) DrawGI.second |= 0x4000u;
+                    if( s_Px.find("pixel_nolocal") != std::string::npos )   DrawGI.second |= 0x8000u;     // (mb_standard_pbr.frag: no SurfelGILocalMean)
+                    if( s_Px.find("pixel_nocorners") != std::string::npos ) DrawGI.second |= 0x01000000u; // (the per-pixel read without its corner weights)
+                    if( s_Px.find("pixel_none") != std::string::npos )      DrawGI = { 0u, 0xFFFFFFFFu };
                     static const std::uint32_t s_Cap = [] { const char* p = std::getenv("XLION_GI_PIXEL_CAP"); return p ? std::uint32_t(std::clamp(std::atoi(p), 0, 255)) : 0u; }();
-                    if( s_Cap && m_DrawGI[i].second != 0xFFFFFFFFu ) m_DrawGI[i].second |= s_Cap << 16;     // (xlionrender_surfel_gi.glsl GIPixelCap)
+                    if( s_Cap && DrawGI.second != 0xFFFFFFFFu ) DrawGI.second |= s_Cap << 16;     // (xlionrender_surfel_gi.glsl GIPixelCap)
                 }
+            };
+            for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
+            {
+                if( DrawId[i] >= 0 ) WriteOne(DrawId[i], m_DrawGI[i]);
+                if( DrawSecIds[i].empty() ) continue;
+                m_DrawGISec[i].assign(DrawSecIds[i].size(), { 0u, 0xFFFFFFFFu });
+                for( std::size_t k = 0; k < DrawSecIds[i].size(); ++k ) WriteOne(DrawSecIds[i][k], m_DrawGISec[i][k]);
             }
-        });
+        };
+        if( bShowOnGPU ) RingWrite(nullptr);
+        else (void)m_GILightRing.MemoryMapFrameRegion(std::size_t(Base), std::size_t(m_GIRegion), RingWrite);
         m_GIStats.m_RingCopyMs = MsSince(TRing);
         const auto TMomentsCopy = std::chrono::steady_clock::now();
 
         // The surfels' depth moments at the same index (gi::moment_texels_v per surfel, each a mean and a mean^2 in two 16-bit floats)
-        if( !bGPU ) (void)m_GIMomentRing.MemoryMapFrameRegion(std::size_t(Base) * gi::moment_texels_v, std::size_t(gi_light_region_v) * gi::moment_texels_v, [&](void* pMemory)
+        if( !bGPU ) (void)m_GIMomentRing.MemoryMapFrameRegion(std::size_t(Base) * gi::moment_texels_v, std::size_t(m_GIRegion) * gi::moment_texels_v, [&](void* pMemory)
         {
             auto* pOut = static_cast<std::uint32_t*>(pMemory);
-            for( const auto& [ID, Id] : m_GIIds )
+            ForEachGIId([&](int Id)
             {
                 auto& T = m_GITrack[Id];
-                if( T.m_Offset < 0 ) continue;
+                if( T.m_Offset < 0 ) return;
                 std::uint32_t* pAt = pOut + (std::size_t(T.m_Offset) + 1) * gi::moment_texels_v;
                 if( T.m_bMomFull[Slot] ) { std::memcpy(pAt, T.m_Moments.data(), T.m_Moments.size() * sizeof(std::uint32_t)); MomentUints += T.m_Moments.size(); T.m_bMomFull[Slot] = false; }
                 else for( const int k : T.m_MomPending[Slot] )
@@ -518,14 +620,19 @@ namespace xlionrender
                     MomentUints += gi::moment_texels_v;
                 }
                 T.m_MomPending[Slot].clear();
-            }
+            });
         });
         // G4: on the GPU the shown light of every drawn instance into this frame's region (its places: the means written above)
         if( bGPU )
         {
-            std::vector<int> Places(std::size_t(W.InstanceCount()), -1);
+            // per instance { its place (-1: not drawn), its mean light in RGB9E5 (written before its surfels when the rings are local) }
+            std::vector<int> Places(2 * std::size_t(W.InstanceCount()), -1);
+            const auto PlaceOf = [&](int Id) { if( Id >= 0 && m_GITrack[Id].m_Offset >= 0 ) { Places[2 * std::size_t(Id)] = m_GITrack[Id].m_Offset; Places[2 * std::size_t(Id) + 1] = bShowOnGPU ? int(gi::PackRGB9E5(W.MeanLight(Id))) : -1; } };
             for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
-                if( const int Id = DrawId[i]; Id >= 0 && m_GITrack[Id].m_Offset >= 0 ) Places[std::size_t(Id)] = m_GITrack[Id].m_Offset;
+            {
+                PlaceOf(DrawId[i]);
+                for( const int Id : DrawSecIds[i] ) PlaceOf(Id);
+            }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 2);
             (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 3);
@@ -1266,6 +1373,7 @@ namespace xlionrender
 
             const xgpu::pipeline_instance* pBound     = nullptr;      // the state the last cluster draw left bound
             const cluster_geom*            pBoundGeom = nullptr;
+            const xgpu::buffer*            pBoundGIBuf = nullptr;     // (GI sections: its section's buffer)
 
             // A cluster mesh's submesh with its material (null: the constant one)
             const auto DrawSubmesh = [&]( std::size_t iDraw, const cluster_geom::submesh& Sub, material_slot* pMat )
@@ -1282,13 +1390,22 @@ namespace xlionrender
                     pInstance = &m_StaticGeomInstance;      // the constant material, read from the instance record
                 }
                 const std::uint32_t MaterialBase = pMat ? pMat->m_ParamBase : 0u;
-                if( pInstance != pBound || &G != pBoundGeom )
+                const auto* pMesh = findMesh(D.m_Mesh);
+                const bool  bSections = !bSkin && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
+                // its GI buffer: the geometry's, or (GI sections) the cluster's section's
+                const auto GIBufferOf = [&](std::uint32_t c) -> xgpu::buffer*
                 {
-                    const auto* pMesh = findMesh(D.m_Mesh);
+                    if( bSections ) return const_cast<xgpu::buffer*>(&pMesh->m_GISections[pMesh->m_GIClusterSection[c]].m_Buffer);
+                    return pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy;
+                };
+                const auto Bind = [&](xgpu::buffer* pGIBuffer)
+                {
+                    const auto TB = std::chrono::steady_clock::now();
+                    struct bind_lap { std::chrono::steady_clock::time_point t; ~bind_lap() { g_BindMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count(); } } BindLap{ TB };
                     if( !bSkin )
                     {
                         std::array<xgpu::buffer*, 9> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
-                                                              , pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
+                                                              , pGIBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
                         Cmd.setPipelineInstance(*pInstance, std::span{ GIBuffers });     // every rigid pipeline reads the GI
                     }
                     else
@@ -1299,20 +1416,78 @@ namespace xlionrender
                     Cmd.setDynamicUBO(m_LightUBO, 1);
                     Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                     BindClusterStreams(Cmd, G);
-                    pBound     = pInstance;
-                    pBoundGeom = &G;
-                }
+                    pBound       = pInstance;
+                    pBoundGeom   = &G;
+                    pBoundGIBuf  = pGIBuffer;
+                    ++g_nSceneBinds;
+                };
+                if( pInstance != pBound || &G != pBoundGeom ) Bind(GIBufferOf(Sub.m_iCluster));
 
                 const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                 for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                 {
                     if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
                     const auto& C = G.m_Clusters[c];
-                    if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase });
-                    else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second, MaterialBase });
-                    Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
+                    if( bSkin ) { Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase }); }
+                    else if( bSections )        // GI sections: the cluster's section - its buffer, its place in the light ring, its vertices
+                    {
+                        const std::uint16_t k = pMesh->m_GIClusterSection[c];
+                        if( auto* pBuf = GIBufferOf(c); pBuf != pBoundGIBuf ) Bind(pBuf);
+                        const auto SGI = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
+                        Cmd.setPushConstants(details::push_static_geom{ c, Slot, SGI.first, SGI.second, MaterialBase, pMesh->m_GIClusterVertexDelta[c] });
+                    }
+                    else Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second, MaterialBase });
+                    { const auto TD = std::chrono::steady_clock::now(); Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex)); g_DrawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TD).count(); }
+                    ++g_nSceneDraws;
                 }
             };
+
+            // The depth prepass: the opaque rigid clusters' depth first (no GI read, no material: the same vertex shader, no color), so their
+            // shading below runs once a pixel - at the depth written here (LESS_OR_EQUAL), every pixel behind it rejected before its fragment
+            // runs. Left out (they shade as before, tested against it): blended, masked (their discard), double sided (the prepass culls),
+            // no depth write or test, wireframe, skin. XLION_NO_PREPASS=1: none (measurement)
+            static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
+            if( !s_bNoPrepass )
+            {
+                const cluster_geom* pPrepassGeom = nullptr;
+                for( const auto& Vis : m_Visible )
+                {
+                    const std::size_t iDraw = Vis.m_iDraw;
+                    const auto&       D     = Scene.m_Draws[iDraw];
+                    const auto*       pMesh = Vis.m_pMesh;
+                    const std::uint32_t Slot = m_DrawSlot[iDraw];
+                    if( !pMesh->m_bCluster || Slot == instance_slots::none_v || (bPlan && m_bBoxesOnly) ) continue;
+                    const auto& G = pMesh->m_Geom;
+                    if( G.m_Kind == geom_kind::SKIN ) continue;
+                    const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
+                    for( const auto& Sub : G.m_Submeshes )
+                    {
+                        const auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                        if( pMat )
+                        {
+                            const auto& St = pMat->m_State;
+                            if( St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided || !St.m_bDepthWrite || !St.m_bDepthTest || St.m_bWireframe ) continue;
+                        }
+                        if( &G != pPrepassGeom )
+                        {
+                            std::array<xgpu::buffer*, 9> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
+                            Cmd.setPipelineInstance(m_DepthPrepassInstance, std::span{ Buffers });
+                            Cmd.setDynamicUBO(m_LightUBO, 1);
+                            Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                            BindClusterStreams(Cmd, G);
+                            pPrepassGeom = &G;
+                            pBound = nullptr;           // (the shading's binds start again)
+                        }
+                        for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                        {
+                            if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
+                            const auto& C = G.m_Clusters[c];
+                            Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, 0u });       // (no GI: the vertex shader's read skipped)
+                            Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
+                        }
+                    }
+                }
+            }
 
             // Translucent and additive submeshes: after the opaque ones and the sky, by priority, then back to front
             struct blended_draw { std::int8_t m_Priority; float m_Distance; std::uint32_t m_iDraw; const cluster_geom::submesh* m_pSub; material_slot* m_pMat; };
@@ -1544,8 +1719,10 @@ namespace xlionrender
         auto&       J     = m_GICaptures.front();
         const auto  Frame = m_Device.getFrameIndex();
         const auto* pM    = findMesh(J.m_Mesh);
-        if( pM == nullptr || !pM->m_pGI ) { m_GICaptures.pop_front(); return; }     // (its buffer goes with it)
-        const auto& G     = *pM->m_pGI;
+        const gi::surfel_mesh* pG = pM == nullptr ? nullptr : J.m_Section < 0 ? pM->m_pGI.get()
+                                  : std::size_t(J.m_Section) < pM->m_GISections.size() ? pM->m_GISections[std::size_t(J.m_Section)].m_pGI.get() : nullptr;
+        if( pG == nullptr ) { m_GICaptures.pop_front(); return; }     // (its buffer goes with it)
+        const auto& G     = *pG;
         std::vector<gi::surfel_mesh::surfel_material> TriMats;
         std::vector<gi::v3>               TriN;
         if( J.m_bTriangles )
@@ -1579,7 +1756,7 @@ namespace xlionrender
             std::stable_sort(J.m_Order.begin(), J.m_Order.end(), [&](int a, int b) { return Mats[a].m_iMaterial < Mats[b].m_iMaterial; });
 
             std::vector<xmath::fvec4> Data(2 * std::size_t(n));
-            const auto& L0 = pM->m_pGI->m_Levels[0];
+            const auto& L0 = G.m_Levels[0];
             for( int i = 0; i < n; ++i )
             {
                 const auto& S = Mats[J.m_Order[i]];
@@ -1674,7 +1851,7 @@ namespace xlionrender
                 CapLap(2);
                 m_pGIWorld->SetTriangleEmission(J.m_GIId, J.m_First, Emission);
                 CapLap(3);
-                if( J.m_First + std::size_t(n) >= G.m_Tris.size() )         // its last batch: the SURFACE_COLOR view's table (the mesh's first instance)
+                if( J.m_Section < 0 && J.m_First + std::size_t(n) >= G.m_Tris.size() )      // its last batch: the SURFACE_COLOR view's table (the mesh's first instance)
                 {
                     const auto& All = m_pGIWorld->TriangleAlbedo(J.m_GIId);
                     CapLap(4);
@@ -1684,6 +1861,30 @@ namespace xlionrender
                         (void)buildMeshGI(*pSlot, C);
                         CapLap(5);
                         pSlot->m_bTriColors = true;
+                    }
+                }
+                else if( J.m_Section >= 0 && J.m_First + std::size_t(n) >= G.m_Tris.size() )   // a section's last batch: its buffer again, with its triangles' table
+                {
+                    // A section's triangles are its clusters' (SectionGeometry: in the whole's order), so a cluster's first is the count of the
+                    // section's triangles before it; the clusters of other sections name nothing (their draws bind their own section's buffer)
+                    auto* pSlot = const_cast<mesh_slot*>(pM);
+                    const auto& Cl = pSlot->m_Geom.m_Clusters;
+                    std::vector<std::uint32_t> Order(Cl.size()), First(Cl.size(), 0);
+                    for( std::uint32_t c = 0; c < Order.size(); ++c ) Order[c] = c;
+                    std::sort(Order.begin(), Order.end(), [&](std::uint32_t x, std::uint32_t y) { return Cl[x].m_iIndex < Cl[y].m_iIndex; });
+                    std::uint32_t Off = 0;
+                    for( const auto c : Order )
+                        if( c < pSlot->m_GIClusterSection.size() && pSlot->m_GIClusterSection[c] == std::uint16_t(J.m_Section) ) { First[c] = Off; Off += Cl[c].m_nIndices / 3; }
+                    const auto& All = m_pGIWorld->TriangleAlbedo(J.m_GIId);
+                    if( Off == All.size() )
+                    {
+                        auto& S = pSlot->m_GISections[std::size_t(J.m_Section)];
+                        const std::vector<xmath::fvec3> Colors(All.begin(), All.end());
+                        const auto Packed = PackMeshGI(*S.m_pGI, First, Colors);
+                        xgpu::buffer B;         // (swapped in: the old one's destructor queues it in the device's deferred destroy)
+                        if( !m_Device.Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Packed.size()), .m_pData = const_cast<std::uint32_t*>(Packed.data()) }) )
+                            S.m_Buffer.m_Private.swap(B.m_Private);
+                        CapLap(5);
                     }
                 }
             }
@@ -1845,7 +2046,9 @@ namespace xlionrender
         const auto T2 = clock::now();
 
         updateBudget();
+        const auto T2b = clock::now();
         renderScenePass(Window, Scene, View, W2C, Eye, true);
+        const auto T2c = clock::now();
 
         // HDR -> exposure -> LionMapper -> sRGB output (alpha = coverage)
         {
@@ -1872,5 +2075,16 @@ namespace xlionrender
 
         const auto T3 = clock::now();
         m_CPUTimes = { Ms(T0, T1), Ms(T1, T2), m_LightBuildMs, Ms(T0, T3) };
+        // Measurement only (XLION_FRAME_TIMES): Render's CPU parts, the mean of 120 frames
+        static const bool s_bFrameTimes = std::getenv("XLION_FRAME_TIMES") != nullptr;
+        if( s_bFrameTimes )
+        {
+            static double Sum[5] = {}, nB = 0, nD = 0; static int n = 0;
+            nB += g_nSceneBinds; nD += g_nSceneDraws; g_nSceneBinds = g_nSceneDraws = 0;
+            static double BMs = 0, DMs = 0; BMs += g_BindMs; DMs += g_DrawMs; g_BindMs = g_DrawMs = 0;
+            const double V[5] = { Ms(T0, T1), Ms(T1, T2), Ms(T2, T2b), Ms(T2b, T2c), Ms(T2c, T3) };
+            for( int k = 0; k < 5; ++k ) Sum[k] += V[k];
+            if( ++n == 120 ) { std::printf("RENDERCPU up to the shadows %.2f, shadows+probes %.2f, budget %.2f, scene pass %.2f, tone map+overlays+outline %.2f ms; scene binds %.0f (%.2f ms), cluster draws %.0f (%.2f ms) a frame\n", Sum[0] / n, Sum[1] / n, Sum[2] / n, Sum[3] / n, Sum[4] / n, nB / n, BMs / n, nD / n, DMs / n); std::fflush(stdout); n = 0; nB = nD = 0; BMs = DMs = 0; for( auto& v : Sum ) v = 0; }
+        }
     }
 }

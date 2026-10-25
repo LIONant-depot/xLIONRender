@@ -604,6 +604,33 @@ namespace xlionrender::gi
         // can bake a surfel for each (Bake's Forced: PatchDefects). The fine surfels from m_FirstPatch on are those (0xFFFFFFFF: none)
         std::vector<std::pair<v3, v3>>              m_EmptyParts;
         std::uint32_t                               m_FirstPatch = 0xFFFFFFFFu;
+        // The last Bake's stages, ms (the compiler's autopsy): candidates, fine darts, materials, vertex surfels, parents, neighbours
+        std::array<double, 6>                       m_BakeMs{};
+        // Bake's progress, 0..1, after each of its stages (the compiler's progress bar; the stages weighed as the Bistro's took: the
+        // vertex surfels, the parents and the neighbours most). Empty: none
+        std::function<void(float)>                  m_OnBakeProgress;
+        // ... inside a stage too (its loops in slices: BakeTick, SlicedFor): the bar moves every few seconds, not once a minute
+        float                                       m_BakeLo = 0, m_BakeHi = 1;
+        mutable float                               m_BakeLast = -1;
+        void BakeTick(float f) const noexcept
+        {
+            if (!m_OnBakeProgress) return;
+            const float v = m_BakeLo + (m_BakeHi - m_BakeLo) * std::clamp(f, 0.0f, 1.0f);
+            if (v - m_BakeLast < 0.005f) return;
+            m_BakeLast = v;
+            m_OnBakeProgress(v);
+        }
+        // ParallelFor over [0, n) in 20 slices, a tick after each (f0..f1 of the stage)
+        template <class F> void SlicedFor(int n, F&& Fn, float f0 = 0, float f1 = 1) const noexcept
+        {
+            constexpr int slices_v = 20;
+            for (int k = 0; k < slices_v; ++k)
+            {
+                const int a = int(std::int64_t(n) * k / slices_v), b = int(std::int64_t(n) * (k + 1) / slices_v);
+                if (b > a) ParallelFor(b - a, [&](int i) { Fn(a + i); });
+                BakeTick(f0 + (f1 - f0) * float(k + 1) / float(slices_v));
+            }
+        }
 
         static std::array<int, 3> ReadCellOf(const v3& P, float Cell) noexcept { return { int(std::floor(P.m_X / Cell)), int(std::floor(P.m_Y / Cell)), int(std::floor(P.m_Z / Cell)) }; }
         static std::array<std::uint32_t, 2> ReadKey(const std::array<int, 3>& C) noexcept
@@ -638,6 +665,7 @@ namespace xlionrender::gi
                     std::stable_sort(m_ReadList.begin() + First, m_ReadList.begin() + First + n, [&](std::uint32_t a, std::uint32_t b) { return D2(a) < D2(b); });
                 }
             }
+            RefreshPackedReadGrid();
         }
         static std::uint32_t ReadHash(const std::array<int, 3>& C) noexcept { return (std::uint32_t(C[0]) * 73856093u) ^ (std::uint32_t(C[1]) * 19349663u) ^ (std::uint32_t(C[2]) * 83492791u); }
 
@@ -649,6 +677,58 @@ namespace xlionrender::gi
         // A list entry: the surfel (low 16 bits) and how much the surface sees it at the 4 corners of the cell in the patch's plane (4 bits
         // each, 0..15): at a point, blended by its place in the cell (as GIReadWeight)
         static std::uint32_t ReadEntrySurfel(std::uint32_t E) noexcept { return E & 0xFFFFu; }
+
+        // The read grid as the GPU and the resource keep it (PackReadGrid): a part's list of 1..fallback_cap_v entries keeps the entries with
+        // corner weights as they are, then its all-seen ones (every corner 15: only the surfel to say) two to a word, 16 bits each; its count
+        // (header word 3, low 16 bits) is then read_packed_v | the first count | the second << 7. Longer lists stay as they are (a count
+        // below read_packed_v). The Bistro: 61% of its lists' entries all-seen, its sections' lists 143 MB -> about 97
+        static constexpr std::uint32_t read_packed_v = 0x8000u;
+        static std::uint32_t ReadListCount(std::uint32_t Code) noexcept { Code &= 0xFFFFu; return (Code & read_packed_v) ? (Code & 0x7Fu) + ((Code >> 7) & 0x7Fu) : Code; }
+        static void PackReadGrid(bool bPack, const std::vector<std::array<std::uint32_t, 4>>& Table, const std::vector<std::uint32_t>& List,
+                                 std::vector<std::array<std::uint32_t, 4>>& OutTable, std::vector<std::uint32_t>& OutList) noexcept
+        {
+            OutTable = Table; OutList.clear(); OutList.reserve(List.size());
+            std::vector<std::uint32_t> Halves, Order;           // (the cells in the lists' order: unpacked again, the same layout)
+            for (std::uint32_t k = 0; k < OutTable.size(); ++k) if (OutTable[k][1] != 0xFFFFFFFFu) Order.push_back(k);
+            std::sort(Order.begin(), Order.end(), [&](std::uint32_t x, std::uint32_t y) { return Table[x][2] < Table[y][2]; });
+            for (const std::uint32_t k : Order)
+            {
+                auto& E = OutTable[k];
+                if (E[1] == 0xFFFFFFFFu || std::size_t(E[2]) + 4 * std::size_t(E[3]) > List.size()) continue;
+                const std::uint32_t H0 = E[2], At = std::uint32_t(OutList.size());
+                OutList.insert(OutList.end(), List.begin() + H0, List.begin() + H0 + 4 * E[3]);
+                E[2] = At;
+                for (std::uint32_t p = 0; p < E[3]; ++p)
+                {
+                    const std::uint32_t First = List[H0 + 4 * p + 2], Code = List[H0 + 4 * p + 3] & 0xFFFFu, Mask = List[H0 + 4 * p + 3] & 0xFFFF0000u;
+                    const std::uint32_t L0 = std::uint32_t(OutList.size());
+                    std::uint32_t NewCode = Code;
+                    if (!bPack && (Code & read_packed_v))
+                    {
+                        const std::uint32_t nF = Code & 0x7Fu, nH = (Code >> 7) & 0x7Fu;
+                        OutList.insert(OutList.end(), List.begin() + First, List.begin() + First + nF);
+                        for (std::uint32_t h = 0; h < nH; ++h) { const std::uint32_t w = List[First + nF + h / 2]; OutList.push_back(((h & 1) ? (w >> 16) : (w & 0xFFFFu)) | 0xFFFF0000u); }
+                        NewCode = nF + nH;
+                    }
+                    else if (bPack && Code >= 1 && Code <= std::uint32_t(fallback_cap_v))
+                    {
+                        Halves.clear();
+                        for (std::uint32_t k = 0; k < Code; ++k) { const std::uint32_t e = List[First + k]; if ((e >> 16) == 0xFFFFu) Halves.push_back(e & 0xFFFFu); else OutList.push_back(e); }
+                        const std::uint32_t nF = Code - std::uint32_t(Halves.size());
+                        for (std::size_t h = 0; h < Halves.size(); h += 2) OutList.push_back(Halves[h] | (h + 1 < Halves.size() ? Halves[h + 1] << 16 : 0u));
+                        NewCode = read_packed_v | nF | (std::uint32_t(Halves.size()) << 7);
+                    }
+                    else OutList.insert(OutList.end(), List.begin() + First, List.begin() + First + Code);
+                    OutList[At + 4 * p + 2] = L0;
+                    OutList[At + 4 * p + 3] = Mask | NewCode;
+                }
+            }
+        }
+        // The packed form of the lists (the GPU's display and trace buffers): made again whenever the lists change (SortReadLists, and the
+        // chunks' remap). ponytail: a second copy on the CPU (the Bistro: ~97 MB more); the CPU reads could walk the packed form instead
+        std::vector<std::array<std::uint32_t, 4>>   m_PackedReadTable;
+        std::vector<std::uint32_t>                  m_PackedReadList;
+        void RefreshPackedReadGrid() noexcept { PackReadGrid(true, m_ReadTable, m_ReadList, m_PackedReadTable, m_PackedReadList); }
         static std::array<int, 3> ReadAxes(const v3& N) noexcept             // the 2 axes across a plane, then the one along its normal
         {
             const float x = std::abs(N.m_X), y = std::abs(N.m_Y), z = std::abs(N.m_Z);
@@ -813,6 +893,14 @@ namespace xlionrender::gi
         // model) put 300 of them in each of its 24 cells, 30 ms a frame maximized. The lists stay the surfels whose reach touches the cell
         static constexpr float read_patches_v  = 8;
         static constexpr int   read_halvings_v = 4;
+        // A part's list: its nearest read_list_cap_v seen surfels from its cell's center (the per-pixel read walks the 32 nearest:
+        // gi_pixel_cap_v). The Bistro's layered surface listed thousands a part: 5 GB of lists, 10 min of rays, a 19 GB peak
+        static constexpr std::size_t read_list_cap_v = 32;
+        // ... and the facing surfels a part asks (its rays: up to 16 each), nearest first: a part of a dense Bistro section asked thousands, hidden
+        // behind each other (121 s for its lists)
+        static constexpr int read_tests_v = 256;
+        std::size_t m_ReadListCap = read_list_cap_v;        // (tests: ~0 builds the unbounded lists, the reference)
+        static constexpr int near_tests_v = 256;            // Bake's nearest seen surfels of a vertex / a surfel's parent: the rays it may cast
         float ReadPatchesPerCell() const noexcept
         {
             std::size_t nCells = 0, nPatches = 0;
@@ -821,21 +909,25 @@ namespace xlionrender::gi
         }
         void BuildReadGrid() noexcept
         {
-            m_ReadTable.clear(); m_ReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
+            m_ReadTable.clear(); m_ReadList.clear(); m_PackedReadTable.clear(); m_PackedReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
             if (m_Levels[0].empty()) return;
             // The cell: halved while the surface's patches alone (BuildReadGridAt's first step: no lists, no rays) are too many per cell
             float Cell = m_Levels[0][0].m_Radius;
+            const auto T0 = std::chrono::steady_clock::now();
             for (int k = 0; k < read_halvings_v && BuildReadGridAt(Cell, true) > read_patches_v; ++k) Cell *= 0.5f;
+            m_ReadGridMs = {}; m_ReadGridMs[0] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
             BuildReadGridAt(Cell);
         }
+        std::array<double, 4> m_ReadGridMs{};       // the last BuildReadGrid's stages, ms (measurement): the cell's probes, the samples and their patches, the parts, the lists
         // bPatches: only the cells' patches (their mean per cell returned; the grid is left empty)
         float BuildReadGridAt(float CellSize, bool bPatches = false) noexcept
         {
-            m_ReadTable.clear(); m_ReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
+            m_ReadTable.clear(); m_ReadList.clear(); m_PackedReadTable.clear(); m_PackedReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
             const auto& L = m_Levels[0];
             if (L.empty()) return 0;
             m_ReadCell = CellSize;
             const float Cell = m_ReadCell, Reach = 2 * L[0].m_Radius;
+            const auto TGrid0 = std::chrono::steady_clock::now();
 
             // The cells the surface crosses (points on every triangle an eighth of a cell apart), and per cell its patches: the pieces of
             // surface in it that face one way in one plane (the blinds and the window frame 10 cm behind them are two patches, whichever
@@ -865,14 +957,14 @@ namespace xlionrender::gi
                 auto& Pa = Ce.m_Patches.back(); Pa.m_N = N; Pa.m_D = P.Dot(N);
                 return Pa;
             };
-            const auto Touch = [&](const v3& P, const v3& N)
+            const auto Touch = [&](const v3& P, const v3& N, bool bCovered)      // (bCovered: CoveredAt(P, N), asked before)
             {
                 const auto C  = ReadCellAt(P, N, Cell);
                 patch& Pa = PatchIn(C, P, N);
                 const int b = SubCell(P, N, Pa.m_N, Cell);
                 const auto Bit = std::uint16_t(1u << b);
-                if (Pa.m_VisMask & Bit) return;                            // (no ray: it has its point in sight)
-                if (CoveredAt(P, N)) { if (!(Pa.m_HidMask & Bit)) { Pa.m_HidMask |= Bit; Pa.m_Hid[b] = P; } return; }
+                if (Pa.m_VisMask & Bit) return;                            // (it has its point in sight)
+                if (bCovered) { if (!(Pa.m_HidMask & Bit)) { Pa.m_HidMask |= Bit; Pa.m_Hid[b] = P; } return; }
                 Pa.m_VisMask |= Bit; Pa.m_Vis[b] = P;
                 // ... and the neighbor cells across the edges it is near (in the patch's plane: ReadAxes)
                 const auto [Au, Av, Aa] = ReadAxes(Pa.m_N);
@@ -892,6 +984,9 @@ namespace xlionrender::gi
                     if (!(Pn.m_VisMask & (1u << bn))) { Pn.m_VisMask |= std::uint16_t(1u << bn); Pn.m_Vis[bn] = P; }
                 }
             };
+            // The samples in order, whether each is covered (CoveredAt's rays) asked in parallel first, then touched in order: the same grid as
+            // asking each when touched (a pure test), the rays no longer one at a time (a Bistro section's grid: minutes)
+            std::vector<std::pair<v3, v3>> Samples;
             for (const auto& T : m_Tris)
             {
                 const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], Cc = m_Pos[T[2]];
@@ -902,9 +997,20 @@ namespace xlionrender::gi
                     const float u = float(i) / k, w = float(j) / k;
                     v3 N = m_Nrm[T[0]] * (1 - u - w) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * w;
                     { const v3 F = (B - A).Cross(Cc - A); if (F.Length() > 1e-12f) N = (F.Dot(N) < 0 ? F * -1.0f : F).NormalizeCopy(); else N = N.NormalizeCopy(); }     // the face's (as the pixels')
-                    Touch(A + (B - A) * u + (Cc - A) * w, N);
+                    Samples.push_back({ A + (B - A) * u + (Cc - A) * w, N });
                 }
             }
+            std::vector<char> Covered(Samples.size(), 0);
+            constexpr int block_v = 4096;
+            // (the patches alone need no rays: what is covered only marks their sub-cells)
+            if (!bPatches) ParallelFor(int((Samples.size() + block_v - 1) / block_v), [&](int b)
+            {
+                for (std::size_t s = std::size_t(b) * block_v; s < std::min(Samples.size(), std::size_t(b + 1) * block_v); ++s) Covered[s] = CoveredAt(Samples[s].first, Samples[s].second);
+            });
+            for (std::size_t s = 0; s < Samples.size(); ++s) Touch(Samples[s].first, Samples[s].second, Covered[s] != 0);
+            auto TLap = std::chrono::steady_clock::now();
+            const auto Lap = [&](int k) { const auto T = std::chrono::steady_clock::now(); if (!bPatches) m_ReadGridMs[std::size_t(k)] += std::chrono::duration<double, std::milli>(T - TLap).count(); TLap = T; };
+            if (!bPatches) m_ReadGridMs[1] = std::chrono::duration<double, std::milli>(TLap - TGrid0).count();
 
             if (bPatches)
             {
@@ -964,11 +1070,21 @@ namespace xlionrender::gi
             // the points of the same surface around it (the 26 neighbor cells' parts in its plane that it is joined to: their nearest points
             // Linked). Without it a pixel of blinds read the surfels of the window frame behind them (dark blotches). The neighbors' points
             // make the test generous and shared: a surfel leaves a list where the surface around no longer sees it, not at a cell's edge
-            surfel_grid G{ Cell, {} };
+            Lap(2);
+            // The surfels by cells of Reach + Cell: one ring around a read cell's center holds all within Reach of its box (per axis it needs
+            // Cell / 2 + Reach). A grid of the read cell's size needed Reach / Cell rings: a refined cell (R / 16) walked 65^3 grid cells a
+            // read cell - minutes for a dense Bistro section
+            surfel_grid G{ Reach + Cell, {} };
             for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
-            const int Ring = int(std::ceil(Reach / Cell));
+            const int Ring = 1;
             std::vector<std::vector<std::vector<std::uint32_t>>> Lists(Order.size());
             std::atomic<std::uint32_t> Unsupported{ 0 };
+            // Buried surfels (something within a tenth of a read cell in front of them: ivy pressed on a wall) are listed after the others
+            // (only where the list has room): they see back faces (their validity 0, their light none), and a list's nearest slots taken
+            // by them left the surface around them reading next to nothing - the Bistro's dark and bright cell blocks behind its ivy,
+            // 2026-10-24. Not left out: one under a box's edge still serves the floor beside it
+            std::vector<char> Buried(L.size(), 0);
+            ParallelFor(int((L.size() + 1023) / 1024), [&](int b) { for (std::size_t k = std::size_t(b) * 1024; k < std::min(L.size(), std::size_t(b + 1) * 1024); ++k) Buried[k] = Occluded(L[k].m_Center + L[k].m_Normal * (0.02f * m_ReadCell), L[k].m_Normal, 0.1f * m_ReadCell); });
             ParallelFor(int(Order.size()), [&](int c)
             {
                 const auto& Ce = *Order[c];
@@ -976,6 +1092,13 @@ namespace xlionrender::gi
                 const v3 Lo{ Ce.m_C[0] * Cell, Ce.m_C[1] * Cell, Ce.m_C[2] * Cell }, Hi = Lo + v3{ Cell, Cell, Cell };
                 std::vector<int> Near;
                 G.Near((Lo + Hi) * 0.5f, Ring, [&](int s) { const v3 Q = v3::Max(Lo, v3::Min(Hi, L[s].m_Center)); if ((Q - L[s].m_Center).Length() < Reach) Near.push_back(s); });
+                // Nearest first from the cell's center (SortReadLists' order and center): each list stops at m_ReadListCap seen surfels, the
+                // farther ones never tested
+                {
+                    const v3 Cc{ (float(Ce.m_C[0]) + 0.5f) * Cell, (float(Ce.m_C[1]) + 0.5f) * Cell, (float(Ce.m_C[2]) + 0.5f) * Cell };
+                    const auto D2 = [&](int s) { const v3 d = L[s].m_Center - Cc; return d.Dot(d); };
+                    std::stable_sort(Near.begin(), Near.end(), [&](int a, int b) { return D2(a) < D2(b); });
+                }
                 for (std::size_t p = 0; p < Ce.m_Parts.size(); ++p)
                 {
                     const auto& Pa = Ce.m_Parts[p];
@@ -1012,9 +1135,12 @@ namespace xlionrender::gi
                     // Each facing surfel with how much of the surface around each corner sees it: the fraction of the corner's points in its
                     // sight, cubed (as the depth moments' fade), 4 bits a corner (the read blends them across the cell: ReadEntryWeight). Seen
                     // through the gaps of blinds by a few points: next to nothing; in plain sight: all. A weight, not a cut: no holes, no edges
-                    for (int s : Near)
+                    int nTested = 0;
+                    for (int Pass = 0; Pass < 2 && Lists[c][p].size() < m_ReadListCap; ++Pass)     // (the buried last: Buried)
+                    for (const int s : Near)
                     {
-                        if (L[s].m_Normal.Dot(Pa.m_N) < 0.5f) continue;
+                        if (L[s].m_Normal.Dot(Pa.m_N) < 0.5f || (Buried[std::size_t(s)] != 0) != (Pass == 1)) continue;
+                        if (++nTested > read_tests_v) break;           // (its nearest read_tests_v facing ones asked: past them a part is enclosed)
                         // A corner with no surface near it knows nothing: it takes the mean of the corners that do (it was: in plain sight -
                         // the surfels the surface does not see leaked in across the cell)
                         std::array<float, 4> Frac{};
@@ -1033,11 +1159,12 @@ namespace xlionrender::gi
                             const float F = Frac[k] >= 0 ? Frac[k] : nKnown ? Known / float(nKnown) : 0.0f;
                             E |= std::uint32_t(std::lround(F * F * F * 15.0f)) << (16 + 4 * k);
                         }
+                        // Out of sight everywhere: not listed. None in sight (a face tucked in, or all in reach behind something): an empty list -
+                        // the read there is unsupported (GIQueryResult: the vertex read, else the mean light), not filled from surfels it does not see
+                        if ((E >> 16) == 0) continue;
                         Lists[c][p].push_back(E);
+                        if (Lists[c][p].size() >= m_ReadListCap) break;
                     }
-                    // Out of sight everywhere: not listed. None in sight (a face tucked in, or all in reach behind something): an empty list - the
-                    // read there is unsupported (GIQueryResult: the vertex read, else the mean light), not filled from surfels it does not see
-                    std::erase_if(Lists[c][p], [](std::uint32_t E) { return (E >> 16) == 0; });
                     if (Lists[c][p].empty()) Unsupported.fetch_add(1, std::memory_order_relaxed);
                 }
             });
@@ -1062,7 +1189,7 @@ namespace xlionrender::gi
                     m_ReadList[First + 4 * p + 0] = PackOct(Pa.m_N);
                     m_ReadList[First + 4 * p + 1] = std::bit_cast<std::uint32_t>(Pa.m_D);
                     m_ReadList[First + 4 * p + 2] = L0;
-                    m_ReadList[First + 4 * p + 3] = std::min<std::uint32_t>(std::uint32_t(Lists[c][p].size()), 0xFFFFu) | (std::uint32_t(Pa.m_Mask) << 16);
+                    m_ReadList[First + 4 * p + 3] = std::min<std::uint32_t>(std::uint32_t(Lists[c][p].size()), read_packed_v - 1) | (std::uint32_t(Pa.m_Mask) << 16);
                 }
                 const auto K = ReadKey(Ce.m_C);
                 std::uint32_t h = ReadHash(Ce.m_C) & (Size - 1), nProbe = 0;
@@ -1079,6 +1206,7 @@ namespace xlionrender::gi
                     if (Lists[c][p].empty() && Pa.m_bSeen && !Pa.m_Pts.empty()) m_EmptyParts.push_back({ Pa.m_Pts[Pa.m_Pts.size() / 2], Pa.m_N });
                 }
             SortReadLists();
+            Lap(3);
             return ReadPatchesPerCell();
         }
 
@@ -1204,18 +1332,40 @@ namespace xlionrender::gi
                 for (std::size_t i = 0; i < Order.size(); ++i) Order[i] = int(i);
                 rng Shuffle(0x5EEDu);
                 for (std::size_t i = Order.size(); i > 1; --i) std::swap(Order[i - 1], Order[std::size_t(Shuffle.Next() * float(i)) % i]);
-                for (int i : Order)
+                // ... and only if it lies in the candidate's own plane (a tenth of R off it at most): a window frame 10 cm behind blinds,
+                // tilted so its plane runs through them and seeing them through their gaps, does not take the blinds' surfels
+                const auto Takes = [&](int i, int s) { return (P[i] - Out[s].m_Center).Length() < R && Out[s].m_Normal.Dot(N[i]) > 0.8f
+                                                              && std::abs((Out[s].m_Center - P[i]).Dot(N[i])) < 0.1f * R && Sees(P[i], N[i], Out[s]); };
+                // In batches of the order (the same surfels as one at a time: taken = taken by a surfel kept before it, whichever pass looks):
+                // the surfels kept before the batch looked at in parallel (their rays: the bake's cost, single-threaded it was 16 min on the
+                // Bistro), then the batch in order against the ones it keeps itself
+                constexpr std::size_t batch_v = 8192;
+                std::vector<std::uint8_t> Prior;
+                for (std::size_t b0 = 0; b0 < Order.size(); b0 += batch_v)
                 {
-                    bool bTaken = false;
-                    // ... and only if it lies in the candidate's own plane (a tenth of R off it at most): a window frame 10 cm behind blinds,
-                    // tilted so its plane runs through them and seeing them through their gaps, does not take the blinds' surfels
-                    G.Near(P[i], 1, [&](int s) { bTaken = bTaken || ((P[i] - Out[s].m_Center).Length() < R && Out[s].m_Normal.Dot(N[i]) > 0.8f
-                                                                    && std::abs((Out[s].m_Center - P[i]).Dot(N[i])) < 0.1f * R && Sees(P[i], N[i], Out[s])); });
-                    if (bTaken) continue;
-                    G.Add(P[i], int(Out.size()));
-                    Out.push_back({ P[i], N[i], R });
-                    if (pFrom) pFrom->push_back(i);
-                    if (Out.size() > Max) break;
+                    const std::size_t b1 = std::min(Order.size(), b0 + batch_v);
+                    BakeTick(0.9f * float(b0) / float(Order.size()));          // (the parents' stage: their nearest after, the last tenth)
+                    const int nBefore = int(Out.size());
+                    Prior.assign(b1 - b0, 0);
+                    ParallelFor(int(b1 - b0), [&](int k)
+                    {
+                        const int i = Order[b0 + std::size_t(k)];
+                        bool bTaken = false;
+                        G.Near(P[i], 1, [&](int s) { bTaken = bTaken || Takes(i, s); });
+                        Prior[std::size_t(k)] = bTaken;
+                    });
+                    for (std::size_t k = 0; k < b1 - b0; ++k)
+                    {
+                        if (Prior[k]) continue;
+                        const int i = Order[b0 + k];
+                        bool bTaken = false;
+                        G.Near(P[i], 1, [&](int s) { bTaken = bTaken || (s >= nBefore && Takes(i, s)); });
+                        if (bTaken) continue;
+                        G.Add(P[i], int(Out.size()));
+                        Out.push_back({ P[i], N[i], R });
+                        if (pFrom) pFrom->push_back(i);
+                        if (Out.size() > Max) return;
+                    }
                 }
             };
 
@@ -1225,28 +1375,54 @@ namespace xlionrender::gi
             {
                 std::array<std::pair<float, int>, 4> Best;
                 Best.fill({ 1e30f, -1 });
-                for (int Ring = 1; Ring <= 4 && Best[0].second < 0; ++Ring)
-                    G.Near(P, Ring, [&](int s)
+                // Nearest first ((distance, surfel): the order Best keeps), a ray each until nMax are seen: the same ones as testing all of
+                // them; a wider ring tests only what the narrower did not. At most near_tests_v rays a point: one that sees none of its
+                // nearest is enclosed (the Bistro's hidden vertices tested every compatible surfel 4 m around: 11 of its 17 minutes of bake)
+                std::vector<std::pair<float, int>> By;
+                std::vector<int> Tested;
+                int nRays = 0;
+                for (int Ring = 1; Ring <= 4 && Best[0].second < 0 && nRays < near_tests_v; ++Ring)
+                {
+                    By.clear();
+                    G.Near(P, Ring, [&](int s) { if (L[s].m_Normal.Dot(N) >= 0.5f) By.push_back({ (P - L[s].m_Center).Length(), s }); });
+                    std::sort(By.begin(), By.end());
+                    std::sort(Tested.begin(), Tested.end());
+                    int n = 0;
+                    for (const auto& [d, s] : By)
                     {
-                        if (L[s].m_Normal.Dot(N) < 0.5f) return;
-                        const float d = (P - L[s].m_Center).Length();
-                        if (d >= Best[nMax - 1].first || std::any_of(Best.begin(), Best.end(), [&](const auto& b) { return b.second == s; })) return;
-                        if (!Sees(P, N, L[s])) return;
-                        Best[nMax - 1] = { d, s };
-                        std::sort(Best.begin(), Best.begin() + nMax);
-                    });
+                        if (std::binary_search(Tested.begin(), Tested.end(), s)) continue;
+                        if (nRays++ >= near_tests_v) break;
+                        Tested.push_back(s);
+                        if (!Sees(P, N, L[s])) continue;
+                        Best[std::size_t(n)] = { d, s };
+                        if (++n == nMax) break;
+                    }
+                }
                 return Best;
+            };
+
+            m_BakeMs = {};
+            auto TLap = std::chrono::steady_clock::now();
+            static constexpr float Done[6] = { 0.01f, 0.11f, 0.12f, 0.40f, 0.67f, 1.0f };     // (after each stage)
+            m_BakeLo = 0; m_BakeHi = Done[0]; m_BakeLast = -1;
+            const auto Lap = [&](int k)
+            {
+                const auto T = std::chrono::steady_clock::now(); m_BakeMs[std::size_t(k)] += std::chrono::duration<double, std::milli>(T - TLap).count(); TLap = T;
+                if (m_OnBakeProgress) { m_OnBakeProgress(Done[std::size_t(k)]); m_BakeLast = Done[std::size_t(k)]; }
+                m_BakeLo = Done[std::size_t(k)]; m_BakeHi = k < 5 ? Done[std::size_t(k) + 1] : 1.0f;      // (the next stage's range)
             };
 
             // 1. Candidates on the surface, by area
             std::vector<v3> CP, CN;
             std::vector<std::array<float, 3>> CT;                  // per candidate: its triangle, u, v (where its material is)
             Candidates(Radius, CP, CN, &CT);
+            Lap(0);
 
             // 2. Surfels, 3. vertex indices
             surfel_grid G0, G1;
             std::vector<int> From;
             Poisson(CP, CN, Radius, m_Levels[0], G0, &From, MaxSurfels);
+            Lap(1);
             if (m_Levels[0].size() > MaxSurfels) return;
             // The patches (PatchDefects: Forced, from BuildReadGrid's m_EmptyParts): a surfel at each, after the others (one where one already
             // stands for it: the same rule as the darts'), its material where it lies (the triangle under it)
@@ -1288,25 +1464,29 @@ namespace xlionrender::gi
                 const float Area   = 0.5f * (m_Pos[T[1]] - m_Pos[T[0]]).Cross(m_Pos[T[2]] - m_Pos[T[0]]).Length();
                 M.m_UVRadius = Area > 1e-12f ? Radius * std::sqrt(UVArea / Area) : 0.0f;
             }
+            Lap(2);
             m_VertSurfels.resize(m_Pos.size());
-            ParallelFor(int(m_Pos.size()), [&](int v)
+            SlicedFor(int(m_Pos.size()), [&](int v)
             {
                 const auto B = Nearest(m_Levels[0], G0, m_Pos[v], m_Nrm[v], 4);
                 m_VertSurfels[v] = { B[0].second, B[1].second, B[2].second, B[3].second };
             });
+            Lap(3);
 
             // 4. Parents
             std::vector<v3> SP(m_Levels[0].size()), SN(m_Levels[0].size());
             for (std::size_t s = 0; s < SP.size(); ++s) { SP[s] = m_Levels[0][s].m_Center; SN[s] = m_Levels[0][s].m_Normal; }
             Poisson(SP, SN, ParentRadius, m_Levels[1], G1);
             m_ParentOf.assign(SP.size(), 0);
-            ParallelFor(int(SP.size()), [&](int s)
+            SlicedFor(int(SP.size()), [&](int s)
             {
                 const auto B = Nearest(m_Levels[1], G1, SP[s], SN[s], 1);
                 m_ParentOf[s] = std::max(B[0].second, 0);
-            });
+            }, 0.9f, 1.0f);
+            Lap(4);
 
             BuildNeighbors();
+            Lap(5);
         }
 
         // The spatial filter's neighbors (world::FilteredLight), per level: the surfels within a surfel's reach that face about the same
@@ -1322,13 +1502,23 @@ namespace xlionrender::gi
         // Where a fine surfel's rays start (BuildOrigins): its center, then up to 7 of the mesh's vertices it is the nearest surfel of
         // (within half its radius, facing its way), each with its own normal. A surfel stands for a patch: its rays come from across the patch at
         // the surface's own angles (slats of blinds: from different slats), not all from one point that may sit in one slat's shadow
+        // Origin 0 is the surfel's own center and normal (implicit: 68% of Police's surfels have no other); the others its entries, each a
+        // vertex (its position, its normal normalized). Compressed (GI working set): 4 B an origin, was a position and a normal (24 B; Police
+        // 6.6 MB -> 1.0 MB), the same origins
         std::vector<std::uint32_t>          m_OriginFirst;          // per fine surfel: its first entry (size + 1)
-        std::vector<v3>                     m_OriginPos, m_OriginNrm;
+        std::vector<std::uint32_t>          m_OriginVert;
+        // A fine surfel's origin k (0: its center; k: its entry o0 + k - 1, o0 = m_OriginFirst[s]), mesh space
+        void Origin(std::uint32_t o0, std::uint32_t k, int s, v3& P, v3& N) const noexcept
+        {
+            if (k == 0) { P = m_Levels[0][std::size_t(s)].m_Center; N = m_Levels[0][std::size_t(s)].m_Normal; return; }
+            const std::uint32_t v = m_OriginVert[o0 + k - 1];
+            P = m_Pos[v]; N = m_Nrm[v].NormalizeCopy();
+        }
 
         void BuildOrigins() noexcept
         {
             const auto& L = m_Levels[0];
-            m_OriginFirst.assign(L.size() + 1, 0); m_OriginPos.clear(); m_OriginNrm.clear();
+            m_OriginFirst.assign(L.size() + 1, 0); m_OriginVert.clear();
             std::vector<std::vector<int>> Per(L.size());
             if (m_VertSurfels.size() == m_Pos.size())
                 for (std::size_t v = 0; v < m_Pos.size(); ++v)
@@ -1340,10 +1530,9 @@ namespace xlionrender::gi
                 }
             for (std::size_t s = 0; s < L.size(); ++s)
             {
-                m_OriginPos.push_back(L[s].m_Center); m_OriginNrm.push_back(L[s].m_Normal);
                 const std::size_t n = Per[s].size(), k = std::min<std::size_t>(n, 7);
-                for (std::size_t j = 0; j < k; ++j) { const int v = Per[s][j * n / k]; m_OriginPos.push_back(m_Pos[v]); m_OriginNrm.push_back(m_Nrm[v].NormalizeCopy()); }
-                m_OriginFirst[s + 1] = std::uint32_t(m_OriginPos.size());
+                for (std::size_t j = 0; j < k; ++j) m_OriginVert.push_back(std::uint32_t(Per[s][j * n / k]));
+                m_OriginFirst[s + 1] = std::uint32_t(m_OriginVert.size());
             }
         }
 
@@ -1359,7 +1548,7 @@ namespace xlionrender::gi
                 surfel_grid G{ 2 * L[0].m_Radius, {} };
                 for (int s = 0; s < int(L.size()); ++s) G.Add(L[s].m_Center, s);
                 std::vector<std::vector<std::pair<std::uint32_t, float>>> Per(L.size());
-                ParallelFor(int(L.size()), [&](int s)
+                SlicedFor(int(L.size()), [&](int s)
                 {
                     G.Near(L[s].m_Center, 1, [&](int n)
                     {
@@ -1370,7 +1559,7 @@ namespace xlionrender::gi
                         if (f <= 0 || !SameLayer(L[s], L[n])) return;
                         Per[s].push_back({ std::uint32_t(n), f * c });      // linear: a neighbor counts (squared, the read's falloff, it barely did)
                     });
-                });
+                }, Lv == 0 ? 0.1f : 0.9f, Lv == 0 ? 0.9f : 1.0f);
                 Nb.m_First.assign(L.size() + 1, 0);
                 for (std::size_t s = 0; s < L.size(); ++s)
                 {
@@ -1384,13 +1573,19 @@ namespace xlionrender::gi
         // GeomStatic compiler packs it into the resource, the renderer unpacks it at load instead of building it (seconds in Release, half
         // a minute in Debug for the Police Station). Only what the surfels and the geometry decide: the same in both. Unpack checks the
         // block's tag and sizes (false: build them)
-        static constexpr std::uint32_t derived_tag_v = 0x33444947u;    // "GID3" (GID2: no first patch; GID1: no sub-cell masks, no flags): a change to the layout below is a new tag
+        static constexpr std::uint32_t derived_tag_v = 0x36444947u;    // "GID6": the lists packed (PackReadGrid). GID5: as they are, read: unpacked
+        static constexpr std::uint32_t derived_tag5_v = 0x35444947u;   // (GID4, never released: the center as an entry; GID3: the origins as
+                                                                        // positions and normals, read: made again;
+                                                                        // GID2: no first patch; GID1: no sub-cell masks, no flags): a change to the layout below is a new tag
+        static constexpr std::uint32_t derived_tag3_v = 0x33444947u;
         std::vector<std::uint32_t> PackDerived() const noexcept
         {
+            std::vector<std::array<std::uint32_t, 4>> PTable; std::vector<std::uint32_t> PList;
+            PackReadGrid(true, m_ReadTable, m_ReadList, PTable, PList);        // (made here: the compiler's chunks change the lists after their sort)
             std::vector<std::uint32_t> W{ derived_tag_v, std::uint32_t(m_bLeakProtection), m_FirstPatch, std::bit_cast<std::uint32_t>(m_ReadCell), m_ReadMaxProbe, m_ReadUnsupported
-                                        , std::uint32_t(m_ReadTable.size()), std::uint32_t(m_ReadList.size()) };
-            for (const auto& E : m_ReadTable) W.insert(W.end(), E.begin(), E.end());
-            W.insert(W.end(), m_ReadList.begin(), m_ReadList.end());
+                                        , std::uint32_t(PTable.size()), std::uint32_t(PList.size()) };
+            for (const auto& E : PTable) W.insert(W.end(), E.begin(), E.end());
+            W.insert(W.end(), PList.begin(), PList.end());
             for (const auto& Nb : m_Neighbors)
             {
                 W.push_back(std::uint32_t(Nb.m_First.size())); W.push_back(std::uint32_t(Nb.m_Index.size()));
@@ -1398,9 +1593,9 @@ namespace xlionrender::gi
                 W.insert(W.end(), Nb.m_Index.begin(), Nb.m_Index.end());
                 for (float w : Nb.m_Weight) W.push_back(std::bit_cast<std::uint32_t>(w));
             }
-            W.push_back(std::uint32_t(m_OriginFirst.size())); W.push_back(std::uint32_t(m_OriginPos.size()));
+            W.push_back(std::uint32_t(m_OriginFirst.size())); W.push_back(std::uint32_t(m_OriginVert.size()));
             W.insert(W.end(), m_OriginFirst.begin(), m_OriginFirst.end());
-            for (const auto* pV : { &m_OriginPos, &m_OriginNrm }) for (const auto& v : *pV) for (int a = 0; a < 3; ++a) W.push_back(std::bit_cast<std::uint32_t>(v[a]));
+            W.insert(W.end(), m_OriginVert.begin(), m_OriginVert.end());
             return W;
         }
         bool UnpackDerived(std::span<const std::uint32_t> W) noexcept
@@ -1408,7 +1603,9 @@ namespace xlionrender::gi
             std::size_t i = 0;
             const auto Take = [&](std::size_t n) { const bool b = i + n <= W.size(); const std::size_t at = i; i += n; return b ? W.data() + at : nullptr; };
             const std::uint32_t* p = Take(8);
-            if (p == nullptr || p[0] != derived_tag_v) return false;
+            if (p == nullptr || (p[0] != derived_tag_v && p[0] != derived_tag5_v && p[0] != derived_tag3_v)) return false;
+            const bool bPacked = p[0] == derived_tag_v;
+            const bool bTag3 = p[0] == derived_tag3_v;
             const bool bLeak = (p[1] & 1u) != 0;
             const std::uint32_t FirstPatch = p[2];
             const float Cell = std::bit_cast<float>(p[3]);
@@ -1431,18 +1628,19 @@ namespace xlionrender::gi
             const std::uint32_t* q = Take(2);
             if (!q) return false;
             const std::uint32_t nOFirst = q[0], nO = q[1];
-            const std::uint32_t *pOF = Take(nOFirst), *pOP = Take(3 * std::size_t(nO)), *pON = Take(3 * std::size_t(nO));
-            if (!pOF || !pOP || !pON || i != W.size()) return false;
+            const std::uint32_t *pOF = Take(nOFirst), *pOV = Take(bTag3 ? 6 * std::size_t(nO) : std::size_t(nO));
+            if (!pOF || !pOV || i != W.size()) return false;
+            if (!bTag3) for (std::uint32_t k = 0; k < nO; ++k) if (pOV[k] >= m_Pos.size()) return false;     // (made for other vertices)
             if (Nbs[0].m_First.size() != 0 && Nbs[0].m_First.size() != m_Levels[0].size() + 1) return false;       // made for other surfels
             if (nOFirst != 0 && nOFirst != m_Levels[0].size() + 1) return false;
             m_ReadCell = Cell; m_ReadMaxProbe = MaxProbe; m_ReadUnsupported = Unsupported; m_bLeakProtection = bLeak; m_FirstPatch = FirstPatch;
             m_ReadTable.resize(nTable);
             for (std::uint32_t k = 0; k < nTable; ++k) m_ReadTable[k] = { pTable[4 * k], pTable[4 * k + 1], pTable[4 * k + 2], pTable[4 * k + 3] };
             m_ReadList.assign(pList, pList + nList);
+            if (bPacked) { auto T = m_ReadTable; auto L = m_ReadList; PackReadGrid(false, T, L, m_ReadTable, m_ReadList); }
             m_Neighbors = std::move(Nbs);
-            m_OriginFirst.assign(pOF, pOF + nOFirst);
-            const auto V = [](const std::uint32_t* f, std::uint32_t n) { std::vector<v3> Out(n); for (std::uint32_t k = 0; k < n; ++k) Out[k] = { std::bit_cast<float>(f[3 * k]), std::bit_cast<float>(f[3 * k + 1]), std::bit_cast<float>(f[3 * k + 2]) }; return Out; };
-            m_OriginPos = V(pOP, nO); m_OriginNrm = V(pON, nO);
+            if (bTag3) BuildOrigins();                                  // (a GID3 resource: its origins made again from the vertex surfels, the same ones)
+            else { m_OriginFirst.assign(pOF, pOF + nOFirst); m_OriginVert.assign(pOV, pOV + nO); }
             SortReadLists();
             return true;
         }
@@ -1509,9 +1707,14 @@ namespace xlionrender::gi
             return L < 1e-6f || !Occluded(A, D * (1.0f / L), L);
         }
 
+        // GI chunks (xlionrender_surfel_gi_chunks.h): a chunk's bake-time visibility is the whole geometry's (its builders' rays see every
+        // triangle, not only the chunk's); cleared after the build, so the runtime world's rays stay per instance
+        const surfel_mesh*                  m_pOccluder = nullptr;
+
         // Is anything between O and O + D TMax (mesh space)? Stops at the first hit
         bool Occluded(const v3& O, const v3& D, float TMax) const noexcept
         {
+            if (m_pOccluder) return m_pOccluder->Occluded(O, D, TMax);
             bool bHit = false;
             m_Bvh.TraverseLeaves(ray4(O, D), TMax, [&](int l, float& TBest)
             {
@@ -1610,7 +1813,23 @@ namespace xlionrender::gi
             , m_Fine(G.getGISurfels().begin(), G.getGISurfels().end()), m_Parents(G.getGIParents().begin(), G.getGIParents().end())
             , m_VS(G.getGIVertexSurfels().begin(), G.getGIVertexSurfels().end())
             , m_Materials(G.getGISurfelMaterials().begin(), G.getGISurfelMaterials().end())
-            , m_Derived(G.getGIDerived().begin(), G.getGIDerived().end()), m_GIMode(G.m_GIMode) {}
+            , m_Derived(G.getGIDerived().begin(), G.getGIDerived().end()), m_GIMode(G.m_GIMode)
+        {
+            if constexpr (requires { G.getGISections(); G.getGIClusterSections(); G.getGIGhosts(); })      // (xgeom_static version 7: the GI in sections)
+            {
+                for (const auto& S : G.getGISections()) m_Sections.push_back({ S.m_iFine, S.m_nFine, S.m_nOwned, S.m_iParent, S.m_nParents, S.m_iDerived, S.m_nDerived, S.m_iGhost, S.m_nGhosts });
+                m_ClusterSections.assign(G.getGIClusterSections().begin(), G.getGIClusterSections().end());
+                for (const auto& Gh : G.getGIGhosts()) m_Ghosts.push_back({ Gh.m_Section, Gh.m_Local });
+            }
+        }
+        struct section_t { std::uint32_t m_iFine, m_nFine, m_nOwned, m_iParent, m_nParents, m_iDerived, m_nDerived, m_iGhost, m_nGhosts; };
+        struct ghost_t   { std::uint32_t m_Section, m_Local; };
+        std::vector<section_t>      m_Sections;
+        std::vector<std::uint16_t>  m_ClusterSections;
+        std::vector<ghost_t>        m_Ghosts;
+        std::span<const section_t>     getGISections       () const noexcept { return m_Sections; }
+        std::span<const std::uint16_t> getGIClusterSections() const noexcept { return m_ClusterSections; }
+        std::span<const ghost_t>       getGIGhosts         () const noexcept { return m_Ghosts; }
         std::vector<vertex_t>       m_Vertices;
         std::vector<extra_t>        m_Extras;
         std::vector<index_t>        m_Indices;
@@ -2115,6 +2334,38 @@ namespace xlionrender::gi
         int             Level          ( int Id ) const noexcept { return m_Instances[Id].m_Level; }
         bool            IsCube         ( int Id ) const noexcept { return m_Instances[Id].m_bCube; }
         const std::vector<int>& CubeSet( int Id ) const noexcept { return m_Instances[Id].m_CubeSet; }
+        // GI chunks (xlionrender_surfel_gi_chunks.h): Id's level-0 surfels from nOwned on are ghosts of Owners' (instance, surfel) - copied
+        // from them after each commit, never traced, never emitters. Equal levels only (plan v3: mixed levels gated)
+        void SetGhosts(int Id, std::uint32_t nOwned, std::vector<std::array<int, 2>> Owners) noexcept
+        {
+            auto& I = m_Instances[std::size_t(Id)];
+            I.m_nOwned = nOwned; I.m_GhostOwner = std::move(Owners);
+            m_bEmittersDirty = true;
+            ++m_GPUGen;                                         // (gpu_trace: its ghost list, packed again)
+        }
+        std::uint32_t OwnedSurfels(int Id) const noexcept { const auto& I = m_Instances[std::size_t(Id)]; return std::min<std::uint32_t>(I.m_nOwned, std::uint32_t(I.m_E.size())); }
+        const std::vector<std::array<int, 2>>& GhostOwners(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_GhostOwner; }      // (gpu_trace: its ghost pass)
+        // The ghosts' published set from their owners (the commit's epoch: before the means and the filter read it)
+        void SyncGhosts() noexcept
+        {
+            for (auto& I : m_Instances)
+            {
+                if (!I.m_bAlive || I.m_GhostOwner.empty() || I.m_Level != 0) continue;
+                for (std::size_t k = 0; k < I.m_GhostOwner.size(); ++k)
+                {
+                    const std::size_t g = std::size_t(I.m_nOwned) + k;
+                    const auto& [oi, os] = I.m_GhostOwner[k];
+                    if (g >= I.m_E.size() || oi < 0 || std::size_t(oi) >= m_Instances.size()) continue;
+                    const auto& O = m_Instances[std::size_t(oi)];
+                    if (!O.m_bAlive || O.m_Level != 0 || std::size_t(os) >= O.m_E.size()) continue;      // (mixed levels: gated - the ghost keeps its last set)
+                    I.m_E[g] = O.m_E[std::size_t(os)]; I.m_Valid[g] = O.m_Valid[std::size_t(os)];
+                    if (g < I.m_Moments.size() && std::size_t(os) < O.m_Moments.size()) I.m_Moments[g] = O.m_Moments[std::size_t(os)];
+                    if (g < I.m_Frac.size() && std::size_t(os) < O.m_Frac.size()) I.m_Frac[g] = O.m_Frac[std::size_t(os)];
+                    I.m_FilterDirty.push_back(int(g));
+                }
+                I.m_bMeanDirty = true;
+            }
+        }
         int             LinkRebuilds   ( void ) const noexcept { return m_nLinkRebuilds; }
         int             LinkCount      ( int Id ) const noexcept { return int(m_Instances[Id].m_Links.size()); }
         std::uint32_t   LastPass       ( int Id, int s ) const noexcept { return m_Instances[Id].m_LastPass[s]; }       // the update that last finished it
@@ -2580,13 +2831,13 @@ namespace xlionrender::gi
                     H[5 + 2 * Lv] = std::uint32_t(At); H[6 + 2 * Lv] = std::uint32_t(Lev.size());
                 }
                 H[9]  = Words(M.m_ParentOf.data(), M.m_ParentOf.size());
-                H[10] = Words(M.m_ReadTable.data(), 4 * M.m_ReadTable.size());
-                H[11] = std::uint32_t(M.m_ReadTable.size());
-                H[12] = Words(M.m_ReadList.data(), M.m_ReadList.size());
+                H[10] = Words(M.m_PackedReadTable.data(), 4 * M.m_PackedReadTable.size());     // (the packed lists: PackReadGrid)
+                H[11] = std::uint32_t(M.m_PackedReadTable.size());
+                H[12] = Words(M.m_PackedReadList.data(), M.m_PackedReadList.size());
                 H[13] = F(M.m_ReadCell);
                 H[14] = M.m_OriginFirst.empty() ? gpu_none_v : Words(M.m_OriginFirst.data(), M.m_OriginFirst.size());
-                H[15] = V3s(M.m_OriginPos.data(), M.m_OriginPos.size());
-                H[16] = V3s(M.m_OriginNrm.data(), M.m_OriginNrm.size());
+                H[15] = Words(M.m_OriginVert.data(), M.m_OriginVert.size());     // (per origin a vertex of H[1] / H[2], or the surfel's own: GIOrigin)
+                H[16] = gpu_none_v;
                 H[17] = M.m_bLeakProtection ? 1u : 0u;
                 for (int Lv = 0; Lv < 2; ++Lv)
                 {
@@ -2647,7 +2898,13 @@ namespace xlionrender::gi
                 }
                 {
                     const std::size_t At = Grow(nRoom * gpu_est_v);
-                    for (std::size_t k = 0; k < nS && k < I.m_Est.size(); ++k) PackEst(I.m_Est[k], D.data() + At + k * gpu_est_v);
+                    for (std::size_t k = 0; k < nS; ++k)
+                    {
+                        if (k < I.m_Est.size()) { PackEst(I.m_Est[k], D.data() + At + k * gpu_est_v); continue; }
+                        estimator Es; Es.Seed(k < I.m_E.size() ? I.m_E[k] : v3{ 0, 0, 0 }); Es.Restart();     // (GPU-owned: no CPU estimators: a new
+                                                                    // instance's, as Resize makes them; one packed before keeps its own: the migrate)
+                        PackEst(Es, D.data() + At + k * gpu_est_v);
+                    }
                     R[42] = std::uint32_t(At);
                 }
                 {
@@ -2700,6 +2957,9 @@ namespace xlionrender::gi
                  | (I.m_bProvisional ? 64u : 0u);      // (64: 7a, not captured yet: its hits bring nothing)
         }
         std::uint32_t MatGen(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_MatGen; }
+        const xmath::fmat4& InstanceL2W(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_L2W; }            // (gpu_trace: the links' local rebuild)
+        std::pair<v3, v3>   InstanceBounds(int Id) const noexcept { return { m_Instances[std::size_t(Id)].m_Lo, m_Instances[std::size_t(Id)].m_Hi }; }
+        const surfel_mesh&  InstanceMesh(int Id) const noexcept { return *m_Instances[std::size_t(Id)].m_pMesh; }
 
         // G5: the emitter list as the GPU's light sampling reads it: per emitter (gpu_emitter_v words) its world center 3, normal 3, area,
         // radiance now 3 (the emissive scale in it), instance, surfel. Room: what the table is packed with for Count of them
@@ -2768,6 +3028,7 @@ namespace xlionrender::gi
             {
                 const auto& G = Items[k];
                 work_item W; W.m_Inst = G.m_Inst; W.m_Surf = G.m_Surf; W.m_Level = G.m_Level; W.m_Rays = G.m_Rays; W.m_Off1 = G.m_Off1; W.m_Off2 = G.m_Off2; W.m_Shift = G.m_Shift;
+                EnsureSolver(m_Instances[G.m_Inst]);
                 TraceChunk(W, 0, W.m_Rays, L);
                 const auto& I = m_Instances[G.m_Inst];
                 auto& R = Out[k];
@@ -2803,6 +3064,7 @@ namespace xlionrender::gi
                 ++j;
                 const auto& G = R[k];
                 auto& I = m_Instances[W.m_Inst];
+                EnsureSolver(I);                                        // (the CPU commits it: its pass' accumulators)
                 W.m_Sum = { G.m_Sum[0], G.m_Sum[1], G.m_Sum[2] };
                 for (int i = 0; i < 3; ++i) I.m_BasisAcc[W.m_Surf][i] = { G.m_Basis[3 * i], G.m_Basis[3 * i + 1], G.m_Basis[3 * i + 2] };
                 std::copy_n(G.m_Moments, 3 * moment_texels_v, I.m_MomAcc[W.m_Surf].begin());
@@ -2814,6 +3076,8 @@ namespace xlionrender::gi
             }
         }
         std::uint64_t GPUGen() const noexcept { return m_GPUGen; }
+        // every instance's material generation summed: a capture landing changes it (the GPU's links, built from the materials, are made again)
+        std::uint64_t MaterialGenSum() const noexcept { std::uint64_t n = 0; for (const auto& I : m_Instances) n += I.m_MatGen; return n; }
         std::uint64_t GPULevelGen() const noexcept { return m_GPULevelGen; }     // an instance changed level (the arrays have room for both: PackGPUSurfels)
 
         // G4c: a range of a surfel pass (GPURanges): the GPU's expand serves its surfels (shaders/xlionrender_gi_expand_comp.glsl). Flags:
@@ -2877,6 +3141,7 @@ namespace xlionrender::gi
         void SetGPUState(int Id, const std::uint32_t* E, const std::uint32_t* V, const std::uint32_t* Mo, const std::uint32_t* Fr, const std::uint32_t* Es, const std::uint32_t* Mc) noexcept
         {
             auto& I = m_Instances[std::size_t(Id)];
+            EnsureSolver(I);                                            // (the estimators and counts read back: GPU-owned, not kept otherwise)
             const auto F = [](std::uint32_t u) { return std::bit_cast<float>(u); };
             for (std::size_t s = 0; s < I.m_E.size(); ++s)
             {
@@ -2972,13 +3237,17 @@ namespace xlionrender::gi
             std::vector<std::uint32_t>  m_Col;           // per link: the row it reads
             std::vector<v3>             m_W;             // per link: its weight (albedo x read share / rays)
             std::vector<v3>             m_D;             // per row: the part no surfel carries (sky, direct, emission)
+            // Relightable (CompileTransport bRelight; the GPU's links always): D has the hits' direct light at the lights it was compiled
+            // with; when they change, the difference of the surfels' own direct light goes through the same weights - E = D + T (E + Dir
+            // - Dir0) (m_Dir: RelightTransport, m_Dir0: at the compile)
+            std::vector<v3>             m_Dir, m_Dir0;
             std::size_t                 m_nRays = 0, m_nUnsupported = 0, m_nDropped = 0, m_nBack = 0, m_nSky = 0, m_nFar = 0;
             // TruncateTransport: per row its aggregate links (the tail) to groups (a surfel's parent: its level-1 surfel); per row its group
             std::vector<std::uint32_t>  m_AFirst, m_AGroup, m_Group, m_GroupSize;
             std::vector<v3>             m_AW;     // (far: a hit on a level-1 instance, dropped)
             double                      m_CompileMs = 0;
         };
-        transport CompileTransport(const lights& L, int Rays, unsigned Seed = 1) noexcept
+        transport CompileTransport(const lights& L, int Rays, unsigned Seed = 1, bool bRelight = false) noexcept
         {
             const auto T0 = std::chrono::steady_clock::now();
             BuildTlas();
@@ -2998,14 +3267,14 @@ namespace xlionrender::gi
                 {
                     const auto& S = Mo.m_Levels[0][s];
                     const bool bSpread = Mo.m_OriginFirst.size() == Mo.m_Levels[0].size() + 1;
-                    const std::uint32_t o0 = bSpread ? Mo.m_OriginFirst[s] : 0, nO = bSpread ? Mo.m_OriginFirst[s + 1] - o0 : 0;
+                    const std::uint32_t o0 = bSpread ? Mo.m_OriginFirst[s] : 0, nO = bSpread ? Mo.m_OriginFirst[s + 1] - o0 + 1 : 0;     // (+1: its center)
                     v3 D{ 0, 0, 0 };
                     Row.clear();
                     const float Off1 = R.Next(), Off2 = R.Next();
                     for (int r = 0; r < Rays; ++r)
                     {
                         v3 Cr = I.m_L2W * S.m_Center, Nr = NormalToWorld(I, S.m_Normal);
-                        if (nO > 1) { const std::uint32_t k = o0 + std::uint32_t(r) % nO; Cr = I.m_L2W * Mo.m_OriginPos[k]; Nr = NormalToWorld(I, Mo.m_OriginNrm[k]); }
+                        if (nO > 1) { v3 Po, No; Mo.Origin(o0, std::uint32_t(r) % nO, int(s), Po, No); Cr = I.m_L2W * Po; Nr = NormalToWorld(I, No); }
                         const v3 Dir = StratifiedCosineDir(Nr, r, Rays, Off1, Off2);
                         const hit H = Cast(Cr + Nr * 1e-3f, Dir);
                         ++T.m_nRays;
@@ -3017,7 +3286,8 @@ namespace xlionrender::gi
                         SurfaceAt(H, Albedo, Emission);
                         const v3 Dl = Direct(HitPosition(H), Nh, L);
                         const v3 Em = I.m_EmitB.empty() && !m_Setup.m_bEmitterSampling ? Emission : v3{ 0, 0, 0 };
-                        D = D + (v3{ Albedo.m_X * Dl.m_X, Albedo.m_Y * Dl.m_Y, Albedo.m_Z * Dl.m_Z } + Em * pi_v) * (1.0f / float(Rays));
+                        const v3 AD = v3{ Albedo.m_X * Dl.m_X, Albedo.m_Y * Dl.m_Y, Albedo.m_Z * Dl.m_Z } * (1.0f / float(Rays));
+                        D = D + Em * (pi_v / float(Rays)) + AD;
                         Cap.clear();
                         m_pReadCapture = &Cap;
                         const query Q = Indirect(H);
@@ -3053,7 +3323,22 @@ namespace xlionrender::gi
                 }
             }
             T.m_CompileMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+            if (bRelight) { RelightTransport(T, L); T.m_Dir0 = T.m_Dir; }
             return T;
+        }
+        // A relightable transport's direct light (m_Dir): each row's surfel's, at its center (the GPU's links mode 1, a shadow ray a light)
+        void RelightTransport(transport& T, const lights& L) const noexcept
+        {
+            T.m_Dir.assign(T.m_D.size(), v3{ 0, 0, 0 });
+            for (std::size_t i = 0; i < m_Instances.size() && i + 1 < T.m_InstFirst.size(); ++i)
+            {
+                const auto& I = m_Instances[i];
+                for (std::uint32_t r = T.m_InstFirst[i]; r < T.m_InstFirst[i + 1] && r < T.m_Dir.size(); ++r)
+                {
+                    const auto& S = I.m_pMesh->m_Levels[0][r - T.m_InstFirst[i]];
+                    T.m_Dir[r] = Direct(I.m_L2W * S.m_Center, NormalToWorld(I, S.m_Normal), L);
+                }
+            }
         }
         // Iterations of E = D + T E (Jacobi), from E (empty: from zero)
         static void SolveTransport(const transport& T, std::vector<v3>& E, int Iterations) noexcept
@@ -3061,19 +3346,22 @@ namespace xlionrender::gi
             const std::size_t n = T.m_D.size();
             if (E.size() != n) E.assign(n, v3{ 0, 0, 0 });
             std::vector<v3> Next(n), Mean(T.m_GroupSize.size());
-            const bool bTail = !T.m_AFirst.empty();
+            const bool bTail = !T.m_AFirst.empty(), bDir = T.m_Dir.size() == n;
+            std::vector<v3> In;                     // (relightable: what the links read, Dir + E)
             for (int it = 0; it < Iterations; ++it)
             {
+                if (bDir) { In.resize(n); for (std::size_t r = 0; r < n; ++r) In[r] = E[r] + T.m_Dir[r] - (r < T.m_Dir0.size() ? T.m_Dir0[r] : v3{ 0, 0, 0 }); }
+                const auto& Src = bDir ? In : E;
                 if (bTail)
                 {
                     std::fill(Mean.begin(), Mean.end(), v3{ 0, 0, 0 });
-                    for (std::size_t r = 0; r < n; ++r) Mean[T.m_Group[r]] = Mean[T.m_Group[r]] + E[r];
+                    for (std::size_t r = 0; r < n; ++r) Mean[T.m_Group[r]] = Mean[T.m_Group[r]] + Src[r];
                     for (std::size_t g = 0; g < Mean.size(); ++g) Mean[g] = Mean[g] * (1.0f / float(std::max<std::uint32_t>(T.m_GroupSize[g], 1)));
                 }
                 for (std::size_t r = 0; r < n; ++r)
                 {
                     v3 Sum = T.m_D[r];
-                    for (std::uint32_t k = T.m_First[r]; k < T.m_First[r + 1]; ++k) { const v3& w = T.m_W[k]; const v3& e = E[T.m_Col[k]]; Sum = Sum + v3{ w.m_X * e.m_X, w.m_Y * e.m_Y, w.m_Z * e.m_Z }; }
+                    for (std::uint32_t k = T.m_First[r]; k < T.m_First[r + 1]; ++k) { const v3& w = T.m_W[k]; const v3& e = Src[T.m_Col[k]]; Sum = Sum + v3{ w.m_X * e.m_X, w.m_Y * e.m_Y, w.m_Z * e.m_Z }; }
                     if (bTail) for (std::uint32_t k = T.m_AFirst[r]; k < T.m_AFirst[r + 1]; ++k) { const v3& w = T.m_AW[k]; const v3& m = Mean[T.m_AGroup[k]]; Sum = Sum + v3{ w.m_X * m.m_X, w.m_Y * m.m_Y, w.m_Z * m.m_Z }; }
                     Next[r] = Sum;
                 }
@@ -3085,7 +3373,7 @@ namespace xlionrender::gi
         transport TruncateTransport(const transport& T, int K, bool bInstances = false) const noexcept     // (bInstances: the tail to whole instances)
         {
             transport O;
-            O.m_InstFirst = T.m_InstFirst; O.m_D = T.m_D; O.m_nRays = T.m_nRays; O.m_nUnsupported = T.m_nUnsupported; O.m_nDropped = T.m_nDropped;
+            O.m_InstFirst = T.m_InstFirst; O.m_D = T.m_D; O.m_Dir = T.m_Dir; O.m_Dir0 = T.m_Dir0; O.m_nRays = T.m_nRays; O.m_nUnsupported = T.m_nUnsupported; O.m_nDropped = T.m_nDropped;
             O.m_nBack = T.m_nBack; O.m_nSky = T.m_nSky; O.m_nFar = T.m_nFar; O.m_CompileMs = T.m_CompileMs;
             const std::size_t n = T.m_D.size();
             O.m_Group.resize(n);
@@ -3349,7 +3637,7 @@ namespace xlionrender::gi
                 I.m_UrgentMark[Surf] = 2; Urgent.push_back(Surf);
                 Range(Surf, 1, gpu_range_urgent_v, float(R)); ++Took; TookRays += R; ++St.m_UrgentSurfels;
             }
-            const int n = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
+            const int n = I.m_bCube ? int(I.m_CubeSet.size()) : I.m_Level == 0 ? int(std::min<std::size_t>(I.m_nOwned, I.m_E.size())) : int(I.m_E.size());     // (GI chunks: no ghost)
             const float Step = I.m_RaysPerStep > 0 ? I.m_RaysPerStep : float(R);
             const int Steps = TookRays >= Cap ? 0 : std::min(n - I.m_Cursor, std::max(1, int(std::ceil(float(Cap - TookRays) / Step))));
             const int c0 = I.m_Cursor, c1 = c0 + Steps;
@@ -3479,14 +3767,14 @@ namespace xlionrender::gi
             const float Off1 = W.m_Off1, Off2 = W.m_Off2;               // this pass' rotation of the stratified set
             const auto& Mo = *I.m_pMesh;
             const bool  bSpread = m_Setup.m_bSpreadOrigins && I.m_Level == 0 && Mo.m_OriginFirst.size() == Mo.m_Levels[0].size() + 1;
-            const std::uint32_t o0 = bSpread ? Mo.m_OriginFirst[s] : 0, nO = bSpread ? Mo.m_OriginFirst[s + 1] - o0 : 0;
+            const std::uint32_t o0 = bSpread ? Mo.m_OriginFirst[s] : 0, nO = bSpread ? Mo.m_OriginFirst[s + 1] - o0 + 1 : 0;     // (+1: its center)
             const int   Shift = W.m_Shift;                              // the pass' pairing of origins and direction strata
             v3 Sum = W.m_Sum;
             int nBack = W.m_nBack, nBackAll = W.m_nBackAll, nUnsupported = W.m_nUnsupported, nHits = W.m_nHits;
             for (int r = r0; r < r1; ++r)
             {
                 v3 Cr = C, Nr = N;                                      // the ray's origin: across the surfel's patch (BuildOrigins)
-                if (nO > 1) { const std::uint32_t k = o0 + std::uint32_t(r + Shift) % nO; Cr = I.m_L2W * Mo.m_OriginPos[k]; Nr = NormalToWorld(I, Mo.m_OriginNrm[k]); }
+                if (nO > 1) { v3 Po, No; Mo.Origin(o0, std::uint32_t(r + Shift) % nO, s, Po, No); Cr = I.m_L2W * Po; Nr = NormalToWorld(I, No); }
                 const v3 D = StratifiedCosineDir(Nr, r, R, Off1, Off2);
                 const auto Tc = clock::now();
                 const hit H = Cast(Cr + Nr * 1e-3f, D);
@@ -3560,7 +3848,9 @@ namespace xlionrender::gi
                 if (AllowMs > 0) m_Starve[3] = bWork && !bDid ? m_Starve[3] + 1 : 0;
             }
             m_nMovesAcc = 0; m_MovesMsAcc = 0; m_MoveMarked = 0;
-            BuildTlas();
+            if (!m_Setup.m_bGPUOwned) for (auto& I : m_Instances) { if (I.m_bAlive) EnsureSolver(I); }     // (the CPU solves again: AllocSolver)
+            else if (!m_bSolverFreed) for (auto& I : m_Instances) FreeSolver(I);          // (GPU-owned since: the instances added before it)
+            m_bSolverFreed = m_Setup.m_bGPUOwned;            BuildTlas();
             TrackLights(L);
             Lap(St.m_TlasLightsMs);
 
@@ -3599,8 +3889,7 @@ namespace xlionrender::gi
                 }
                 I.m_E = std::move(E); I.m_Valid = std::move(Valid); I.m_Level = Want; I.m_Cursor = 0; ++m_GPULevelGen;     // (the GPU re-levels in place: gpu_trace::Relevel)
                 I.m_bEmitRelevel = true;
-                I.m_Acc.assign(I.m_E.size(), v3{ 0, 0, 0 }); I.m_AccValid.assign(I.m_E.size(), 1);
-                ResetMoments(I);
+                ResetMoments(I);                                // (the solver's arrays: AllocSolver, CPU-solved only)
                 }
                 // An ambient cube: its parents cover too few pixels: 6 of them traced, the rest blended (the instance is still at level 1 for everything that reads it)
                 bCubeWant = bCubeWant && I.m_Level == 1;
@@ -3649,7 +3938,7 @@ namespace xlionrender::gi
                     if (RaysLeft <= 0) break;
                     auto& I = m_Instances[i];
                     const int Cap = i == Fair ? std::max(1, int(float(RaysLeft) * m_Setup.m_FairShare)) : RaysLeft;
-                    const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : int(I.m_E.size());
+                    const int n    = I.m_bCube ? int(I.m_CubeSet.size()) : I.m_Level == 0 ? int(std::min<std::size_t>(I.m_nOwned, I.m_E.size())) : int(I.m_E.size());     // (GI chunks: its ghosts are never traced)
                     if (I.m_Cursor == 0)
                     {
                         if (I.m_bDirty) { I.m_History = 0; I.m_bDirty = false; ++St.m_nHistoryResets; for (auto& Es : I.m_Est) Es.Lower(I.m_DirtyA); if (m_Setup.m_bGPUTrace) m_GPUOps.push_back({ i, -1, I.m_DirtyA, 0 }); I.m_DirtyA = 1; }
@@ -3807,6 +4096,7 @@ namespace xlionrender::gi
             for (const auto& [i, s] : m_Work)       // the surfels finished this update
             {
                 auto& I = m_Instances[i];
+                EnsureSolver(I);
                 // The light: the estimator (it warms up after a change, settles, and still follows one). The validity and the depth
                 // moments: their own slow blends (they weigh the reads: noise there swims too)
                 auto& Es = I.m_Est[s];
@@ -3847,6 +4137,7 @@ namespace xlionrender::gi
                 if (++I.m_nMeanDeltas > I.m_E.size()) I.m_bMeanDirty = true;  // summed again exactly now and then (float drift)
             }
 
+            if (!m_Setup.m_bGPUOwned) SyncGhosts();          // (GI chunks: the ghosts take their owners' committed set; the GPU's: its own pass)
             for (int i = 0; i < int(m_Instances.size()); ++i)
                 if (m_Instances[i].m_bAlive && m_Instances[i].m_bCube)
                 {
@@ -4003,6 +4294,8 @@ namespace xlionrender::gi
             float                   m_RaysPerStep = 0;          // G4c: the rays a step of its cursor cost on the GPU (its ranges' mean; 0: not known)
             int                     m_Level     = 0;
             bool                    m_bCube     = false;        // level 1 as an ambient cube: only m_CubeSet is traced, the other parents blend from them (ExpandCube)
+            std::uint32_t           m_nOwned    = 0xFFFFFFFFu;  // GI chunks: its level-0 surfels from here on are ghosts (SetGhosts); all: none
+            std::vector<std::array<int, 2>> m_GhostOwner;      //   per ghost: its owner's instance and surfel
             std::vector<int>        m_CubeSet;                  // the parents traced: for each axis direction the one facing it best
             int                     m_Age       = 0;
             int                     m_History   = 0;
@@ -4049,14 +4342,33 @@ namespace xlionrender::gi
         void Resize(instance& I) noexcept
         {
             const std::size_t n = I.m_pMesh->m_Levels[I.m_Level].size();
-            I.m_E.assign(n, v3{ 0, 0, 0 }); I.m_Acc.assign(n, v3{ 0, 0, 0 });
-            I.m_Valid.assign(n, 1); I.m_AccValid.assign(n, 1);
+            I.m_E.assign(n, v3{ 0, 0, 0 });
+            I.m_Valid.assign(n, 1);
             ResetMoments(I);
             for (auto& Es : I.m_Est) Es.Restart();                      // new: the first sample is its light
         }
 
+        // The CPU solver's state per surfel (the pass' accumulators, the estimators, the moments' counts): only where the CPU solves. GPU-owned,
+        // the GPU keeps its own (gpu_trace); these arrays were ~250 B a surfel at the fine count, never read (GI working set, job 2). Made
+        // when the CPU solves again, or reads the GPU's state back (SetGPUState), from the light it has then
+        void AllocSolver(instance& I) noexcept
+        {
+            const std::size_t n = I.m_E.size();            I.m_Acc.assign(n, v3{ 0, 0, 0 }); I.m_AccValid.assign(n, 1);
+            I.m_MomAcc.assign(n, {});
+            I.m_MomCount.assign(n, {});
+            I.m_BasisAcc.assign(n, basis{});
+            I.m_Est.assign(n, estimator{});                             // (all new, as the GPU's re-level: G4c)
+            for (std::size_t s = 0; s < n; ++s) I.m_Est[s].Seed(I.m_E[s]);
+        }
+        void EnsureSolver(instance& I) noexcept { if (I.m_Est.size() != I.m_E.size() || I.m_Acc.size() != I.m_E.size()) AllocSolver(I); }
+        static void FreeSolver(instance& I) noexcept
+        {
+            const auto Free = [](auto& V) { V.clear(); V.shrink_to_fit(); };     // (= {} keeps the capacity)
+            Free(I.m_Acc); Free(I.m_AccValid); Free(I.m_MomAcc); Free(I.m_MomCount); Free(I.m_BasisAcc); Free(I.m_Est);
+        }
+
         // Fully open (every direction travels the whole reach): a new surfel reads at full weight until its rays say otherwise
-        static void ResetMoments(instance& I) noexcept      // (a new layout: its shown light and its mean are made again too)
+        void ResetMoments(instance& I) noexcept      // (a new layout: its shown light and its mean are made again too)
         {
             I.m_bFilterFull = true; I.m_bMeanDirty = true;
             ++I.m_MomentsReset;
@@ -4064,13 +4376,9 @@ namespace xlionrender::gi
             I.m_LastPass.assign(I.m_pMesh->m_Levels[I.m_Level].size(), 0); I.m_LastOff.assign(I.m_pMesh->m_Levels[I.m_Level].size(), { 0.0f, 0.0f });
             const auto& L = I.m_pMesh->m_Levels[I.m_Level];
             I.m_Moments.resize(L.size());
-            I.m_MomAcc.assign(L.size(), {});
-            I.m_MomCount.assign(L.size(), {});
             const v3 Third{ 1.0f / 3, 1.0f / 3, 1.0f / 3 };
             I.m_Frac.assign(L.size(), basis{ Third, Third, Third });
-            I.m_BasisAcc.assign(L.size(), basis{});
-            I.m_Est.assign(L.size(), estimator{});                     // (all new, as the GPU's re-level: G4c)
-            for (std::size_t s = 0; s < L.size(); ++s) I.m_Est[s].Seed(I.m_E[s]);
+            if (m_Setup.m_bGPUOwned) FreeSolver(I); else AllocSolver(I);
             for (std::size_t s = 0; s < L.size(); ++s)
             {
                 const float R = 2 * L[s].m_Radius;
@@ -4118,13 +4426,12 @@ namespace xlionrender::gi
                 for (std::uint32_t k = I.m_BucketFirst[Cell]; k < I.m_BucketFirst[Cell + 1]; ++k)
                 {
                     const std::uint32_t s = I.m_BucketIndex[k];
-                    if (s >= I.m_Est.size()) continue;
+                    if (s >= I.m_E.size()) continue;
                     const float* C = W + 3 * std::size_t(s);       // (plain floats: a Debug build calls every v3 operator)
                     const float dx = std::max(std::max(Lo.m_X - C[0], C[0] - Hi.m_X), 0.0f), dy = std::max(std::max(Lo.m_Y - C[1], C[1] - Hi.m_Y), 0.0f), dz = std::max(std::max(Lo.m_Z - C[2], C[2] - Hi.m_Z), 0.0f);
                     const float a = 1.0f - std::sqrt(dx * dx + dy * dy + dz * dz) / Mg;
                     if (a <= 0) continue;
-                    I.m_Est[s].Lower(a);
-                    if (a >= 0.5f) I.m_MomCount[s] = {};
+                    if (s < I.m_Est.size()) { I.m_Est[s].Lower(a); if (a >= 0.5f) I.m_MomCount[s] = {}; }     // (GPU-owned: the GPU's, the op below)
                     if (m_Setup.m_bGPUTrace) m_GPUOps.push_back({ int(&I - m_Instances.data()), int(s), a, a >= 0.5f ? 1 : 0 });
                     if (!I.m_UrgentMark[s]) { I.m_UrgentMark[s] = 1; I.m_Urgent.push_back(int(s)); }
                     bAny = true;
@@ -4411,6 +4718,7 @@ namespace xlionrender::gi
                 if (!I.m_bAlive || !Transports(I)) continue;
                 for (const int e : I.m_EmitSurfs)
                 {
+                    if (std::uint32_t(e) >= I.m_nOwned) continue;      // (a ghost: its owner emits)
                     const auto& S = I.m_pMesh->m_Levels[0][e];
                     const float r = S.m_Radius * I.m_MeanScale;
                     m_Emitters.push_back({ i, e });
@@ -4786,6 +5094,7 @@ namespace xlionrender::gi
         float                                   m_EmitScale = -1;           // the scale it was made with
         std::vector<std::pair<int, int>>        m_Emitters;         // (instance, fine surfel) of every surfel that emits
         std::vector<instance>                   m_Instances;
+        bool                                    m_bSolverFreed = false;     // GPU-owned at the last Update: the CPU solver's arrays freed (AllocSolver)
         mutable bvh                             m_Tlas;
         mutable std::vector<int>                m_TlasIds;          // TLAS primitive -> instance (the alive ones)
         bvh                                     m_LightBvh;         // over the point lights' spheres

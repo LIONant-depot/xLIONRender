@@ -61,6 +61,14 @@ vec3  MNrm(uint M, uint v)    { return GV(GD[M + 2u] + 3u * v); }
 uvec3 MTri(uint M, int t)     { const uint b = GD[M + 3u] + 3u * uint(t); return uvec3(GD[b], GD[b + 1u], GD[b + 2u]); }
 int   MVertSurfel(uint M, uint v, int k) { const uint w = GD[GD[M + 4u] + 2u * v + uint(k / 2)]; const uint s = (k % 2) == 0 ? (w & 0xFFFFu) : (w >> 16); return s == 0xFFFFu ? -1 : int(s); }
 uint  MSurfel(uint M, uint Level, int s) { return GD[M + 5u + 2u * Level] + 7u * uint(s); }      // center 3, normal 3, radius
+// A fine surfel's ray origin k (surfel_mesh::Origin, mesh space): 0 its own center, else its entry o0 + k - 1: a vertex of the mesh (its
+// position, its normal normalized)
+void GIOrigin(uint M, uint o0, uint k, int s, out vec3 P, out vec3 N)
+{
+    if (k == 0u) { const uint Sb = MSurfel(M, 0u, s); P = GV(Sb); N = GV(Sb + 3u); return; }
+    const uint v = GD[GD[M + 15u] + o0 + k - 1u];
+    P = GV(GD[M + 1u] + 3u * v); N = normalize(GV(GD[M + 2u] + 3u * v));
+}
 int   MParent(uint M, int s)  { return int(GD[GD[M + 9u] + uint(s)]); }
 
 // ---- the solver's helpers
@@ -218,6 +226,15 @@ int ReadEntry(uint M, vec3 P, vec3 N)
     }
     return -1;
 }
+// A part's list (surfel_mesh::PackReadGrid; GIListEntry's twin): Code the count word, At the list's first word
+uint ListCount(uint Code) { return (Code & 0x8000u) != 0u ? (Code & 0x7Fu) + ((Code >> 7u) & 0x7Fu) : Code; }
+uint ListEntry(uint At, uint Code, uint i)
+{
+    const uint nF = (Code & 0x8000u) != 0u ? (Code & 0x7Fu) : 0xFFFFu;
+    if (i < nF) return GD[At + i];
+    const uint h = i - nF, w = GD[At + nF + (h >> 1u)];
+    return ((h & 1u) == 0u ? (w & 0xFFFFu) : (w >> 16u)) | 0xFFFF0000u;
+}
 // surfel_mesh::ReadCellList: the patch of P's cell that matches it best; its list (First, Count) and its normal. false: none
 bool ReadCellList(uint M, vec3 P, vec3 N, out uint First, out uint Count, out vec3 PatchN)
 {
@@ -267,9 +284,9 @@ bool ReadPoint(int Id, vec3 P, vec3 N, out vec3 E)
     const uint nLight = GD[M + 6u + 2u * Level];
     const uint Lb = GD[M + 12u];
     vec3 S = vec3(0), RS = vec3(0); float W = 0.0, RW = 0.0;
-    for (uint i = 0u; i < Count; ++i)
+    for (uint i = 0u; i < ListCount(Count); ++i)
     {
-        const uint e = GD[Lb + First + i];
+        const uint e = ListEntry(Lb + First, Count, i);
         ++g_ReadEntries;
         const int s = int(e & 0xFFFFu);
         const uint Sb = MSurfel(M, 0u, s);
@@ -368,10 +385,10 @@ vec3 Unsupported(int Id, int Tri, float U, float V)
     const uint Lb = GD[M + 12u];
     const uint nLight = GD[M + 6u + 2u * Level];
     vec3 S = vec3(0); float W = 0.0;
-    for (uint i = 0u; i < min(Count, gi_fallback_cap_v); ++i)
+    for (uint i = 0u; i < min(ListCount(Count), gi_fallback_cap_v); ++i)
     {
         ++g_ReadEntries;                                  // (diagnostics: the fallback's walk counts as read entries too)
-        const int s = int(GD[Lb + First + i] & 0xFFFFu);
+        const int s = int(ListEntry(Lb + First, Count, i) & 0xFFFFu);
         const uint Sb = MSurfel(M, 0u, s);
         const float f = max(0.0, 1.0 - length(P - GV(Sb)) / (2.0 * GF(Sb + 6u)));
         const int sl = Level == 1u ? MParent(M, s) : s;

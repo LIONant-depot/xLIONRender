@@ -5,6 +5,7 @@
 // CPU's filter. The CPU's main-thread time per update in GPU mode is printed
 #include "xlionrender_test_common.h"
 #include "features/gi/xlionrender_surfel_gi_gpu.h"
+#include "features/gi/xlionrender_surfel_gi_chunks.h"
 
 using namespace xlionrender::test;
 using namespace xlionrender::gi;
@@ -41,10 +42,16 @@ namespace
     constexpr std::uint32_t s_LinksComp[] = {
         #include "xlionrender_gi_links_comp.h"
     };
+    constexpr std::uint32_t s_SolveComp[] = {
+        #include "xlionrender_gi_solve_comp.h"
+    };
+    constexpr std::uint32_t s_GhostsComp[] = {
+        #include "xlionrender_gi_ghosts_comp.h"
+    };
     constexpr std::uint32_t s_ReadBackComp[] = {
         #include "xlionrender_gi_readback_comp.h"
     };
-    const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp, s_LinksComp };
+    const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp, s_LinksComp, s_SolveComp, s_GhostsComp };
 
     // The GPU's light into the world's arrays: the last slice delivered, the read back copied, then in (two frames)
     // Empty frames until the slices out are back (gpu_trace::Collect reads them lag_frames_v frames on)
@@ -115,6 +122,48 @@ namespace
     }
 
     // The room of xlionrender_test_gi_render (its pieces boxes of cube::Generate at their size, MakeSurfels: the renderer's meshes)
+    // GI sections (gi_chunks_plan.md): a room baked as one mesh (6 x 6 m, 2.5 m high, 1 m tiles as its clusters), cut into sections of about a
+    // quarter of its surfels, each its own instance; their ghosts copy their owners (the CPU: world::SyncGhosts; the GPU: the ghost pass)
+    void MakeSectionRoom(std::vector<surfel_mesh>& M, world& W)
+    {
+        surfel_mesh Whole;
+        const auto Quad = [&](v3 C, v3 U, v3 V)
+        {
+            const int n = 48;
+            const int Base = int(Whole.m_Pos.size());
+            const v3 N = U.Cross(V).NormalizeCopy();
+            for (int j = 0; j <= n; ++j) for (int i = 0; i <= n; ++i) { Whole.m_Pos.push_back(C + U * (float(i) / n) + V * (float(j) / n)); Whole.m_Nrm.push_back(N); }
+            for (int j = 0; j < n; ++j) for (int i = 0; i < n; ++i)
+            {
+                const int a = Base + j * (n + 1) + i;
+                Whole.m_Tris.push_back({ a, a + 1, a + n + 2 }); Whole.m_Tris.push_back({ a, a + n + 2, a + n + 1 });
+            }
+        };
+        Quad({ -3, 0, -3 }, { 0, 0, 6 }, { 6, 0, 0 }); Quad({ -3, 2.5f, -3 }, { 6, 0, 0 }, { 0, 0, 6 });
+        Quad({ -3, 0, 3 }, { 0, 2.5f, 0 }, { 6, 0, 0 }); Quad({ -3, 0, -3 }, { 6, 0, 0 }, { 0, 2.5f, 0 });
+        Quad({ -3, 0, -3 }, { 0, 2.5f, 0 }, { 0, 0, 6 }); Quad({ 3, 0, -3 }, { 0, 0, 6 }, { 0, 2.5f, 0 });
+        Whole.Bake(0.3f, 0.9f);
+        std::vector<int> TriCluster(Whole.m_Tris.size());
+        std::unordered_map<std::int64_t, int> Tile;
+        for (std::size_t t = 0; t < Whole.m_Tris.size(); ++t)
+        {
+            const v3 c = (Whole.m_Pos[Whole.m_Tris[t][0]] + Whole.m_Pos[Whole.m_Tris[t][1]] + Whole.m_Pos[Whole.m_Tris[t][2]]) * (1.0f / 3.0f);
+            const std::int64_t k = (std::int64_t(std::floor(c.m_X)) + 100) * 1000000 + (std::int64_t(std::floor(c.m_Y)) + 100) * 1000 + (std::int64_t(std::floor(c.m_Z)) + 100);
+            TriCluster[t] = Tile.try_emplace(k, int(Tile.size())).first->second;
+        }
+        chunked_mesh Ch;
+        (void)PartitionChunks(Whole, TriCluster, int(Tile.size()), Whole.m_Levels[0].size() / 4, Ch);
+        M = std::move(Ch.m_Chunks);
+        std::vector<int> Ids;
+        for (auto& C : M) Ids.push_back(W.Add(C, xmath::fmat4::fromIdentity(), { 0.7f, 0.7f, 0.7f }));
+        for (std::size_t c = 0; c < M.size(); ++c)
+        {
+            std::vector<std::array<int, 2>> Owners;
+            for (const auto& G : Ch.m_Ghosts[c]) Owners.push_back({ Ids[G.m_Chunk], int(G.m_Local) });
+            W.SetGhosts(Ids[c], Ch.m_nOwned[c], std::move(Owners));
+        }
+    }
+
     void MakeRoom(std::vector<surfel_mesh>& M, world& W)
     {
         struct piece { xprim_geom::float3 m_Size; xmath::fvec3 m_Pos; v3 m_Color; };
@@ -127,17 +176,18 @@ namespace
         for (std::size_t i = 0; i < std::size(Pieces); ++i) W.Add(M[i], xmath::fmat4::fromTranslation(Pieces[i].m_Pos), Pieces[i].m_Color);
     }
 
-    struct result { int m_Surfels = 0, m_Mismatch = 0; double m_Worst = 0, m_UpdateMs = 0, m_TraceMs = 0; int m_Packs = 0, m_Relevels = 0; double m_ShownWorst = -1, m_MomentWorst = -1, m_InitMs = 0; };
+    struct result { int m_Surfels = 0, m_Mismatch = 0; double m_Worst = 0, m_UpdateMs = 0, m_TraceMs = 0; int m_Packs = 0, m_Relevels = 0; double m_ShownWorst = -1, m_MomentWorst = -1, m_InitMs = 0; std::size_t m_CpuBytes = 0, m_OwnedBytes = 0; };
 
     // Updates of the CPU world against the GPU world's (it commits a batch one update later: one update more). bEvents: on both at the
     // same updates, a wall recolored (its material: the scene packed again), the box moved (estimator ops: Lower, the changes near it),
     // the eye far away (the coarse level: the light carried over)
-    int Compare(app& App, const lights& L, bool bPanel, int Updates, result& R, bool bEvents = false, bool bRoom = false, bool bSample = false)
+    int Compare(app& App, const lights& L, bool bPanel, int Updates, result& R, bool bEvents = false, bool bRoom = false, bool bSample = false, bool bSections = false)
     {
         R = {};
         std::vector<surfel_mesh> Mc, Mg;
         world Wc, Wg;
-        if (bRoom) { MakeRoom(Mc, Wc); MakeRoom(Mg, Wg); }
+        if (bSections) { MakeSectionRoom(Mc, Wc); MakeSectionRoom(Mg, Wg); }
+        else if (bRoom) { MakeRoom(Mc, Wc); MakeRoom(Mg, Wg); }
         else { MakeCornell(Mc, Wc, bPanel); MakeCornell(Mg, Wg, bPanel); }
         Wc.m_Setup.m_bEmitterSampling = Wg.m_Setup.m_bEmitterSampling = bSample;
         Wg.m_Setup.m_bGPUTrace = Wg.m_Setup.m_bGPUOwned = true;
@@ -159,7 +209,7 @@ namespace
             if (bEvents && u == 7) W.SetSurfelMaterial(2, std::vector<v3>(M[2].m_Levels[0].size(), v3{ 0.9f, 0.9f, 0.4f }), {});
         };
         const auto EyeAt = [&](int u) { return bEvents && u >= 14 ? v3{ 0, 0, -60 } : bRoom ? v3{ 0, 1.6f, -1.9f } : v3{ 0, 0, -0.9f }; };
-        for (int u = 0; u < Updates; ++u) { Event(Wc, Mc, u); Wc.Update(L, EyeAt(u), 1 << 30, 100 + u); Late(Wc, Mc, u); }
+        for (int u = 0; u < Updates; ++u) { Event(Wc, Mc, u); R.m_CpuBytes = Wc.Update(L, EyeAt(u), 1 << 30, 100 + u).m_LightBytes; Late(Wc, Mc, u); }
         for (int u = 0; u < Updates; ++u)       // (the GPU commits a batch in the frame it traces it: the same updates; its stats back first)
         {
             Drain(App, T, Wg);
@@ -168,7 +218,7 @@ namespace
             const auto T0 = std::chrono::steady_clock::now();
             T.Collect(Wg, Frame);
             Event(Wg, Mg, u);
-            Wg.Update(L, EyeAt(u), 1 << 30, 100 + u);
+            R.m_OwnedBytes = Wg.Update(L, EyeAt(u), 1 << 30, 100 + u).m_LightBytes;      // (before Sync: its read back makes the CPU's arrays)
             T.Submit(App.m_Window, Wg, L, Frame, 1000.0f, EyeAt(u));     // (a budget for all of a batch: one slice, the CPU's order)
             Late(Wg, Mg, u);
             if (u > 0) R.m_UpdateMs = std::max(R.m_UpdateMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count());
@@ -198,9 +248,9 @@ namespace
         }
         if (bRoom)      // G4: the GPU's shown light (gpu_trace::Show into rings as the renderer's) against the CPU's filter of the same state
         {
-            std::vector<int> Places(std::size_t(Wg.InstanceCount()), -1);
+            std::vector<int> Places(2 * std::size_t(Wg.InstanceCount()), -1);     // (per instance: its place, its mean: -1, the renderer's CPU writes it)
             int nRing = 0;
-            for (int i = 0; i < Wg.InstanceCount(); ++i) { Places[std::size_t(i)] = nRing; nRing += int(Wg.InstanceLight(i).size()) + 1; }
+            for (int i = 0; i < Wg.InstanceCount(); ++i) { Places[2 * std::size_t(i)] = nRing; nRing += int(Wg.InstanceLight(i).size()) + 1; }
             xgpu::buffer Light, Moments;
             CHECK(!App.m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = nRing })
                && !App.m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = 16 * nRing }), "rings");
@@ -227,7 +277,7 @@ namespace
                 double Top = 1e-6; for (const auto& b : B) for (int k = 0; k < 3; ++k) Top = std::max({ Top, double(b[k].m_X), double(b[k].m_Y), double(b[k].m_Z) });
                 for (std::size_t q = 0; q < B.size(); ++q)
                 {
-                    const std::size_t At = std::size_t(Places[std::size_t(i)] + 1) + q;
+                    const std::size_t At = std::size_t(Places[2 * std::size_t(i)] + 1) + q;
                     for (int k = 0; k < 3; ++k)
                     {
                         const v3 g = UnpackRGB9E5(L4[At][std::size_t(k)]);        // (RGB9E5: steps of 2^-9 of the largest channel)
@@ -262,6 +312,10 @@ int main()
                     "an update in GPU mode (collect, Update, submit) %.2f ms at most, a batch %.3f ms on the GPU; gpu_trace::Init %.0f ms\n", pName, R.m_Surfels, R.m_Mismatch, R.m_Worst, R.m_Packs, R.m_UpdateMs, R.m_TraceMs, R.m_InitMs);
         CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "%s: %d of %d surfels differ from the CPU world", pName, R.m_Mismatch, R.m_Surfels);
         CHECK(R.m_Packs == 1, "%s: the scene was packed %d times (no structural change after the first)", pName, R.m_Packs);
+        // GI working set, job 2: GPU-owned, the world keeps no CPU solver state (accumulators, estimators, moment counts): the light state
+        // per surfel well under the CPU world's
+        std::printf("  the CPU's light state: CPU-solved %.0f B a surfel, GPU-owned %.0f B\n", double(R.m_CpuBytes) / std::max(R.m_Surfels, 1), double(R.m_OwnedBytes) / std::max(R.m_Surfels, 1));
+        CHECK(R.m_OwnedBytes * 10 < R.m_CpuBytes * 6, "%s: GPU-owned, the CPU keeps %zu B of light state (CPU-solved %zu B): its solver's arrays", pName, R.m_OwnedBytes, R.m_CpuBytes);
     }
     {
         lights L; L.m_Points = { { { 0.2f, 0.4f, -0.3f }, { 1.5f, 1.5f, 1.5f }, 4.0f } };
@@ -367,13 +421,16 @@ int main()
         App.m_Window.PageFlip();
         world::transport Tg; double Dropped = 0;
         CHECK(G.ReadLinks(W, Items, Tg, &Dropped), "ReadLinks");
-        const auto Tf = W.CompileTransport(L, 256);
+        W.RelightTransport(Tg, L); Tg.m_Dir0 = Tg.m_Dir;                 // (the GPU's links are relightable: at their own lights, no change)
+        const auto Tf = W.CompileTransport(L, 256, 1, true);
+        const auto Tb = W.CompileTransport(L, 256, 1, false);            // (the direct light baked at the hits: what relightable costs)
         const auto Tc = W.TruncateTransport(Tf, gpu_trace::links_v, true);
         std::vector<v3> Ref;
         for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i)) Ref.push_back(e);
         std::vector<v3> Eg, Ec;
         std::vector<v3> Ef;
-        world::SolveTransport(Tg, Eg, 20); world::SolveTransport(Tc, Ec, 20); world::SolveTransport(Tf, Ef, 20);
+        std::vector<v3> Eb;
+        world::SolveTransport(Tg, Eg, 20); world::SolveTransport(Tc, Ec, 20); world::SolveTransport(Tf, Ef, 20); world::SolveTransport(Tb, Eb, 20);
         const auto Lum = [](const v3& e) { return 0.2126 * e.m_X + 0.7152 * e.m_Y + 0.0722 * e.m_Z; };
         const auto Off = [&](const std::vector<v3>& A, const std::vector<v3>& B)      // the worst instance's mean, relative
         {
@@ -390,6 +447,20 @@ int main()
                     bPanel ? "the emissive panel, sampled" : "a point light", Tg.m_Col.size(), Tg.m_AGroup.size(), Tc.m_Col.size(), Tc.m_AGroup.size(), Dropped, 100 * Off(Eg, Ref), 100 * Off(Ec, Ref), 100 * Off(Ef, Ref), 100 * Off(Eg, Ec));
         // (the same rays as the CPU's: the same offsets and origins; a closed box is the worst case of the top 16 - surfel_gi 6k: 4.8%)
         CHECK(Off(Eg, Ec) < 0.005, "the GPU's links are %.2f%% off the CPU's (the same rays)", 100 * Off(Eg, Ec));
+        // relightable (the direct light at each surfel, not at each hit) against baked: close to the converged world as well
+        CHECK(Off(Ef, Eb) < 1e-4, "relightable links at their own lights are %.3f%% off the baked ones", 100 * Off(Ef, Eb));
+        // A light moved (relit: the difference of the surfels' direct light through the same links) against the links compiled again
+        // at the new light, and against the old links left as they were (the light did not follow)
+        if (!bPanel)
+        {
+            lights L2 = L; L2.m_Points[0].m_Position = { -0.3f, 0.5f, 0.3f };
+            auto Tr = Tc; W.RelightTransport(Tr, L2);
+            const auto Tn = W.TruncateTransport(W.CompileTransport(L2, 256, 1, false), gpu_trace::links_v, true);
+            std::vector<v3> Er, En, Es;
+            world::SolveTransport(Tr, Er, 20); world::SolveTransport(Tn, En, 20); world::SolveTransport(Tc, Es, 20);
+            std::printf("  a light moved: relit links off the links compiled again by %.2f%% (the old links, not relit: %.2f%%)\n", 100 * Off(Er, En), 100 * Off(Es, En));
+            CHECK(Off(Er, En) < 0.5 * Off(Es, En), "a light moved: the relit links are %.2f%% off (not relit %.2f%%)", 100 * Off(Er, En), 100 * Off(Es, En));
+        }
         CHECK(Off(Ef, Ref) < 0.02, "every link: %.1f%% off the converged world", 100 * Off(Ef, Ref));
         CHECK(Off(Eg, Ref) < 0.15, "the GPU's links: %.1f%% off the converged world (the tail through whole instances: a closed box of big walls is its worst case)", 100 * Off(Eg, Ref));
     }
@@ -402,6 +473,130 @@ int main()
         CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "the room: %d of %d surfels differ from the CPU world", R.m_Mismatch, R.m_Surfels);
         CHECK(R.m_ShownWorst >= 0 && R.m_ShownWorst < 2.5e-3 && R.m_MomentWorst == 0,      // (the light in RGB9E5: 2^-9 steps)
               "the GPU's shown light is off the CPU's filter (%.1e; %.0f moment words differ)", R.m_ShownWorst, R.m_MomentWorst);
+    }
+    {   // GI sections: a room cut into sections, each its own instance, its ghosts copied from their owners after every commit - the GPU's
+        // ghost pass against the CPU's SyncGhosts, every surfel (the ghosts too) the CPU world's
+        lights L; L.m_Points = { { { 0.5f, 2.0f, 0.3f }, { 6, 6, 6 }, 8.0f } }; L.m_Sky = { 0.05f, 0.05f, 0.05f };
+        result R;
+        if (Compare(App, L, false, 24, R, false, false, false, true)) return 1;
+        std::printf("GPU trace, a room in GI sections (ghosts copied on the GPU), 24 updates: %d surfels, %d differ from the CPU world, the worst of the others %.1e\n", R.m_Surfels, R.m_Mismatch, R.m_Worst);
+        CHECK(R.m_Mismatch * 200 <= R.m_Surfels, "the sections: %d of %d surfels differ from the CPU world", R.m_Mismatch, R.m_Surfels);
+    }
+    {   // GI sections with the link solve (the renderer's default): the solve writes every surfel's light, the ghosts' too - they must take
+        // their owners' again after it (a section's border stepped: the Bistro's wall behind the ivy, 2026-10-24)
+        lights L; L.m_Points = { { { 0.5f, 2.0f, 0.3f }, { 6, 6, 6 }, 8.0f } }; L.m_Sky = { 0.05f, 0.05f, 0.05f };
+        std::vector<surfel_mesh> M; world W;
+        MakeSectionRoom(M, W);
+        W.m_Setup.m_bGPUTrace = W.m_Setup.m_bGPUOwned = true;
+        gpu_trace T;
+        CHECK(T.Init(App.m_Device, s_Shaders), "gpu_trace::Init");
+        std::size_t nSolves = 0;
+        for (int u = 0; u < 40; ++u)
+        {
+            Drain(App, T, W);
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            const std::uint64_t Frame = App.m_Device.getFrameIndex();
+            T.Collect(W, Frame);
+            W.Update(L, v3{ 0, 1.6f, -1.9f }, 1 << 30, 100 + u);
+            T.Submit(App.m_Window, W, L, Frame, 1000.0f, v3{ 0, 1.6f, -1.9f });
+            T.PumpLinks(App.m_Window, W, L, Frame, 64, 4, 1 << 20);     // (links after 4 frames, all at once)
+            if (std::getenv("XLION_TEST_DEBUG")) std::printf("u %d state %d solves %zu\n", u, T.LinkState(), T.LinkSolves());
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+        }
+        nSolves = T.LinkSolves();
+        Sync(App, T, W);
+        int nGhosts = 0, nOff = 0; double Worst = 0;
+        for (int i = 0; i < W.InstanceCount(); ++i)
+        {
+            const auto& Own = W.GhostOwners(i);
+            const auto& E = W.InstanceLight(i);
+            for (std::size_t k = 0; k < Own.size(); ++k)
+            {
+                const auto [Oi, Os] = Own[k];
+                const std::size_t g = std::size_t(W.OwnedSurfels(i)) + k;
+                if (Oi < 0 || g >= E.size() || std::size_t(Os) >= W.InstanceLight(Oi).size()) continue;
+                const v3 a = E[g], b = W.InstanceLight(Oi)[std::size_t(Os)];
+                const double d = std::max({ std::abs(a.m_X - b.m_X), std::abs(a.m_Y - b.m_Y), std::abs(a.m_Z - b.m_Z) });
+                ++nGhosts; Worst = std::max(Worst, d); if (d > 1e-6) ++nOff;
+            }
+        }
+        std::printf("GI sections with the link solve (%zu solves): %d ghosts, %d not their owners' light (worst %.1e)\n", nSolves, nGhosts, nOff, Worst);
+        CHECK(nSolves > 0 && nGhosts > 0 && nOff == 0, "the link solve left %d of %d ghosts off their owners' light (%zu solves)", nOff, nGhosts, nSolves);
+
+        // A light moved: the links (they carry each surfel's direct light) are dropped and the rays relight the room (they were kept: the
+        // light never followed the lamp)
+        CHECK(T.LinkState() == 2, "the links were not solving before the light moved (state %d)", T.LinkState());
+        std::vector<v3> Before;
+        for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i)) Before.push_back(e);
+        L.m_Points[0].m_Position = { -1.5f, 1.0f, -1.0f };
+        for (int u = 40; u < 80; ++u)
+        {
+            Drain(App, T, W);
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            const std::uint64_t Frame = App.m_Device.getFrameIndex();
+            T.Collect(W, Frame);
+            W.Update(L, v3{ 0, 1.6f, -1.9f }, 1 << 30, 100 + u);
+            T.Submit(App.m_Window, W, L, Frame, 1000.0f, v3{ 0, 1.6f, -1.9f });
+            T.PumpLinks(App.m_Window, W, L, Frame, 64, 4, 1 << 20);
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+        }
+        Sync(App, T, W);
+        double Diff = 0, Sum = 0; std::size_t k = 0;
+        for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i))
+        {
+            if (k >= Before.size()) break;
+            const auto& b = Before[k++];
+            Diff += std::abs(e.m_X - b.m_X) + std::abs(e.m_Y - b.m_Y) + std::abs(e.m_Z - b.m_Z); Sum += b.m_X + b.m_Y + b.m_Z;
+        }
+        std::printf("a light moved: the surfels' light changed by %.1f%% (the links relit: state %d)\n", 100.0 * Diff / std::max(Sum, 1e-9), T.LinkState());
+        CHECK(Diff > 0.05 * Sum, "a light moved and the GI did not follow it (%.2f%% of the light changed)", 100.0 * Diff / std::max(Sum, 1e-9));
+
+        // A material changed (an instance recolored) once the links solve: only the rows that read it are built again - the links stay
+        // (state 2 throughout), the rest of the room keeps its rows, and its light follows the new color
+        {
+            const std::size_t nBefore = T.LocalRebuilds();
+            int nState2 = 0, nFrames = 0;
+            W.SetSurfelMaterial(0, std::vector<v3>(M[0].m_Levels[0].size(), v3{ 0.9f, 0.1f, 0.1f }), {});
+            for (int u = 80; u < 110; ++u)
+            {
+                Drain(App, T, W);
+                while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+                const std::uint64_t Frame = App.m_Device.getFrameIndex();
+                T.Collect(W, Frame);
+                W.Update(L, v3{ 0, 1.6f, -1.9f }, 1 << 30, 100 + u);
+                T.Submit(App.m_Window, W, L, Frame, 1000.0f, v3{ 0, 1.6f, -1.9f });
+                T.PumpLinks(App.m_Window, W, L, Frame, 64, 4, 1 << 20);
+                { auto Cmd = App.m_Window.getCmdBuffer(); }
+                App.m_Window.PageFlip();
+                ++nFrames; nState2 += T.LinkState() == 2;
+            }
+            std::size_t nRows = 0; for (int i = 0; i < W.InstanceCount(); ++i) nRows += W.InstanceLight(i).size();
+            std::printf("a material changed: %zu local rebuilds, %zu rows of %zu built again; the links solving %d of %d frames\n", T.LocalRebuilds() - nBefore, T.LocalRows(), nRows, nState2, nFrames);
+            CHECK(T.LocalRebuilds() > nBefore && nState2 == nFrames && T.LocalRows() < nRows, "a material change rebuilt %zu rows of %zu (local rebuilds %zu, solving %d of %d frames)", T.LocalRows(), nRows, T.LocalRebuilds() - nBefore, nState2, nFrames);
+        }
+        // A static object moved once the links solve: a local rebuild too (its rows, the rows reading it, the rows near it), the links stay
+        {
+            const std::size_t nBefore = T.LocalRebuilds();
+            int nState2 = 0, nFrames = 0;
+            W.SetTransform(1, xmath::fmat4::fromTranslation({ 0.05f, 0, 0 }));
+            for (int u = 110; u < 140; ++u)
+            {
+                Drain(App, T, W);
+                while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+                const std::uint64_t Frame = App.m_Device.getFrameIndex();
+                T.Collect(W, Frame);
+                W.Update(L, v3{ 0, 1.6f, -1.9f }, 1 << 30, 100 + u);
+                T.Submit(App.m_Window, W, L, Frame, 1000.0f, v3{ 0, 1.6f, -1.9f });
+                T.PumpLinks(App.m_Window, W, L, Frame, 64, 4, 1 << 20);
+                { auto Cmd = App.m_Window.getCmdBuffer(); }
+                App.m_Window.PageFlip();
+                ++nFrames; nState2 += T.LinkState() == 2;
+            }
+            std::printf("a static object moved: %zu local rebuilds; the links solving %d of %d frames\n", T.LocalRebuilds() - nBefore, nState2, nFrames);
+            CHECK(T.LocalRebuilds() > nBefore && nState2 == nFrames, "a move: %zu local rebuilds, solving %d of %d frames (the links dropped)", T.LocalRebuilds() - nBefore, nState2, nFrames);
+        }
     }
     std::printf("PASS\n");
     return 0;

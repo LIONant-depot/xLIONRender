@@ -10,7 +10,7 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 0) readonly buffer data_b    { uint  GD[]; };
 layout(std430, set = 0, binding = 1) readonly buffer owners_b  { uint  GIOwner[]; };
 layout(std430, set = 0, binding = 2)          buffer scratch_b { float GIPass[]; };     // two arrays of 9 floats a surfel: [0, 9N), [9N, 18N)
-layout(std430, set = 0, binding = 3) readonly buffer places_b  { int   GIPlace[]; };    // per instance its place in the ring region (-1: not drawn)
+layout(std430, set = 0, binding = 3) readonly buffer places_b  { int   GIPlace[]; };    // per instance its place in the ring region (-1: not drawn), its mean light (RGB9E5; -1: the CPU wrote it)
 layout(std430, set = 0, binding = 4)          buffer light_b   { uvec4 GILight[]; };
 layout(std430, set = 0, binding = 5)          buffer moment_b  { uint  GIMoment[]; };
 
@@ -87,8 +87,13 @@ void main()
         return;
     }
     // shown: saturated, into the ring (its region for this frame: m_Base surfels in), with the moments
-    const int Place = GIPlace[Inst];
+    const int Place = GIPlace[2u * Inst];
     if (Place < 0) return;
+    if (s == 0u && t == 0u && GIPlace[2u * Inst + 1u] != -1)            // (the device-local rings: the slot before its surfels, its mean)
+    {
+        const uint m = uint(GIPlace[2u * Inst + 1u]);
+        GILight[uint(Push.m_Base + Place)] = uvec4(m, m, m, floatBitsToUint(1.0));
+    }
     const uint At = uint(Push.m_Base + Place + 1) + s;
     const uint Mo = GD[R + 4u] + 32u * s;
     GIMoment[16u * At + t] = Half(GF(Mo + 2u * t)) | (Half(GF(Mo + 2u * t + 1u)) << 16);
