@@ -249,6 +249,7 @@ namespace xlionrender::gi
             Window.Dispatch(m_LinksC, B, &Smooth, sizeof(Smooth), int((nItems + 63) / 64));
             m_bLinkDirValid = true;
             ++m_nRelights;
+            if (std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS relit %zu items, %u lamps in the GPU data\n", nItems, m_Data.size() > 3 ? m_Data[3] : 0u); std::fflush(stdout); }     // (measurement)
             return true;
         }
         // The links, their D, items and hit clusters copied once into device-local buffers: built into host-visible ones (ReadLinks maps

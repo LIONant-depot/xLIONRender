@@ -127,6 +127,27 @@ int main()
     CHECK(OnR > OnL * 1.15, "no color bleeding with GI (near red %.2f, near green %.2f)", OnR, OnL);
     CHECK(MOn[1] > MOff[1] * 1.05, "GI adds no light");
 
+    // A light with GI off (a bullet, a muzzle flash): its direct light only - left out of the GI's lights, the GI's light is as without
+    // it. The same light with GI on brings its bounce (the GI's light alone, its debug view)
+    {
+        const auto Lights = Scene.m_LocalLights;
+        Scene.m_GI.m_Debug = xlionrender::gi_debug::LIGHT;                // (the GI's light alone: what the switch changes)
+        Scene.m_LocalLights.push_back({ .m_Position = { 0.4f, 2.2f, 0.4f }, .m_Radius = 6, .m_Color = { 1, 1, 1 }, .m_Intensity = 4, .m_bCastShadows = true, .m_bGI = false });
+        for (int f = 0; f < 60; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render a light with GI off");
+        const auto NoGI = Mean(ReadRGB(Device, View, W, H), W, H, 0, 0, 1, 1);
+        Scene.m_LocalLights.back().m_bGI = true;
+        for (int f = 0; f < 60; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the light with GI on");
+        const auto WithGI = Mean(ReadRGB(Device, View, W, H), W, H, 0, 0, 1, 1);
+        Scene.m_LocalLights = Lights;
+        for (int f = 0; f < 60; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render without the light");
+        Scene.m_GI.m_Debug = xlionrender::gi_debug::NONE;
+        const auto Lum3 = [](const auto& c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+        const auto Without = Mean(ReadRGB(Device, View, W, H), W, H, 0, 0, 1, 1);
+        std::printf("a light with GI off: mean luminance %.4f, with GI on %.4f (its bounce +%.1f%%; without the light %.4f)\n", Lum3(NoGI), Lum3(WithGI), 100 * (Lum3(WithGI) / std::max(Lum3(NoGI), 1e-9) - 1), Lum3(Without));
+        CHECK(Lum3(WithGI) > Lum3(NoGI) * 1.1, "a light's GI switch changes nothing (%.4f with GI off, %.4f on)", Lum3(NoGI), Lum3(WithGI));
+        CHECK(std::abs(Lum3(NoGI) - Lum3(Without)) < 0.005 * Lum3(Without), "a light with GI off changed the GI (%.4f, without it %.4f)", Lum3(NoGI), Lum3(Without));
+    }
+
     // Reflections layer 1 (gi_dynamic_master_plan.md): the floor as a rough metal (no diffuse: what it shows is its reflection). The surfels'
     // light around the reflection direction colors it - redder by the red wall than by the green one; without GI (the flat ambient) not
     {

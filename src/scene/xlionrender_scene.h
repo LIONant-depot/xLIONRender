@@ -118,6 +118,7 @@ namespace xlionrender
         float           m_Intensity     = 4.0f;                     // ponytail: unitless until the physical-unit contract (research doc §6) is approved
         bool            m_bCastShadows  = true;
         float           m_ShadowTileSize = 1.0f;                    // world size of a clipmap level-0 tile (512 texels); the levels double it
+        bool            m_bGI           = true;                     // in the GI's lights (off: direct light only)
     };
 
     // A point or spot light (up to max_local_lights_v per scene, the nearest first is up to the caller); shadows from atlas tiles:
@@ -135,6 +136,7 @@ namespace xlionrender
         xmath::fvec3    m_Color         { 1, 1, 1 };
         float           m_Intensity     = 4.0f;
         bool            m_bCastShadows  = true;
+        bool            m_bGI           = true;                     // in the GI's lights (off: direct light only)
     };
     constexpr int max_local_lights_v = 32;
 

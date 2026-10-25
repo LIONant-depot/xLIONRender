@@ -111,6 +111,7 @@ namespace xlionrender
         float           m_Intensity     = 3.0f;
         bool            m_bCastShadows  = true;
         float           m_ShadowTileSize = 4.0f;           // world size of a level-0 shadow tile; the clipmap levels double it
+        bool            m_bGI           = true;             // in the GI's lights (its bounce); off: direct light only
 
         XPROPERTY_DEF
         ( "LightSun", light_sun
@@ -118,6 +119,7 @@ namespace xlionrender
         , obj_member<"Intensity",      &light_sun::m_Intensity>
         , obj_member<"CastShadows",    &light_sun::m_bCastShadows>
         , obj_member<"ShadowTileSize", &light_sun::m_ShadowTileSize, member_help<"World size of the finest shadow tile: smaller is sharper near the camera">>
+        , obj_member<"GI",             &light_sun::m_bGI, member_help<"Bounce light (global illumination). Off: direct light only, no bounce and no GI cost - for short-lived or fast lights such as bullets">>
         )
     };
 
@@ -130,6 +132,7 @@ namespace xlionrender
         float           m_Intensity     = 4.0f;
         float           m_Radius        = 8.0f;
         bool            m_bCastShadows  = true;
+        bool            m_bGI           = true;             // in the GI's lights (its bounce); off: direct light only
 
         XPROPERTY_DEF
         ( "LightPoint", light_point
@@ -137,6 +140,7 @@ namespace xlionrender
         , obj_member<"Intensity",   &light_point::m_Intensity>
         , obj_member<"Radius",      &light_point::m_Radius, member_help<"No light at and beyond this distance">>
         , obj_member<"CastShadows", &light_point::m_bCastShadows>
+        , obj_member<"GI",          &light_point::m_bGI, member_help<"Bounce light (global illumination). Off: direct light only, no bounce and no GI cost - for short-lived or fast lights such as bullets">>
         )
     };
 
@@ -151,6 +155,7 @@ namespace xlionrender
         float           m_InnerAngle    = 0.4f;            // radians from the axis: full light inside
         float           m_OuterAngle    = 0.6f;            // radians: no light outside (at most ~1)
         bool            m_bCastShadows  = true;
+        bool            m_bGI           = true;             // in the GI's lights (its bounce); off: direct light only
 
         XPROPERTY_DEF
         ( "LightSpot", light_spot
@@ -160,6 +165,7 @@ namespace xlionrender
         , obj_member<"InnerAngle",  &light_spot::m_InnerAngle, member_help<"Radians from the axis inside which the light is full">>
         , obj_member<"OuterAngle",  &light_spot::m_OuterAngle, member_help<"Radians from the axis beyond which there is no light (at most about 1)">>
         , obj_member<"CastShadows", &light_spot::m_bCastShadows>
+        , obj_member<"GI",          &light_spot::m_bGI, member_help<"Bounce light (global illumination). Off: direct light only, no bounce and no GI cost - for short-lived or fast lights such as bullets">>
         )
     };
 

@@ -317,7 +317,7 @@ namespace xlionrender
         // The lights: the sun, the sky (or the flat ambient as a sky), the local lights as points (ponytail: spots as points)
         gi::lights L;
         L.m_SunDirection = Scene.m_Sun.m_Direction.NormalizeCopy();
-        L.m_SunColor     = Scene.m_Sun.m_Color * Scene.m_Sun.m_Intensity;
+        L.m_SunColor     = Scene.m_Sun.m_bGI ? Scene.m_Sun.m_Color * Scene.m_Sun.m_Intensity : xmath::fvec3{ 0, 0, 0 };     // (GI off: direct light only)
         L.m_Sky          = Scene.m_Sky.m_Intensity <= 0 ? Scene.m_Ambient * (1.0f / gi::pi_v)
                          : Scene.m_Sky.m_pCubemap      ? m_EnvMean * Scene.m_Sky.m_Intensity                                  // (updateEnvironment)
                          :                               (Scene.m_Sky.m_Zenith + Scene.m_Sky.m_Horizon) * (0.5f * Scene.m_Sky.m_Intensity);
@@ -327,7 +327,7 @@ namespace xlionrender
             L.m_bSkyOct = true;
         }
         L.m_Points.reserve(Scene.m_LocalLights.size());
-        for( const auto& LL : Scene.m_LocalLights ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });
+        for( const auto& LL : Scene.m_LocalLights ) if( LL.m_bGI ) L.m_Points.push_back({ LL.m_Position, LL.m_Color * LL.m_Intensity, LL.m_Radius });     // ponytail: a spot is a point in the GI (its cone ignored)
         if( auto It = s_TransportAsked.find(this); It != s_TransportAsked.end() && It->second )      // measurement: experiment D at a real size
         {
             It->second = false;
