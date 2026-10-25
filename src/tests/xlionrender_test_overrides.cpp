@@ -7,6 +7,8 @@
 //  - in place: changed again while it is the only user: the same material, its block rewritten
 //  - texture swap: slot 1's texture overridden in place (bindless: an id; else a new set), no pipeline made
 //  - released: no override material left
+//  - one state: 64 draws on 64 override materials of one pipeline bind it once (they share it; only the texture table is theirs)
+//  - many: 9000 override materials, more blocks than a frame's ring region (their copies spread over two frames): the last one draws its value
 #include "xlionrender_test_common.h"
 #include "scene/xlionrender_material_overrides.h"
 
@@ -104,6 +106,39 @@ int main()
 
     Overrides.Release(Renderer, A);
     Overrides.Release(Renderer, B);
+
+    // One state: draws on override materials of one pipeline need one bind (not one per material)
+    {
+        std::vector<xlionrender::material_overrides::slot> S(64);
+        xlionrender::scene Scene;
+        for (int i = 0; i < 64; ++i)
+        {
+            const std::array O{ Over(100, 0), Over(101, 1.0f + float(i)) };
+            Scene.m_Draws.push_back({ .m_Mesh = Static, .m_Materials = { Overrides.Acquire(Renderer, Source, O, S[i]) } });
+        }
+        CHECK(Overrides.Count() == 64 && App.RenderFrame(Scene, View, Camera), "64 override materials drawn");
+        CHECK(Renderer.getSceneBinds() == 1, "64 override materials of one pipeline: %d scene binds (1 expected)", Renderer.getSceneBinds());
+        for (auto& X : S) Overrides.Release(Renderer, X);
+    }
+
+    // Many: more parameter blocks than a frame's ring region holds - the rest is copied the frame after, in order
+    {
+        constexpr int n_v = 9000;       // 2 vec4s each: 18000 > instance::param_ring_v
+        std::vector<xlionrender::material_overrides::slot> S(n_v);
+        xlionrender::material_id Last;
+        for (int i = 0; i < n_v; ++i)
+        {
+            const std::array O{ Over(100, 0), Over(101, 2.0f + 1e-3f * float(i)) };     // (each its own: no sharing)
+            Last = Overrides.Acquire(Renderer, Source, O, S[i]);
+            CHECK(Last.isValid(), "override material %d of %d", i, n_v);
+        }
+        xlionrender::scene Scene;
+        Scene.m_Draws = { { .m_Mesh = Static, .m_Materials = { Last } } };
+        CHECK(App.RenderFrame(Scene, View, Camera), "frame");
+        CHECK(Overrides.Count() == n_v, "%d override materials (%d made)", n_v, Overrides.Count());
+        CHECK(Expect(Last, 3 * Red(1) * (2.0f + 1e-3f * float(n_v - 1)), "many: the last one"), "The last of %d override materials draws its own value", n_v);
+        for (auto& X : S) Overrides.Release(Renderer, X);
+    }
     CHECK(Overrides.Count() == 0 && Renderer.getMaterialCount() == Materials0 && Renderer.getPipelineCount() == Pipelines0, "Released: %d entries, %d materials, %d pipelines left over"
          , Overrides.Count(), Renderer.getMaterialCount() - Materials0, Renderer.getPipelineCount() - Pipelines0);
 

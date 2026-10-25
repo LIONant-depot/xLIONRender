@@ -76,6 +76,7 @@ namespace xlionrender
             m_InstanceFrame  = Frame;
             m_TransientCount = 0;
             m_RingUsed       = 0;
+            m_ParamRingUsed  = 0;
             m_nSlotsWritten  = 0;
         }
 
@@ -128,19 +129,26 @@ namespace xlionrender
         Window.CopyBuffer(m_InstanceRing, m_InstanceBuffer, Regions);
         Window.CopyBuffer(m_EntityParamsRing, m_EntityParams, Regions);
 
-        // New materials' parameter blocks: into this frame's ring region at their own offsets, then copied into MaterialParams
+        // New and changed parameter blocks: packed into this frame's ring region (in order: a later write of the same vec4s wins), then
+        // copied into MaterialParams at their own offsets; what does not fit waits for the next frame, still in order
         if( m_ParamPending.empty() ) return;
-        const int ParamBase = int(Frame % ring_frames_v) * max_material_params_v;
+        const int ParamBase = int(Frame % ring_frames_v) * param_ring_v;
         std::vector<xgpu::buffer::copy> Blocks;
-        (void)m_MaterialParamsRing.MemoryMap(ParamBase, max_material_params_v, [&](void* pMemory)
+        std::size_t nDone = 0;
+        (void)m_MaterialParamsRing.MemoryMap(ParamBase, param_ring_v, [&](void* pMemory)
         {
-            for( const auto& [At, Floats] : m_ParamPending )
+            for( ; nDone < m_ParamPending.size(); ++nDone )         // (after what this frame's earlier renders wrote: their copies have not run yet)
             {
-                std::memcpy(static_cast<float*>(pMemory) + 4 * std::size_t(At), Floats.data(), Floats.size() * sizeof(float));
-                Blocks.push_back({ ParamBase + At, At, int(Floats.size() / 4) });
+                const auto& [At, Floats] = m_ParamPending[nDone];
+                const int n = int(Floats.size() / 4);
+                assert(n <= param_ring_v);
+                if( m_ParamRingUsed + n > param_ring_v ) break;
+                std::memcpy(static_cast<float*>(pMemory) + 4 * std::size_t(m_ParamRingUsed), Floats.data(), Floats.size() * sizeof(float));
+                Blocks.push_back({ ParamBase + m_ParamRingUsed, At, n });
+                m_ParamRingUsed += n;
             }
         });
-        m_ParamPending.clear();
+        m_ParamPending.erase(m_ParamPending.begin(), m_ParamPending.begin() + nDone);
         Window.CopyBuffer(m_MaterialParamsRing, m_MaterialParams, Blocks);
     }
 
@@ -1117,7 +1125,7 @@ namespace xlionrender
             ViewBlock.m_w2C         = W2C;
             ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
             const cluster_geom*            pBoundGeom = nullptr;       // binds only when the mesh or the caster changes
-            const xgpu::pipeline_instance* pBound     = nullptr;
+            const void*                    pBound     = nullptr;       // (the caster's shared state: texture-table materials of one pipeline share it)
             bool                           bCutLight  = false;
 
             for( const std::uint32_t i : Indices )
@@ -1147,7 +1155,7 @@ namespace xlionrender
                     if( pMat && !pMat->m_State.m_bCastShadows ) continue;
                     auto* pCut = pMat && pMat->m_State.m_Blend == material_state::blend::MASKED ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
                     auto* pInstance = pCut ? pCut : &m_ShadowInstance[bSkin ? 2 : 1];
-                    if( pInstance != pBound || &G != pBoundGeom )
+                    if( pInstance->m_Private.get() != pBound || &G != pBoundGeom )
                     {
                         if( pCut )
                         {
@@ -1169,9 +1177,10 @@ namespace xlionrender
                         }
                         Cmd.setDynamicUBO(m_ShadowUBO, 0);
                         BindClusterStreams(Cmd, G);
-                        pBound     = pInstance;
+                        pBound     = pInstance->m_Private.get();
                         pBoundGeom = &G;
                     }
+                    else if( pCut && pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);     // (the same state, another material: its table - bindless: the same set, nothing)
 
                     const std::uint32_t MaterialBase = pCut ? pMat->m_ParamBase : 0u;
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
@@ -1533,7 +1542,7 @@ namespace xlionrender
             auto Cmd = Window.StartRenderPass(View.m_ScenePass);
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
 
-            const xgpu::pipeline_instance* pBound     = nullptr;      // the state the last cluster draw left bound
+            const void*                    pBound     = nullptr;      // the state the last cluster draw left bound (texture-table materials of one pipeline share it)
             const cluster_geom*            pBoundGeom = nullptr;
             const xgpu::buffer*            pBoundGIBuf = nullptr;     // (GI sections: its section's buffer)
 
@@ -1590,12 +1599,14 @@ namespace xlionrender
                     Cmd.setDynamicUBO(m_LightUBO, 1);
                     Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                     BindClusterStreams(Cmd, G);
-                    pBound       = pInstance;
+                    pBound       = pInstance->m_Private.get();
                     pBoundGeom   = &G;
                     pBoundGIBuf  = pGIBuffer;
                     ++g_nSceneBinds;
+                    ++m_nSceneBinds;
                 };
-                if( pInstance != pBound || &G != pBoundGeom || (bScreenSub && pBoundGIBuf != &View.m_GIScreenBuffer) ) Bind(GIBufferOf(Sub.m_iCluster));
+                if( pInstance->m_Private.get() != pBound || &G != pBoundGeom || (bScreenSub && pBoundGIBuf != &View.m_GIScreenBuffer) ) Bind(GIBufferOf(Sub.m_iCluster));
+                else if( pMat && pMat->m_bTable && pInstance != &m_StaticGeomInstance ) Cmd.setTextureTable(pMat->m_Table);     // (the same state, another material: its table - bindless: the same set, nothing)
 
                 for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                 {
@@ -2177,6 +2188,7 @@ namespace xlionrender
         using clock = std::chrono::steady_clock;
         const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
         const auto T0 = clock::now();
+        m_nSceneBinds = 0;
         // Measurement only (XLION_GPU_TIMES): the whole Render on the GPU (its start, after the GI and the captures, after the tone map, its end)
         static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
         static std::unordered_map<const void*, xgpu::timestamps> s_TS;      // ponytail: per renderer, never erased (a measurement hook)

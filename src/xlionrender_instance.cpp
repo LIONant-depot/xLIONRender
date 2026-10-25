@@ -381,7 +381,7 @@ namespace xlionrender
                 std::vector<xmath::fvec4> Zeros(max_material_params_v, xmath::fvec4(0, 0, 0, 0));
                 void* pZeros = Zeros.data();
                 if( auto Err = Device.Create(m_MaterialParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = max_material_params_v, .m_pData = pZeros }); Err ) return Err;
-                if( auto Err = Device.Create(m_MaterialParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = ring_frames_v * max_material_params_v }); Err ) return Err;
+                if( auto Err = Device.Create(m_MaterialParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = ring_frames_v * param_ring_v }); Err ) return Err;
                 std::vector<entity_params> EntityZeros(max_instances_v + max_transient_v);     // a 64 B entry per slot (every slot a shader can index), like the instance buffer
                 void* pEntityZeros = EntityZeros.data();
                 if( auto Err = Device.Create(m_EntityParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(entity_params), .m_EntryCount = int(EntityZeros.size()), .m_pData = pEntityZeros }); Err ) return Err;

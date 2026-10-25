@@ -193,6 +193,7 @@ namespace xlionrender
         };
                       std::span<const wire_box> getNotDrawn( void ) const                                      noexcept { return m_NotDrawn; }
                       const budget_stats&  getBudgetStats( void ) const                                         noexcept { return m_BudgetStats; }
+                      int                  getSceneBinds( void ) const                                          noexcept { return m_nSceneBinds; }    // the last Render's scene-pass state binds
         // Whether the last scene pass left cluster iCluster (an index into its cluster_geom::m_Clusters) of scene draw iDraw out (its box is drawn, or it is outside the view)
                       bool                 isClusterSkipped( std::size_t iDraw, std::uint32_t iCluster ) const  noexcept
                       {
@@ -366,15 +367,18 @@ namespace xlionrender
         xgpu::buffer                m_InstanceRing;
         instance_slots              m_InstanceSlots;
         int                         m_RingUsed              = 0;        // entries of this frame's ring region already written
+        int                         m_ParamRingUsed         = 0;        // vec4s of this frame's MaterialParams ring region already written
         int                         m_nSlotsWritten         = 0;        // persistent slots written this frame (getSlotsWritten)
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
         std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
 
         // Material parameters (plugins/xmaterial.plugin/documentation/material_contract.md, section 0): every material's block in one
-        // device-local buffer (set 1 binding 9), a range per material; a new block goes into this frame's ring region at its own
-        // offset and is copied over by updateInstances. EntityParams (binding 10): a 64 B entry per instance slot (draw::m_EntityParams),
-        // written with its instance entry: the same ring entry index in its own ring, copied by the same regions.
-        static constexpr int        max_material_params_v   = 16384;    // vec4s (256 KiB)
+        // device-local buffer (set 1 binding 9), a range per material; a new block goes into this frame's ring region (packed: the
+        // region is much smaller than the buffer, what does not fit waits for the next frame) and is copied over by updateInstances.
+        // EntityParams (binding 10): a 64 B entry per instance slot (draw::m_EntityParams), written with its instance entry: the same
+        // ring entry index in its own ring, copied by the same regions.
+        static constexpr int        max_material_params_v   = 262144;   // vec4s (4 MiB: 10k override materials of a 20-vec4 block)
+        static constexpr int        param_ring_v            = 16384;    // vec4s a frame can write (256 KiB a ring region)
         xgpu::buffer                m_MaterialParams;
         xgpu::buffer                m_MaterialParamsRing;
         xgpu::buffer                m_EntityParams;
@@ -474,6 +478,7 @@ namespace xlionrender
         double                      m_BudgetWindowMs        = 0;        // the frames since the allowance was last decided on
         int                         m_BudgetWindowFrames    = 0;
         budget_stats                m_BudgetStats;
+        int                         m_nSceneBinds           = 0;
         xmath::fvec3                m_Origin                {};
         bool                        m_bOriginSet            = false;
         std::uint64_t               m_InstanceFrame         = ~0ull;

@@ -46,7 +46,9 @@ namespace xlionrender
         // The Meshes' "Override materials": the entity slots' own materials (shared when equal, copy on write), per (entity, slot) the one it
         // draws with and the frame it last did (a slot not drawn for a frame lets it go)
         material_overrides                              m_Overrides;
-        struct override_slot { material_overrides::slot m_Slot; std::uint32_t m_Frame = 0; };
+        // (m_Check: what the slot's material was made from - its instance's own material, which a compile replaces, and the slot's overrides
+        // as written - so a frame that changed neither returns it without resolving them again; 0: resolve)
+        struct override_slot { material_overrides::slot m_Slot; std::uint32_t m_Frame = 0; std::uint64_t m_Check = 0; };
         std::unordered_map<std::uint64_t, override_slot> m_OverrideSlots;
         std::uint32_t                                   m_Frame = 0;
 
@@ -174,6 +176,27 @@ namespace xlionrender
         material_id OverrideOf(std::uint64_t Entity, std::size_t iSlot, std::uint64_t MIInstance, const std::vector<mesh_param>& Params) noexcept
         {
             if (Params.empty() || MIInstance == 0) return MaterialOf(MIInstance);
+            auto& S = m_OverrideSlots[(Entity << 8) ^ iSlot];
+            S.m_Frame = m_Frame;
+            const material_id Base = MaterialOf(MIInstance);
+            if (!Base.isValid()) return {};
+            std::uint64_t Check = 14695981039346656037ull;
+            const auto Mix = [&](const void* p, std::size_t n) { for (std::size_t i = 0; i < n; ++i) { Check ^= static_cast<const std::uint8_t*>(p)[i]; Check *= 1099511628211ull; } };
+            Mix(&Base, sizeof(Base));
+            for (const auto& P : Params)
+            {
+                Mix(&P.m_ID, sizeof(P.m_ID));
+                if (P.m_ID == 0) Mix(P.m_Name.data(), P.m_Name.size());
+                Mix(&P.m_X, sizeof(float) * 4);
+                if (!P.m_Texture.empty())                                                           // (the texture as loaded: a compile replaces it)
+                {
+                    const void* pTex = xlioncore::resources::GetResource(texture_type_guid_v.m_Value, P.m_Texture.m_Instance.m_Value);
+                    Mix(&pTex, sizeof(pTex));
+                }
+            }
+            Check |= 1;
+            if (S.m_Check == Check) return S.m_Slot.m_Id;
+
             std::vector<const void*> From;
             if (!MaterialSources(MIInstance, From)) return {};
             auto* pMI  = static_cast<xmaterial_instance::rt*>(const_cast<void*>(From[0]));
@@ -202,21 +225,21 @@ namespace xlionrender
                 if (xmaterial::param_type(pInfo->m_Type) == xmaterial::param_type::TEXTURE)
                 {
                     auto* pTex = P.m_Texture.empty() ? nullptr : static_cast<xgpu::texture*>(xlioncore::resources::GetResource(texture_type_guid_v.m_Value, P.m_Texture.m_Instance.m_Value));
-                    if (pTex == nullptr) continue;                                                 // (not loaded yet: the instance's until it is)
+                    if (pTex == nullptr) { Check = 0; continue; }                                  // (not loaded yet: the instance's until it is - resolved again next frame)
                     O = { .m_ID = pInfo->m_ID, .m_pTexture = pTex, .m_TextureKey = reinterpret_cast<std::uint64_t>(pTex) };
                 }
                 Overrides.push_back(O);
             }
-            if (Overrides.empty()) return MaterialOf(MIInstance);
+            if (Overrides.empty()) { m_Overrides.Release(m_Renderer, S.m_Slot); S.m_Check = 0; return Base; }
             std::ranges::sort(Overrides, {}, &param_override::m_ID);
 
             std::uint64_t Key = 14695981039346656037ull;                                            // the instance as loaded now: what it is made of
             for (auto p : From) { Key ^= reinterpret_cast<std::uint64_t>(p); Key *= 1099511628211ull; }
             const material_source Source{ .m_Key = Key, .m_pFragment = &pMat->getShaderHDR(), .m_Textures = Textures, .m_State = xmaterial::RenderState(pMat->m_Render, pMI->m_DoubleSided)
                                         , .m_Block = { pMI->m_pParams, pMI->m_BlockBytes / 4u }, .m_bTextureTable = pMat->m_Flags.m_bTextureTable, .m_Params = Info };
-            auto& S = m_OverrideSlots[(Entity << 8) ^ iSlot];
-            S.m_Frame = m_Frame;
-            return m_Overrides.Acquire(m_Renderer, Source, Overrides, S.m_Slot);
+            const material_id Id = m_Overrides.Acquire(m_Renderer, Source, Overrides, S.m_Slot);
+            S.m_Check = Id.isValid() ? Check : 0;
+            return Id;
         }
 
         // What a material instance's renderer material is made from, as loaded now: the instance, its material, its textures (but slot 0's).
