@@ -1410,11 +1410,14 @@ namespace xlionrender
                 // its GI buffer: the geometry's, or (GI sections) the cluster's section's
                 // a skinned mesh's GI: the probe grid (no surfels of its own; the dummy: none). ponytail: the main view's only (its header carries
                 // the main eye: the reflection views' positions are their own eye's)
-                xgpu::buffer* const SkinGI = bSkin && bMain && Scene.m_GI.m_bEnable && Scene.m_GI.m_bProbes && m_pGITrace && m_pGITrace->ProbeBuffer() ? m_pGITrace->ProbeBuffer() : &m_GIDummy;
+                xgpu::buffer* const Probes = bMain && Scene.m_GI.m_bEnable && Scene.m_GI.m_bProbes && m_pGITrace && m_pGITrace->ProbeBuffer() ? m_pGITrace->ProbeBuffer() : nullptr;
+                xgpu::buffer* const SkinGI = bSkin && Probes ? Probes : &m_GIDummy;
+                // a rigid mesh without surfels of its own reads the probe grid as well (its GI buffer: the grid; its level: gi_probes_v)
+                const bool bRigidProbes = !bSkin && Probes && !pMesh->m_pGI;
                 const auto GIBufferOf = [&](std::uint32_t c) -> xgpu::buffer*
                 {
                     if( bSections ) return const_cast<xgpu::buffer*>(&pMesh->m_GISections[pMesh->m_GIClusterSection[c]].m_Buffer);
-                    return pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : &m_GIDummy;
+                    return pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : bRigidProbes ? Probes : &m_GIDummy;
                 };
                 const auto Bind = [&](xgpu::buffer* pGIBuffer)
                 {
@@ -1454,7 +1457,7 @@ namespace xlionrender
                         const auto SGI = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                         Cmd.setPushConstants(details::push_static_geom{ c, Slot, SGI.first, SGI.second, MaterialBase, pMesh->m_GIClusterVertexDelta[c] });
                     }
-                    else Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, GI.second, MaterialBase });
+                    else Cmd.setPushConstants(details::push_static_geom{ c, Slot, GI.first, bRigidProbes ? 0xFFFFFFFEu : GI.second, MaterialBase });     // (0xFFFFFFFE: xlionrender_surfel_gi.glsl gi_probes_v)
                     { const auto TD = std::chrono::steady_clock::now(); Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex)); g_DrawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TD).count(); }
                     ++g_nSceneDraws;
                 }

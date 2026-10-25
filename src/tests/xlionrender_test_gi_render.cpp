@@ -148,6 +148,35 @@ int main()
         CHECK(std::abs(Lum3(NoGI) - Lum3(Without)) < 0.005 * Lum3(Without), "a light with GI off changed the GI (%.4f, without it %.4f)", Lum3(NoGI), Lum3(Without));
     }
 
+    // A mesh with no surfels of its own (its GI off, or never baked) in the lit room: the probe grid's light, not the flat ambient - the
+    // image brighter with the probes than without them (the room's bounce on it; the ambient is 0.02)
+    {
+        cluster_buffers NoGIBuffers;
+        xlionrender::mesh_id NoGIMesh;
+        const auto Prim = xprim_geom::cube::Generate(4, 4, 4, 4, xprim_geom::float3{ 0.25f, 0.25f, 0.25f });
+        CHECK(MakeStaticBuffers(Device, Prim, 2.2f, NoGIBuffers), "the no-GI cube's buffers");
+        CHECK(!Renderer.CreateClusterGeom(NoGIMesh, NoGIBuffers.Geom()), "the no-GI cube's geom");
+        Scene.m_Draws.push_back({ .m_Mesh = NoGIMesh, .m_L2W = xmath::fmat4::fromTranslation({ 0.3f, 0.4f, 0.2f }), .m_Material = { .m_BaseColor = { 0.8f, 0.8f, 0.8f }, .m_Roughness = 0.9f }, .m_Instance = 900 });
+        Scene.m_GI.m_bProbes = false;
+        for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the no-GI cube without probes");
+        const auto Flat = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bProbes = true;
+        for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render the no-GI cube with probes");
+        const auto Lit = ReadRGB(Device, View, W, H);
+        Scene.m_Draws.pop_back();
+        for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render without the no-GI cube");
+        Renderer.DestroyMesh(NoGIMesh);
+        DumpRGB("gi_probe_cube", Lit, W, H);
+        double Changed = 0, Gain = 0;
+        for (std::size_t i = 0; i < Lit.size(); ++i)
+        {
+            const double a = 0.2126 * Flat[i][0] + 0.7152 * Flat[i][1] + 0.0722 * Flat[i][2], b = 0.2126 * Lit[i][0] + 0.7152 * Lit[i][1] + 0.0722 * Lit[i][2];
+            if (std::abs(b - a) > 1e-3) { ++Changed; Gain += b - a; }
+        }
+        std::printf("a mesh without surfels: %.0f pixels changed by the probe grid, %.4f brighter on average\n", Changed, Changed > 0 ? Gain / Changed : 0.0);
+        CHECK(Changed > 100 && Gain > 0, "a mesh without surfels: the probe grid changed %.0f pixels (gain %.4f)", Changed, Gain);
+    }
+
     // Reflections layer 1 (gi_dynamic_master_plan.md): the floor as a rough metal (no diffuse: what it shows is its reflection). The surfels'
     // light around the reflection direction colors it - redder by the red wall than by the green one; without GI (the flat ambient) not
     {
