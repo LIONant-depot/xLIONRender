@@ -221,7 +221,7 @@ namespace xlionrender::gi
                 rng R(Seed);
                 for (std::size_t k = 0; k < Items.size(); ++k) It[k] = { { Items[k][0], Items[k][1], 0, Rays }, { R.Next(), R.Next(), 0, 0 } };
                 if (!Fit(m_LinkItemB, int(sizeof(item)), It.size()) || m_LinkItemB.MemoryMap(0, int(It.size()), [&](void* p) { std::memcpy(p, It.data(), It.size() * sizeof(item)); })) return false;
-                if (!FitLocal(m_LinkB, int(4 * sizeof(std::uint32_t)), 2 * links_v * Items.size()) || !Fit(m_LinkDB, int(4 * sizeof(float)), Items.size())) return false;
+                if (!FitLocal(m_LinkB, int(2 * sizeof(std::uint32_t)), 2 * links_v * Items.size()) || !Fit(m_LinkDB, int(4 * sizeof(float)), Items.size())) return false;
                 // per instance its first item (+1: the total): mode 4 finds a neighbor's item by it
                 std::vector<std::uint32_t> InstFirst(std::size_t(W.InstanceCount()) + 1, 0);
                 for (const auto& It2 : Items) if (std::size_t(It2[0]) < InstFirst.size() - 1) ++InstFirst[std::size_t(It2[0]) + 1];
@@ -242,8 +242,8 @@ namespace xlionrender::gi
         bool CopyLinksOut(xgpu::window& Window, std::size_t nItems) noexcept
         {
             // (in words: FitLocal's entries, a copy's unit is its source's entry)
-            const xgpu::buffer::copy CL{ 0, 0, int(4 * 2 * links_v * nItems) }, CH{ 0, 0, int(4 * hits_v * nItems) };
-            if (!Fit(m_LinkReadB, int(sizeof(std::uint32_t)), 4 * 2 * links_v * nItems) || !Fit(m_LinkHitReadB, int(sizeof(std::uint32_t)), 4 * hits_v * nItems)) return false;
+            const xgpu::buffer::copy CL{ 0, 0, int(2 * 2 * links_v * nItems) }, CH{ 0, 0, int(4 * hits_v * nItems) };
+            if (!Fit(m_LinkReadB, int(sizeof(std::uint32_t)), 2 * 2 * links_v * nItems) || !Fit(m_LinkHitReadB, int(sizeof(std::uint32_t)), 4 * hits_v * nItems)) return false;
             Window.CopyBuffer(m_LinkB, m_LinkReadB, std::span{ &CL, 1 });
             Window.CopyBuffer(m_LinkHitB, m_LinkHitReadB, std::span{ &CH, 1 });
             m_bLinkReadback = true;
@@ -478,7 +478,7 @@ namespace xlionrender::gi
                     const std::size_t n = m_LinkItems.size();
                     std::printf("GIMEM data %.1f, BVH nodes %.1f + tri4 %.1f, links %.1f (+ its device-local copy %.1f), hit clusters %.1f (+ %.1f), D/F/items %.1f MB\n",
                                 MB(m_Data.size() * 4), MB(m_Scene.m_Nodes.size() * sizeof(m_Scene.m_Nodes[0])), MB(m_Scene.m_Tri4.size() * sizeof(m_Scene.m_Tri4[0])),
-                                MB(2 * links_v * n * 16), 0.0, MB(hits_v * n * 16), 0.0, MB(n * (16 * 2 + 32 * 2 + 16 * 3))), std::fflush(stdout);
+                                MB(2 * links_v * n * 8), 0.0, MB(hits_v * n * 16), 0.0, MB(n * (16 * 2 + 32 * 2 + 16 * 3))), std::fflush(stdout);
                 }
                 LocalRebuild(Window, W, L, Frame, Rays, PerFrame);
                 if ((!m_bLinkDirValid || DirKey != m_LinkDirKey) && RelightLinks(Window, m_LinkItems.size())) m_LinkDirKey = DirKey;
@@ -505,10 +505,10 @@ namespace xlionrender::gi
         bool ReadLinks(const world& W, std::span<const std::array<int, 2>> Items, world::transport& T, double* pDropped = nullptr) noexcept
         {
             if (!m_bLinks || Items.empty() || !m_bLinkReadback) return false;
-            std::vector<std::array<std::uint32_t, 4>> Lk(2 * links_v * Items.size());
+            std::vector<std::array<std::uint32_t, 2>> Lk(2 * links_v * Items.size());
             std::vector<std::array<float, 4>> Dk(Items.size());
             std::vector<std::array<std::uint32_t, 4>> Hk(hits_v * Items.size());
-            if (m_LinkReadB.MemoryMap(0, int(4 * Lk.size()), [&](void* p) { std::memcpy(Lk.data(), p, Lk.size() * 16); })) return false;
+            if (m_LinkReadB.MemoryMap(0, int(2 * Lk.size()), [&](void* p) { std::memcpy(Lk.data(), p, Lk.size() * 8); })) return false;
             if (m_LinkDB.MemoryMap(0, int(Dk.size()), [&](void* p) { std::memcpy(Dk.data(), p, Dk.size() * 16); })) return false;
             if (m_LinkHitReadB.MemoryMap(0, int(4 * Hk.size()), [&](void* p) { std::memcpy(Hk.data(), p, Hk.size() * 16); })) return false;
             T = {};
@@ -539,7 +539,7 @@ namespace xlionrender::gi
                 {
                     const auto& e = Lk[2 * links_v * k + std::size_t(q)];
                     if (e[0] == 0xFFFFFFFFu) continue;
-                    const v3 w{ std::bit_cast<float>(e[1]), std::bit_cast<float>(e[2]), std::bit_cast<float>(e[3]) };
+                    const v3 w = UnpackRGB9E5(e[1]);
                     if (e[0] & 0x80000000u) { T.m_AGroup.push_back(e[0] & 0x7FFFFFFFu); T.m_AW.push_back(w); }
                     else { T.m_Col.push_back(T.m_InstFirst[e[0] >> 16] + (e[0] & 0xFFFFu)); T.m_W.push_back(w); }
                 }

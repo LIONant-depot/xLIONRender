@@ -25,7 +25,7 @@ const float gi_fixed_v = 67108864.0;          // the weights' fixed point (2^26)
 
 struct GIItem { ivec4 m_Ids; vec4 m_Offsets; };     // instance, surfel, level, rays; off1, off2, shift (bits), -
 layout(std430, set = 0, binding = 5) readonly  buffer items_b { GIItem GIItems[]; };
-layout(std430, set = 0, binding = 6)           buffer links_b { uvec4  GILinks[]; };     // per item 2 x gi_links_v: { key, r, g, b (float bits) }; key: instance << 16 | surfel (empty: ~0); the tail's: 1 << 31 | instance
+layout(std430, set = 0, binding = 6)           buffer links_b { uvec2  GILinks[]; };     // per item 2 x gi_links_v: { key, weight (RGB9E5) }; key: instance << 16 | surfel (empty: ~0); the tail's: 1 << 31 | instance
 layout(std430, set = 0, binding = 7) writeonly buffer d_b     { vec4   GILinkD[]; };     // per item: D, the dropped weight's luminance
 layout(std430, set = 0, binding = 8)           buffer dir_b   { vec4   GIDir[]; };       // per item: its first bounce of the lights, F (mode 4: smoothed)
 layout(std430, set = 0, binding = 9)  readonly buffer list_b  { uint   GIList[]; };      // mode 2: the items to build
@@ -82,6 +82,18 @@ void LinkEmit(int Inst, int s, float w)
 #include "xlionrender_gi_pass_common.glsl"
 
 float Lum(vec3 c) { return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z; }
+// gi::PackRGB9E5, step for step (the same bits): a link's weight in 32 bits (9 bits a channel, a shared exponent)
+uint PackRGB9E5(vec3 c)
+{
+    c = vec3(c.x > 0.0 ? min(c.x, 65408.0) : 0.0, c.y > 0.0 ? min(c.y, 65408.0) : 0.0, c.z > 0.0 ? min(c.z, 65408.0) : 0.0);
+    const float m = max(c.x, max(c.y, c.z));
+    const int Floor = m > 0.0 ? int((floatBitsToUint(m) >> 23) & 0xFFu) - 127 : -16;
+    int e = max(-16, Floor) + 16;
+    float s = uintBitsToFloat(uint(127 - (e - 24)) << 23);
+    if (floor(m * s + 0.5) >= 512.0) { ++e; s *= 0.5; }
+    const uvec3 M = uvec3(floor(c * s + 0.5));
+    return M.x | (M.y << 9) | (M.z << 18) | (uint(e) << 27);
+}
 vec2 OctEnc(vec3 n) { n /= abs(n.x) + abs(n.y) + abs(n.z); vec2 e = n.xy; if (n.z < 0.0) e = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0); return e; }
 vec3 OctDec(vec2 e) { vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y)); if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0); return normalize(n); }
 vec3  Unfix(uint a, uint b, uint c) { return vec3(float(a), float(b), float(c)) * (1.0 / gi_fixed_v); }
@@ -305,10 +317,10 @@ void main()
             if (s_Best != 0u)
             {
                 const uint j = s_Best & (gi_slots_v - 1u);
-                GILinks[Base + q] = uvec4(s_Key[j], floatBitsToUint(Unfix(s_Val[3u * j], s_Val[3u * j + 1u], s_Val[3u * j + 2u])));
+                GILinks[Base + q] = uvec2(s_Key[j], PackRGB9E5(Unfix(s_Val[3u * j], s_Val[3u * j + 1u], s_Val[3u * j + 2u])));
                 s_Key[j] |= 0x80000000u;              // (taken)
             }
-            else GILinks[Base + q] = uvec4(gi_empty_v, 0u, 0u, 0u);
+            else GILinks[Base + q] = uvec2(gi_empty_v, 0u);
         }
         barrier();
     }
@@ -330,10 +342,10 @@ void main()
             if (s_Best != 0u)
             {
                 const uint j = s_Best & (gi_tslots_v - 1u);
-                GILinks[Base + gi_links_v + q] = uvec4(0x80000000u | s_TKey[j], floatBitsToUint(Unfix(s_TVal[3u * j], s_TVal[3u * j + 1u], s_TVal[3u * j + 2u])));
+                GILinks[Base + gi_links_v + q] = uvec2(0x80000000u | s_TKey[j], PackRGB9E5(Unfix(s_TVal[3u * j], s_TVal[3u * j + 1u], s_TVal[3u * j + 2u])));
                 s_TKey[j] |= 0x80000000u;
             }
-            else GILinks[Base + gi_links_v + q] = uvec4(gi_empty_v, 0u, 0u, 0u);
+            else GILinks[Base + gi_links_v + q] = uvec2(gi_empty_v, 0u);
         }
         barrier();
     }
