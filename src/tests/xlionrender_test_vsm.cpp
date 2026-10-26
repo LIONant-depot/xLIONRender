@@ -338,6 +338,7 @@ int main()
         int nPix = 0, nDisV = 0, nDisC = 0, nEdge = 0, nEdgeV = 0, nEdgeC = 0;
         int nFitV = 0, nFitC = 0, nUnderV = 0, nUnderC = 0;     // texel within [pixel/2, pixel]; texel larger than the pixel
         int nInDarkV = 0, nInLeakV = 0, nInDarkC = 0, nInLeakC = 0;  // away from the edges: shadowed where the rays see the sun (acne), lit where they do not (leaks)
+        std::vector<std::uint8_t> Dump(std::getenv("XLION_VSM_TEST_DUMP") ? std::size_t(S) * S * 3 : 0, 0);    // (where the pages disagree: acne red, leaks blue)
         for (int y = 1; y < S - 1; ++y) for (int x = 1; x < S - 1; ++x)
         {
             const std::size_t i = std::size_t(y) * S + x;
@@ -368,6 +369,7 @@ int main()
             const bool  bEdge = Ray[i - 1] != VRay || Ray[i + 1] != VRay || Ray[i - S] != VRay || Ray[i + S] != VRay;
             ++nPix; nDisV += bDis; nDisC += bDisC;
             if (!bEdge) { nInDarkV += bDis && VMap < VRay; nInLeakV += bDis && VMap > VRay; nInDarkC += bDisC && VClip < VRay; nInLeakC += bDisC && VClip > VRay; }
+            if (!Dump.empty()) { auto* d = &Dump[i * 3]; const std::uint8_t g = std::uint8_t(60 + 120 * VRay); d[0] = bDis && VMap < VRay ? 255 : g; d[1] = bDis ? 0 : g; d[2] = bDis && VMap > VRay ? 255 : g; }
             if (bEdge) { ++nEdge; nEdgeV += bDis; nEdgeC += bDisC; }
             float TexelC = Scene.m_Sun.m_ShadowTileSize * 8.0f / 512.0f;        // past the clipmap's levels: the coarsest's texel
             for (int Lc = 0; Lc < xlionrender::shadows::clipmap_levels_v; ++Lc)
@@ -381,6 +383,8 @@ int main()
             nFitV += rV >= 0 && rV < 1; nFitC += rC >= 0 && rC < 1;
             nUnderV += rV < 0; nUnderC += rC < 0;
         }
+        if (!Dump.empty())
+            if (FILE* f = std::fopen((std::string(pName).substr(0, std::string(pName).find(' ')) + "_disagree.ppm").c_str(), "wb")) { std::fprintf(f, "P6 %d %d 255\n", S, S); std::fwrite(Dump.data(), 1, Dump.size(), f); std::fclose(f); }
         std::printf("%s: against the rays: pages disagree on %.2f%% of %d lit pixels (%.2f%% of %d at shadow edges), the clipmap %.2f%% (%.2f%% at edges)\n"
                    , pName, Pct(nDisV, nPix), nPix, Pct(nEdgeV, nEdge), nEdge, Pct(nDisC, nPix), Pct(nEdgeC, nEdge));
         std::printf("%s: texel against pixel: pages %.1f%% within [pixel/2, pixel], %.1f%% larger than the pixel; clipmap %.1f%% within, %.1f%% larger\n"
@@ -427,6 +431,23 @@ int main()
         const auto& C = Renderer.getVSMReport().m_Counters;
         std::printf("far view (1536): %u pixels by their level %.2f%%; pages requested %d; request pass %.3f ms\n", C[0], Pct(C[1], C[0]), Renderer.getVSMReport().m_Pages.m_Requested, Renderer.getVSMReport().m_RequestGpuMs);
         if (Measure("far view (1536)", FUnlit, FLit, FClip, false, hires_v)) return 1;
+    }
+
+    // A low sun (the static geom preview's default: 20 degrees up) on the ground and a pole, a small model's tile (the radius / 2:
+    // 0.78 mm level 0): grazing receivers. A constant depth bias left them acne (more than the clipmap's): the receiver plane's slope per
+    // filter tap (Unreal's ComputeVirtualShadowMapOptimalSlopeBias) is what keeps the comparison on the receiver's own depth
+    {
+        std::vector<float> UUnlit, UClip, ULit;
+        const xmath::fvec3 Dir0 = Scene.m_Sun.m_Direction;
+        Scene.m_Sun.m_ShadowTileSize = 1.6f;
+        Scene.m_Sun.m_Direction      = { -0.599603f, -0.345631f, -0.721815f };
+        Camera.LookAt(xmath::fvec3{ 1.0f + 2.7f, 2.6f, 12.0f + 3.25f }, xmath::fvec3{ 1.0f, 0.3f, 12.0f });     // 4.5 m up the light from the pole's foot
+        CHECK(Triple(UUnlit, UClip, ULit), "low sun view at 1536");
+        const auto& C = Renderer.getVSMReport().m_Counters;
+        std::printf("low sun (1536): %u pixels by their level %.2f%%; level 0 texel %.2f mm\n", C[0], Pct(C[1], C[0]), Renderer.getVSM().Level0Texel() * 1000.0f);
+        if (Measure("low sun (1536)", UUnlit, ULit, UClip, true, hires_v)) return 1;
+        Scene.m_Sun.m_ShadowTileSize = 4.0f;
+        Scene.m_Sun.m_Direction      = Dir0;
         Camera.LookAt(xmath::fvec3{ 0, 6.0f, -9.0f }, xmath::fvec3{ 0, 0, 1.0f });
         Renderer.DestroyView(Hi);
         CHECK(Settle(12), "settle back on the near view");

@@ -378,7 +378,12 @@ vec3 PBRLighting
 #elif defined(XLION_LDR_OUTPUT)
 	float Shadow = ShadowPCF(In.ShadowPosition / In.ShadowPosition.w);       // editors that draw materials themselves: their own shadow map
 #else
-	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0)) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
+	// The sun's shadow: offset along, and biased by the slope of, the triangle's own plane (the screen derivatives: Unreal's
+	// EstimatedGeoWorldNormal) - the interpolated normal of a faceted curved surface is not the plane its depth lies in (acne at the terminator)
+	vec3 FaceN = cross(dFdx(In.wSpacePosition.xyz), dFdy(In.wSpacePosition.xyz));
+	const vec3 VtxN = normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0);
+	FaceN = dot(FaceN, FaceN) > 1e-20 ? normalize(FaceN) * sign(dot(FaceN, VtxN) + 1e-9) : VtxN;
+	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, FaceN) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
 #endif
 	// xLIONRender: W == 0 is a directional light (XYZ = direction towards the light, no falloff); W > 0 a point
 	// light with that falloff radius. (The original treated W == 0 as a zero-radius point light: always black.)
