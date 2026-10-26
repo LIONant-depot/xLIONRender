@@ -5,6 +5,7 @@
 //  - a city (400 buildings, sun + sky): cost per update, coverage, LOD levels, and a moved building dirtying only its block
 //  - surfels saved by the GeomStatic compiler load back as baked, and a receive-only mesh is not in the rays' way
 #include "features/gi/xlionrender_surfel_gi.h"
+#include "tests/xlionrender_test_no_dialogs.h"
 #include "features/gi/xlionrender_surfel_gi_chunks.h"
 #include <cstdio>
 #include <filesystem>

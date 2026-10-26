@@ -5,6 +5,7 @@
 // Shared by the xLIONRender tests: a window + renderer, validation-message counting, HDR readback, a test sphere.
 
 #include "xlionrender.h"
+#include "xlionrender_test_no_dialogs.h"
 #include "dependencies/xprim_geom/source/xprim_geom.h"
 #include <cstdio>
 #include <cstdlib>
