@@ -82,7 +82,7 @@ struct LocalLightData                  // xLIONRender: a point or spot light (sh
 	vec4 PosRadius;                    // camera-centered position, radius
 	vec4 Color;                        // rgb: color * intensity, w: cos of the spot's inner angle
 	vec4 DirCosOuter;                  // spot: direction, w cos of the outer angle; point: w = -2
-	vec4 Shadow;                       // xy: its shadow map's origin in the atlas, z: its size (0 none), w: spot tan of the half field of view
+	vec4 Shadow;                       // x: its first face's entry in the local pages' table, z: 1 shadowed, w: spot tan of the half field of view
 };
 #endif
 
@@ -384,7 +384,11 @@ vec3 PBRLighting
 	FaceN = dot(FaceN, FaceN) > 1e-20 ? normalize(FaceN) * sign(dot(FaceN, VtxN) + 1e-9) : VtxN;
 	g_LocalFaceN = FaceN;                                                                  // (the local lights' shadows: LocalShadow)
 	g_LocalFoot  = max(length(dFdx(In.wSpacePosition.xyz)), length(dFdy(In.wSpacePosition.xyz)));
-	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, FaceN) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
+	// (a surface facing away from the sun returns before the shadow is used - the early cull below, the same NdotL -: no lookups for
+	// it, unless a debug view shows the pages; the footprint's derivatives stay outside the branch)
+	VSMFootprint(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
+	const bool bSunFacing = saturate(dot(N, normalize(UBOLight.wSpaceLightPos.xyz))) >= 1e-4 || UBOLight.VSMParams2.w >= 2.0;
+	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? (bSunFacing ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, FaceN) : 0.0) : 1.0;
 #endif
 	// xLIONRender: W == 0 is a directional light (XYZ = direction towards the light, no falloff); W > 0 a point
 	// light with that falloff radius. (The original treated W == 0 as a zero-radius point light: always black.)

@@ -180,10 +180,19 @@ float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint Move
     return n > 0.0 ? (Depth - Sum / n) * 2.0 * Half : -1.0;
 }
 
+// The pixel's light-space footprint (the level's choice), from the screen derivatives: set by the material in uniform control flow,
+// before a branch that skips the shadow (a surface facing away from the sun)
+float g_VSMFoot = 1e-9;
+void VSMFootprint(in const vec3 World)
+{
+    const vec3 L = (UBOLight.W2Light * vec4(World, 1.0)).xyz;
+    g_VSMFoot = max(max(length(dFdx(L.xy)), length(dFdy(L.xy))), 1e-9);
+}
+
 float ShadowVSM(in const vec3 World, in const vec3 Ng)
 {
     const vec3  L = (UBOLight.W2Light * vec4(World, 1.0)).xyz;
-    const float Foot = max(max(length(dFdx(L.xy)), length(dFdy(L.xy))), 1e-9);
+    const float Foot = g_VSMFoot;
     const int   nLevels = int(UBOLight.VSMParams.z);
     const int   Mode    = int(UBOLight.VSMParams2.w);
     const int   First   = clamp(int(floor(log2(Foot / UBOLight.VSMParams.y) + UBOLight.VSMParams3.x)), 0, nLevels - 1);

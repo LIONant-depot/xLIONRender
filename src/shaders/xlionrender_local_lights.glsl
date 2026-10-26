@@ -120,7 +120,9 @@ vec3 LocalLight(in const int i, in const vec3 N, in const vec3 V, in const float
     const vec3 L = ToLight / Dist;
     if (Ld.DirCosOuter.w > -1.5) Att *= LightSpotCone(dot(-L, Ld.DirCosOuter.xyz), Ld.DirCosOuter.w, Ld.Color.w);
     if (Att < 1e-4) return vec3(0.0);
-    return PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att * LocalShadow(Ld, -ToLight, N);
+    const vec3 Direct = PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att;
+    if (all(equal(Direct, vec3(0.0)))) return vec3(0.0);                       // (facing away: no shadow lookups)
+    return Direct * LocalShadow(Ld, -ToLight, N);
 }
 
 // The cell holding a world position: the finest level whose window holds it (-1: none)
