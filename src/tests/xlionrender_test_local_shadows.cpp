@@ -11,6 +11,7 @@
 //    urgent_age_v frames under a budget of 1
 //  - a caster changing material (same mesh, same place) re-renders the maps it reaches
 #include "xlionrender_test_common.h"
+#include "features/shadows/xlionrender_shadow_local_pages.h"
 
 using namespace xlionrender::test;
 
@@ -47,6 +48,96 @@ namespace
 
 int main()
 {
+    // The virtual pages (features/shadows/xlionrender_shadow_local_pages.h, CPU only): addressing, a page's projection, the pinned pages,
+    // requests within the budget, eviction under pressure, a light that moves, a changed caster dirtying its face's pages only
+    {
+        using pages = xlionrender::shadows::local_pages;
+        CHECK(pages::face_entries_v == 341 && pages::LevelBase(pages::levels_v - 1) == 340, "a face's entries");
+        for (int i = 0; i < 2 * pages::face_entries_v; ++i) CHECK(pages::Entry(pages::KeyOf(i)) == i, "entry %d round trip", i);
+
+        // A point's page: the face's clip square of that page maps to [-1, 1], the neighbours' do not
+        const xlionrender::local_light P{ .m_Position = { 1, 2, 3 }, .m_Radius = 10 };
+        for (int k = 0; k < 64; ++k)
+        {
+            const xmath::fvec3 W{ 1.0f + 4.0f * std::sin(0.7f * k), 2.0f + 3.0f * std::cos(1.3f * k), 3.0f + 5.0f * std::sin(0.31f * k + 1.0f) };
+            for (int f = 0; f < 6; ++f)
+            {
+                const auto F = pages::FaceProjection(P, f);
+                const auto C = F * xmath::fvec4(W, 1);
+                if (C.m_W <= 0) continue;
+                const float u = C.m_X / C.m_W, v = C.m_Y / C.m_W;
+                if (std::abs(u) >= 1 || std::abs(v) >= 1) continue;
+                for (int L = 0; L < pages::levels_v; ++L)
+                {
+                    const int n = pages::level0_pages_v >> L;
+                    const int x = std::min(int((u * 0.5f + 0.5f) * n), n - 1), y = std::min(int((v * 0.5f + 0.5f) * n), n - 1);
+                    const auto Q = pages::PageW2C(P, { f, L, x, y }) * xmath::fvec4(W, 1);
+                    CHECK(std::abs(Q.m_X / Q.m_W) <= 1.0001f && std::abs(Q.m_Y / Q.m_W) <= 1.0001f && std::abs(Q.m_Z / Q.m_W - C.m_Z / C.m_W) < 1e-5f, "point %d face %d level %d: outside its page", k, f, L);
+                }
+            }
+        }
+
+        const auto Table = [](const pages& S) { std::vector<std::uint32_t> T; S.BuildTable(T); return T; };
+        pages S;
+        S.Init({ .m_PoolTexels = 512, .m_Budget = 2 });        // 16 slots
+        std::vector<xlionrender::local_light> L{ P, { .m_Type = xlionrender::local_light::type::SPOT, .m_Position = { -5, 2, 0 }, .m_Direction = { 0, -1, 0 }, .m_Radius = 6 } };
+        S.Update(L, {}, true, {}, 1);
+        CHECK(S.m_Stats.m_RenderedPinned == 7 && S.m_Stats.m_Rendered == 0, "a point's 6 coarsest pages and a spot's 1, pinned (%d)", S.m_Stats.m_RenderedPinned);
+        CHECK(S.Validate(Table(S)), "invariant 1, pinned");
+        S.Update(L, {}, true, {}, 2);
+        CHECK(S.m_ToRender.empty(), "an unchanged frame renders nothing (%d)", int(S.m_ToRender.size()));
+
+        // 5 requests, a budget of 2: coarse first, 2 a frame
+        const int f0 = S.SlotOfLight(0) * pages::faces_per_light_v;
+        std::vector<pages::key> Req{ { f0, 0, 3, 4 }, { f0, 2, 1, 1 }, { f0, 1, 2, 2 }, { f0, 0, 5, 5 }, { f0 + 1, 3, 0, 1 } };
+        S.Update(L, {}, true, Req, 3);
+        CHECK(S.m_ToRender.size() == 2 && S.m_ToRender[0].m_Key.m_Level == 3 && S.m_ToRender[1].m_Key.m_Level == 2, "the budget, coarse first");
+        S.Update(L, {}, true, Req, 4);
+        S.Update(L, {}, true, Req, 5);
+        CHECK(S.m_ToRender.size() == 1 && S.m_Stats.m_Resident == 5 && S.Validate(Table(S)), "the requests all resident (%d)", S.m_Stats.m_Resident);
+
+        // Pressure: 16 slots, 7 pinned, 5 resident; 8 new requests: 4 fit, then the least recently requested go, never a pinned one
+        std::vector<pages::key> More;
+        for (int k = 0; k < 8; ++k) More.push_back({ f0 + 2, 0, k, 0 });
+        S.Init({ .m_PoolTexels = 512, .m_Budget = 100 });
+        S.Update(L, {}, true, Req, 10);
+        S.Update(L, {}, true, More, 11);
+        CHECK(S.m_Stats.m_ResidentPinned == 7 && S.m_Stats.m_Resident == 9 && S.m_Stats.m_Rejected == 0, "the older requests evicted for the new (pinned %d, resident %d, rejected %d)", S.m_Stats.m_ResidentPinned, S.m_Stats.m_Resident, S.m_Stats.m_Rejected);
+        More.push_back({ f0 + 3, 0, 0, 0 });
+        S.Update(L, {}, true, More, 12);
+        CHECK(S.m_Stats.m_Rejected == 0 && S.m_Stats.m_ResidentPinned == 7, "one more evicts the last old one (rejected %d)", S.m_Stats.m_Rejected);
+        More.push_back({ f0 + 3, 0, 1, 0 });
+        S.Update(L, {}, true, More, 13);
+        CHECK(S.m_Stats.m_Rejected == 1 && S.m_Stats.m_ResidentPinned == 7 && S.Validate(Table(S)), "a full pool rejects, keeps the pinned (rejected %d)", S.m_Stats.m_Rejected);
+
+        // The point moves: its pages go, a new generation; requests of the old one are dropped
+        const std::vector<std::uint32_t> OldGen{ S.Generation(0), S.Generation(1) };
+        L[0].m_Position.m_X += 0.5f;
+        S.Update(L, {}, true, {}, 14);
+        CHECK(S.m_Stats.m_RenderedPinned == 6 && S.Validate(Table(S)), "a moved point renders its 6 pinned pages again (%d)", S.m_Stats.m_RenderedPinned);
+        std::vector<std::uint32_t> Bits(std::size_t(pages::max_faces_v * pages::face_entries_v / 32 + 1), 0u);
+        for (const auto& K : Req) Bits[std::size_t(pages::Entry(K)) >> 5] |= 1u << (pages::Entry(K) & 31);
+        std::vector<pages::key> Decoded;
+        pages::DecodeRequests(Bits, OldGen, S, Decoded);
+        int nPoint = 0;
+        for (const auto& K : Decoded) nPoint += K.m_Face / pages::faces_per_light_v == f0 / pages::faces_per_light_v;
+        CHECK(nPoint == 0, "requests of the moved light's old generation dropped (%d kept)", nPoint);
+
+        // A changed caster below the point (its -Y face) dirties that face's pages, not the +Y face's
+        S.Init({ .m_PoolTexels = 1024, .m_Budget = 100 });
+        S.Update(L, {}, true, {}, 20);
+        const int fp = S.SlotOfLight(0) * pages::faces_per_light_v;
+        std::vector<pages::key> Down{ { fp + 3, 2, 1, 1 }, { fp + 2, 2, 1, 1 } };     // -Y, +Y
+        S.Update(L, {}, true, Down, 21);
+        const xmath::fvec3 Below = L[0].m_Position - xmath::fvec3(0, 2, 0);
+        const std::vector<xmath::fbbox> Changed{ xmath::fbbox{ Below - xmath::fvec3(0.2f), Below + xmath::fvec3(0.2f) } };
+        S.Update(L, Changed, true, Down, 22);
+        int nDown = 0, nUp = 0;
+        for (const auto& R : S.m_ToRender) { nDown += R.m_Key.m_Face == fp + 3; nUp += R.m_Key.m_Face == fp + 2; }
+        CHECK(nDown >= 1 && nUp == 0, "a caster below dirties the -Y face's pages (%d), not the +Y face's (%d)", nDown, nUp);
+        std::printf("local pages (CPU): addressing, projections, pinned, budget, pressure, generations, dirty faces: ok\n");
+    }
+
     // The atlas allocator (CPU only)
     {
         xlionrender::shadows::buddy B;
