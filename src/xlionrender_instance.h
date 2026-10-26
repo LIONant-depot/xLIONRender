@@ -17,6 +17,7 @@
 #include "features/gi/xlionrender_surfel_gi_gpu.h"
 #include "features/gi/xlionrender_surfel_gi_chunks.h"
 #include "plans/forward/xlionrender_plan_forward.h"     // (details::push_static_geom, draw_indexed_indirect: the half-resolution GI pass's lists)
+#include "features/cull/xlionrender_gpu_cull.h"
 #include "xlionrender_view.h"
 #include <chrono>
 #include <memory>
@@ -173,6 +174,12 @@ namespace xlionrender
 
         // The scene pass skips draws whose world bounds are outside the camera's frustum (false: draw everything - the reference)
         bool                                       m_bFrustumCull = true;
+        // The main view's opaque rigid clusters with a material are culled on the GPU and drawn indirectly (documentation/gpu_cluster_culling.md;
+        // false or XLION_NO_GPU_CULL=1: the CPU path). The last Render's candidates (its clusters handed to the cull) and runs (indirect draws)
+        bool                                       m_bGPUCull     = true;
+        // and, read back a few frames late, the clusters the GPU kept (drawn shaded, drawn in the depth prepass)
+        struct cull_stats { int m_nCandidates = 0; int m_nRuns = 0; int m_nDrawn = 0; int m_nPrepassDrawn = 0; };
+                      cull_stats           getCullStats( void ) const                                           noexcept { return { int(m_CullCandidates.size()), int(m_CullRuns.size()), m_pCull ? m_pCull->m_Drawn : 0, m_pCull ? m_pCull->m_PrepassDrawn : 0 }; }
         // How many of the scene's draws the last Render drew in the scene pass
                       int                  getDrawsRendered( void ) const                                       noexcept { return m_nDrawsRendered; }
         // How many persistent instance slots this frame wrote (new or changed: transform, constant material, entity parameters)
@@ -250,6 +257,7 @@ namespace xlionrender
 
         static constexpr std::size_t capture_path_v = std::size_t(geom_kind::COUNT);      // the GI material capture's pipelines (getCaptureInstance)
         static constexpr std::size_t shadow_path_v  = capture_path_v + 1;                 // a masked material's shadow casters, per vertex path (getMaterialInstance bShadow)
+        static constexpr std::size_t records_path_v = shadow_path_v + capture_path_v;     // the rigid path reading its draws' records (getRecordsInstance: GPU culling)
 
         struct material_slot
         {
@@ -258,9 +266,9 @@ namespace xlionrender
             xgpu::shader                                            m_Fragment;
             std::vector<xgpu::texture>                              m_Textures;     // slot 0 (shadow map) may be empty: white
             std::vector<xgpu::texture*> TexturePointers() noexcept { std::vector<xgpu::texture*> P; for (auto& T : m_Textures) P.push_back(T.m_Private ? &T : nullptr); return P; }
-            // Per vertex path (geom_kind), the GI capture, then the shadow casters per vertex path: built on first use. Its own textures; the
-            // pipeline is shared with every material of the same fragment and state (m_SharedPipelines)
-            std::array<xgpu::pipeline_instance, shadow_path_v + capture_path_v> m_Instance;
+            // Per vertex path (geom_kind), the GI capture, the shadow casters per vertex path, the records path: built on first use. Its own
+            // textures; the pipeline is shared with every material of the same fragment and state (m_SharedPipelines)
+            std::array<xgpu::pipeline_instance, records_path_v + 1> m_Instance;
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             material_state          m_State;                        // CreateMaterial: its pipelines' settings
@@ -293,6 +301,7 @@ namespace xlionrender
         xgpu::pipeline_instance*    getMaterialInstance( material_slot& Material, geom_kind Kind, bool bShadow = false ) noexcept;     // bShadow: its shadow caster (a masked material's cutout)
         static void                 ApplyState         ( xgpu::pipeline::setup& Setup, const material_state& S ) noexcept;
         xgpu::pipeline_instance*    getCaptureInstance ( material_slot& Material )                              noexcept;
+        xgpu::pipeline_instance*    getRecordsInstance ( material_slot& Material )                              noexcept;     // RIGID, the draw's push constants from its record (binding 12)
         // The materials' pipelines, shared by (fragment shader, the state the path uses, path): materials differ by their instances (textures)
         using pipeline_key = std::tuple<const void*, std::uint32_t, std::size_t>;
         struct shared_pipeline { xgpu::pipeline m_Pipeline; xgpu::pipeline_instance m_Globals; int m_nUsers = 0; };      // m_Globals: the texture-table materials' set 0 (the renderer's textures only)
@@ -301,9 +310,9 @@ namespace xlionrender
         // Material's instance k on the shared pipeline (made by Build when it is new); nullptr when either could not be created
         xgpu::pipeline_instance*    makeInstance       ( material_slot& Material, std::size_t k, bool bShadowAtlas, const std::function<xgpu::device::error*(xgpu::pipeline&)>& Build ) noexcept;
         void                        releaseInstances   ( material_slot& Material )                              noexcept;
-        xgpu::device::error*        buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& Material, geom_kind Kind, bool bShadow ) noexcept;
+        xgpu::device::error*        buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& Material, geom_kind Kind, bool bShadow, bool bRecords = false ) noexcept;
         std::uint8_t                TableSlots         ( const material_slot& Material ) const                  noexcept;
-        xgpu::shader                m_StaticGeomGIVert, m_SkinGeomVert, m_GICaptureVert;     // the material pipelines' vertex shaders
+        xgpu::shader                m_StaticGeomGIVert, m_SkinGeomVert, m_GICaptureVert, m_StaticGeomGIRecordsVert;     // the material pipelines' vertex shaders
         void                        BindClusterStreams ( xgpu::cmd_buffer& Cmd, const cluster_geom& Geom )      noexcept;   // the core + optional streams (m_StaticGeomVD / m_SkinGeomVD)
         void                        processGICapture( xgpu::window& Window )                                    noexcept;
 
@@ -461,6 +470,17 @@ namespace xlionrender
         std::vector<details::push_static_geom>      m_ScreenRecords;
         std::vector<details::draw_indexed_indirect> m_ScreenCommands;
         std::vector<screen_run>                     m_ScreenRuns;
+        // GPU culling (features/cull): the main view's opaque rigid clusters with a material, culled into runs of indirect draws - a run a bind
+        // state (records pipeline, material, geometry, GI buffer), a prepass run a geometry (m_pInstance null). XLION_NO_GPU_CULL=1: the CPU path
+        struct cull_run { xgpu::pipeline_instance* m_pInstance; material_slot* m_pMat; const cluster_geom* m_pGeom; xgpu::buffer* m_pGI; std::uint32_t m_First = 0, m_Max = 0; };
+        std::unique_ptr<gpu_cull>                   m_pCull;                // null: not supported (drawIndirectCount)
+        std::vector<gpu_cull::candidate>            m_CullCandidates;
+        std::vector<xmath::fmat4>                   m_CullMatrices;
+        std::vector<cull_run>                       m_CullRuns;
+        std::vector<std::uint8_t>                   m_CullPrepass;          // per run: a prepass run
+        std::map<std::tuple<const void*, const void*, const void*, const void*>, std::uint32_t> m_CullRunOf;
+        std::vector<std::uint32_t>                  m_CullSubBase;          // per scene draw: its submeshes' first flag in m_CullSub (~0: none)
+        std::vector<std::uint8_t>                   m_CullSub;              // 1: the submesh is culled on the GPU (the CPU loops leave it)
         int                         m_nDrawsRendered        = 0;
         // The editor's view of huge meshes (m_bBoxesOnly, m_FrameBudgetMs): planClusters, updateBudget
         void                        planClusters    ( const scene& Scene, const xmath::fvec3& Eye, const frustum& Frustum ) noexcept;

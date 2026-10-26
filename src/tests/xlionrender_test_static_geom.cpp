@@ -162,16 +162,17 @@ int main()
             for (float v : M) if (v != 0) { CHECK(std::abs(v - Expected) < 0.01f, "Shared material %d: texel %f, expected %f", i, v, Expected); ++n; }
             CHECK(n == nCovered, "Shared material %d covered %d texels, the standard path %d", i, n, nCovered);
         }
-        CHECK(Renderer.getPipelineCount() == Before + 1, "Drawing them made %d pipelines, expected 1", Renderer.getPipelineCount() - Before);
+        const int nCull = std::getenv("XLION_NO_GPU_CULL") || !Device.hasDrawIndirectCount() ? 0 : 1;      // (GPU culling: the records path's pipeline as well)
+        CHECK(Renderer.getPipelineCount() == Before + 1 + nCull, "Drawing them made %d pipelines, expected %d", Renderer.getPipelineCount() - Before, 1 + nCull);
 
         xlionrender::material_id Other;
         const auto Slots = std::array<xgpu::texture*, 2>{ nullptr, &Textures[0] };
         CHECK(!Renderer.CreateMaterial(Other, Frag, Slots, { .m_bDoubleSided = true }), "CreateMaterial double sided");
-        CHECK(Renderer.getPipelineCount() == Before + 2, "Another state: %d new pipelines, expected 2", Renderer.getPipelineCount() - Before);
+        CHECK(Renderer.getPipelineCount() == Before + 2 + nCull, "Another state: %d new pipelines, expected %d", Renderer.getPipelineCount() - Before, 2 + nCull);
 
         Renderer.DestroyMaterial(Materials[0]);
         Renderer.DestroyMaterial(Materials[1]);
-        CHECK(Renderer.getPipelineCount() == Before + 2, "A pipeline stays while a material uses it");
+        CHECK(Renderer.getPipelineCount() == Before + 2 + nCull, "A pipeline stays while a material uses it");
         Scene.m_Draws = { { .m_Mesh = Static, .m_Material = Mat, .m_Materials = { Materials[2] } } };
         CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, M), "Render the last shared material");
         for (float v : M) if (v != 0) CHECK(std::abs(v - 3.0f * 64 / 255) < 0.01f, "The last shared material: texel %f", v);
@@ -231,7 +232,8 @@ int main()
         CHECK(!Renderer.SetMaterialTexture(A, 0, T[2]), "SetMaterialTexture");
         CHECK(Expect(A, Red(2), "table A swapped"), "The swapped texture is drawn (%.3f)", Red(2));
         CHECK(Expect(B, Red(1), "table B again"), "The other material keeps its own");
-        CHECK(Renderer.getPipelineCount() == Before + 1, "A texture swap made no pipeline");
+        const int nCull = std::getenv("XLION_NO_GPU_CULL") || !Device.hasDrawIndirectCount() ? 0 : 1;      // (drawn: the records path's pipeline as well)
+        CHECK(Renderer.getPipelineCount() == Before + 1 + nCull, "A texture swap made no pipeline");
 
         Renderer.DestroyMaterial(A);
         Renderer.DestroyMaterial(B);

@@ -24,6 +24,9 @@ namespace xlionrender
         constexpr std::uint32_t s_StaticGeomGIRecordsVert[] = {
             #include "xlionrender_static_geom_gi_records_vert.h"
         };
+        constexpr std::uint32_t s_CullComp[] = {
+            #include "xlionrender_cull_comp.h"
+        };
         constexpr std::uint32_t s_SkinGeomVert[] = {
             #include "xlionrender_skin_geom_vert.h"
         };
@@ -506,6 +509,8 @@ namespace xlionrender
         if( auto Err = Device.Create(m_StaticGeomGIVert,    { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_StaticGeomGIVert) }); Err ) return Err;     // RIGID: reads the surfel GI
         if( auto Err = Device.Create(m_SkinGeomVert,        { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_SkinGeomVert) }); Err ) return Err;
         if( auto Err = Device.Create(m_GICaptureVert,       { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
+        if( auto Err = Device.Create(m_StaticGeomGIRecordsVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_StaticGeomGIRecordsVert) }); Err ) return Err;     // RIGID, GPU culled
+        if( m_pCull = std::make_unique<gpu_cull>(); !m_pCull->Init(Device, s_CullComp) ) m_pCull.reset();      // (no drawIndirectCount: the CPU path)
 
         // Shadows: the atlas's passes (a clear for its first use - a never rendered attachment cannot be loaded -, then load), the
         // tile clear (depth 1, ALWAYS) and the casters' depth pipelines: depth bias against acne, depth clamp so casters nearer to the
@@ -1028,7 +1033,13 @@ namespace xlionrender
         return makeInstance(M, k, !bShadow, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, Kind, bShadow); });
     }
 
-    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow ) noexcept
+    xgpu::pipeline_instance* instance::getRecordsInstance( material_slot& M ) noexcept
+    {
+        if( M.m_Instance[records_path_v].m_Private ) return &M.m_Instance[records_path_v];
+        return makeInstance(M, records_path_v, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, geom_kind::RIGID, false, true); });
+    }
+
+    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow, bool bRecords ) noexcept
     {
         const bool bSkin = Kind == geom_kind::SKIN;
 
@@ -1037,7 +1048,7 @@ namespace xlionrender
         assert(M.m_bTable || M.m_Textures.size() <= 8);       // slots 8, 9: the environment
         const auto Samplers = LitSamplers();
 
-        auto Shaders      = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, bSkin ? &m_SkinGeomVert : &m_StaticGeomGIVert };
+        auto Shaders      = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, bSkin ? &m_SkinGeomVert : bRecords ? &m_StaticGeomGIRecordsVert : &m_StaticGeomGIVert };
         using ub = xgpu::pipeline::uniform_binds;
         const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
         const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
@@ -1057,6 +1068,7 @@ namespace xlionrender
         if( bSkin ) UniformBinds.push_back(VertexSSBO(8));     // SKIN: the BoneMap (xgeom_skin palettes)
         UniformBinds.push_back(FragmentSSBO(9));                // MaterialParams (every material declares it, read or not)
         UniformBinds.push_back(FragmentSSBO(10));               // EntityParams
+        if( bRecords ) UniformBinds.push_back(VertexSSBO(12)); // the draws' records (GPU culling)
         const auto Binds = std::span{ UniformBinds };
         xgpu::pipeline::setup Setup{ .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                    , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
@@ -1080,7 +1092,7 @@ namespace xlionrender
     instance::pipeline_key instance::PipelineKey( const material_slot& M, std::size_t k ) noexcept
     {
         std::uint32_t State = 0;
-        if( k < capture_path_v )
+        if( k < capture_path_v || k == records_path_v )
         {
             const auto& S = M.m_State;
             State = (S.isBlended() ? 1u + std::uint32_t(S.m_Blend) : 0u) | (S.m_bDoubleSided ? 1u << 4 : 0u) | (S.m_bWireframe ? 1u << 5 : 0u)

@@ -107,7 +107,7 @@ namespace xlionrender::test
             cluster_geom G{ .m_Kind = Kind, .m_pStreams = m_Streams.data(), .m_pColors = m_Colors.m_Private ? &m_Colors : nullptr, .m_pUV1 = m_UV1.m_Private ? &m_UV1 : nullptr, .m_pClusterData = &m_ClusterData, .m_pBones = pBones, .m_MaxInfluences = MaxInfluences };
             G.m_BBox.m_Min = xmath::fvec3(-m_Scale);
             G.m_BBox.m_Max = xmath::fvec3( m_Scale);
-            G.m_Clusters  = { { 0, m_nIndices, 0 } };
+            G.m_Clusters  = { { 0, m_nIndices, 0, G.m_BBox } };       // (its box: the GPU culls by it)
             G.m_Submeshes = { { 0, 1, 0 } };
             return G;
         }
