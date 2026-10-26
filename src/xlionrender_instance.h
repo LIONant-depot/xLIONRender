@@ -159,6 +159,9 @@ namespace xlionrender
         bool                                       m_bVirtualShadows = false;
         // Tests: every filter tap of the pages through the table (the border path everywhere): the image must not change
         bool                                       m_bVSMTapTranslation = false;
+        // The pages' debug views (shaders/xlionrender_shadow_vsm.glsl): 0 off, 2 the level, 3 the footprint against the texel, 4 what shaded the pixel
+        // (its own level, a coarser one, none). XLION_VSM_DEBUG=n at Init
+        int                                        m_VSMDebugView = 0;
         // The pages' numbers: this frame's admission (shadows::vsm::stats) and the request pass's counters of a ring ago (the pixels, the
         // ones shaded by their own level, by a coarser one, by none; crossing a page border; per level; per log2(footprint / texel) + 4)
         struct vsm_report

@@ -522,6 +522,7 @@ namespace xlionrender
         // pass, its frame data (a ring slot each), its bits and counters (zeroed by a copy, copied back to a ring slot)
         m_VSM.Init({ .m_PoolTexels = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize });
         m_bVirtualShadows = std::getenv("XLION_VSM") != nullptr;
+        if( const char* p = std::getenv("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
         {
             using usage = xgpu::buffer::setup::usage;
             const int nReq = vsmBitUints() + 32;

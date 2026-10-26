@@ -16,7 +16,7 @@ struct frame_t
     mat4 C2W;                       // the main view's clip -> camera-centred world
     vec4 Eye;                       // the camera's world position
     vec4 LX, LY, LZ;                // world -> light rows
-    vec4 P0;                        // x: level 0 texel, y: levels, z: window (pages), w: -
+    vec4 P0;                        // x: level 0 texel, y: levels, z: window (pages), w: the resolution bias (levels)
     vec4 Levels[kMaxLevels];        // per level: xy the window's first page, z page size, w depth centre
 };
 layout(std430, set = 0, binding = 0) readonly buffer frame_b { frame_t F[]; };
@@ -86,7 +86,7 @@ void main()
         const float fx = AxisFootprint(p, ivec2(1, 0), L), fy = AxisFootprint(p, ivec2(0, 1), L);
         float Foot = max(fx < 1e29 ? fx : 0.0, fy < 1e29 ? fy : 0.0);         // the shading's max(|dFdx|, |dFdy|) of the light-space xy
         if (Foot <= 0.0) Foot = t0;                                             // (an isolated pixel: no neighbour to measure with)
-        int Level = clamp(int(floor(log2(Foot / t0))), 0, nLevels - 1);
+        int Level = clamp(int(floor(log2(Foot / t0) + F[Push.m_Frame].P0.w)), 0, nLevels - 1);
         atomicAdd(s_Count[0], 1u);
         atomicAdd(s_Count[17 + clamp(int(floor(log2(Foot / (t0 * float(1 << Level))))) + 4, 0, 7)], 1u);
 
@@ -104,7 +104,10 @@ void main()
                 First = l;
                 atomicAdd(s_Count[5 + min(l, 11)], 1u);
                 bCross = any(notEqual(PLo, PHi));
-                for (int y = PLo.y; y <= PHi.y; ++y) for (int x = PLo.x; x <= PHi.x; ++x) Request(l, ivec2(x, y));
+                {   // (the request also covers the shading's normal offset: 2 texels more around the taps)
+            const ivec2 RLo = ivec2(floor(vec2(Lo - 2) / float(kPageTexels))), RHi = ivec2(floor(vec2(Hi + 2) / float(kPageTexels)));
+            for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y));
+        }
             }
             // What the shading finds this frame: every tap's page in the table, or a coarser level
             bool bAll = true;

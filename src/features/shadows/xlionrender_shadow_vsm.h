@@ -39,11 +39,15 @@ namespace xlionrender::shadows
         struct setup
         {
             int     m_PoolTexels    = 4096;             // the pool's side in the atlas: 4096^2 x 16-bit = 32 MiB, 1024 slots
-            int     m_Levels        = 8;                // level L's texel: level 0's x 2^L; the coarsest is the net
+            int     m_Levels        = 10;               // level L's texel: level 0's x 2^L; the coarsest is the net
             int     m_Window        = 32;               // pages per level side kept in the table around the camera
             int     m_PinnedRadius  = 8;                // the net: the coarsest level's pages within this many of the camera's (a 16 x 16 square)
             int     m_Budget        = 64;               // fine pages rendered a frame (the net's are not counted against it)
             int     m_ProtectFrames = 4;                // a page requested this many frames ago is still protected (the requests are a ring late)
+            float   m_ResolutionBias = -1;              // levels added to the footprint's (-1: texels half the pixel; Unreal's ResolutionLodBiasDirectional);
+                                                        // -1 measured against the clipmap and the rays (tests/xlionrender_test_vsm.cpp)
+            float   m_EpochDegrees  = 0.25f;            // the light turning less than this keeps its epoch: the pages are of its direction then, the
+                                                        // shading's is the current one (an approximation; the mismatch in stats::m_EpochMismatchDegrees)
 
             int SlotsPerRow ( void ) const noexcept { return m_PoolTexels / page_texels_v; }
             int Slots       ( void ) const noexcept { return SlotsPerRow() * SlotsPerRow(); }
@@ -89,6 +93,7 @@ namespace xlionrender::shadows
             int m_ResidentFine = 0, m_ResidentPinned = 0;
             int m_PinnedNotValid = 0;       // net pages not VALID when the table is published (a readiness failure: 0 by construction)
             int m_Epochs    = 0;            // 1: this frame opened a new epoch (a new direction or scale)
+            float m_EpochMismatchDegrees = 0;   // the angle between the light's direction and its epoch's (under setup::m_EpochDegrees)
         };
 
         // Windows of one frame, to decode its requests later
@@ -169,7 +174,8 @@ namespace xlionrender::shadows
 
             // The basis: a new direction or scale is a new epoch, every page goes
             const xmath::fvec3 Z = LightDir.NormalizeCopy();
-            if (!m_bHasBasis || Z.Dot(m_Z) < 0.99999f || Level0Texel != m_Level0Texel)
+            const float EpochCos = std::cos(m_Setup.m_EpochDegrees * 3.14159265f / 180.0f);
+            if (!m_bHasBasis || Z.Dot(m_Z) < EpochCos || Level0Texel != m_Level0Texel)
             {
                 const xmath::fvec3 Up = std::abs(Z.m_Y) < 0.99f ? xmath::fvec3(0, 1, 0) : xmath::fvec3(1, 0, 0);
                 m_X = xmath::fvec3::Cross(Up, Z).NormalizeCopy();
@@ -181,6 +187,8 @@ namespace xlionrender::shadows
                 FreeAll();
                 for (auto& b : m_bDepthSet) b = false;
             }
+
+            m_Stats.m_EpochMismatchDegrees = std::acos(std::clamp(Z.Dot(m_Z), -1.0f, 1.0f)) * 180.0f / 3.14159265f;
 
             // The windows; a level whose depth range moves loses its pages
             const xmath::fvec3 C = ToLight(Camera);

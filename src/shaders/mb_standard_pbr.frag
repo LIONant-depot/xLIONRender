@@ -108,6 +108,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 VSMParams;                      // x: 1 the virtual pages (0: the clipmap), y: level 0 texel, z: levels, w: the page table's first uint in LightCells
 	vec4 VSMParams2;                     // x: window (pages per level side), y: page texels, z: pool slots per row, w: 1 every tap through the table (tests)
 	vec4 VSMLevels[12];                  // per level: xy the window's first page, z page size, w depth centre
+	vec4 VSMParams3;                     // x: the resolution bias (levels added to the footprint's)
 #endif
 } UBOLight;
 
@@ -238,6 +239,9 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 #include "xlionrender_local_lights.glsl"
 #include "xlionrender_environment.glsl"
 #include "xlionrender_shadow_vsm.glsl"
+#endif
+#ifndef XLIONRENDER_SHADOW_VSM_GLSL
+#define VSMDebugOr(Lit) (Lit)
 #endif
 
 #ifndef XLION_LDR_OUTPUT
@@ -374,7 +378,7 @@ vec3 PBRLighting
 #elif defined(XLION_LDR_OUTPUT)
 	float Shadow = ShadowPCF(In.ShadowPosition / In.ShadowPosition.w);       // editors that draw materials themselves: their own shadow map
 #else
-	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
+	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0)) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
 #endif
 	// xLIONRender: W == 0 is a directional light (XYZ = direction towards the light, no falloff); W > 0 a point
 	// light with that falloff radius. (The original treated W == 0 as a zero-radius point light: always black.)
@@ -398,7 +402,7 @@ vec3 PBRLighting
 #else
 	const vec3 Local = vec3(0.0);
 #endif
-	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return GIDebugOr(ambient + Local + emissive);
+	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return VSMDebugOr(GIDebugOr(ambient + Local + emissive));
 
 	// Commit to lit path: Rest here.
 	vec3	H					= normalize(V + L);
@@ -429,5 +433,5 @@ vec3 PBRLighting
 	vec3	radiance			= UBOLight.LightColor.rgb * lightTint * att * UBOLight.LightParams.z; // Apply intensity mult
 	vec3	directLighting		= (diffuse + specular) * radiance * NdotL * Shadow;
 
-	return GIDebugOr(ambient + directLighting + Local + emissive);
+	return VSMDebugOr(GIDebugOr(ambient + directLighting + Local + emissive));
 }

@@ -124,6 +124,7 @@ namespace xlionrender::details
         xmath::fvec4                            m_VSMParams;        // x: 1 the virtual pages (0: the clipmap), y: level 0 texel, z: levels, w: the page table's first uint in the cell buffer
         xmath::fvec4                            m_VSMParams2;       // x: window (pages), y: page texels, z: pool slots per row, w: 1 every tap through the table (tests)
         std::array<xmath::fvec4, shadows::vsm::max_levels_v> m_VSMLevels;   // per level: xy the window's first page, z page size, w depth centre
+        xmath::fvec4                            m_VSMParams3;       // x: the resolution bias (levels added to the footprint's)
     };
 
     // The sun's virtual pages: the request pass's frame data (shaders/xlionrender_vsm_request_comp.glsl frame_t, std430)
@@ -132,7 +133,7 @@ namespace xlionrender::details
         xmath::fmat4                            m_C2W;              // the main view's clip -> camera-centred world
         xmath::fvec4                            m_Eye;              // the camera's world position
         xmath::fvec4                            m_LX, m_LY, m_LZ;   // world -> light rows
-        xmath::fvec4                            m_P0;               // x: level 0 texel, y: levels, z: window
+        xmath::fvec4                            m_P0;               // x: level 0 texel, y: levels, z: window, w: the resolution bias
         std::array<xmath::fvec4, shadows::vsm::max_levels_v> m_Levels;     // per level: xy the window's first page, z page size, w depth centre
     };
     static_assert(sizeof(vsm_frame) == 64 + 5 * 16 + shadows::vsm::max_levels_v * 16);

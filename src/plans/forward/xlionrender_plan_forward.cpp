@@ -705,7 +705,7 @@ namespace xlionrender
         F.m_C2W = W2C.Inverse();
         F.m_Eye = xmath::fvec4(Eye, 1);
         F.m_LX  = xmath::fvec4(m_VSM.m_X, 0); F.m_LY = xmath::fvec4(m_VSM.m_Y, 0); F.m_LZ = xmath::fvec4(m_VSM.m_Z, 0);
-        F.m_P0  = { m_VSM.Level0Texel(), float(VS.m_Levels), float(VS.m_Window), 0 };
+        F.m_P0  = { m_VSM.Level0Texel(), float(VS.m_Levels), float(VS.m_Window), VS.m_ResolutionBias };
         for( int i = 0; i < shadows::vsm::max_levels_v; ++i )
         {
             const auto& Lv = m_VSM.m_Levels[i];
@@ -1182,7 +1182,8 @@ namespace xlionrender
             }
             if( std::vector<std::uint64_t> Ns; m_VSMTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
                 m_VSMReport.m_RequestGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
-            m_VSM.Update(Sun.m_Direction, Sun.m_ShadowTileSize / float(m_ShadowSetup.m_ClipmapTileSize), Eye, Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex());
+            // (level 0's texel: the clipmap's level 0 texel / 4 - two finer levels for the pixels near the camera; ten levels reach as far)
+            m_VSM.Update(Sun.m_Direction, Sun.m_ShadowTileSize / float(4 * m_ShadowSetup.m_ClipmapTileSize), Eye, Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex());
             m_VSMReport.m_Pages = m_VSM.m_Stats;
             m_ShadowTiles.clear();
         }
@@ -1445,12 +1446,13 @@ namespace xlionrender
                 Light.m_ShadowParams = { L.m_bCastShadows && !bVSM ? 1.0f : 0.0f, m_Clipmap.DepthHalfRange(0), float(m_ShadowSetup.m_ClipmapTileSize), 0 };
                 const auto& VS = m_VSM.getSetup();
                 Light.m_VSMParams  = bVSM ? xmath::fvec4{ 1.0f, m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };
-                Light.m_VSMParams2 = { float(VS.m_Window), float(shadows::vsm::page_texels_v), float(VS.SlotsPerRow()), m_bVSMTapTranslation ? 1.0f : 0.0f };
+                Light.m_VSMParams2 = { float(VS.m_Window), float(shadows::vsm::page_texels_v), float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
                 for( int i = 0; i < shadows::vsm::max_levels_v; ++i )
                 {
                     const auto& Lv = m_VSM.m_Levels[i];
                     Light.m_VSMLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
                 }
+                Light.m_VSMParams3 = { VS.m_ResolutionBias, 0, 0, 0 };
 
                 writeLocalLights(Scene, Eye, Light);
                 Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, 0, 0 };
