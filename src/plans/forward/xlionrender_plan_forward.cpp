@@ -689,7 +689,7 @@ namespace xlionrender
         m_VSM.BuildTable(m_VSMTable);
         const int n = int(m_VSMTable.size());
         m_VSMTableBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
-        (void)m_CellRing.MemoryMap(m_VSMTableBase, n, [&](void* p) { std::memcpy(p, m_VSMTable.data(), std::size_t(n) * sizeof(std::uint32_t)); });
+        (void)m_CellRing.MemoryMapFrameRegion(m_VSMTableBase, n, [&](void* p) { std::memcpy(p, m_VSMTable.data(), std::size_t(n) * sizeof(std::uint32_t)); });   // (this frame's slot: no wait for the frame in flight)
         m_CellRingUsed += n;
         m_VSMTableFrame = Frame;
         return m_VSMTableBase;
@@ -711,7 +711,7 @@ namespace xlionrender
             const auto& Lv = m_VSM.m_Levels[i];
             F.m_Levels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
         }
-        (void)m_VSMFrames.MemoryMap(Slot, 1, [&](void* p) { std::memcpy(p, &F, sizeof(F)); });
+        (void)m_VSMFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p) { std::memcpy(p, &F, sizeof(F)); });                                           // (this frame's slot: no wait)
         const xgpu::buffer::copy Z{ 0, 0, nReq };
         Window.CopyBuffer(m_VSMZeros, m_VSMReq, std::span{ &Z, 1 });
         Window.WriteTimestamp(m_VSMTimes, 0);
@@ -1171,12 +1171,12 @@ namespace xlionrender
             m_VSMRequests.clear();
             if( m_VSMSnap[Slot].m_bValid )
             {
-                (void)m_VSMReqHost.MemoryMap(Slot * nReq, nReq, [&](void* p)
-                {
-                    const auto* pU = static_cast<const std::uint32_t*>(p);
-                    m_VSM.DecodeRequests({ pU, std::size_t(nBits) }, m_VSMSnap[Slot], m_VSMRequests);
-                    std::memcpy(m_VSMReport.m_Counters.data(), pU + nBits, m_VSMReport.m_Counters.size() * sizeof(std::uint32_t));
-                });
+                // (a ring ago: done - no wait for the frame in flight, which cost 2.3 ms of CPU; one copy out, then decoded: the mapped
+                // memory can be the GPU's, where every read crosses the bus - a word at a time it cost 1 ms)
+                std::vector<std::uint32_t> Got(static_cast<std::size_t>(nReq));
+                (void)m_VSMReqHost.MemoryMapFrameRegion(Slot * nReq, nReq, [&](void* p) { std::memcpy(Got.data(), p, Got.size() * sizeof(std::uint32_t)); });
+                m_VSM.DecodeRequests({ Got.data(), std::size_t(nBits) }, m_VSMSnap[Slot], m_VSMRequests);
+                std::memcpy(m_VSMReport.m_Counters.data(), Got.data() + nBits, m_VSMReport.m_Counters.size() * sizeof(std::uint32_t));
                 m_VSMReport.m_bCounters = true;
                 m_VSMSnap[Slot].m_bValid = false;
             }
