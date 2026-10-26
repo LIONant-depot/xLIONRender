@@ -240,7 +240,7 @@ namespace xlionrender
             const auto TakeMaterials = [&](int Id)
             {
                 std::vector<bool> Alpha(D.m_Materials.size(), false);
-                for( std::size_t k = 0; k < D.m_Materials.size(); ++k ) if( const auto* pMat = findMaterial(D.m_Materials[k]); pMat && pMat->m_State.isBlended() ) Alpha[k] = true;
+                for( std::size_t k = 0; k < D.m_Materials.size(); ++k ) if( const auto* pMat = findMaterial(D.m_Materials[k]); pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::BLENDED ) Alpha[k] = true;
                 W.SetSeeThrough(Id, Alpha);
                 const_cast<mesh_slot*>(pM)->m_bTriColors = false;              // the SURFACE_COLOR view's table: made again from the new capture
                 // a capture still waiting for this instance is of materials it no longer has (one in flight does not publish: processGICapture)
@@ -1164,8 +1164,9 @@ namespace xlionrender
                 {
                     // The material's settings: no shadow, or a masked one's cutout (its own caster: the material's fragment, which stops after the cut)
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
-                    if( pMat && !pMat->m_State.m_bCastShadows ) continue;
-                    auto* pCut = pMat && pMat->m_State.m_Blend == material_state::blend::MASKED ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
+                    const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
+                    if( !Vis.m_bCastsShadow ) continue;
+                    auto* pCut = Vis.m_Opacity == material_visibility::opacity::MASKED ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
                     auto* pInstance = pCut ? pCut : &m_ShadowInstance[bSkin ? 2 : 1];
                     if( pInstance->m_Private.get() != pBound || &G != pBoundGeom )
                     {

@@ -1,0 +1,446 @@
+#ifndef XLIONRENDER_SHADOW_VSM_H
+#define XLIONRENDER_SHADOW_VSM_H
+#pragma once
+
+// The directional light's virtual shadow pages (documentation/lighting_strategy.md sec. 7, P1a): the clipmap's levels made virtual.
+//
+//  - Levels: level L's texel is Level0Texel x 2^L; a page is page_texels_v texels square, world-anchored in light space (its integer
+//    x, y index), so a page stays valid while the camera moves. Each level keeps a window of setup::m_Window pages around the camera;
+//    the page table is that window, toroidal (the page's index mod the window), as the clipmap's slots are.
+//  - Demand: a pass over the main view's depth (shaders/xlionrender_vsm_request_comp.glsl) marks, per pixel, the page of the level
+//    whose texel fits the pixel's footprint, dilated by the filter's reach; read back a ring late, the requests are decoded with the
+//    windows of the frame that made them (Snapshot).
+//  - The pool: the clipmap's part of the shadow atlas cut into page slots. The first setup::PinnedSlots() hold the coarse net (the
+//    coarsest level's pages within m_PinnedRadius of the camera): never evicted, rendered first, and rendered whatever the budget (the
+//    overrun is counted) - so a fine page that is not there degrades to the net, never to a hole. The rest hold requested fine pages:
+//    a page requested by the latest requests or rendered this frame is protected; the others are evicted least recently requested
+//    first; a page with no slot left is rejected (counted apart from a miss).
+//  - States: a resident page is VALID or DIRTY. A caster change makes the pages under it DIRTY at once (they leave the table: the
+//    shader falls back to a coarser level), the budget decides when they are rendered again. A new light direction or level-0 size
+//    opens a new epoch: every page goes; a level's depth range moving makes that level's pages go.
+//  - The table holds a page only when it is VALID this frame (its slot + 1, 16 bits; 0: none), so the shader never reads a slot that
+//    holds another page or stale depth (invariant 1); Validate checks it. A slot reused this frame is rendered before the scene pass
+//    that samples it reads the table naming it; earlier frames still on the GPU read it before (one queue, the passes in order).
+// ponytail: CPU admission from a ring-late readback (GPU-driven page lists: P1c); one unordered_map lookup per requested page
+
+#include "features/shadows/xlionrender_shadow_clipmap.h"
+#include <algorithm>
+#include <span>
+#include <unordered_map>
+
+namespace xlionrender::shadows
+{
+    struct vsm
+    {
+        static constexpr int page_texels_v  = 128;
+        static constexpr int max_levels_v   = 12;
+        static constexpr int filter_reach_v = 2;        // texels a lookup's filter reaches past its centre texel (the request pass dilates by it)
+
+        struct setup
+        {
+            int     m_PoolTexels    = 4096;             // the pool's side in the atlas: 4096^2 x 16-bit = 32 MiB, 1024 slots
+            int     m_Levels        = 8;                // level L's texel: level 0's x 2^L; the coarsest is the net
+            int     m_Window        = 32;               // pages per level side kept in the table around the camera
+            int     m_PinnedRadius  = 8;                // the net: the coarsest level's pages within this many of the camera's (a 16 x 16 square)
+            int     m_Budget        = 64;               // fine pages rendered a frame (the net's are not counted against it)
+            int     m_ProtectFrames = 4;                // a page requested this many frames ago is still protected (the requests are a ring late)
+
+            int SlotsPerRow ( void ) const noexcept { return m_PoolTexels / page_texels_v; }
+            int Slots       ( void ) const noexcept { return SlotsPerRow() * SlotsPerRow(); }
+            int PinnedSlots ( void ) const noexcept { return (2 * m_PinnedRadius) * (2 * m_PinnedRadius); }
+            int TableEntries( void ) const noexcept { return m_Levels * m_Window * m_Window; }
+            int TableUints  ( void ) const noexcept { return (TableEntries() + 1) / 2; }
+        };
+
+        struct key
+        {
+            int m_Level = 0, m_X = 0, m_Y = 0;
+            bool operator == (const key&) const noexcept = default;
+        };
+
+        struct level
+        {
+            int     m_OriginX = 0, m_OriginY = 0;       // the window's first page index
+            float   m_PageSize = 1;                     // world units per page side
+            float   m_DepthCenter = 0;                  // light-space z the level's depth range is centered on (snapped)
+        };
+
+        struct page_to_render
+        {
+            key             m_Key;
+            int             m_Slot;
+            int             m_AtlasX, m_AtlasY;         // its slot's texel origin in the atlas
+            xmath::fmat4    m_W2C;                      // world -> the page's clip space
+            float           m_MinX, m_MinY, m_Size;     // its light-space rect (culling the casters)
+            bool            m_bPinned;
+        };
+
+        struct stats
+        {
+            int m_Requested = 0;            // distinct pages the latest requests asked for
+            int m_Reused    = 0;            //   of them VALID already
+            int m_Admitted  = 0;            //   given a slot this frame
+            int m_Rejected  = 0;            //   no slot left (pressure)
+            int m_Deferred  = 0;            //   waiting for the budget (absent or dirty)
+            int m_Rendered  = 0;            // fine pages rendered
+            int m_RenderedPinned = 0;       // net pages rendered (mandatory: beyond the budget)
+            int m_Dirtied   = 0;            // pages a caster change invalidated
+            int m_Evicted   = 0;
+            int m_ResidentFine = 0, m_ResidentPinned = 0;
+            int m_PinnedNotValid = 0;       // net pages not VALID when the table is published (a readiness failure: 0 by construction)
+            int m_Epochs    = 0;            // 1: this frame opened a new epoch (a new direction or scale)
+        };
+
+        // Windows of one frame, to decode its requests later
+        struct snapshot
+        {
+            std::array<int, max_levels_v * 2> m_Origin{};
+            std::uint64_t m_Epoch = 0;
+            bool          m_bValid = false;
+        };
+
+        void Init(const setup& Setup) noexcept
+        {
+            m_Setup = Setup;
+            m_Setup.m_Levels = std::clamp(m_Setup.m_Levels, 1, max_levels_v);
+            m_Slots.assign(std::size_t(m_Setup.Slots()), slot{});
+            m_RenderedFrame.assign(m_Slots.size(), ~0ull);
+            m_Map.clear();
+            m_bHasBasis = false;
+        }
+
+        const setup& getSetup( void ) const noexcept { return m_Setup; }
+
+        static std::uint64_t Pack(const key& K) noexcept
+        {
+            return (std::uint64_t(std::uint32_t(K.m_Level)) << 56) | ((std::uint64_t(std::uint32_t(K.m_X)) & 0xFFFFFFF) << 28) | (std::uint64_t(std::uint32_t(K.m_Y)) & 0xFFFFFFF);
+        }
+
+        // Toroidal: a page's entry in its level's window, and back (Origin: the window's first page index on that axis)
+        int  Torus  (int Index) const noexcept { return PositiveMod(Index, m_Setup.m_Window); }
+        int  Unwrap (int T, int Origin) const noexcept { return Origin + PositiveMod(T - Origin, m_Setup.m_Window); }
+        bool InWindow(const key& K) const noexcept
+        {
+            const auto& Lv = m_Levels[K.m_Level];
+            return K.m_X >= Lv.m_OriginX && K.m_X < Lv.m_OriginX + m_Setup.m_Window && K.m_Y >= Lv.m_OriginY && K.m_Y < Lv.m_OriginY + m_Setup.m_Window;
+        }
+        int TableIndex(const key& K) const noexcept { return (K.m_Level * m_Setup.m_Window + Torus(K.m_Y)) * m_Setup.m_Window + Torus(K.m_X); }
+
+        bool IsPinned(const key& K) const noexcept
+        {
+            if (K.m_Level != m_Setup.m_Levels - 1) return false;
+            return K.m_X >= m_PinX - m_Setup.m_PinnedRadius && K.m_X < m_PinX + m_Setup.m_PinnedRadius
+                && K.m_Y >= m_PinY - m_Setup.m_PinnedRadius && K.m_Y < m_PinY + m_Setup.m_PinnedRadius;
+        }
+
+        snapshot Snapshot(void) const noexcept
+        {
+            snapshot S;
+            for (int L = 0; L < m_Setup.m_Levels; ++L) { S.m_Origin[2 * L] = m_Levels[L].m_OriginX; S.m_Origin[2 * L + 1] = m_Levels[L].m_OriginY; }
+            S.m_Epoch = m_Epoch;
+            S.m_bValid = m_bHasBasis;
+            return S;
+        }
+
+        // The request pass's bits (a bit per table entry, level-major) as pages, with the windows of the frame that made them. Requests of
+        // an older epoch are dropped (their pages no longer exist)
+        void DecodeRequests(std::span<const std::uint32_t> Bits, const snapshot& S, std::vector<key>& Out) const noexcept
+        {
+            Out.clear();
+            if (!S.m_bValid || S.m_Epoch != m_Epoch) return;
+            const int W = m_Setup.m_Window, n = std::min(int(Bits.size()) * 32, m_Setup.TableEntries());
+            for (int i = 0; i < n; ++i)
+            {
+                if ((Bits[std::size_t(i) >> 5] & (1u << (i & 31))) == 0) continue;
+                const int L = i / (W * W), ty = (i / W) % W, tx = i % W;
+                Out.push_back({ L, Unwrap(tx, S.m_Origin[2 * L]), Unwrap(ty, S.m_Origin[2 * L + 1]) });
+            }
+        }
+
+        // Once a frame, before the shadow pass: the windows, the invalidations, the net, the requested pages admitted and the pages to
+        // render (m_ToRender), then the table (BuildTable). Level0Texel: world units per texel of level 0. bCache false: every resident
+        // page renders again (the reference)
+        void Update(const xmath::fvec3& LightDir, float Level0Texel, const xmath::fvec3& Camera, const std::vector<xmath::fbbox>& ChangedWorld
+                   , bool bCache, std::span<const key> Requests, std::uint64_t Frame) noexcept
+        {
+            m_ToRender.clear();
+            m_Stats = {};
+            m_Frame = Frame;
+
+            // The basis: a new direction or scale is a new epoch, every page goes
+            const xmath::fvec3 Z = LightDir.NormalizeCopy();
+            if (!m_bHasBasis || Z.Dot(m_Z) < 0.99999f || Level0Texel != m_Level0Texel)
+            {
+                const xmath::fvec3 Up = std::abs(Z.m_Y) < 0.99f ? xmath::fvec3(0, 1, 0) : xmath::fvec3(1, 0, 0);
+                m_X = xmath::fvec3::Cross(Up, Z).NormalizeCopy();
+                m_Y = xmath::fvec3::Cross(Z, m_X);
+                m_Z = Z;
+                m_Level0Texel = Level0Texel;
+                m_bHasBasis = true;
+                ++m_Epoch; ++m_Stats.m_Epochs;
+                FreeAll();
+                for (auto& b : m_bDepthSet) b = false;
+            }
+
+            // The windows; a level whose depth range moves loses its pages
+            const xmath::fvec3 C = ToLight(Camera);
+            for (int L = 0; L < m_Setup.m_Levels; ++L)
+            {
+                auto& Lv = m_Levels[L];
+                Lv.m_PageSize = PageSize(L);
+                Lv.m_OriginX  = int(std::floor(C.m_X / Lv.m_PageSize)) - m_Setup.m_Window / 2;
+                Lv.m_OriginY  = int(std::floor(C.m_Y / Lv.m_PageSize)) - m_Setup.m_Window / 2;
+                const float Half = DepthHalfRange(L);
+                if (!m_bDepthSet[L] || std::abs(C.m_Z - Lv.m_DepthCenter) > Half * 0.5f)
+                {
+                    Lv.m_DepthCenter = std::round(C.m_Z / (Half * 0.5f)) * (Half * 0.5f);
+                    m_bDepthSet[L] = true;
+                    for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bUsed && m_Slots[s].m_Key.m_Level == L) Free(s);
+                }
+            }
+            m_PinX = int(std::floor(C.m_X / m_Levels[m_Setup.m_Levels - 1].m_PageSize));
+            m_PinY = int(std::floor(C.m_Y / m_Levels[m_Setup.m_Levels - 1].m_PageSize));
+
+            // Pages out of their window, or a net page out of the net, go
+            for (int s = 0; s < int(m_Slots.size()); ++s)
+            {
+                auto& S = m_Slots[s];
+                if (!S.m_bUsed) continue;
+                if (!InWindow(S.m_Key) || (s < m_Setup.PinnedSlots()) != IsPinned(S.m_Key)) Free(s);
+            }
+
+            // Caster changes: the pages under them are DIRTY now (out of the table until rendered again)
+            if (!ChangedWorld.empty() || !bCache)
+            {
+                std::vector<lbox> Changed;
+                Changed.reserve(ChangedWorld.size());
+                for (auto& B : ChangedWorld) Changed.push_back(Bounds(B));
+                for (auto& S : m_Slots)
+                {
+                    if (!S.m_bUsed || !S.m_bValid) continue;
+                    const float P = m_Levels[S.m_Key.m_Level].m_PageSize;
+                    bool bDirty = !bCache;
+                    for (std::size_t i = 0; !bDirty && i < Changed.size(); ++i) bDirty = clipmap::Overlaps(Changed[i], S.m_Key.m_X * P, S.m_Key.m_Y * P, P);
+                    if (bDirty) { S.m_bValid = false; ++m_Stats.m_Dirtied; }
+                }
+            }
+
+            // The net: every page present and VALID, whatever the budget
+            {
+                const int Lc = m_Setup.m_Levels - 1, R = m_Setup.m_PinnedRadius;
+                for (int y = m_PinY - R; y < m_PinY + R; ++y)
+                for (int x = m_PinX - R; x < m_PinX + R; ++x)
+                {
+                    const key K{ Lc, x, y };
+                    int s = Find(K);
+                    if (s < 0)
+                    {
+                        s = FreePinnedSlot();
+                        if (s < 0) continue;                    // (a net larger than its slots: setup error, counted below)
+                        Assign(s, K, Frame);
+                    }
+                    if (!m_Slots[s].m_bValid) { Render(s, true); ++m_Stats.m_RenderedPinned; }
+                }
+            }
+
+            // The requests: touched (protected), admitted by priority (coarser levels first, then nearer pages), rendered within the budget
+            std::vector<key> Want;
+            Want.reserve(Requests.size());
+            for (const auto& K : Requests)
+            {
+                if (K.m_Level < 0 || K.m_Level >= m_Setup.m_Levels || !InWindow(K) || IsPinned(K)) continue;
+                ++m_Stats.m_Requested;
+                if (const int s = Find(K); s >= 0)
+                {
+                    m_Slots[s].m_LastRequested = Frame;
+                    if (m_Slots[s].m_bValid) { ++m_Stats.m_Reused; continue; }
+                }
+                Want.push_back(K);
+            }
+            std::sort(Want.begin(), Want.end(), [&](const key& a, const key& b)
+            {
+                if (a.m_Level != b.m_Level) return a.m_Level > b.m_Level;
+                return PageDistance2(a, C) < PageDistance2(b, C);
+            });
+            int Budget = m_Setup.m_Budget;
+            for (const auto& K : Want)
+            {
+                if (Budget <= 0) { ++m_Stats.m_Deferred; continue; }
+                int s = Find(K);
+                if (s < 0)
+                {
+                    s = AdmitSlot(Frame);
+                    if (s < 0) { ++m_Stats.m_Rejected; continue; }
+                    Assign(s, K, Frame);
+                    ++m_Stats.m_Admitted;
+                }
+                Render(s, false);
+                --Budget;
+                ++m_Stats.m_Rendered;
+            }
+
+            for (int s = 0; s < int(m_Slots.size()); ++s)
+            {
+                if (!m_Slots[s].m_bUsed) continue;
+                if (s < m_Setup.PinnedSlots()) { ++m_Stats.m_ResidentPinned; m_Stats.m_PinnedNotValid += !m_Slots[s].m_bValid; }
+                else                           ++m_Stats.m_ResidentFine;
+            }
+        }
+
+        // The page table of this frame: per entry (level-major, then the toroidal row, column) a 16-bit slot + 1 of a VALID page, 0 none;
+        // two entries a uint (even index: low half)
+        void BuildTable(std::vector<std::uint32_t>& Out) const noexcept
+        {
+            Out.assign(std::size_t(m_Setup.TableUints()), 0u);
+            for (int s = 0; s < int(m_Slots.size()); ++s)
+            {
+                const auto& S = m_Slots[s];
+                if (!S.m_bUsed || !S.m_bValid || !InWindow(S.m_Key)) continue;
+                const int i = TableIndex(S.m_Key);
+                Out[std::size_t(i) >> 1] |= std::uint32_t(s + 1) << ((i & 1) * 16);
+            }
+        }
+
+        // Invariant 1 (the tests): every table entry names a used, VALID slot holding exactly the page of that entry in this frame's window
+        bool Validate(std::span<const std::uint32_t> Table) const noexcept
+        {
+            const int W = m_Setup.m_Window;
+            for (int i = 0; i < m_Setup.TableEntries(); ++i)
+            {
+                const std::uint32_t E = (Table[std::size_t(i) >> 1] >> ((i & 1) * 16)) & 0xFFFFu;
+                if (E == 0) continue;
+                const int s = int(E) - 1;
+                if (s >= int(m_Slots.size())) return false;
+                const auto& S = m_Slots[s];
+                const int L = i / (W * W);
+                const key K{ L, Unwrap(i % W, m_Levels[L].m_OriginX), Unwrap((i / W) % W, m_Levels[L].m_OriginY) };
+                if (!S.m_bUsed || !S.m_bValid || !(S.m_Key == K)) return false;
+            }
+            return true;
+        }
+
+        // A slot's generation (it changes whenever the slot takes another page): the tests check reuse with it
+        std::uint32_t Generation(int Slot) const noexcept { return m_Slots[Slot].m_Generation; }
+        int  Find(const key& K) const noexcept { const auto It = m_Map.find(Pack(K)); return It == m_Map.end() ? -1 : It->second; }
+        bool IsValid(const key& K) const noexcept { const int s = Find(K); return s >= 0 && m_Slots[s].m_bValid; }
+
+        float PageSize      (int Level) const noexcept { return m_Level0Texel * float(page_texels_v) * float(1 << Level); }
+        float DepthHalfRange(int Level) const noexcept { return PageSize(Level) * float(m_Setup.m_Window) * 0.5f * depth_scale_v; }
+        float Level0Texel   (void) const noexcept { return m_Level0Texel; }
+        xmath::fvec3 ToLight(const xmath::fvec3& P) const noexcept { return { P.Dot(m_X), P.Dot(m_Y), P.Dot(m_Z) }; }
+        lbox Bounds(const xmath::fbbox& World) const noexcept
+        {
+            lbox B;
+            for (int i = 0; i < 8; ++i)
+                B.Add(ToLight({ (i & 1) ? World.m_Max.m_X : World.m_Min.m_X, (i & 2) ? World.m_Max.m_Y : World.m_Min.m_Y, (i & 4) ? World.m_Max.m_Z : World.m_Min.m_Z }));
+            return B;
+        }
+
+        // World -> clip of one page: x, y over its light-space rect to [-1,1], z over its level's depth range to [0,1]
+        xmath::fmat4 PageW2C(const key& K) const noexcept
+        {
+            const auto& Lv   = m_Levels[K.m_Level];
+            const float Half = DepthHalfRange(K.m_Level), P = Lv.m_PageSize;
+            const float SX = 2.0f / P, SZ = 1.0f / (2.0f * Half);
+            const float MinX = K.m_X * P, MinY = K.m_Y * P, ZMin = Lv.m_DepthCenter - Half;
+            xmath::fmat4 M = xmath::fmat4::fromZero();
+            M(0, 0) = m_X.m_X * SX; M(0, 1) = m_X.m_Y * SX; M(0, 2) = m_X.m_Z * SX; M(0, 3) = -MinX * SX - 1.0f;
+            M(1, 0) = m_Y.m_X * SX; M(1, 1) = m_Y.m_Y * SX; M(1, 2) = m_Y.m_Z * SX; M(1, 3) = -MinY * SX - 1.0f;
+            M(2, 0) = m_Z.m_X * SZ; M(2, 1) = m_Z.m_Y * SZ; M(2, 2) = m_Z.m_Z * SZ; M(2, 3) = -ZMin * SZ;
+            M(3, 3) = 1.0f;
+            return M;
+        }
+
+        // Every page goes on the next Update (the sun stopped casting: what changed meanwhile never reached the pages)
+        void Invalidate(void) noexcept { m_bHasBasis = false; }
+
+        xmath::fvec3                            m_X{ 1, 0, 0 }, m_Y{ 0, 1, 0 }, m_Z{ 0, 0, 1 };      // world -> light rotation rows
+        std::array<level, max_levels_v>         m_Levels{};
+        std::vector<page_to_render>             m_ToRender;
+        stats                                   m_Stats;
+
+    private:
+
+        struct slot
+        {
+            key             m_Key;
+            std::uint64_t   m_LastRequested = 0;
+            std::uint32_t   m_Generation = 0;
+            bool            m_bUsed  = false;
+            bool            m_bValid = false;
+        };
+
+        float PageDistance2(const key& K, const xmath::fvec3& C) const noexcept
+        {
+            const float P = m_Levels[K.m_Level].m_PageSize, dx = (K.m_X + 0.5f) * P - C.m_X, dy = (K.m_Y + 0.5f) * P - C.m_Y;
+            return dx * dx + dy * dy;
+        }
+
+        void Assign(int s, const key& K, std::uint64_t Frame) noexcept
+        {
+            auto& S = m_Slots[s];
+            S = { K, Frame, S.m_Generation + 1, true, false };
+            m_Map[Pack(K)] = s;
+        }
+
+        void Free(int s) noexcept
+        {
+            auto& S = m_Slots[s];
+            if (!S.m_bUsed) return;
+            m_Map.erase(Pack(S.m_Key));
+            S.m_bUsed = S.m_bValid = false;
+            if (s >= m_Setup.PinnedSlots()) ++m_Stats.m_Evicted;
+        }
+
+        void FreeAll(void) noexcept
+        {
+            for (auto& S : m_Slots) S.m_bUsed = S.m_bValid = false;
+            m_Map.clear();
+        }
+
+        int FreePinnedSlot(void) const noexcept
+        {
+            for (int s = 0; s < std::min(m_Setup.PinnedSlots(), int(m_Slots.size())); ++s) if (!m_Slots[s].m_bUsed) return s;
+            return -1;
+        }
+
+        // A fine slot: a free one, else the least recently requested page that is neither requested lately nor rendered this frame
+        int AdmitSlot(std::uint64_t Frame) noexcept
+        {
+            int Best = -1;
+            for (int s = m_Setup.PinnedSlots(); s < int(m_Slots.size()); ++s)
+            {
+                const auto& S = m_Slots[s];
+                if (!S.m_bUsed) return s;
+                if (S.m_LastRequested + std::uint64_t(m_Setup.m_ProtectFrames) >= Frame) continue;     // protected (requested lately)
+                if (m_RenderedFrame[s] == Frame) continue;                                              // in flight (rendered this frame)
+                if (Best < 0 || S.m_LastRequested < m_Slots[Best].m_LastRequested) Best = s;
+            }
+            if (Best >= 0) Free(Best);
+            return Best;
+        }
+
+        void Render(int s, bool bPinned) noexcept
+        {
+            auto& S = m_Slots[s];
+            S.m_bValid = true;
+            m_RenderedFrame[s] = m_Frame;
+            const float P = m_Levels[S.m_Key.m_Level].m_PageSize;
+            const int   R = m_Setup.SlotsPerRow();
+            m_ToRender.push_back({ S.m_Key, s, (s % R) * page_texels_v, (s / R) * page_texels_v, PageW2C(S.m_Key), S.m_Key.m_X * P, S.m_Key.m_Y * P, P, bPinned });
+        }
+
+        setup                                   m_Setup;
+        std::uint64_t                           m_Frame = 0;
+        std::vector<slot>                       m_Slots;
+        std::vector<std::uint64_t>              m_RenderedFrame;
+        std::unordered_map<std::uint64_t, int>  m_Map;
+        std::array<bool, max_levels_v>          m_bDepthSet{};
+        std::uint64_t                           m_Epoch = 0;
+        float                                   m_Level0Texel = 0;
+        int                                     m_PinX = 0, m_PinY = 0;
+        bool                                    m_bHasBasis = false;
+    };
+}
+
+#endif

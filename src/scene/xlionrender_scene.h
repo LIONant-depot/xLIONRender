@@ -64,6 +64,22 @@ namespace xlionrender
         constexpr bool operator==( const material_state& ) const noexcept = default;
     };
 
+    // What a material is to visibility (documentation/lighting_strategy.md 6.2): one answer for the shadow casters, the GI's
+    // see-through and the later ray masks, from the material's state. Emission is not here (a separate property, with the material
+    // compiler's flag, not made yet)
+    struct material_visibility
+    {
+        enum class opacity : std::uint8_t { SOLID /* opaque (OPAQUE is a wingdi.h macro) */, MASKED, BLENDED };
+        opacity m_Opacity     = opacity::SOLID;
+        bool    m_bCastsShadow = true;              // drawn in the shadow passes (a blended one as opaque, as today)
+    };
+    constexpr material_visibility MaterialVisibilityOf( const material_state& S ) noexcept
+    {
+        using o = material_visibility::opacity;
+        const o Op = S.isBlended() ? o::BLENDED : S.m_Blend == material_state::blend::MASKED ? o::MASKED : o::SOLID;
+        return { Op, S.m_bCastShadows };
+    }
+
     // Standard metal/roughness material (glTF-style), scene-linear values
     struct material
     {
