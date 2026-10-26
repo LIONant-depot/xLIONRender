@@ -89,6 +89,8 @@ namespace xlionrender
         float           m_AO            = 1.0f;
         float           m_F0            = 0.04f;        // dielectric reflectance
         xmath::fvec3    m_Emissive      { 0, 0, 0 };
+        bool            m_bCastShadows  = true;
+        bool            m_bEditorGrid   = false;        // the albedo: the editors' ground grid (shaders/xlionrender_editor_grid.glsl), lit as any surface
     };
 
     // A draw's entity parameters (plugins/xmaterial.plugin/documentation/material_contract.md section 4): the EntityParams entry of its

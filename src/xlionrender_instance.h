@@ -154,9 +154,9 @@ namespace xlionrender
         // Local light maps draw, per face, only the casters in that face's frustum (false: every caster in the light's sphere)
         bool                                       m_bShadowFaceCull = true;
         // The sun's shadows from virtual pages (documentation/lighting_strategy.md P1a; features/shadows/xlionrender_shadow_vsm.h) instead
-        // of the clipmap (false: the rollback). XLION_VSM=1 turns it on at Init. A switch re-renders every page or tile. Materials compiled
-        // before the pages existed sample no sun shadow while it is on (their shader knows only the clipmap)
-        bool                                       m_bVirtualShadows = false;
+        // of the clipmap - the default; XLION_VSM=0 at Init: the clipmap (a fallback until the moving sun, P1e: then it goes).
+        // A switch re-renders every page or tile. Materials compiled before the pages existed sample no sun shadow while it is on
+        bool                                       m_bVirtualShadows = true;
         // Tests: every filter tap of the pages through the table (the border path everywhere): the image must not change
         bool                                       m_bVSMTapTranslation = false;
         // The pages' debug views (shaders/xlionrender_shadow_vsm.glsl): 0 off, 2 the level, 3 the footprint against the texel, 4 what shaded the pixel

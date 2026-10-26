@@ -1229,6 +1229,7 @@ namespace xlionrender
 
                 if( M.m_bCluster == false )
                 {
+                    if( !D.m_Material.m_bCastShadows ) continue;        // (the standard material's choice: the editors' ground grid does not cast)
                     pBoundGeom = nullptr;
                     pBound     = nullptr;
                     Cmd.setPipelineInstance(m_ShadowInstance[0]);
@@ -1986,7 +1987,7 @@ namespace xlionrender
                     auto& Mat = m_MaterialUBO.allocEntry<details::ubo_material>();
                     Mat.m_BaseColor = xmath::fvec4(D.m_Material.m_BaseColor, 1);
                     Mat.m_Params    = { D.m_Material.m_Metallic, D.m_Material.m_Roughness, D.m_Material.m_AO, D.m_Material.m_F0 };
-                    Mat.m_Emissive  = xmath::fvec4(D.m_Material.m_Emissive, 0);
+                    Mat.m_Emissive  = xmath::fvec4(D.m_Material.m_Emissive, D.m_Material.m_bEditorGrid ? 1.0f : 0.0f);
                     Cmd.setDynamicUBO(m_MaterialUBO, 2);
                 };
 

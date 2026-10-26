@@ -28,6 +28,7 @@ int main()
     app App;
     CHECK(App.Init(), "Init");
     auto& Renderer = App.m_Renderer;
+    Renderer.m_bVirtualShadows = false;         // the clipmap's own test (its tiles), whatever XLION_VSM says
     auto& Device   = App.m_Device;
 
     xlionrender::mesh_id Sphere, Box;
