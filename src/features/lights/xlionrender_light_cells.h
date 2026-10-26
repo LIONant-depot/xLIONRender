@@ -17,6 +17,7 @@
 // a compute builder come after the lab says the cells earn their place.
 
 #include "dependencies/xmath/source/xmath.h"
+#include "shaders/xlionrender_light_eval.glsl"
 #include <algorithm>
 #include <cassert>
 #include <array>
@@ -110,8 +111,8 @@ namespace xlionrender
                 {
                     const std::uint32_t e = m_First[Cell] + Fill[Cell]++;
                     m_Data[EntryBase + 2 * e] = i;
-                    const float s = Dist / Lights[i].m_Radius;                                         // the shader's falloff at the
-                    Importance[e] = Lights[i].m_Power * (1.0f - s * s * s * s) / (1.0f + 2.0f * s * s);   // cell's nearest point: an upper bound
+                    // the shader's falloff at the cell's nearest point: an upper bound
+                    Importance[e] = light_eval::LightDistanceFalloff(Dist / Lights[i].m_Radius, Lights[i].m_Power);
                 });
 
             if (HeadCount > 0) for (int c = 0; c < nCells; ++c) SplitCell(c, std::min<int>(HeadCount, max_head_v), Importance);

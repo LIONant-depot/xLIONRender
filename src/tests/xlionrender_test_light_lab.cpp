@@ -243,6 +243,7 @@ int main()
         std::vector<float> Exact, Cells;
         CHECK(RenderMode(mode::EXACT, Exact) && RenderMode(mode::CELLS, Cells), "Render the pile");
         CHECK(Renderer.getLightModeUsed() == mode::CELLS, "The pile fell back to EXACT for the whole render");
+        CHECK(Renderer.getLightStats().m_nOverflowCells > 0, "The pile's overflowing cells are not counted (LightCellsOverflow)");
         const auto C = Compare(Cells, Exact);
         std::printf("overflow: cells vs exact %.2e (max %.2e)\n", C.m_MeanRel, C.m_Max);
         CHECK(C.m_Max < 1e-4, "Overflowing cells differ from EXACT (max %e)", C.m_Max);

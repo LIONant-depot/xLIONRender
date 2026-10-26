@@ -234,6 +234,9 @@ namespace xlionrender::shadows
             for (const auto& A : m_Allocs) if (A.m_bValid) Maps[A.m_iLight] = { A.m_X, A.m_Y, A.m_Size };
         }
 
+        // Maps sampled this frame while still waiting for a redraw (a changed caster touched them; the budget deferred it)
+        int StaleCount() const noexcept { int n = 0; for (const auto& A : m_Allocs) n += A.m_bValid && A.m_bDirty; return n; }
+
     private:
         struct alloc
         {

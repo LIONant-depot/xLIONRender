@@ -18,6 +18,7 @@ vec3 PBRDirect(in const vec3 N, in const vec3 V, in const float NdotV, in const 
 }
 
 #include "xlionrender_octahedral.glsl"
+#include "xlionrender_light_eval.glsl"
 
 // 1 lit .. 0 shadowed. Receiver: the surface minus the light's position, N its normal. The light's map (Shadow: xy origin in the
 // atlas, z size) holds the linear distance to the nearest caster / radius: octahedral for a point light, the frustum for a spot.
@@ -83,9 +84,9 @@ vec3 LocalLight(in const int i, in const vec3 N, in const vec3 V, in const float
     const float Dist    = length(ToLight);
     const float s       = Dist / Ld.PosRadius.w;
     if (s >= 1.0 || Dist < 1e-6) return vec3(0.0);
-    float Att = (1.0 - s * s * s * s) / (1.0 + 2.0 * s * s);                    // the main light's falloff (Attenuate) without its area term
+    float Att = LightDistanceFalloff(s, 1.0);
     const vec3 L = ToLight / Dist;
-    if (Ld.DirCosOuter.w > -1.5) Att *= smoothstep(Ld.DirCosOuter.w, Ld.Color.w, dot(-L, Ld.DirCosOuter.xyz));     // spot cone: outer -> inner
+    if (Ld.DirCosOuter.w > -1.5) Att *= LightSpotCone(dot(-L, Ld.DirCosOuter.xyz), Ld.DirCosOuter.w, Ld.Color.w);
     if (Att < 1e-4) return vec3(0.0);
     return PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att * LocalShadow(Ld, -ToLight, N);
 }

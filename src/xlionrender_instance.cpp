@@ -1434,6 +1434,7 @@ namespace xlionrender
     bool instance::getGPUTimes( gpu_times& Times ) noexcept
     {
         if( m_Timestamps.getResults(m_TimestampNs) == false ) return false;
+        ++m_GPUTimesSerial;
         const auto& T = m_TimestampNs;
         Times.m_ShadowMs  = (T[1] - T[0]) * 1e-6;
         Times.m_SceneMs   = (T[2] - T[1]) * 1e-6;

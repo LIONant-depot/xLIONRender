@@ -764,6 +764,10 @@ namespace xlionrender
 
         m_LightModeUsed  = Mode;
         m_LightCellUints = Mode == light_mode::EXACT ? 0 : int(m_LightCells.m_Data.size());
+        m_LightStats.m_nLights        = nLights;
+        m_LightStats.m_nDropped       = int(Scene.m_LocalLights.size()) - nLights;
+        m_LightStats.m_nOverflowCells = 0;
+        if( Mode != light_mode::EXACT ) for( const auto n : m_LightCells.m_Count ) m_LightStats.m_nOverflowCells += n >= light_cells::overflow_v;
         Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_LightHead) };
         Light.m_LocalBase  = { float(LightBase), float(CellBase), m_LightCellSize, float(m_LightTailSamples) };
         Light.m_ProbeCount = { float(std::max(nProbes, 0)), float(ProbeBase), float(ProbeCells), 0 };
@@ -1114,6 +1118,13 @@ namespace xlionrender
         if( Sun.m_bCastShadows ) m_Clipmap.Update(Sun.m_Direction, Sun.m_ShadowTileSize, Eye, Changed, m_bShadowCache, m_ShadowTiles);
         else                   { m_ShadowTiles.clear(); m_Clipmap.Invalidate(); }      // the casters changing meanwhile reach no tile: all of them when it casts again
         m_LocalShadows.Update(Scene.m_LocalLights, Changed, m_bShadowCache, Eye, ProjScale, m_ShadowUpdatesPerFrame, m_LocalMaps, m_LocalToRender);
+        m_LightStats.m_nShadowed = m_LightStats.m_nShadowFallback = 0;
+        for( std::size_t i = 0; i < Scene.m_LocalLights.size(); ++i ) if( Scene.m_LocalLights[i].m_bCastShadows )
+        {
+            ++m_LightStats.m_nShadowed;
+            m_LightStats.m_nShadowFallback += m_LocalMaps[i].m_Size == 0;
+        }
+        m_LightStats.m_nShadowStale = m_LocalShadows.StaleCount();
 
         m_nShadowTilesRendered = static_cast<int>(m_ShadowTiles.size() + m_LocalToRender.size());
         if( m_nShadowTilesRendered == 0 ) return;
@@ -2470,6 +2481,40 @@ namespace xlionrender
 
         const auto T3 = clock::now();
         m_CPUTimes = { Ms(T0, T1), Ms(T1, T2), m_LightBuildMs, Ms(T0, T3) };
+        // Measurement only (XLION_LEDGER): the lighting ledger (documentation/lighting_strategy.md sec. 10), median, p95 and p99 of 120 frames
+        // per row, per renderer (its view's size names it). Rows that do not exist yet (reconstruction, rays, cache maintenance) print 0;
+        // direct shading is fused in the scene pass, so the scene pass is the row (paired variants attribute it). The GPU times are the
+        // previous frames': each timing set once, whoever read it (getGPUTimes: the GI's log or the host may have)
+        static const bool s_bLedger = std::getenv("XLION_LEDGER") != nullptr;
+        if( s_bLedger )
+        {
+            struct ledger { std::array<std::vector<double>, 4> m_Rows; std::uint64_t m_Serial = 0; };
+            static std::unordered_map<const void*, ledger> s_Ledger;    // ponytail: per renderer, never erased (a measurement hook)
+            auto& L      = s_Ledger[this];
+            auto& s_Rows = L.m_Rows;                                    // CPU records + grid, CPU shadow preparation (+ probes), GPU shadows, GPU scene pass
+            s_Rows[0].push_back(m_LightBuildMs); s_Rows[1].push_back(Ms(T1, T2));
+            gpu_times G;
+            (void)getGPUTimes(G);
+            if( m_GPUTimesSerial != L.m_Serial && m_TimestampNs.size() >= 3 )
+            {
+                L.m_Serial = m_GPUTimesSerial;
+                s_Rows[2].push_back((m_TimestampNs[1] - m_TimestampNs[0]) * 1e-6); s_Rows[3].push_back((m_TimestampNs[2] - m_TimestampNs[1]) * 1e-6);
+            }
+            if( s_Rows[0].size() == 120 )
+            {
+                double Med[4] = {}, P95[4] = {}, P99[4] = {};
+                for( int r = 0; r < 4; ++r ) if( auto& V = s_Rows[r]; !V.empty() )
+                {
+                    std::sort(V.begin(), V.end());
+                    Med[r] = V[V.size() / 2]; P95[r] = V[std::min(V.size() - 1, V.size() * 95 / 100)]; P99[r] = V[std::min(V.size() - 1, V.size() * 99 / 100)];
+                    V.clear();
+                }
+                std::printf("LEDGER view %dx%d records+grid cpu %.3f/%.3f/%.3f, shadow prep gpu %.3f/%.3f/%.3f cpu %.3f/%.3f/%.3f, direct shading (scene pass) gpu %.3f/%.3f/%.3f, reconstruction 0, rays 0, cache 0 ms (median/p95/p99 of 120); lights %d (dropped %d), shadowed %d (fallback %d, stale %d), overflow cells %d\n"
+                           , View.m_Width, View.m_Height, Med[0], P95[0], P99[0], Med[2], P95[2], P99[2], Med[1], P95[1], P99[1], Med[3], P95[3], P99[3], m_LightStats.m_nLights, m_LightStats.m_nDropped, m_LightStats.m_nShadowed
+                           , m_LightStats.m_nShadowFallback, m_LightStats.m_nShadowStale, m_LightStats.m_nOverflowCells);
+                std::fflush(stdout);
+            }
+        }
         // Measurement only (XLION_FRAME_TIMES): Render's CPU parts, the mean of 120 frames
         static const bool s_bFrameTimes = std::getenv("XLION_FRAME_TIMES") != nullptr;
         if( s_bFrameTimes )

@@ -9,6 +9,7 @@
 #include "dependencies/xprim_geom/source/xprim_geom.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <cmath>
 #include <algorithm>
@@ -31,12 +32,57 @@ namespace xlionrender::test
         return S * std::ldexp(float(Mant | 0x400), Exp - 25);
     }
 
+    // Saved outputs (documentation/lighting_strategy.md P0): every HDR readback of a test, in order, kept as raw RGBA halves.
+    //   XLIONRENDER_BASELINE_SAVE=<folder>: writes <folder>/hdr_<n>.bin
+    //   XLIONRENDER_BASELINE=<folder>:      compares with them; a difference above XLIONRENDER_BASELINE_TOL (absolute, default 0:
+    //                                       bitwise) is an error. The summary line is printed at exit.
+    struct baseline
+    {
+        int     m_n = 0, m_nEqual = 0, m_nWithin = 0, m_nMissing = 0;
+        double  m_MaxDiff = 0;
+        bool    m_bUsed = false;
+        ~baseline() { if (m_bUsed) std::printf("BASELINE %d images: %d bitwise equal, %d within tolerance, %d missing, max abs diff %.3g\n", m_n, m_nEqual, m_nWithin, m_nMissing, m_MaxDiff); }
+
+        void Image(const std::vector<std::byte>& Raw) noexcept
+        {
+            static const char* pSave = std::getenv("XLIONRENDER_BASELINE_SAVE");
+            static const char* pLoad = std::getenv("XLIONRENDER_BASELINE");
+            static const double Tol  = std::getenv("XLIONRENDER_BASELINE_TOL") ? std::atof(std::getenv("XLIONRENDER_BASELINE_TOL")) : 0.0;
+            if (!pSave && !pLoad) return;
+            m_bUsed = true;
+            const std::string Path = std::string(pSave ? pSave : pLoad) + "/hdr_" + std::to_string(m_n++) + ".bin";
+            if (pSave)
+            {
+                if (FILE* f = std::fopen(Path.c_str(), "wb")) { std::fwrite(Raw.data(), 1, Raw.size(), f); std::fclose(f); }
+                return;
+            }
+            std::vector<std::byte> Old;
+            if (FILE* f = std::fopen(Path.c_str(), "rb"))
+            {
+                std::fseek(f, 0, SEEK_END); Old.resize(std::size_t(std::ftell(f))); std::fseek(f, 0, SEEK_SET);
+                if (std::fread(Old.data(), 1, Old.size(), f) != Old.size()) Old.clear();
+                std::fclose(f);
+            }
+            if (Old.size() != Raw.size()) { ++m_nMissing; LogError("baseline: " + Path + " missing or another size"); return; }
+            if (std::memcmp(Old.data(), Raw.data(), Raw.size()) == 0) { ++m_nEqual; return; }
+            const auto* a = reinterpret_cast<const std::uint16_t*>(Old.data());
+            const auto* b = reinterpret_cast<const std::uint16_t*>(Raw.data());
+            double Max = 0; std::size_t nDiff = 0;
+            for (std::size_t i = 0; i < Raw.size() / 2; ++i) if (a[i] != b[i]) { ++nDiff; Max = std::max(Max, double(std::abs(HalfToFloat(a[i]) - HalfToFloat(b[i])))); }
+            m_MaxDiff = std::max(m_MaxDiff, Max);
+            std::printf("BASELINE %s: %zu values differ, max abs diff %.3g\n", Path.c_str(), nDiff, Max);
+            if (Max <= Tol) ++m_nWithin; else LogError("baseline: " + Path + " differs beyond the tolerance");
+        }
+    };
+    inline baseline g_Baseline;
+
     // Red channel of the HDR target as floats (row 0 = top of the image)
     inline bool ReadHDR(xgpu::device& Device, const render_view& View, std::vector<float>& Red)
     {
         std::vector<std::byte> Raw;
         int W, H;
         if (Device.ReadTexture(View.m_HDR, Raw, W, H)) return false;
+        g_Baseline.Image(Raw);
         const auto* p = reinterpret_cast<const std::uint16_t*>(Raw.data());
         Red.resize(std::size_t(W) * H);
         for (std::size_t i = 0; i < Red.size(); ++i) Red[i] = HalfToFloat(p[i * 4]);

@@ -169,6 +169,11 @@ namespace xlionrender
         // The last render's cell data (uints; 0 when the mode was EXACT or fell back to it) and the mode it used
                       int                  getLightCellUints( void ) const                                      noexcept { return m_LightCellUints; }
                       light_mode           getLightModeUsed( void ) const                                       noexcept { return m_LightModeUsed; }
+        // The last render's local lights and what it could not shade as asked (documentation/lighting_strategy.md sec. 3, 9): lights past
+        // the buffer (not shaded at all), shadowed lights shaded unshadowed (no map yet: the declared fallback), maps sampled while waiting
+        // for a redraw (stale: what P1a removes), cells whose list overflowed (shaded with every light: exact, slower)
+        struct light_stats { int m_nLights = 0; int m_nDropped = 0; int m_nShadowed = 0; int m_nShadowFallback = 0; int m_nShadowStale = 0; int m_nOverflowCells = 0; };
+                      light_stats          getLightStats( void ) const                                          noexcept { return m_LightStats; }
         // How many clipmap tiles + local light maps the last Render drew (a static scene: 0 after its first frame)
                       int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
 
@@ -638,6 +643,7 @@ namespace xlionrender
         double                      m_LightBuildMs          = 0;
         int                         m_LightCellUints        = 0;
         light_mode                  m_LightModeUsed         = light_mode::EXACT;
+        light_stats                 m_LightStats;
         xgpu::buffer                m_MaterialUBO;
         xgpu::buffer                m_FullscreenVB;
         xgpu::buffer                m_FullscreenIB;
@@ -646,6 +652,7 @@ namespace xlionrender
         std::vector<mesh_slot>      m_Meshes;
         std::vector<material_slot>  m_Materials;
         std::vector<std::uint64_t>  m_TimestampNs;
+        std::uint64_t               m_GPUTimesSerial        = 0;          // counts the timings getGPUTimes read (whoever asked: the ledger records each once)
         bool                        m_bReady        = false;
     };
 }
