@@ -191,7 +191,16 @@ int main()
         CHECK(Frame(W, 5, {}, {}, xmath::fvec3{ 1000, 0, 1000 } + W.m_Z * (W.DepthHalfRange(0) * 0.75f)) && W.Find(R2[0]) < 0, "a page kept a moved depth range");
     }
 
-    std::printf("P1a-0 (CPU): addressing, net, budget, dirty pages, pressure, slot reuse (B13), epochs, decoding, windows: ok\n");
+    // The depth range reaches every pixel a level shades, along the light too (Tomas: the Velociraptor's leg shadow cut off - the range was the
+    // window's extent, and the camera could drift half of it): at 2160 lines and a 45 degree field of view, the farthest pixel a level serves is
+    // 4 x 2160 / (2 tan 22.5) of its texels away (the resolution bias -1: footprints up to 4 texels). In texels the reach is the same on every level
+    {
+        const float Farthest = 4.0f * 2160.0f / (2.0f * std::tan(22.5f * 3.14159265f / 180.0f));
+        const float Reach    = float(vsm::page_texels_v * vsm::setup{}.m_Window) * vsm::depth_range_v * (1.0f - vsm::depth_recenter_v);
+        CHECK(Reach >= Farthest, "the depth range reaches %.0f texels past the camera, a pixel can be %.0f away", Reach, Farthest);
+    }
+
+    std::printf("P1a-0 (CPU): addressing, net, budget, dirty pages, pressure, slot reuse (B13), epochs, decoding, windows, depth reach: ok\n");
 
     //------------------------------------------------------------------------------------------------------------------------------
     // P1a-1 (GPU)

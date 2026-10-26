@@ -13,6 +13,7 @@
 const int   kVSMPageTexels   = 128;
 const float kVSMNormalOffset = 1.5;
 const float kVSMDepthBias    = 1.0;
+const float kVSMDepthRange   = 4.0;     // vsm::depth_range_v: a level's depth half range, in its window's extents
 
 // The pages' debug views (VSMParams2.w): 2 the level per pixel (a colour a level, page borders darker), 3 the footprint against the
 // texel (green: within 2x; red: the texel larger than the pixel; blue: smaller), 4 what shaded it (green its own level, yellow a coarser
@@ -45,7 +46,7 @@ float ShadowVSMLevel(in const int Level, in const vec3 L)
 {
     const float Texel = UBOLight.VSMParams.y * float(1 << Level);
     const vec4  Lv    = UBOLight.VSMLevels[Level];
-    const float Half  = Lv.z * UBOLight.VSMParams2.x;                                  // the level's depth half range (vsm::DepthHalfRange)
+    const float Half  = Lv.z * UBOLight.VSMParams2.x * kVSMDepthRange;                 // the level's depth half range (vsm::DepthHalfRange)
     const float Depth = clamp((L.z - (Lv.w - Half)) / (2.0 * Half), 0.0, 1.0);
     const float Bias  = kVSMDepthBias * Texel / (2.0 * Half);
     const vec2  U     = L.xy / Texel - 0.5;

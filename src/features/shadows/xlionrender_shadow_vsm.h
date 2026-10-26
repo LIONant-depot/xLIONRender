@@ -34,7 +34,14 @@ namespace xlionrender::shadows
     {
         static constexpr int page_texels_v  = 128;
         static constexpr int max_levels_v   = 12;
-        static constexpr float max_level0_texel_v = 0.002f;    // level 0 is never coarser than 2 mm (Unreal's finest directional level is under 0.1 mm)
+        static constexpr float max_level0_texel_v = 0.002f;
+        // A level's depth range: +-depth_range_v x its window's extent around the camera, re-centered (snapped to depth_recenter_v of it)
+        // once the camera is depth_recenter_v of it away. A pixel shaded by a level is up to 4 x H / (2 tan(fov/2)) of its texels from the
+        // camera (resolution bias -1; 10430 at 2160 lines and 45 degrees) - along the light too, so the range less the drift must reach that:
+        // with the window's extent (4096) and half of it as the drift, a low sun left the ground and the casters near it out (Tomas: the
+        // Velociraptor's leg shadow cut off). 4 and a quarter: 12288 texels; 16 bits still give half a texel a step
+        static constexpr float depth_range_v      = 4.0f;
+        static constexpr float depth_recenter_v   = 0.25f;    // level 0 is never coarser than 2 mm (Unreal's finest directional level is under 0.1 mm)
         static constexpr int filter_reach_v = 2;        // texels a lookup's filter reaches past its centre texel (the request pass dilates by it)
 
         struct setup
@@ -200,9 +207,9 @@ namespace xlionrender::shadows
                 Lv.m_OriginX  = int(std::floor(C.m_X / Lv.m_PageSize)) - m_Setup.m_Window / 2;
                 Lv.m_OriginY  = int(std::floor(C.m_Y / Lv.m_PageSize)) - m_Setup.m_Window / 2;
                 const float Half = DepthHalfRange(L);
-                if (!m_bDepthSet[L] || std::abs(C.m_Z - Lv.m_DepthCenter) > Half * 0.5f)
+                if (!m_bDepthSet[L] || std::abs(C.m_Z - Lv.m_DepthCenter) > Half * depth_recenter_v)
                 {
-                    Lv.m_DepthCenter = std::round(C.m_Z / (Half * 0.5f)) * (Half * 0.5f);
+                    Lv.m_DepthCenter = std::round(C.m_Z / (Half * depth_recenter_v)) * (Half * depth_recenter_v);
                     m_bDepthSet[L] = true;
                     for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bUsed && m_Slots[s].m_Key.m_Level == L) Free(s);
                 }
@@ -334,7 +341,7 @@ namespace xlionrender::shadows
         bool IsValid(const key& K) const noexcept { const int s = Find(K); return s >= 0 && m_Slots[s].m_bValid; }
 
         float PageSize      (int Level) const noexcept { return m_Level0Texel * float(page_texels_v) * float(1 << Level); }
-        float DepthHalfRange(int Level) const noexcept { return PageSize(Level) * float(m_Setup.m_Window) * 0.5f * depth_scale_v; }
+        float DepthHalfRange(int Level) const noexcept { return PageSize(Level) * float(m_Setup.m_Window) * depth_range_v; }
         float Level0Texel   (void) const noexcept { return m_Level0Texel; }
         xmath::fvec3 ToLight(const xmath::fvec3& P) const noexcept { return { P.Dot(m_X), P.Dot(m_Y), P.Dot(m_Z) }; }
         lbox Bounds(const xmath::fbbox& World) const noexcept
