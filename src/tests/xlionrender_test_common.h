@@ -215,7 +215,13 @@ namespace xlionrender::test
 
         bool Init()
         {
-            if (xgpu::CreateInstance(m_Instance, { .m_bDebugMode = true, .m_bEnableRenderDoc = false, .m_pLogErrorFunc = LogError, .m_pLogWarning = LogWarning })) return false;
+            // Validation: on in Debug (XLION_NO_VALIDATION=1: off), off in Release (XLION_VALIDATION=1: on) - as the editor
+#ifdef NDEBUG
+            const bool bValidation = std::getenv("XLION_VALIDATION") != nullptr;
+#else
+            const bool bValidation = std::getenv("XLION_NO_VALIDATION") == nullptr;
+#endif
+            if (xgpu::CreateInstance(m_Instance, { .m_bDebugMode = bValidation, .m_bEnableRenderDoc = false, .m_pLogErrorFunc = LogError, .m_pLogWarning = LogWarning })) return false;
             if (m_Instance.Create(m_Device))                                    return false;
             if (m_Device.Create(m_Window, { .m_Width = 256, .m_Height = 256 })) return false;
             return m_Renderer.Init(m_Device) == nullptr;
