@@ -19,7 +19,7 @@ struct candidate
 layout(std430, set = 0, binding = 0) readonly  buffer cand_b    { candidate C[]; };
 layout(std430, set = 0, binding = 1) readonly  buffer mat_b     { mat4 L2C[]; };
 layout(std430, set = 0, binding = 2)           buffer count_b   { uint Counts[]; };     // pass 1's, then (at m_RunsCap) pass 2's; at 2 m_RunsCap: the triangles shaded,
-                                                                                         // then pass 2's triangles tested (in the view) and occluded (adaptive occlusion)
+                                                                                         // then the triangles in the view and those pass 2 hid (adaptive occlusion)
 layout(std430, set = 0, binding = 3) writeonly buffer cmd_b     { uint Cmd[]; };        // VkDrawIndexedIndirectCommand: 5 each
 layout(std430, set = 0, binding = 4) writeonly buffer rec_b     { uint Rec[]; };        // the vertex shader's DrawRecord: 6 each
 layout(std430, set = 0, binding = 5)           buffer vis_b     { uint Vis[]; };        // 1: visible last frame
@@ -85,6 +85,10 @@ void main()
     for (int p = 0; p < 6; ++p)
         if (dot(Planes[p], Cc) + abs(dot(Planes[p], Ax)) + abs(dot(Planes[p], Ay)) + abs(dot(Planes[p], Az)) < 0.0) bIn = false;
 
+    // The view's triangles (adaptive occlusion: the share it hides, and whether the view has enough to be worth it) - counted once a frame:
+    // by pass 2, or by the frustum-only pass
+    if (bIn && Push.m_Mode != 0u) atomicAdd(Counts[2u * Push.m_RunsCap + 1u], K.Draw.y / 3u);
+
     uint Pass = 0u;
     if (Push.m_Mode == 0u)
     {
@@ -94,7 +98,6 @@ void main()
     {
         const bool bOccluded = bIn && Occluded(Cc, Ax, Ay, Az);
         const bool bVisible  = bIn && !bOccluded;
-        if (bIn) atomicAdd(Counts[2u * Push.m_RunsCap + 1u], K.Draw.y / 3u);           // (triangles: what it saves; many small clusters hide little)
         if (bOccluded) atomicAdd(Counts[2u * Push.m_RunsCap + 2u], K.Draw.y / 3u);
         const bool bWas     = Vis[K.Rec1.z] != 0u;
         Vis[K.Rec1.z] = bVisible ? 1u : 0u;

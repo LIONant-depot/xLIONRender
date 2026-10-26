@@ -1658,7 +1658,7 @@ namespace xlionrender
                     const bool bCut = Jump.Dot(Jump) > 4.0f || Fwd(W2C).Dot(m_CullPrevFwd) < 0.7071f;
                     m_CullPrevEye = Eye; m_CullPrevFwd = Fwd(W2C);
                     m_pCull->Begin(m_Device.getFrameIndex());
-                    bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut) && createCullTargets(View) == nullptr;
+                    bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
                     m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
                     static const bool s_bCullTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
                     if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
@@ -1676,6 +1676,27 @@ namespace xlionrender
             CmdPass.emplace(Window.StartRenderPass(View.m_ScenePass));
             auto& Cmd = *CmdPass;
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
+            // Measurement only (XLION_GPU_TIMES): the main view's scene pass split - its start, the depth prepass's end, its end (SCENESPLIT)
+            static const bool s_bSplit = std::getenv("XLION_GPU_TIMES") != nullptr;
+            static std::unordered_map<const void*, xgpu::timestamps> s_Split;      // ponytail: per renderer, never erased (a measurement hook)
+            xgpu::timestamps* pSplit = nullptr;
+            if( s_bSplit && bMain )
+            {
+                auto [It, bNew] = s_Split.try_emplace(this);
+                if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_Split.erase(It);
+                else pSplit = &It->second;
+            }
+            if( pSplit )
+            {
+                static std::vector<std::uint64_t> s_Ns;
+                static double s_Pre = 0, s_Shade = 0; static int s_n = 0;
+                if( pSplit->getResults(s_Ns) && s_Ns.size() >= 3 && s_Ns[2] > s_Ns[1] && s_Ns[1] > s_Ns[0] )
+                {
+                    s_Pre += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Shade += double(s_Ns[2] - s_Ns[1]) * 1e-6;
+                    if( ++s_n == 120 ) { std::printf("SCENESPLIT prepass %.3f, the rest (shading, sky, blended) %.3f ms\n", s_Pre / s_n, s_Shade / s_n); std::fflush(stdout); s_n = 0; s_Pre = s_Shade = 0; }
+                }
+                Cmd.WriteTimestamp(*pSplit, 0);
+            }
 
             // A GPU culled run's draws in a pass (0: pass 1, 1: pass 2)
             const auto DrawCulled = [&]( std::size_t r, int Pass )
@@ -1814,6 +1835,8 @@ namespace xlionrender
                     }
                 }
             }
+
+            if( pSplit ) Cmd.WriteTimestamp(*pSplit, 1);
 
             // GPU culling's second pass: the depth laid so far (the clusters seen last frame, the CPU path's) into the Hi-Z pyramid, every other
             // cluster in the view tested against it; the visible ones' depth too, in the pass loaded again - then the shading of both passes
@@ -1964,6 +1987,7 @@ namespace xlionrender
 #endif
 
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 2);
+            if( pSplit ) Cmd.WriteTimestamp(*pSplit, 2);
         }
     }
 

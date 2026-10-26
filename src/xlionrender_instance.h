@@ -180,6 +180,8 @@ namespace xlionrender
         // with occlusion, in two passes (the clusters seen last frame, then the rest against the Hi-Z of their depth; false or
         // XLION_NO_GPU_OCCLUSION=1: the frustum only)
         bool                                       m_bGPUOcclusion = true;
+        // its view-size rule: a view of fewer triangles (in the frustum) skips it - it costs more than it saves there
+        std::int64_t                               m_GPUOcclusionMinTriangles = 500'000;
         // Freeze: the last cull's lists drawn again, seen from wherever the camera goes - what was culled shows as missing (a debug view;
         // ignored when the scene's runs change)
         bool                                       m_bFreezeCull   = false;

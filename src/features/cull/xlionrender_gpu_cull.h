@@ -95,6 +95,7 @@ namespace xlionrender
                     const auto* pC = static_cast<const std::uint32_t*>(p);
                     m_Triangles = std::int64_t(pC[2 * max_runs_v]);
                     Tested = pC[2 * max_runs_v + 1]; Occluded = pC[2 * max_runs_v + 2];
+                    m_ViewTriangles = std::int64_t(Tested);
                     for( std::size_t r = 0; r < P.size(); ++r )
                     {
                         (P[r] ? m_PrepassDrawn : m_Drawn) += int(pC[r] + pC[max_runs_v + r]);
@@ -118,13 +119,17 @@ namespace xlionrender
 
         // Whether this frame runs the occlusion (the Hi-Z and pass 2): not while the last frames hid under low_share_v of what they tested
         // (skip_frames_v frames, then it tries again); a camera cut tries again at once
-        bool WantOcclusion( bool bCameraCut ) noexcept
+        // A view of under MinTriangles (in the frustum, read a ring late) skips it as long as it stays that small: the pyramid and the second
+        // pass cost more than hiding some of so few triangles saves (the Police level: 167k). Skipped, every cluster in the view is drawn
+        bool WantOcclusion( bool bCameraCut, std::int64_t MinTriangles ) noexcept
         {
             if( bCameraCut ) m_nSkipFrames = 0;
+            m_bSmallView = m_ViewTriangles >= 0 && m_ViewTriangles < MinTriangles;
+            if( m_bSmallView ) return false;
             if( m_nSkipFrames > 0 ) { --m_nSkipFrames; return false; }
             return true;
         }
-        bool isOcclusionSkipped( void ) const noexcept { return m_nSkipFrames > 0; }
+        bool isOcclusionSkipped( void ) const noexcept { return m_bSmallView || m_nSkipFrames > 0; }
 
         // This frame's candidates and their draws' local to clip into its region, the runs' counts zeroed, pass 1 (outside a render pass):
         // bOcclusion, what was visible last frame (Occlude follows); else every cluster in the view. Prepass: per run, whether it is a
@@ -204,5 +209,7 @@ namespace xlionrender
         int                 m_Slot = 0, m_nCandidates = 0;
         std::uint32_t       m_Second = 0;
         int                 m_nLowFrames = 0, m_nSkipFrames = 0;
+        std::int64_t        m_ViewTriangles = -1;       // the triangles in the view (-1: not read yet)
+        bool                m_bSmallView = false;
     };
 }

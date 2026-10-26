@@ -43,6 +43,7 @@ int main()
     app App;
     CHECK(App.Init(), "Init");
     auto& Renderer = App.m_Renderer;
+    Renderer.m_GPUOcclusionMinTriangles = 0;        // (the field is small: occlusion on whatever its size - the view-size rule has its own test)
     auto& Device   = App.m_Device;
 
     xlionrender::mesh_id Sphere;
@@ -210,6 +211,22 @@ int main()
                 Camera.LookAt(xmath::fvec3{ 0, 0.5f, 0 }, xmath::fvec3{ 3, 0.3f, 10 });      // (a cut: down to the ground)
                 CHECK(App.RenderFrame(Occluded, View, Camera), "Render after the cut");
                 CHECK(!Renderer.getCullStats().m_bOcclusionSkipped, "A camera cut tries the occlusion again");
+
+                // The view-size rule: a view of fewer triangles than m_GPUOcclusionMinTriangles skips occlusion (the occluded field: ~60k) - the same
+                // picture, every cluster in the view drawn; back to 0, it is on again
+                Renderer.m_GPUOcclusionMinTriangles = 10'000'000;
+                for (int k = 0; k < 5; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render a small view %d", k);
+                CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, GPU), "Render a small view");
+                const bool bSmallSkipped = Renderer.getCullStats().m_bOcclusionSkipped;
+                Renderer.m_bFrustumCull = true; Renderer.m_bGPUCull = false;
+                CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, CPU), "Render a small view on the CPU path");
+                Renderer.m_bFrustumCull = false; Renderer.m_bGPUCull = true;
+                int nSmall = 0;
+                for (std::size_t i = 0; i < CPU.size(); ++i) nSmall += CPU[i] != GPU[i];
+                CHECK(bSmallSkipped && nSmall == 0, "A small view: occlusion skipped %d, %d texels differ", int(bSmallSkipped), nSmall);
+                Renderer.m_GPUOcclusionMinTriangles = 0;
+                for (int k = 0; k < 5; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render again %d", k);
+                CHECK(!Renderer.getCullStats().m_bOcclusionSkipped, "The view-size rule off: occlusion on again");
             }
         }
 
