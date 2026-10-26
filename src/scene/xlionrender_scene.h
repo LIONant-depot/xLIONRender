@@ -137,6 +137,8 @@ namespace xlionrender
         bool            m_bCastShadows  = true;
         float           m_ShadowTileSize = 1.0f;                    // world size of a clipmap level-0 tile (512 texels); the levels double it
         bool            m_bGI           = true;                     // in the GI's lights (off: direct light only)
+        float           m_SourceAngle   = 0.5357f;                  // the sun's disc, degrees across (Unreal's default): contact-hardening shadows,
+                                                                    // sharp at the contact and wider with the distance to the caster; 0: hard
     };
 
     // A point or spot light (up to max_local_lights_v per scene, the nearest first is up to the caller); shadows from atlas tiles:

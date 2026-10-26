@@ -329,10 +329,37 @@ int main()
         const xmath::fvec3 ToSun = Scene.m_Sun.m_Direction.NormalizeCopy() * -1.0f;
         std::vector<float> Ray(Hit.size(), 1.0f);            // the rays' visibility per pixel (a shadow edge: a neighbour's differs)
         for (std::size_t i = 0; i < Hit.size(); ++i) if (bHit[i]) Ray[i] = World.Occluded(Hit[i] + Nrm[i] * 0.01f, ToSun, 1e4f) ? 0.0f : 1.0f;
+        // The sun's disc (scene::sun_light::m_SourceAngle): near a shadow edge (24 pixels of one: where a penumbra can be) the visible share
+        // of 16 rays over the disc (a golden-angle spiral), so the contact-hardening's penumbrae are measured against the soft truth
+        if (const float TanHalf = std::tan(Scene.m_Sun.m_SourceAngle * 0.5f * 3.14159265f / 180.0f); TanHalf > 0)
+        {
+            std::vector<char> Near(Hit.size(), 0);
+            constexpr int reach_v = 24;
+            for (int y = 1; y < S - 1; ++y) for (int x = 1; x < S - 1; ++x)
+            {
+                const std::size_t i = std::size_t(y) * S + x;
+                if (Ray[i] == Ray[i - 1] && Ray[i] == Ray[i + 1] && Ray[i] == Ray[i - S] && Ray[i] == Ray[i + S]) continue;
+                for (int dy = -reach_v; dy <= reach_v; ++dy) if (y + dy >= 0 && y + dy < S) { char* r = &Near[std::size_t(y + dy) * S]; for (int dx = std::max(-x, -reach_v); dx <= std::min(S - 1 - x, reach_v); ++dx) r[x + dx] = 1; }
+            }
+            const xmath::fvec3 U = xmath::fvec3::Cross(std::abs(ToSun.m_Y) < 0.99f ? xmath::fvec3(0, 1, 0) : xmath::fvec3(1, 0, 0), ToSun).NormalizeCopy(), V = xmath::fvec3::Cross(ToSun, U);
+            for (std::size_t i = 0; i < Hit.size(); ++i)
+            {
+                if (!bHit[i] || !Near[i]) continue;
+                int nSeen = 0;
+                for (int k = 0; k < 16; ++k)
+                {
+                    const float r = std::sqrt((float(k) + 0.5f) / 16.0f) * TanHalf, a = float(k) * 2.39996323f;
+                    nSeen += !World.Occluded(Hit[i] + Nrm[i] * 0.01f, (ToSun + U * (r * std::cos(a)) + V * (r * std::sin(a))).NormalizeCopy(), 1e4f);
+                }
+                Ray[i] = float(nSeen) / 16.0f;
+            }
+        }
         int nB = 0, nBD = 0, nO = 0, nOD = 0, nMiss = 0;
         int nPix = 0, nDisV = 0, nEdge = 0, nEdgeV = 0;
         int nFitV = 0, nUnderV = 0;                             // texel within [pixel/2, pixel]; texel larger than the pixel
         int nInDarkV = 0, nInLeakV = 0;                         // away from the edges: shadowed where the rays see the sun (acne), lit where they do not (leaks)
+        int nVisDarkV = 0, nVisLeakV = 0;                       // of them, those with a tenth of the view's strongest sunlight at least (a terminator pixel,
+        const float Visible = 0.1f * *std::max_element(Unlit.begin(), Unlit.end());   //  N.L near 0, is black whatever its shadow)
         std::vector<std::uint8_t> Dump(std::getenv("XLION_VSM_TEST_DUMP") ? std::size_t(S) * S * 3 : 0, 0);    // (where the pages disagree: acne red, leaks blue)
         for (int y = 1; y < S - 1; ++y) for (int x = 1; x < S - 1; ++x)
         {
@@ -360,7 +387,7 @@ int main()
 
             const bool  bEdge = Ray[i - 1] != VRay || Ray[i + 1] != VRay || Ray[i - S] != VRay || Ray[i + S] != VRay;
             ++nPix; nDisV += bDis;
-            if (!bEdge) { nInDarkV += bDis && VMap < VRay; nInLeakV += bDis && VMap > VRay; }
+            if (!bEdge) { nInDarkV += bDis && VMap < VRay; nInLeakV += bDis && VMap > VRay; nVisDarkV += bDis && VMap < VRay && Unlit[i] > Visible; nVisLeakV += bDis && VMap > VRay && Unlit[i] > Visible; }
             if (!Dump.empty()) { auto* d = &Dump[i * 3]; const std::uint8_t g = std::uint8_t(60 + 120 * VRay); d[0] = bDis && VMap < VRay ? 255 : g; d[1] = bDis ? 0 : g; d[2] = bDis && VMap > VRay ? 255 : g; }
             if (bEdge) { ++nEdge; nEdgeV += bDis; }
             const float rV = std::log2(Foot / Texel);
@@ -373,7 +400,9 @@ int main()
                    , pName, Pct(nDisV, nPix), nPix, Pct(nEdgeV, nEdge), nEdge, Ref.m_Dis, Ref.m_Edge);
         std::printf("%s: texel against pixel: pages %.1f%% within [pixel/2, pixel], %.1f%% larger than the pixel; the clipmap had %.1f%% larger\n"
                    , pName, Pct(nFitV, nPix), Pct(nUnderV, nPix), Ref.m_Under);
-        std::printf("%s: away from the edges - pages %d dark (acne) %d lit (leaks), the clipmap had %d dark %d lit\n", pName, nInDarkV, nInLeakV, Ref.m_Acne, Ref.m_Leaks);
+        std::printf("%s: away from the edges - pages %d dark (acne) %d lit (leaks), visible %d and %d; the clipmap had %d dark %d lit\n", pName, nInDarkV, nInLeakV, nVisDarkV, nVisLeakV, Ref.m_Acne, Ref.m_Leaks);
+        CHECK(nVisLeakV <= Ref.m_Leaks, "%s: %d visible pixels lit where the rays see no sun - the clipmap had %d (all of them)", pName, nVisLeakV, Ref.m_Leaks);
+        CHECK(nVisDarkV <= Ref.m_Acne, "%s: %d visible pixels shadowed where the rays see the sun - the clipmap had %d (all of them)", pName, nVisDarkV, Ref.m_Acne);
         CHECK(nMiss * 100 < nPix, "the pixel to ray mapping is off (%d missed)", nMiss);
         CHECK(Pct(nDisV, nPix) <= Ref.m_Dis && Pct(nEdgeV, nEdge) <= Ref.m_Edge, "%s: the pages disagree with the rays more than the clipmap did (%.2f%% vs %.2f%%, edges %.2f%% vs %.2f%%)", pName, Pct(nDisV, nPix), Ref.m_Dis, Pct(nEdgeV, nEdge), Ref.m_Edge);
         CHECK(Pct(nUnderV, nPix) <= Ref.m_Under, "%s: more of the pages' texels are larger than the pixel than the clipmap's were (%.1f%% vs %.1f%%)", pName, Pct(nUnderV, nPix), Ref.m_Under);

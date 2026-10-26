@@ -720,7 +720,7 @@ namespace xlionrender
         const xgpu::buffer::copy Z{ 0, 0, nReq };
         Window.CopyBuffer(m_VSMZeros, m_VSMReq, std::span{ &Z, 1 });
         Window.WriteTimestamp(m_VSMTimes, 0);
-        const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(vsmTableBase()), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), 0u, 0u };
+        const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(vsmTableBase()), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), std::uint32_t(m_VSMSoftLevels), 0u };
         auto Buffers  = std::array<xgpu::buffer*, 3>{ &m_VSMFrames, &m_VSMReq, &m_CellRing };
         auto Textures = std::array<const xgpu::texture*, 1>{ &View.m_Depth };
         Window.Dispatch(m_VSMRequest, Buffers, Textures, Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
@@ -1166,7 +1166,9 @@ namespace xlionrender
         std::swap(m_CasterSlots, m_CasterSlotsPrev);
 
         const auto& Sun = Scene.m_Sun;
-        // The sun: its virtual pages
+        // The sun: its virtual pages (a sun with a disc: the 3 coarser levels' pages asked for too - the contact-hardening's search and its
+        // wide penumbrae read them)
+        m_VSMSoftLevels = Sun.m_SourceAngle > 0 ? 3 : 0;
         m_VSM.m_ToRender.clear();
         if( Sun.m_bCastShadows )
         {
@@ -1468,7 +1470,7 @@ namespace xlionrender
                     const auto& Lv = m_VSM.m_Levels[i];
                     Light.m_VSMLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
                 }
-                Light.m_VSMParams3 = { m_VSM.ResolutionBias(), 0, 0, 0 };
+                Light.m_VSMParams3 = { m_VSM.ResolutionBias(), std::tan(std::max(L.m_SourceAngle, 0.0f) * 0.5f * 3.14159265f / 180.0f), float(m_VSMSoftLevels), 0 };
                 Light.m_VSMPrevW2Light = xmath::fmat4::fromIdentity();
                 {
                     const float Axis[3][3] = { { m_VSM.m_PX.m_X, m_VSM.m_PX.m_Y, m_VSM.m_PX.m_Z }, { m_VSM.m_PY.m_X, m_VSM.m_PY.m_Y, m_VSM.m_PY.m_Z }, { m_VSM.m_PZ.m_X, m_VSM.m_PZ.m_Y, m_VSM.m_PZ.m_Z } };

@@ -118,6 +118,20 @@ void main()
             // (rounded up to 1/256: still conservative, and after a few pixels most find the page's range holding theirs: no atomic)
             const uint  Z = floatBitsToUint(max(ceil(z * 256.0) / 256.0, 1e-7)), InvZ = floatBitsToUint(max(ceil((1.0 - z) * 256.0) / 256.0, 1e-7));
             for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y), Z, InvZ);
+            // Contact-hardening (a sun with a disc, xlionrender_shadow_vsm.glsl): the blocker search and the wide penumbrae read the coarser
+            // levels' taps too
+            for (int k = 1; k <= int(Push.m_Pad0) && l + k < nLevels; ++k)
+            {
+                const int   lk  = l + k;
+                const float Tk  = t0 * float(1 << lk);
+                const ivec2 Lk  = ivec2(floor(L.xy / Tk - 0.5)) - 3;         // (the 4 x 4 taps, the normal offset's 2 more)
+                const ivec2 KLo = ivec2(floor(vec2(Lk) / float(kPageTexels))), KHi = ivec2(floor(vec2(Lk + 7) / float(kPageTexels)));
+                const vec4  Lvk = F[Push.m_Frame].Levels[lk];
+                const float Hk  = Lvk.z * F[Push.m_Frame].P0.z * kDepthRange;
+                const float zk  = clamp((L.z - (Lvk.w - Hk)) / (2.0 * Hk), 0.0, 1.0);
+                const uint  Zk = floatBitsToUint(max(ceil(zk * 256.0) / 256.0, 1e-7)), InvZk = floatBitsToUint(max(ceil((1.0 - zk) * 256.0) / 256.0, 1e-7));
+                for (int y = KLo.y; y <= KHi.y; ++y) for (int x = KLo.x; x <= KHi.x; ++x) Request(lk, ivec2(x, y), Zk, InvZk);
+            }
         }
             }
             // What the shading finds this frame: every tap's page in the table, or a coarser level

@@ -585,6 +585,7 @@ namespace xlionrender
         std::vector<shadows::lbox>              m_CasterLight;
         std::vector<xmath::fbbox>               m_CasterLightWorld;
         std::array<xmath::fvec3, 3>             m_CasterLightBasis{};
+        int                                     m_VSMSoftLevels = 0;        // the coarser levels the request pass asks for too (contact-hardening)
         int  sunAtlasWidth( void ) const noexcept { return 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
         void vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
         int  vsmTableBase( void ) noexcept;
