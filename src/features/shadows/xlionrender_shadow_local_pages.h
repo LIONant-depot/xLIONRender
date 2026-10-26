@@ -83,9 +83,11 @@ namespace xlionrender::shadows
             m_Setup = Setup;
             m_Slots.assign(std::size_t(Setup.Slots()), slot{});
             m_Map.clear();
+            m_Waiting.clear();
             for (auto& L : m_Lights) L = {};
         }
         const setup& getSetup(void) const noexcept { return m_Setup; }
+        void setBudget(int Budget) noexcept { m_Setup.m_Budget = Budget; }
 
         // A light slot's generation (a request names the generation it was made for; the light changed since: dropped)
         std::uint32_t Generation(int LightSlot) const noexcept { return m_Lights[LightSlot].m_Generation; }
@@ -148,7 +150,7 @@ namespace xlionrender::shadows
             for (const auto& L : m_Lights) m_Stats.m_Lights += L.m_bUsed;
 
             // Dirty: every resident page of a light a changed caster reaches whose frustum holds it (bCache false: all of them)
-            for (int s = 0; s < int(m_Slots.size()); ++s)
+            for (int s = 0; s < int(m_Slots.size()) && (!bCache || !Changed.empty()); ++s)
             {
                 auto& S = m_Slots[s];
                 if (!S.m_bUsed || !S.m_bValid) continue;
@@ -193,17 +195,33 @@ namespace xlionrender::shadows
                 if (const int s = Find(K); s >= 0) m_Slots[s].m_LastRequested = Frame;
                 Want.push_back(K);
             }
-            std::sort(Want.begin(), Want.end(), [](const key& a, const key& b) { return a.m_Level > b.m_Level; });
+            // (a page waiting urgent_age_v frames or more goes first, the longest first: pages dirtied every frame by a mover never starve the others)
+            std::unordered_map<int, std::uint64_t> Waiting;
+            for (const auto& K : Want)
+            {
+                const auto It = m_Waiting.find(Entry(K));
+                Waiting[Entry(K)] = It == m_Waiting.end() ? Frame : It->second;
+            }
+            m_Waiting = std::move(Waiting);
+            const auto Age = [&](const key& K) { return Frame - m_Waiting[Entry(K)]; };
+            std::sort(Want.begin(), Want.end(), [&](const key& a, const key& b)
+            {
+                const bool aUrgent = Age(a) >= std::uint64_t(urgent_age_v), bUrgent = Age(b) >= std::uint64_t(urgent_age_v);
+                if (aUrgent != bUrgent) return aUrgent;
+                if (aUrgent && Age(a) != Age(b)) return Age(a) > Age(b);
+                return a.m_Level > b.m_Level;
+            });
             int Budget = bCache ? m_Setup.m_Budget : 1 << 30;
             for (const auto& K : Want)
             {
                 int s = Find(K);
-                if (s >= 0 && m_Slots[s].m_bValid && !m_Slots[s].m_bDirty) continue;
+                if (s >= 0 && m_Slots[s].m_bValid && !m_Slots[s].m_bDirty) { m_Waiting.erase(Entry(K)); continue; }
                 if (Budget <= 0) break;
                 if (s < 0) { s = Admit(K, false); if (s < 0) { ++m_Stats.m_Rejected; continue; } }
                 m_Slots[s].m_LastRequested = Frame;
                 const int iLight = m_Lights[K.m_Face / faces_per_light_v].m_iLight;
                 Render(Lights[std::size_t(iLight)], iLight, s, false);
+                m_Waiting.erase(Entry(K));
                 --Budget;
             }
             if (!bCache)        // a full rebuild: every resident page again
@@ -356,6 +374,7 @@ namespace xlionrender::shadows
         std::unordered_map<int, int>                m_Map;          // table entry -> slot
         std::array<light_slot, max_local_lights_v>  m_Lights{};
         std::vector<int>                            m_SlotOf;       // scene light -> light slot (-1: none)
+        std::unordered_map<int, std::uint64_t>      m_Waiting;      // a wanted page not rendered yet: the frame it was first wanted
         std::uint64_t                               m_Frame = 0;
     };
 }

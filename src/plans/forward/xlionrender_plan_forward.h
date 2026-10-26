@@ -112,7 +112,7 @@ namespace xlionrender::details
         xmath::fmat4                            m_W2Light;          // world -> light space (rotation)
         xmath::fvec4                            m_CameraPos;        // the camera's world position (positions are camera-centered)
         std::array<xmath::fvec4, 4>             m_ShadowLevels;     // per level: xy first tile of the window, z tile size, w depth center
-        xmath::fvec4                            m_ShadowParams;     // x: 1 shadows on, y: level 0 depth half range
+        xmath::fvec4                            m_ShadowParams;     // the local lights' pages: x the pool's atlas x (0: none), y the table's first uint, z slots a row, w the resolution bias
         // point and spot lights: the lights and their world cells are in storage buffers (shaders/xlionrender_local_lights.glsl)
         xmath::fvec4                            m_LocalCount;       // x: lights, y: mode (instance::light_mode), z: seed, w: head size
         xmath::fvec4                            m_LocalBase;        // x: first light in the light buffer, y: first uint in the cell buffer, z: level 0 cell size, w: tail samples
@@ -143,13 +143,23 @@ namespace xlionrender::details
     };
     static_assert(sizeof(vsm_frame) == 64 + 5 * 16 + shadows::vsm::max_levels_v * 16);
 
+    // The local lights' request pass's frame (shaders/xlionrender_local_request_comp.glsl frame_t)
+    struct local_request_frame
+    {
+        struct light { xmath::fvec4 m_PosRadius, m_DirTan, m_Info; };
+        xmath::fmat4                            m_C2W;              // the main view's clip -> camera-centred world
+        xmath::fvec4                            m_Eye;
+        xmath::fvec4                            m_P0;               // x: lights, y: the resolution bias, z: the table's first uint
+        std::array<light, max_local_lights_v>   m_Lights;
+    };
+
     // A point or spot light in the light buffer (std430 LocalLightData)
     struct local_light_data
     {
         xmath::fvec4                            m_PosRadius;        // camera-centered position, radius
         xmath::fvec4                            m_Color;            // rgb * intensity, w: cos inner angle
         xmath::fvec4                            m_DirCosOuter;      // spot: direction, w cos outer angle; point: w = -2
-        xmath::fvec4                            m_Shadow;           // xy: its shadow map's origin in the atlas, z: its size (0 none), w: spot tan half fov
+        xmath::fvec4                            m_Shadow;           // x: its first face's entry in the local pages' table, z: 1 shadowed, w: spot tan half fov
     };
 
     // A reflection probe in the light buffer (shaders/xlionrender_environment.glsl ProbeRecord: the same 64 bytes as a light)
@@ -167,14 +177,6 @@ namespace xlionrender::details
         xmath::fvec4    m_BaseColor;
         xmath::fvec4    m_Params;               // x = metallic, y = roughness, z = AO, w = F0
         xmath::fvec4    m_Emissive;
-    };
-
-    // xlionrender_shadow_remap_frag.glsl
-    struct push_shadow_remap
-    {
-        std::array<std::int32_t, 4>     m_Tile;             // x, y in the atlas, size, face size in the scratch
-        std::array<float, 4>            m_Params;           // near, far, spot tan half fov, 1 point / 0 spot
-        std::array<std::int32_t, 12>    m_Faces;            // the faces' origins in the scratch (x, y) x 6
     };
 
     // xlionrender_env_sky_frag.glsl, xlionrender_env_prefilter_frag.glsl, xlionrender_env_dfg_frag.glsl

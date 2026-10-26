@@ -138,39 +138,27 @@ int main()
         std::printf("local pages (CPU): addressing, projections, pinned, budget, pressure, generations, dirty faces: ok\n");
     }
 
-    // The atlas allocator (CPU only)
+    // No starvation (CPU only): a light whose page a caster dirties every frame, a budget of 1 - another light's requested page still
+    // renders within urgent_age_v frames
     {
-        xlionrender::shadows::buddy B;
-        B.Reset(4096, 64);
-        std::vector<xlionrender::shadows::buddy::pos> P(16);
-        for (auto& Q : P) CHECK(B.Alloc(1024, Q), "16 maps of 1024 fit in 4096");
-        xlionrender::shadows::buddy::pos Q;
-        CHECK(!B.Alloc(64, Q), "A full atlas takes nothing more");
-        for (int i = 0; i < 16; ++i) for (int j = i + 1; j < 16; ++j) CHECK(P[i].m_X != P[j].m_X || P[i].m_Y != P[j].m_Y, "Two maps at the same place");
-        for (auto& R : P) B.Free(R, 1024);
-        CHECK(B.Alloc(4096, Q) && Q.m_X == 0 && Q.m_Y == 0, "Freed maps merge back into the whole atlas");
-    }
-
-    // No starvation (CPU only)
-    {
-        xlionrender::shadows::local_shadows S;
-        S.Init({});
+        using pages = xlionrender::shadows::local_pages;
+        pages S;
+        S.Init({ .m_Budget = 1 });
         const std::vector<xlionrender::local_light> L
-        { { .m_Position = { 0, 0, 2 },   .m_Radius = 5 }        // big on screen
-        , { .m_Position = { 0, 0, 40 },  .m_Radius = 5 } };     // small, far away
-        const std::vector<xmath::fbbox> Both{ xmath::fbbox{ xmath::fvec3{ -1, -1, -1 }, xmath::fvec3{ 1, 1, 50 } } };
-        std::vector<xlionrender::shadows::local_map>           Maps;
-        std::vector<xlionrender::shadows::local_map_to_render> Out;
-        S.Update(L, {}, true, { 0, 0, 0 }, 100.0f, 16, Maps, Out);
-        CHECK(Out.size() == 2, "Both maps render first (%d)", int(Out.size()));
+        { { .m_Position = { 0, 0, 2 },   .m_Radius = 5 }
+        , { .m_Position = { 0, 0, 40 },  .m_Radius = 5 } };
+        S.Update(L, {}, true, {}, 1);
+        const int fa = S.SlotOfLight(0) * pages::faces_per_light_v, fb = S.SlotOfLight(1) * pages::faces_per_light_v;
+        const std::vector<pages::key> Req{ { fa + 4, 3, 0, 0 }, { fb + 4, 0, 7, 7 } };     // (the near one's coarse page first: coarse first)
+        S.Update(L, {}, true, Req, 2);
+        const std::vector<xmath::fbbox> Near{ xmath::fbbox{ xmath::fvec3{ -0.3f, -0.3f, 3.5f }, xmath::fvec3{ 0.3f, 0.3f, 4.0f } } };     // in the near light's +Z face only
         int SmallAt = -1;
-        for (int f = 1; f <= 2 * xlionrender::shadows::urgent_age_v && SmallAt < 0; ++f)
+        for (int f = 3; f <= 3 + 2 * xlionrender::shadows::urgent_age_v && SmallAt < 0; ++f)
         {
-            S.Update(L, Both, true, { 0, 0, 0 }, 100.0f, 1, Maps, Out);
-            CHECK(Out.size() == 1, "A budget of 1 renders 1 map (%d)", int(Out.size()));
-            if (Out[0].m_Light == 1) SmallAt = f;
+            S.Update(L, Near, true, Req, std::uint64_t(f));
+            for (const auto& R : S.m_ToRender) if (!R.m_bPinned && R.m_Light == 1) SmallAt = f - 2;
         }
-        CHECK(SmallAt > 0 && SmallAt <= xlionrender::shadows::urgent_age_v + 1, "The small light waited %d frames", SmallAt);
+        CHECK(SmallAt > 0 && SmallAt <= xlionrender::shadows::urgent_age_v + 1, "the far light's page waited %d frames", SmallAt);
     }
 
     app App;
@@ -213,10 +201,25 @@ int main()
     std::printf("texels lit by the point light: %d\n", nLit);
     CHECK(nLit > size_v * size_v / 4, "The point light lit only %d texels", nLit);
 
+    // The pages (P1d): the first frame renders each face's pinned coarsest page (a point light: 6); the requests arrive a ring later and the
+    // finer pages follow; settled, a frame renders none. Every frame's table holds invariant 1
+    const auto Settle = [&](int n) { for (int i = 0; i < n; ++i) if (!App.RenderFrame(Scene, View, Camera) || !Renderer.validateLocalPages()) return false; return true; };
+    const auto PagesOf = [&](int Light) { int k = 0; for (const auto& P : Renderer.getLocalPagesRendered()) k += P.m_Light == Light; return k; };
+    const auto Pinned  = [&]() { int k = 0; for (const auto& P : Renderer.getLocalPagesRendered()) k += P.m_bPinned; return k; };
+
     // Its shadow
     Scene.m_LocalLights[0].m_bCastShadows = Scene.m_LocalLights[1].m_bCastShadows = true;
-    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, On), "Render with shadows");
-    CHECK(Renderer.getShadowTilesRendered() == 2, "The first frame renders a map per point light (%d)", Renderer.getShadowTilesRendered());
+    CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateLocalPages(), "Render with shadows");
+    CHECK(Pinned() == 12 && Renderer.getShadowTilesRendered() == 12, "The first frame renders the pinned pages, 6 a point light (%d of %d)", Pinned(), Renderer.getShadowTilesRendered());
+    CHECK(Settle(8) && ReadHDR(Device, View, On), "Settle with shadows");
+    {
+        const auto& R = Renderer.getLocalReport();
+        const auto& C = R.m_Counters;
+        std::printf("settled: pixel-light pairs %u - by their level %u, coarser %u, none %u; levels %u %u %u %u %u; pages resident %d + pinned %d\n"
+                   , C[0], C[1], C[2], C[3], C[5], C[6], C[7], C[8], C[9], R.m_Pages.m_Resident, R.m_Pages.m_ResidentPinned);
+        CHECK(R.m_bCounters && C[0] > 1000 && C[2] == 0 && C[3] == 0, "not settled: %u pairs, %u by a coarser level, %u by none", C[0], C[2], C[3]);
+        CHECK(R.m_Pages.m_Resident > 0, "no requested page resident");
+    }
     Dump("point_off", Off); Dump("point_on", On);
     const int nDarker = CountDarker(Off, On);
     std::printf("point shadowed texels: %d\n", nDarker);
@@ -225,74 +228,84 @@ int main()
     // Caching
     std::vector<float> Again;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Again), "Render again");
-    CHECK(Renderer.getShadowTilesRendered() == 0, "An unchanged scene re-rendered %d tiles", Renderer.getShadowTilesRendered());
+    CHECK(Renderer.getShadowTilesRendered() == 0, "An unchanged scene re-rendered %d pages", Renderer.getShadowTilesRendered());
     for (std::size_t i = 0; i < On.size(); ++i) CHECK(Again[i] == On[i], "The cached frame differs at %d", int(i));
 
-    // The sphere moves: the near light's 6 faces re-render, the far light's do not; cached equals rebuilt
+    // The sphere moves: the near light's pages that see it render again, the far light's do not; settled, cached equals rebuilt
     Scene.m_Draws[1].m_L2W = Lifted(0.4f);
     std::vector<float> Cached, Rebuilt;
-    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Cached), "Render moved (cached)");
-    CHECK(Renderer.getShadowTilesRendered() == 1, "A moved caster re-rendered %d maps (expected the near light's)", Renderer.getShadowTilesRendered());
+    CHECK(App.RenderFrame(Scene, View, Camera), "Render moved");
+    CHECK(PagesOf(0) > 0 && PagesOf(1) == 0, "A moved caster re-rendered %d pages of the near light, %d of the far one", PagesOf(0), PagesOf(1));
+    CHECK(Settle(8) && ReadHDR(Device, View, Cached), "Render moved (cached)");
     Renderer.m_bShadowCache = false;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Rebuilt), "Render moved (rebuilt)");
-    CHECK(Renderer.getShadowTilesRendered() == 2, "Without the cache every map renders (%d)", Renderer.getShadowTilesRendered());
+    const int nRebuilt = Renderer.getShadowTilesRendered();
     Renderer.m_bShadowCache = true;
+    CHECK(nRebuilt >= 12, "Without the cache every resident page renders (%d)", nRebuilt);
     for (std::size_t i = 0; i < Cached.size(); ++i) CHECK(Cached[i] == Rebuilt[i], "Cached and rebuilt shadows differ at %d (%f vs %f)", int(i), Cached[i], Rebuilt[i]);
     int nChanged = 0;
     for (std::size_t i = 0; i < Cached.size(); ++i) nChanged += Cached[i] != On[i];
     CHECK(nChanged > 0, "Moving the sphere changed nothing on screen");
 
-    // A caster changing material re-renders the maps it reaches (an alpha-tested material casts another shadow)
+    // A caster changing material re-renders the pages it reaches (an alpha-tested material casts another shadow)
     {
         const xlionrender::material_id Mat{ .m_Index = 7, .m_Generation = 1 };     // the key only (the float mesh ignores slots)
-        CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.getShadowTilesRendered() == 0, "Settled before the material change");
+        CHECK(Settle(4) && Renderer.getShadowTilesRendered() == 0, "Settled before the material change");
         Scene.m_Draws[1].m_Materials = { Mat };
         CHECK(App.RenderFrame(Scene, View, Camera), "Render with the new material");
-        CHECK(Renderer.getShadowTilesRendered() == 1, "A material change re-rendered %d maps (expected the near light's)", Renderer.getShadowTilesRendered());
+        CHECK(PagesOf(0) > 0 && PagesOf(1) == 0, "A material change re-rendered %d pages of the near light, %d of the far one", PagesOf(0), PagesOf(1));
         Scene.m_Draws[1].m_Materials.clear();
-        CHECK(App.RenderFrame(Scene, View, Camera), "Render back");
+        CHECK(Settle(4), "Render back");
     }
 
-    // Per-face caster culling draws the same maps as drawing every caster in the light's sphere into every face
+    // Per-page caster culling draws the same pages as drawing every caster in the light's sphere into every page
     {
         std::vector<float> Faces, Sphere;
         Renderer.m_bShadowCache = false;
-        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Faces), "Render face-culled maps");
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Faces), "Render page-culled");
         Renderer.m_bShadowFaceCull = false;
-        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Sphere), "Render sphere-culled maps");
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Sphere), "Render sphere-culled");
         Renderer.m_bShadowFaceCull = true;
         Renderer.m_bShadowCache    = true;
-        for (std::size_t i = 0; i < Faces.size(); ++i) CHECK(Faces[i] == Sphere[i], "Face culling changed the shadows at %d (%f vs %f)", int(i), Faces[i], Sphere[i]);
+        for (std::size_t i = 0; i < Faces.size(); ++i) CHECK(Faces[i] == Sphere[i], "Page culling changed the shadows at %d (%f vs %f)", int(i), Faces[i], Sphere[i]);
     }
 
-    // A spot light pointing down at the sphere: 1 tile, a shadow
+    // A spot light pointing down at the sphere: 1 pinned page, a shadow
     xlionrender::local_light Spot{ .m_Type = xlionrender::local_light::type::SPOT, .m_Position = { 0.3f, 2.0f, 0.2f }, .m_Direction = { -0.1f, -1.0f, -0.1f }
                                  , .m_Radius = 6.0f, .m_InnerAngle = 0.6f, .m_OuterAngle = 0.8f, .m_Intensity = 8.0f, .m_bCastShadows = false };
     Scene.m_LocalLights = { Spot };
     std::vector<float> SpotOff, SpotOn;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, SpotOff), "Render spot without shadows");
     Scene.m_LocalLights[0].m_bCastShadows = true;
-    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, SpotOn), "Render spot with shadows");
-    CHECK(Renderer.getShadowTilesRendered() == 1, "A spot light renders 1 tile (%d)", Renderer.getShadowTilesRendered());
+    CHECK(App.RenderFrame(Scene, View, Camera), "Render spot with shadows");
+    CHECK(Pinned() == 1 && Renderer.getShadowTilesRendered() == 1, "A spot light renders 1 pinned page first (%d)", Renderer.getShadowTilesRendered());
+    CHECK(Settle(8) && ReadHDR(Device, View, SpotOn), "Settle the spot");
     Dump("spot_on", SpotOn);
     const int nSpot = CountDarker(SpotOff, SpotOn);
     std::printf("spot shadowed texels: %d\n", nSpot);
     CHECK(nSpot > 150, "Only %d texels in the spot light's shadow", nSpot);
 
-    // The budget: 3 new shadowed point lights, 2 maps per frame
+    // The budget: 3 new shadowed point lights, 2 unpinned pages a frame (the pinned ones always); settled, the same image as a full rebuild
     Scene.m_LocalLights = { Point, Point, Point };
     Scene.m_LocalLights[1].m_Position = { -0.6f, 1.4f, 0.2f };
     Scene.m_LocalLights[2].m_Position = { 0.1f, 1.8f, -0.5f };
     Renderer.m_ShadowUpdatesPerFrame = 2;
-    int nPerFrame[3];
-    for (int& n : nPerFrame) { CHECK(App.RenderFrame(Scene, View, Camera), "Render budgeted"); n = Renderer.getShadowTilesRendered(); }
-    CHECK(nPerFrame[0] == 2 && nPerFrame[1] == 1 && nPerFrame[2] == 0, "Budgeted maps per frame: %d %d %d (expected 2 1 0)", nPerFrame[0], nPerFrame[1], nPerFrame[2]);
+    int nMax = 0, nFrames = 0;
+    for (; nFrames < 200; ++nFrames)
+    {
+        CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateLocalPages(), "Render budgeted");
+        const int n = Renderer.getShadowTilesRendered() - Pinned();
+        nMax = std::max(nMax, n);
+        if (nFrames > 4 && Renderer.getShadowTilesRendered() == 0) break;
+    }
+    std::printf("budgeted: settled after %d frames, at most %d unpinned pages a frame\n", nFrames, nMax);
+    CHECK(nMax == 2 && nFrames < 200, "Budgeted: at most %d unpinned pages a frame (2), settled after %d frames", nMax, nFrames);
     std::vector<float> Budgeted, Full;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Budgeted), "Render budgeted (settled)");
     Renderer.m_bShadowCache = false;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Full), "Render budgeted (rebuilt)");
     Renderer.m_bShadowCache = true;
-    Renderer.m_ShadowUpdatesPerFrame = 16;
+    Renderer.m_ShadowUpdatesPerFrame = 64;
     for (std::size_t i = 0; i < Full.size(); ++i) CHECK(Budgeted[i] == Full[i], "Budgeted and rebuilt differ at %d", int(i));
 
     Renderer.DestroyView(View);

@@ -89,8 +89,8 @@ namespace xlionrender
         constexpr std::uint32_t s_GeomStandardFrag[] = {
             #include "xlionrender_geom_standard_frag.h"
         };
-        constexpr std::uint32_t s_ShadowRemapFrag[] = {
-            #include "xlionrender_shadow_remap_frag.h"
+        constexpr std::uint32_t s_LocalRequestComp[] = {
+            #include "xlionrender_local_request_comp.h"
         };
         constexpr std::uint32_t s_ClearDepthVert[] = {
             #include "xlionrender_clear_depth_vert.h"
@@ -197,10 +197,6 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_ShadowClearPipeline));
         m_Device.Destroy(std::move(m_ShadowClearPass));
         m_Device.Destroy(std::move(m_ShadowPass));
-        m_Device.Destroy(std::move(m_RemapInstance));
-        m_Device.Destroy(std::move(m_RemapPipeline));
-        m_Device.Destroy(std::move(m_ScratchPass));
-        m_Device.Destroy(std::move(m_ShadowScratch));
         m_Device.Destroy(std::move(m_ShadowAtlas));
         m_Device.Destroy(std::move(m_ForwardPipeline));
         m_Device.Destroy(std::move(m_ToneMapPipeline));
@@ -266,7 +262,7 @@ namespace xlionrender
     {
         m_Device      = Device;
         m_ShadowSetup = ShadowSetup;
-        m_LocalShadows.Init(ShadowSetup);
+        m_LocalPages.Init({ .m_PoolTexels = ShadowSetup.m_LocalAtlasSize });
 
         // Vertex layouts
         {
@@ -314,7 +310,6 @@ namespace xlionrender
         {
             const int Clipmap = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, Local = ShadowSetup.m_LocalAtlasSize;
             if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = 2 * Clipmap + Local, .m_Height = std::max(Clipmap, Local), .m_isGamma = false }); Err ) return Err;
-            if( auto Err = Device.Create(m_ShadowScratch, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = ShadowSetup.m_ScratchSize, .m_Height = ShadowSetup.m_ScratchSize, .m_isGamma = false }); Err ) return Err;
         }
 
         // The environment probe's textures (filled by updateEnvironment)
@@ -545,6 +540,13 @@ namespace xlionrender
             if( auto Err = Device.Create(m_VSMReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nReq }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMTimes,   { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMRenderTimes, { .m_Count = 2 }); Err ) return Err;
+            // the local lights' pages: their request pass (its frame a ring slot each, its bits and counters)
+            const int nLocal = localBitUints() + 32;
+            if( auto Err = Device.Create(m_LocalRequestShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LocalRequestComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_LocalRequest, { .m_pShader = &m_LocalRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
+            if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data() }); Err ) return Err;
+            if( auto Err = Device.Create(m_LocalReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nLocal }); Err ) return Err;
         }
 
         // Shadows: the atlas's passes (a clear for its first use - a never rendered attachment cannot be loaded -, then load), the
@@ -554,8 +556,6 @@ namespace xlionrender
             auto Attachments = std::array{ xgpu::renderpass::attachment{ m_ShadowAtlas } };
             if( auto Err = Device.Create(m_ShadowClearPass, { .m_Attachments = Attachments }); Err ) return Err;
             if( auto Err = Device.Create(m_ShadowPass,      { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
-            auto Scratch = std::array{ xgpu::renderpass::attachment{ m_ShadowScratch } };
-            if( auto Err = Device.Create(m_ScratchPass,     { .m_Attachments = Scratch }); Err ) return Err;
 
             xgpu::shader Depth, ClearVert, ForwardVert, RigidVert, SkinVert;
             if( auto Err = Device.Create(Depth,       { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DepthFrag) }); Err ) return Err;
@@ -571,20 +571,6 @@ namespace xlionrender
                 Setup.m_DepthStencil.m_DepthCompare     = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
                 if( auto Err = Device.Create(m_ShadowClearPipeline, Setup); Err ) return Err;
                 if( auto Err = Device.Create(m_ShadowClearInstance, { .m_PipeLine = m_ShadowClearPipeline }); Err ) return Err;
-            }
-
-            // The local maps' remap: scratch -> atlas, depth written by the shader (ALWAYS)
-            {
-                xgpu::shader Remap;
-                if( auto Err = Device.Create(Remap, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_ShadowRemapFrag) }); Err ) return Err;
-                auto Shaders  = std::array<const xgpu::shader*, 2>{ &Remap, &ClearVert };
-                auto Samplers = std::array{ xgpu::pipeline::sampler{} };
-                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_shadow_remap), .m_Samplers = Samplers };
-                Setup.m_Primitive.m_Cull            = xgpu::pipeline::primitive::cull::NONE;
-                Setup.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
-                if( auto Err = Device.Create(m_RemapPipeline, Setup); Err ) return Err;
-                auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ m_ShadowScratch } };
-                if( auto Err = Device.Create(m_RemapInstance, { .m_PipeLine = m_RemapPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
             }
 
             if( auto Err = Device.Create(m_ShadowUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_geom_view), .m_EntryCount = max_shadow_draws_per_frame_v }); Err ) return Err;

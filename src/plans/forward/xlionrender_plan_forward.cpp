@@ -702,6 +702,57 @@ namespace xlionrender
         return m_VSMTableBase;
     }
 
+    // The local lights' pages: this frame's table in the cell ring, written once a frame (appended in the frame's region). Returns its first uint
+    int instance::localTableBase( void ) noexcept
+    {
+        const std::uint64_t Frame = m_Device.getFrameIndex();
+        if( Frame != m_LightFrame ) { m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0; }
+        if( m_LocalTableFrame == Frame ) return m_LocalTableBase;
+        m_LocalPages.BuildTable(m_LocalTable);
+        const int n = std::max(int(m_LocalTable.size()), 1);
+        m_LocalTable.resize(std::size_t(n), 0u);
+        m_LocalTableBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
+        (void)m_CellRing.MemoryMapFrameRegion(m_LocalTableBase, n, [&](void* p) { std::memcpy(p, m_LocalTable.data(), std::size_t(n) * sizeof(std::uint32_t)); });
+        m_CellRingUsed += n;
+        m_LocalTableFrame = Frame;
+        return m_LocalTableBase;
+    }
+
+    // The local lights' pages: the request pass over the main view's depth (shaders/xlionrender_local_request_comp.glsl), after the scene
+    // pass, for the shadowed lights with a light slot. Its bits and counters go to this frame's ring slot, read when the slot comes round
+    void instance::localRequestPass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept
+    {
+        const int Slot = int(m_Device.getFrameIndex() % ring_frames_v), nBits = localBitUints(), nReq = nBits + 32;
+        details::local_request_frame F{};
+        F.m_C2W = W2C.Inverse();
+        F.m_Eye = xmath::fvec4(Eye, 1);
+        int n = 0;
+        for( int i = 0; i < int(Scene.m_LocalLights.size()) && n < max_local_lights_v; ++i )
+        {
+            const int LS = m_LocalPages.SlotOfLight(i);
+            if( LS < 0 ) continue;
+            const auto& L = Scene.m_LocalLights[std::size_t(i)];
+            const bool  bSpot = L.m_Type == local_light::type::SPOT;
+            F.m_Lights[n].m_PosRadius = xmath::fvec4(L.m_Position, L.m_Radius);
+            F.m_Lights[n].m_DirTan    = bSpot ? xmath::fvec4(L.m_Direction.NormalizeCopy(), shadows::SpotTanHalf(L)) : xmath::fvec4(0, 0, 0, 0);
+            F.m_Lights[n].m_Info      = { float(LS * shadows::local_pages::faces_per_light_v * shadows::local_pages::face_entries_v), shadows::LocalNear(L.m_Radius), 0, 0 };
+            ++n;
+        }
+        for( int ls = 0; ls < max_local_lights_v; ++ls ) m_LocalReqGen[Slot][std::size_t(ls)] = m_LocalPages.Generation(ls);
+        if( n == 0 ) return;
+        F.m_P0 = { float(n), m_LocalPages.getSetup().m_ResolutionBias, float(localTableBase()), 0 };
+        (void)m_LocalFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p) { std::memcpy(p, &F, sizeof(F)); });
+        const xgpu::buffer::copy Z{ 0, 0, nReq };
+        Window.CopyBuffer(m_VSMZeros, m_LocalReq, std::span{ &Z, 1 });
+        const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), 0u, 0u, 0u };
+        auto Buffers  = std::array<xgpu::buffer*, 3>{ &m_LocalFrames, &m_LocalReq, &m_CellRing };
+        auto Textures = std::array<const xgpu::texture*, 1>{ &View.m_Depth };
+        Window.Dispatch(m_LocalRequest, Buffers, Textures, Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
+        const xgpu::buffer::copy C{ 0, Slot * nReq, nReq };
+        Window.CopyBuffer(m_LocalReq, m_LocalReqHost, std::span{ &C, 1 });
+        m_LocalReqValid[Slot] = true;
+    }
+
     // The sun's virtual pages: the request pass over the main view's depth (shaders/xlionrender_vsm_request_comp.glsl), after the scene
     // pass. Its bits and counters go to this frame's ring slot, read when the slot comes round (renderShadows), with these windows
     void instance::vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept
@@ -750,12 +801,12 @@ namespace xlionrender
                 {
                     const auto& LL    = Scene.m_LocalLights[i];
                     const bool  bSpot = LL.m_Type == local_light::type::SPOT;
-                    const auto  Map   = i < int(m_LocalMaps.size()) ? m_LocalMaps[i] : shadows::local_map{};
+                    const int   LSlot = m_LocalPages.SlotOfLight(i);
                     auto&       Out   = pOut[i];
                     Out.m_PosRadius   = xmath::fvec4(LL.m_Position - Eye, LL.m_Radius);
                     Out.m_Color       = xmath::fvec4(LL.m_Color * LL.m_Intensity, std::cos(LL.m_InnerAngle));
                     Out.m_DirCosOuter = bSpot ? xmath::fvec4(LL.m_Direction.NormalizeCopy(), std::cos(LL.m_OuterAngle)) : xmath::fvec4(0, 0, 0, -2);
-                    Out.m_Shadow      = { float(sunAtlasWidth() + Map.m_X), float(Map.m_Y), float(Map.m_Size), bSpot ? shadows::SpotTanHalf(LL) : 1.0f };
+                    Out.m_Shadow      = { float(std::max(LSlot, 0) * shadows::local_pages::faces_per_light_v * shadows::local_pages::face_entries_v), 0.0f, LSlot >= 0 ? 1.0f : 0.0f, bSpot ? shadows::SpotTanHalf(LL) : 1.0f };
                 }
             });
         m_LightRingUsed += std::max(nLights, 0);
@@ -1253,16 +1304,32 @@ namespace xlionrender
             m_VSMReport.m_Pages = m_VSM.m_Stats;
         }
         else m_VSM.Invalidate();            // the casters changing meanwhile reach no page: all of them when it casts again
-        m_LocalShadows.Update(Scene.m_LocalLights, Changed, m_bShadowCache, Eye, ProjScale, m_ShadowUpdatesPerFrame, m_LocalMaps, m_LocalToRender);
+        // The local lights' pages: this ring slot's last request pass (a ring ago: done; its light slots' generations), then the frame's pages
+        {
+            const int Slot = int(m_Device.getFrameIndex() % ring_frames_v), nBits = localBitUints();
+            m_LocalRequests.clear();
+            if( m_LocalReqValid[Slot] )
+            {
+                m_LocalGot.resize(std::size_t(nBits + 32));
+                (void)m_LocalReqHost.MemoryMapFrameRegion(Slot * (nBits + 32), nBits + 32, [&](void* p) { std::memcpy(m_LocalGot.data(), p, m_LocalGot.size() * sizeof(std::uint32_t)); });
+                shadows::local_pages::DecodeRequests({ m_LocalGot.data(), std::size_t(nBits) }, m_LocalReqGen[Slot], m_LocalPages, m_LocalRequests);
+                std::memcpy(m_LocalReport.m_Counters.data(), m_LocalGot.data() + nBits, m_LocalReport.m_Counters.size() * sizeof(std::uint32_t));
+                m_LocalReport.m_bCounters = true;
+                m_LocalReqValid[Slot] = false;
+            }
+            m_LocalPages.setBudget(m_ShadowUpdatesPerFrame);
+            m_LocalPages.Update(Scene.m_LocalLights, Changed, m_bShadowCache, m_LocalRequests, m_Device.getFrameIndex());
+            m_LocalReport.m_Pages = m_LocalPages.m_Stats;
+        }
         m_LightStats.m_nShadowed = m_LightStats.m_nShadowFallback = 0;
         for( std::size_t i = 0; i < Scene.m_LocalLights.size(); ++i ) if( Scene.m_LocalLights[i].m_bCastShadows )
         {
             ++m_LightStats.m_nShadowed;
-            m_LightStats.m_nShadowFallback += m_LocalMaps[i].m_Size == 0;
+            m_LightStats.m_nShadowFallback += m_LocalPages.SlotOfLight(int(i)) < 0;
         }
-        m_LightStats.m_nShadowStale = m_LocalShadows.StaleCount();
+        m_LightStats.m_nShadowStale = m_LocalPages.m_Stats.m_Stale;
 
-        m_nShadowTilesRendered = static_cast<int>(m_VSM.m_ToRender.size() + m_LocalToRender.size());
+        m_nShadowTilesRendered = static_cast<int>(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
         m_VSMRenderTimed[m_Device.getFrameIndex() % ring_frames_v] = !m_VSM.m_ToRender.empty();
         if( m_nShadowTilesRendered == 0 ) return;
 
@@ -1452,130 +1519,61 @@ namespace xlionrender
             Cmd.setScissor(X, Y, S, S);
         };
 
-        // Local maps: batches whose faces fit in the scratch (a point light: 6 faces of half its map size in two blocks of its map
-        // size, a spot: one face of its map size)
-        struct face_batch { int m_iRender; std::array<shadows::buddy::pos, 2> m_Blocks; };
-        std::vector<face_batch> Batch;
-        std::vector<std::uint32_t> LightCasters;        // a local light's casters (reused per light)
-        const int LocalX = sunAtlasWidth();                                                // the local part's origin in the atlas
-        bool      bSunDone = false;
+        auto Cmd = Window.StartRenderPass(m_ShadowPass);
 
-        const auto FacePos = [&]( const face_batch& B, int Face, int Size, bool bPoint ) -> shadows::buddy::pos
-        {
-            if( !bPoint ) return B.m_Blocks[0];
-            const auto& Block = B.m_Blocks[Face / 4];
-            const int   Half  = Size / 2, Sub = Face % 4;
-            return { Block.m_X + (Sub % 2) * Half, Block.m_Y + (Sub / 2) * Half };
-        };
-
-        const auto Flush = [&]()
-        {
-            if( !Batch.empty() )
+            // The sun's virtual pages: each in its slot of the atlas, cleared, its casters (light-space rect test)
+            if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 0);
+            for( const auto& P : m_VSM.m_ToRender )
             {
-                auto Cmd = Window.StartRenderPass(m_ScratchPass);
-                for( const auto& B : Batch )
-                {
-                    const auto& R      = m_LocalToRender[B.m_iRender];
-                    const auto& L      = Scene.m_LocalLights[R.m_Light];
-                    const bool  bPoint = L.m_Type == local_light::type::POINT;
-                    const float Near   = shadows::LocalNear(L.m_Radius);
-                    // The light's casters once (its sphere), then per face the ones in that face's frustum
-                    LightCasters.clear();
-                    for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius) ) LightCasters.push_back(i);
-                    for( int f = 0, nFaces = bPoint ? 6 : 1; f < nFaces; ++f )
-                    {
-                        const auto P = FacePos(B, f, R.m_Map.m_Size, bPoint);
-                        Viewport(Cmd, P.m_X, P.m_Y, bPoint ? R.m_Map.m_Size / 2 : R.m_Map.m_Size);
-                        const xmath::fmat4 FaceW2C = bPoint ? shadows::FaceW2C(L.m_Position, shadows::CubeFaceAxis(f), 1.0f, Near, L.m_Radius)
-                                                            : shadows::FaceW2C(L.m_Position, L.m_Direction.NormalizeCopy(), shadows::SpotTanHalf(L), Near, L.m_Radius);
-                        const frustum Face = frustum::FromW2C(FaceW2C);
-                        DrawCasters(Cmd, FaceW2C, LightCasters, [&](std::uint32_t i) { return !m_bShadowFaceCull || Face.Overlaps(Draws[i].m_World, false); });
-                    }
-                }
-            }
-
-            auto Cmd = Window.StartRenderPass(m_ShadowPass);
-
-            if( !bSunDone )
-            {
-                bSunDone = true;
-
-                // The sun's virtual pages: each in its slot of the atlas, cleared, its casters (light-space rect test)
-                if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 0);
-                for( const auto& P : m_VSM.m_ToRender )
-                {
-                    Viewport(Cmd, P.m_AtlasX, P.m_AtlasY, shadows::vsm::page_texels_v);
-                    Cmd.setPipelineInstance(m_ShadowClearInstance);
-                    Cmd.setBuffer(m_FullscreenVB);
-                    Cmd.setBuffer(m_FullscreenIB);
-                    Cmd.Draw(3);
-                    DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
-                }
-                if( !PairRuns.empty() )         // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
-                {
-                    const int AW = sunAtlasWidth(), AH = shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;
-                    Cmd.setViewport(0.0f, 0.0f, float(AW), float(AH));
-                    Cmd.setScissor(0, 0, AW, AH);
-                    auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();
-                    ViewBlock.m_w2C         = xmath::fmat4::fromIdentity();
-                    ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
-                    for( std::uint32_t r = 0; r < std::uint32_t(PairRuns.size()); ++r )
-                    {
-                        const auto& Run = PairRuns[r];
-                        std::array<xgpu::buffer*, 4> Buffers{ Run.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_pShadowPairs->m_Records, &m_pShadowPairs->m_Pages };
-                        Cmd.setPipelineInstance(m_ShadowPairsInstance, std::span{ Buffers });
-                        Cmd.setDynamicUBO(m_ShadowUBO, 0);
-                        BindClusterStreams(Cmd, *Run.m_pGeom);
-                        Cmd.DrawIndexedIndirectCount(m_pShadowPairs->m_Commands, int(Run.m_First), m_pShadowPairs->m_Counts, int(r), int(Run.m_Max));
-                    }
-                }
-                if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 1);
-            }
-
-            for( const auto& B : Batch )
-            {
-                const auto& R      = m_LocalToRender[B.m_iRender];
-                const auto& L      = Scene.m_LocalLights[R.m_Light];
-                const bool  bPoint = L.m_Type == local_light::type::POINT;
-                details::push_shadow_remap Push{};
-                Push.m_Tile   = { LocalX + R.m_Map.m_X, R.m_Map.m_Y, R.m_Map.m_Size, bPoint ? R.m_Map.m_Size / 2 : R.m_Map.m_Size };
-                Push.m_Params = { shadows::LocalNear(L.m_Radius), L.m_Radius, bPoint ? 1.0f : shadows::SpotTanHalf(L), bPoint ? 1.0f : 0.0f };
-                for( int f = 0; f < (bPoint ? 6 : 1); ++f )
-                {
-                    const auto P = FacePos(B, f, R.m_Map.m_Size, bPoint);
-                    Push.m_Faces[f * 2] = P.m_X;
-                    Push.m_Faces[f * 2 + 1] = P.m_Y;
-                }
-                Viewport(Cmd, Push.m_Tile[0], Push.m_Tile[1], R.m_Map.m_Size);
-                Cmd.setPipelineInstance(m_RemapInstance);
-                Cmd.setPushConstants(Push);
+                Viewport(Cmd, P.m_AtlasX, P.m_AtlasY, shadows::vsm::page_texels_v);
+                Cmd.setPipelineInstance(m_ShadowClearInstance);
                 Cmd.setBuffer(m_FullscreenVB);
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);
+                DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
             }
-            Batch.clear();
-            m_ScratchAlloc.Reset(m_ShadowSetup.m_ScratchSize, m_ShadowSetup.m_MinLocalSize);
-        };
+            if( !PairRuns.empty() )         // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
+            {
+                const int AW = sunAtlasWidth(), AH = shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;
+                Cmd.setViewport(0.0f, 0.0f, float(AW), float(AH));
+                Cmd.setScissor(0, 0, AW, AH);
+                auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();
+                ViewBlock.m_w2C         = xmath::fmat4::fromIdentity();
+                ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
+                for( std::uint32_t r = 0; r < std::uint32_t(PairRuns.size()); ++r )
+                {
+                    const auto& Run = PairRuns[r];
+                    std::array<xgpu::buffer*, 4> Buffers{ Run.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_pShadowPairs->m_Records, &m_pShadowPairs->m_Pages };
+                    Cmd.setPipelineInstance(m_ShadowPairsInstance, std::span{ Buffers });
+                    Cmd.setDynamicUBO(m_ShadowUBO, 0);
+                    BindClusterStreams(Cmd, *Run.m_pGeom);
+                    Cmd.DrawIndexedIndirectCount(m_pShadowPairs->m_Commands, int(Run.m_First), m_pShadowPairs->m_Counts, int(r), int(Run.m_Max));
+                }
+            }
+            if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 1);
 
-        m_ScratchAlloc.Reset(m_ShadowSetup.m_ScratchSize, m_ShadowSetup.m_MinLocalSize);
-        for( int r = 0; r < int(m_LocalToRender.size()); ++r )
+        // The local lights' pages (features/shadows/xlionrender_shadow_local_pages.h): each in its slot of the atlas's local part, cleared,
+        // the casters its light's sphere reaches (once a light) in the page's frustum
+        const int LocalX = sunAtlasWidth();
+        std::vector<std::vector<std::uint32_t>> LightCasters(Scene.m_LocalLights.size());
+        std::vector<std::uint8_t>               bLightCasters(Scene.m_LocalLights.size(), 0);
+        for( const auto& P : m_LocalPages.m_ToRender )
         {
-            const auto& R      = m_LocalToRender[r];
-            const bool  bPoint = Scene.m_LocalLights[R.m_Light].m_Type == local_light::type::POINT;
-            const auto  TryAlloc = [&](face_batch& B)
+            const auto& L = Scene.m_LocalLights[std::size_t(P.m_Light)];
+            auto&       C = LightCasters[std::size_t(P.m_Light)];
+            if( !bLightCasters[std::size_t(P.m_Light)] )
             {
-                if( !m_ScratchAlloc.Alloc(R.m_Map.m_Size, B.m_Blocks[0]) ) return false;
-                return !bPoint || m_ScratchAlloc.Alloc(R.m_Map.m_Size, B.m_Blocks[1]);
-            };
-            face_batch B{ r, {} };
-            if( !TryAlloc(B) )
-            {
-                Flush();
-                if( !TryAlloc(B) ) continue;        // larger than the scratch: setup error (m_ScratchSize >= 2 x m_MaxLocalSize)
+                bLightCasters[std::size_t(P.m_Light)] = 1;
+                for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius) ) C.push_back(i);
             }
-            Batch.push_back(B);
+            Viewport(Cmd, LocalX + P.m_AtlasX, P.m_AtlasY, shadows::local_pages::page_texels_v);
+            Cmd.setPipelineInstance(m_ShadowClearInstance);
+            Cmd.setBuffer(m_FullscreenVB);
+            Cmd.setBuffer(m_FullscreenIB);
+            Cmd.Draw(3);
+            const frustum Page = frustum::FromW2C(P.m_W2C);
+            DrawCasters(Cmd, P.m_W2C, C, [&](std::uint32_t i) { return !m_bShadowFaceCull || Page.Overlaps(Draws[i].m_World, false); });
         }
-        if( !Batch.empty() || !bSunDone ) Flush();
     }
 
     //------------------------------------------------------------------------------------------------
@@ -1608,7 +1606,7 @@ namespace xlionrender
                 }
                 Light.m_CameraPos = xmath::fvec4(Eye, 1);
                 Light.m_ShadowLevels = {};           // (the clipmap's: reserved, zero - the compiled materials' layout keeps them)
-                Light.m_ShadowParams = {};
+                Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.getSetup().m_ResolutionBias };     // the local lights' pages
                 const auto& VS = m_VSM.getSetup();
                 Light.m_VSMParams  = bVSM ? xmath::fvec4{ 1.0f, m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };
                 Light.m_VSMParams2 = { float(VS.m_Window), float(shadows::vsm::page_texels_v), float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
@@ -2728,6 +2726,7 @@ namespace xlionrender
         const auto T2b = clock::now();
         renderScenePass(Window, Scene, View, W2C, Eye, true);
         if( Scene.m_Sun.m_bCastShadows ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
+        localRequestPass(Window, Scene, View, W2C, Eye);
         const auto T2c = clock::now();
 
         // HDR -> exposure -> LionMapper -> sRGB output (alpha = coverage)

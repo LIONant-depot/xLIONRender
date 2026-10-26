@@ -382,6 +382,8 @@ vec3 PBRLighting
 	vec3 FaceN = cross(dFdx(In.wSpacePosition.xyz), dFdy(In.wSpacePosition.xyz));
 	const vec3 VtxN = normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0);
 	FaceN = dot(FaceN, FaceN) > 1e-20 ? normalize(FaceN) * sign(dot(FaceN, VtxN) + 1e-9) : VtxN;
+	g_LocalFaceN = FaceN;                                                                  // (the local lights' shadows: LocalShadow)
+	g_LocalFoot  = max(length(dFdx(In.wSpacePosition.xyz)), length(dFdy(In.wSpacePosition.xyz)));
 	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, FaceN) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
 #endif
 	// xLIONRender: W == 0 is a directional light (XYZ = direction towards the light, no falloff); W > 0 a point

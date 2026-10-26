@@ -19,6 +19,7 @@
 #include "plans/forward/xlionrender_plan_forward.h"     // (details::push_static_geom, draw_indexed_indirect: the half-resolution GI pass's lists)
 #include "features/cull/xlionrender_gpu_cull.h"
 #include "features/shadows/xlionrender_shadow_pairs.h"
+#include "features/shadows/xlionrender_shadow_local_pages.h"
 #include "xlionrender_view.h"
 #include <chrono>
 #include <memory>
@@ -150,9 +151,9 @@ namespace xlionrender
 
         // Shadows: false re-renders every shadow tile every frame (the reference the caching is tested against)
         bool                                       m_bShadowCache = true;
-        // At most this many local light shadow maps re-render per frame (the others stay a frame stale)
-        int                                        m_ShadowUpdatesPerFrame = 16;
-        // Local light maps draw, per face, only the casters in that face's frustum (false: every caster in the light's sphere)
+        // At most this many local light shadow pages render per frame besides the pinned ones (the others wait, a dirty one stays stale)
+        int                                        m_ShadowUpdatesPerFrame = 64;
+        // Local light pages draw only the casters in the page's frustum (false: every caster in the light's sphere)
         bool                                       m_bShadowFaceCull = true;
         // The sun's movers (casters changed lately, skinned) in mover pages of their own, never dirtying the static pages (P1b); false: every
         // caster in the pages (the tests' reference: the two layers composed must equal it)
@@ -176,6 +177,16 @@ namespace xlionrender
             double                          m_RenderGpuMs  = 0;      // the sun's pages rendered (a ring late; 0: none rendered)
         };
                       const vsm_report&    getVSMReport( void ) const                                           noexcept { return m_VSMReport; }
+        // The local lights' pages (P1d): this frame's page stats; a ring late the request pass's counters (0 pixel-light pairs, 1 shaded by
+        // their level, 2 by a coarser one, 3 by none, 5-9 per level)
+        struct local_report { shadows::local_pages::stats m_Pages; std::array<std::uint32_t, 32> m_Counters{}; bool m_bCounters = false; };
+                      const local_report&  getLocalReport( void ) const                                         noexcept { return m_LocalReport; }
+        // This frame's local pages rendered (tests: which lights)
+                      const std::vector<shadows::local_pages::page_to_render>& getLocalPagesRendered( void ) const noexcept { return m_LocalPages.m_ToRender; }
+        // Their setup (tests: a small pool, a budget): starts them over
+                      void                 configureLocalPages( const shadows::local_pages::setup& Setup )     noexcept { m_LocalPages.Init(Setup); }
+        // Invariant 1 on this frame's local table
+                      bool                 validateLocalPages( void ) const                                     noexcept { std::vector<std::uint32_t> T; m_LocalPages.BuildTable(T); return m_LocalPages.Validate(T); }
         struct pairs_report { int m_nCandidates = 0, m_nRuns = 0, m_nPairs = 0, m_nDropped = 0; std::int64_t m_Triangles = 0; bool m_bGPU = false; };
         // The sun's GPU page/caster pairs (P1c): this frame's candidates and runs, whether the GPU drew the pages; a ring late the pairs, those
         // dropped and the triangles
@@ -566,11 +577,6 @@ namespace xlionrender
         // mesh, rigid, skin), the scratch the local maps' casters render into and the remap from it into the atlas
         shadows::setup                          m_ShadowSetup;
         xgpu::texture                           m_ShadowAtlas;
-        xgpu::texture                           m_ShadowScratch;
-        xgpu::renderpass                        m_ScratchPass;
-        xgpu::pipeline                          m_RemapPipeline;
-        xgpu::pipeline_instance                 m_RemapInstance;
-        shadows::buddy                          m_ScratchAlloc;
         xgpu::renderpass                        m_ShadowClearPass, m_ShadowPass;
         xgpu::pipeline                          m_ShadowClearPipeline;
         xgpu::pipeline_instance                 m_ShadowClearInstance;
@@ -611,9 +617,22 @@ namespace xlionrender
         int  sunAtlasWidth( void ) const noexcept { return 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
         void vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
         int  vsmTableBase( void ) noexcept;
-        shadows::local_shadows                  m_LocalShadows;
-        std::vector<shadows::local_map_to_render> m_LocalToRender;
-        std::vector<shadows::local_map>         m_LocalMaps;        // per scene local light: its map (m_Size 0: none)
+        // The local lights' shadow pages (P1d, features/shadows/xlionrender_shadow_local_pages.h): their request pass (a ring slot each, with
+        // the light slots' generations of then) and this frame's table in the cell ring
+        shadows::local_pages                    m_LocalPages;
+        std::vector<shadows::local_pages::key>  m_LocalRequests;
+        std::vector<std::uint32_t>              m_LocalGot, m_LocalTable;
+        std::uint64_t                           m_LocalTableFrame = ~0ull;
+        int                                     m_LocalTableBase  = 0;
+        xgpu::shader                            m_LocalRequestShader;
+        xgpu::compute                           m_LocalRequest;
+        xgpu::buffer                            m_LocalFrames, m_LocalReq, m_LocalReqHost;
+        std::array<std::array<std::uint32_t, max_local_lights_v>, ring_frames_v> m_LocalReqGen{};
+        std::array<bool, ring_frames_v>         m_LocalReqValid{};
+        local_report                            m_LocalReport;
+        int  localBitUints( void ) const noexcept { return (shadows::local_pages::max_faces_v * shadows::local_pages::face_entries_v + 31) / 32; }
+        int  localTableBase( void ) noexcept;
+        void localRequestPass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
         struct prev_caster { xmath::fbbox m_World; std::uint64_t m_First; };       // (m_First: the shadow pass the key first appeared in)
         std::unordered_map<std::uint64_t, prev_caster> m_PrevCasters;   // last frame's casters (key -> world bounds), to find what changed
         int                                     m_nShadowTilesRendered = 0;

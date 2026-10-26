@@ -20,57 +20,89 @@ vec3 PBRDirect(in const vec3 N, in const vec3 V, in const float NdotV, in const 
 #include "xlionrender_octahedral.glsl"
 #include "xlionrender_light_eval.glsl"
 
-// 1 lit .. 0 shadowed. Receiver: the surface minus the light's position, N its normal. The light's map (Shadow: xy origin in the
-// atlas, z size) holds the linear distance to the nearest caster / radius: octahedral for a point light, the frustum for a spot.
-// Against acne the receiver moves along its normal (normal offset: the error grows as the light grazes the
-// surface, a constant bias does not follow it) by two texels, plus a one texel bias.
+layout(std430, set = 1, binding = 3) readonly buffer LocalLightBuffer { LocalLightData LocalLightList[]; };
+layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint LightCells[]; };
+
+// The local lights' shadow pages (features/shadows/xlionrender_shadow_local_pages.h): a face a virtual map of kLocalLevel0Pages^2
+// pages in kLocalLevels levels, its entries in the page table (LightCells at UBOLight.ShadowParams.y: 16 bits, slot + 1); the slots
+// in the atlas's local part (x from ShadowParams.x, ShadowParams.z slots a row). Set by the material before LocalLights: the pixel's
+// world footprint and the triangle's own normal (the derivatives, in uniform control flow)
+const int kLocalLevels      = 5;
+const int kLocalLevel0Pages = 16;
+const int kLocalPageTexels  = 128;
+const int kLocalFaceEntries = 341;
+float g_LocalFoot  = 0.0;
+vec3  g_LocalFaceN = vec3(0.0, 1.0, 0.0);
+
+// 1 lit .. 0 shadowed. Receiver: the surface minus the light's position. The face it is seen through (a point light's cube face, a
+// spot's frustum), the level whose texel fits the pixel's footprint (the request pass picks it alike: xlionrender_local_request_comp.glsl),
+// coarser while a tap's page is missing (the coarsest is pinned). Against acne the receiver moves along its triangle's normal by half
+// a texel, with the pages' slope-scaled depth bias (measured on the visibility reference: 1.5 texels and a texel nearer missed contact
+// shadows, 3.8% against 2.5% disagreement, no less acne). 3 x 3 taps, each through the table (a tap past the face's edge clamps to it)
 float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const vec3 N)
 {
-    if (Ld.Shadow.z <= 0.0) return 1.0;
+    if (Ld.Shadow.z <= 0.0 || UBOLight.ShadowParams.x <= 0.0) return 1.0;
 
-    const float kBorder = 2.0;                                                  // shadows::local_border_v
-    const float Size    = Ld.Shadow.z;
-    const float Inner   = Size - 2.0 * kBorder;
     const bool  bPoint  = Ld.DirCosOuter.w < -1.5;
-    const float TexelWorld = length(Receiver) * (bPoint ? 4.0 : 2.0 * Ld.Shadow.w) / Inner;    // a texel's size at the receiver (the
-                                                                                               // octahedral square spans ~4 radians)
-    const vec3  FromLight = Receiver + N * (2.0 * TexelWorld);
-    const float Dist      = length(FromLight);
-    vec2  UV;
+    const float TanHalf = bPoint ? 1.0 : Ld.Shadow.w;
+    const float Radius  = Ld.PosRadius.w;
+    const float Near    = max(Radius * 0.01, 0.005);                           // shadows::LocalNear
+    vec3 Axis;
+    int  Face = 0;
     if (bPoint)
     {
-        UV = OctEncode(FromLight / Dist);
+        const vec3 A = abs(Receiver);
+        if (A.x >= A.y && A.x >= A.z) { Face = Receiver.x >= 0.0 ? 0 : 1; Axis = vec3(Receiver.x >= 0.0 ? 1.0 : -1.0, 0.0, 0.0); }
+        else if (A.y >= A.z)          { Face = Receiver.y >= 0.0 ? 2 : 3; Axis = vec3(0.0, Receiver.y >= 0.0 ? 1.0 : -1.0, 0.0); }
+        else                          { Face = Receiver.z >= 0.0 ? 4 : 5; Axis = vec3(0.0, 0.0, Receiver.z >= 0.0 ? 1.0 : -1.0); }
     }
-    else
-    {
-        const vec3  F       = Ld.DirCosOuter.xyz;
-        const vec3  Up      = abs(F.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-        const vec3  R       = normalize(cross(Up, F));
-        const vec3  U       = cross(F, R);
-        const float TanHalf = Ld.Shadow.w;
-        const float d       = dot(FromLight, F);
-        if (d <= 0.0) return 1.0;
-        UV = vec2(dot(FromLight, R), dot(FromLight, U)) / (d * TanHalf);
-        if (any(greaterThan(abs(UV), vec2(1.0)))) return 1.0;                  // outside the spot's frustum
-    }
+    else Axis = Ld.DirCosOuter.xyz;
+    const vec3 Up = abs(Axis.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    const vec3 R  = normalize(cross(Up, Axis));
+    const vec3 U  = cross(Axis, R);
+    const float d0 = dot(Receiver, Axis);
+    if (d0 <= Near) return 1.0;
+    const float Texel0 = 2.0 * d0 * TanHalf / float(kLocalLevel0Pages * kLocalPageTexels);
+    const int   Level  = clamp(int(floor(log2(max(g_LocalFoot, 1e-9) / Texel0) + UBOLight.ShadowParams.w)), 0, kLocalLevels - 1);
+    const uint  FaceBase = uint(Ld.Shadow.x) + uint(Face * kLocalFaceEntries);
+    const uint  TableBase = uint(UBOLight.ShadowParams.y);
+    const int   Row = int(UBOLight.ShadowParams.z);
+    const float A = Radius / (Radius - Near), B = -Radius * Near / (Radius - Near);     // shadows::FaceW2C's depth
 
-    const float Ref   = (Dist - TexelWorld) / Ld.PosRadius.w;
-    const ivec2 Base  = ivec2(Ld.Shadow.xy);
-    const ivec2 Texel = ivec2(kBorder + floor((UV * 0.5 + 0.5) * Inner));
-    float Lit = 0.0;
-    for (int y = -1; y <= 1; ++y)
-    for (int x = -1; x <= 1; ++x)
+    for (int l = Level; l < kLocalLevels; ++l)
     {
-        const ivec2 P = clamp(Texel + ivec2(x, y), ivec2(0), ivec2(int(Size) - 1));     // the border holds the folded neighbors
-        Lit += (texelFetch(SamplerShadowMap, Base + P, 0).r < Ref) ? 0.0 : 1.0;
+        const float TexelW = Texel0 * float(1 << l);
+        const vec3  P  = Receiver + g_LocalFaceN * (0.5 * TexelW);
+        const float d  = dot(P, Axis);
+        if (d <= Near) return 1.0;
+        const vec2  UV = vec2(dot(P, R), dot(P, U)) / (d * TanHalf);
+        if (!bPoint && any(greaterThan(abs(UV), vec2(1.0)))) return 1.0;      // outside the spot's frustum
+        const float Ref = A + B / d;
+        const int   NT  = (kLocalLevel0Pages >> l) * kLocalPageTexels, W = kLocalLevel0Pages >> l;
+        uint LB = 0u;
+        for (int k = 0; k < l; ++k) LB += uint((kLocalLevel0Pages >> k) * (kLocalLevel0Pages >> k));
+        const ivec2 T  = ivec2(floor((clamp(UV, vec2(-1.0), vec2(1.0)) * 0.5 + 0.5) * float(NT)));
+        float Lit = 0.0;
+        bool  bAll = true;
+        for (int y = -1; y <= 1 && bAll; ++y)
+        for (int x = -1; x <= 1; ++x)
+        {
+            const ivec2 t = clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1));
+            const ivec2 Pg = t / kLocalPageTexels;
+            const uint  i  = FaceBase + LB + uint(Pg.y * W + Pg.x);
+            const uint  E  = (LightCells[TableBase + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
+            if (E == 0u) { bAll = false; break; }
+            const int   s  = int(E) - 1;
+            const ivec2 At = ivec2(int(UBOLight.ShadowParams.x) + (s % Row) * kLocalPageTexels, (s / Row) * kLocalPageTexels) + (t - Pg * kLocalPageTexels);
+            Lit += (texelFetch(SamplerShadowMap, At, 0).r < Ref) ? 0.0 : 1.0;
+        }
+        if (bAll) return Lit / 9.0;
     }
-    return Lit / 9.0;
+    return 1.0;                                                                 // (no page yet: the light was never rendered)
 }
 
 // The local lights (storage buffers, so a scene is not limited to a uniform block): the lights, and the world-cell lists
 // (features/lights/xlionrender_light_cells.h builds them; levels_v 5, cells_v 16, a packed uint header per cell, 2 uint entries)
-layout(std430, set = 1, binding = 3) readonly buffer LocalLightBuffer { LocalLightData LocalLightList[]; };
-layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint LightCells[]; };
 
 const int kCellLevels = 5;
 const int kCells      = 16;

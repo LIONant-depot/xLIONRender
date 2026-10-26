@@ -6,6 +6,7 @@
 //  - the visibility reference: per pixel, the shadow map's visibility of one light (the image with the light's shadows over the image
 //    without) against the GI's rays (gi::world::Occluded, the same geometry). Opaque rigid geometry only: every capture says so
 #include "xlionrender_test_common.h"
+#include "features/shadows/xlionrender_shadow_local_pages.h"
 #include "features/gi/xlionrender_surfel_gi.h"
 #include <random>
 
@@ -62,24 +63,22 @@ int main()
         std::printf("LightEval: analytic values ok (falloff ends, half radius, monotonic, scale; cone inside, outside, halfway)\n");
     }
 
-    // Radiometry is not visibility: the local shadow cache keeps a map through a colour and intensity change, renders it after a move
+    // Radiometry is not visibility: the local lights' pages (features/shadows/xlionrender_shadow_local_pages.h) stay through a colour and
+    // intensity change, render again after a move
     {
-        xlionrender::shadows::local_shadows S;
+        xlionrender::shadows::local_pages S;
         S.Init({});
         std::vector<xlionrender::local_light> L{ { .m_Position = { 1, 2, 3 }, .m_Radius = 6 } };
-        std::vector<xlionrender::shadows::local_map> Maps;
-        std::vector<xlionrender::shadows::local_map_to_render> Out;
-        const xmath::fvec3 Eye{ 0, 2, -8 };
-        S.Update(L, {}, true, Eye, 500, 8, Maps, Out);
-        CHECK(Out.size() == 1, "a new light's map is not rendered (%zu)", Out.size());
-        S.Update(L, {}, true, Eye, 500, 8, Maps, Out);
-        CHECK(Out.empty(), "an unchanged light's map is rendered again");
+        S.Update(L, {}, true, {}, 1);
+        CHECK(S.m_ToRender.size() == 6, "a new point light's pinned pages are not rendered (%zu)", S.m_ToRender.size());
+        S.Update(L, {}, true, {}, 2);
+        CHECK(S.m_ToRender.empty(), "an unchanged light's pages are rendered again");
         L[0].m_Color = { 1, 0.2f, 0.1f }; L[0].m_Intensity = 9;
-        S.Update(L, {}, true, Eye, 500, 8, Maps, Out);
-        CHECK(Out.empty() && Maps[0].m_Size > 0, "a colour and intensity change rendered the map again (or dropped it)");
+        S.Update(L, {}, true, {}, 3);
+        CHECK(S.m_ToRender.empty() && S.SlotOfLight(0) >= 0 && S.m_Stats.m_ResidentPinned == 6, "a colour and intensity change rendered the pages again (or dropped them)");
         L[0].m_Position.m_X += 0.5f;
-        S.Update(L, {}, true, Eye, 500, 8, Maps, Out);
-        CHECK(Out.size() == 1, "a moved light kept its old map");
+        S.Update(L, {}, true, {}, 4);
+        CHECK(S.m_ToRender.size() == 6, "a moved light kept its old pages");
     }
 
     app App;
@@ -133,12 +132,11 @@ int main()
         CHECK(n > 1000 && MaxRel < 2e-3, "twice the intensity is not twice the light (max relative error %g over %d pixels)", MaxRel, n);
     }
 
-    // The counters (DescribeScene's Lights*): no update budget (forced exhaustion) - a new light's map is never rendered, the light
-    // shades unshadowed and is counted (the declared fallback); a moved caster's maps stay sampled while they wait (counted stale: today's
-    // behaviour, which P1a's resource states end)
+    // The counters (DescribeScene's Lights*): no update budget (forced exhaustion) - a moved caster's pages stay sampled while they wait
+    // (counted stale); a new light still gets its pinned pages (mandatory: the coarse safety net, P1d) - shadowed, not a fallback
     {
         Scene.m_LocalLights = { { .m_Position = { 0.5f, 2.5f, 1.0f }, .m_Radius = 8 } };
-        CHECK(App.RenderFrame(Scene, View, Camera) && App.RenderFrame(Scene, View, Camera), "render with a budget");
+        for (int k = 0; k < 8; ++k) CHECK(App.RenderFrame(Scene, View, Camera), "render with a budget");
         auto L = Renderer.getLightStats();
         CHECK(L.m_nLights == 1 && L.m_nShadowed == 1 && L.m_nShadowFallback == 0 && L.m_nShadowStale == 0 && L.m_nDropped == 0, "counters with a budget: lights %d shadowed %d fallback %d stale %d dropped %d", L.m_nLights, L.m_nShadowed, L.m_nShadowFallback, L.m_nShadowStale, L.m_nDropped);
         const int Budget = Renderer.m_ShadowUpdatesPerFrame;
@@ -146,12 +144,12 @@ int main()
         Scene.m_Draws[1].m_L2W = xmath::fmat4::fromTranslation({ -4.0f, 0.3f, -2.0f });      // a sphere moves: the map waits
         CHECK(App.RenderFrame(Scene, View, Camera), "render a moved caster");
         L = Renderer.getLightStats();
-        CHECK(L.m_nShadowStale == 1 && L.m_nShadowFallback == 0, "a deferred map is not counted stale (stale %d, fallback %d)", L.m_nShadowStale, L.m_nShadowFallback);
+        CHECK(L.m_nShadowStale >= 1 && L.m_nShadowFallback == 0, "a deferred page is not counted stale (stale %d, fallback %d)", L.m_nShadowStale, L.m_nShadowFallback);
         Scene.m_LocalLights.push_back({ .m_Position = { -3.0f, 1.2f, 3.0f }, .m_Radius = 6 });
         CHECK(App.RenderFrame(Scene, View, Camera), "render a new light");
         L = Renderer.getLightStats();
-        CHECK(L.m_nShadowFallback == 1, "a shadowed light without a map is not counted as a fallback (%d)", L.m_nShadowFallback);
-        std::printf("counters: forced budget exhaustion - stale maps %d, unshadowed fallbacks %d\n", L.m_nShadowStale, L.m_nShadowFallback);
+        CHECK(L.m_nShadowFallback == 0 && L.m_nShadowed == 2, "a new light under no budget is a fallback (%d): its pinned pages are mandatory", L.m_nShadowFallback);
+        std::printf("counters: forced budget exhaustion - stale pages %d, unshadowed fallbacks %d\n", L.m_nShadowStale, L.m_nShadowFallback);
         Renderer.m_ShadowUpdatesPerFrame = Budget;
         Scene.m_Draws[1].m_L2W = xmath::fmat4::fromTranslation({ -4.0f, 0.0f, -2.0f });
     }
