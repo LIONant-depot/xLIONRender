@@ -1088,7 +1088,7 @@ namespace xlionrender
         // The casters and what changed since the last render: new and gone casters, moved or re-materialed ones, and skinned
         // ones (old and new bounds). Draws with an instance id compare against their slot's last state (no hashing, bounds kept
         // while unchanged); draws without one go through a hash of their state.
-        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; bool m_bMover; };     // m_BoxedBase: in m_ClusterSkip (~0: none)
+        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; bool m_bMover; bool m_bGPU; };     // m_BoxedBase: in m_ClusterSkip (~0: none); m_bGPU: the pairs can draw it (rigid, no masked material)
         std::vector<draw_caster>                         Draws;
         std::vector<xmath::fbbox>                        Changed;
         std::vector<xmath::fbbox>                        SunStatic, SunMovers;  // the sun's pages: changes of the static casters (a static caster changed or
@@ -1166,7 +1166,13 @@ namespace xlionrender
             m_DrawWorld[iDraw] = World;
             if( !m_bShadowSplitMovers ) bMover = false;
             if( bMover ) SunMovers.push_back(World);
-            Draws.push_back({ &D, pMesh, World, Slot, BoxedBase, bMover });
+            bool bGPU = pMesh->m_bCluster && !bSkin;
+            if( bGPU ) for( const auto& Sub : pMesh->m_Geom.m_Submeshes )
+            {
+                auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) { bGPU = false; break; }
+            }
+            Draws.push_back({ &D, pMesh, World, Slot, BoxedBase, bMover, bGPU });
         }
         for( const auto& [Key, P] : m_PrevCasters ) if( !Now.contains(Key) )
         {
@@ -1192,10 +1198,22 @@ namespace xlionrender
         // wide penumbrae read them)
         m_VSMSoftLevels = Sun.m_SourceAngle > 0 ? 3 : 0;
         m_VSM.m_ToRender.clear();
+        bool bPairs = m_pShadowPairs && m_bShadowGPUPairs;
+        if( m_pShadowPairs )
+        {
+            m_pShadowPairs->Begin(m_Device.getFrameIndex());
+            m_PairsReport.m_nPairs = m_pShadowPairs->m_Pairs; m_PairsReport.m_nDropped = m_pShadowPairs->m_Dropped; m_PairsReport.m_Triangles = m_pShadowPairs->m_Triangles;
+            if( m_pShadowPairs->m_bDropped ) { m_VSM.Invalidate(); bPairs = false; }      // (its pages missed pairs: all again, a draw a cluster and page)
+        }
+        m_PairsReport.m_nCandidates = m_PairsReport.m_nRuns = 0;
+        m_PairsReport.m_bGPU        = false;
         if( Sun.m_bCastShadows )
         {
             if( std::vector<std::uint64_t> Ns; m_VSMTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
                 m_VSMReport.m_RequestGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
+            if( const int Slot = int(m_Device.getFrameIndex() % ring_frames_v); !m_VSMRenderTimed[Slot] ) m_VSMReport.m_RenderGpuMs = 0;
+            else if( std::vector<std::uint64_t> Ns; m_VSMRenderTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
+                m_VSMReport.m_RenderGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
             // Level 0's texel: the clipmap's level 0 texel / 4, at most 2 mm (a scene's tile can be tens of metres: the static geom
             // preview's is the model's radius / 2); the screen picks the level, so the 2 mm only show where a pixel asks for them. The
             // levels: at least the setup's, more (up to max_levels_v) when the coarsest would not cover what the clipmap covers
@@ -1240,7 +1258,101 @@ namespace xlionrender
         m_LightStats.m_nShadowStale = m_LocalShadows.StaleCount();
 
         m_nShadowTilesRendered = static_cast<int>(m_VSM.m_ToRender.size() + m_LocalToRender.size());
+        m_VSMRenderTimed[m_Device.getFrameIndex() % ring_frames_v] = !m_VSM.m_ToRender.empty();
         if( m_nShadowTilesRendered == 0 ) return;
+
+        // The casters culled in light space (only when a page renders): their light-space boxes, kept from frame to frame - a draw's again when
+        // its world box changes, all when the light's basis does (an epoch). The CPU path's casters (all of them without the pairs)
+        auto&                       LightBounds = m_CasterLight;
+        std::vector<std::uint32_t>  AllCasters;
+        if( !m_VSM.m_ToRender.empty() )
+        {
+            const std::array<xmath::fvec3, 3> Basis = { m_VSM.m_X, m_VSM.m_Y, m_VSM.m_Z };
+            if( std::memcmp(&Basis, &m_CasterLightBasis, sizeof(Basis)) != 0 ) { m_CasterLightWorld.clear(); m_CasterLightBasis = Basis; }
+            m_CasterLight.resize(Draws.size());
+            m_CasterLightWorld.resize(Draws.size(), xmath::fbbox{ xmath::fvec3(1, 1, 1), xmath::fvec3(-1, -1, -1) });
+            AllCasters.reserve(Draws.size());
+            for( std::uint32_t i = 0; i < Draws.size(); ++i )
+            {
+                if( std::memcmp(&m_CasterLightWorld[i], &Draws[i].m_World, sizeof(xmath::fbbox)) != 0 )
+                {
+                    m_CasterLight[i]      = m_VSM.Bounds(Draws[i].m_World);
+                    m_CasterLightWorld[i] = Draws[i].m_World;
+                }
+            }
+        }
+
+        // The sun's GPU page/caster pairs (P1c, features/shadows/xlionrender_shadow_pairs.h): the pages, the rigid opaque clusters of the casters
+        // that overlap a page of their kind (a candidate each, a run a geometry), paired on the GPU - outside the passes
+        struct pairs_run { const cluster_geom* m_pGeom; std::uint32_t m_First, m_Max; };
+        std::vector<pairs_run> PairRuns;
+        if( bPairs && !m_VSM.m_ToRender.empty() )
+        {
+            const float AW = float(sunAtlasWidth()), AH = float(shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize), T = float(shadows::vsm::page_texels_v);
+            std::vector<shadow_pairs::page> Pages;
+            Pages.reserve(m_VSM.m_ToRender.size());
+            bool bAny[2] = {};
+            for( const auto& P : m_VSM.m_ToRender )
+            {
+                Pages.push_back({ P.m_W2C, { T / AW, T / AH, (T + 2.0f * float(P.m_AtlasX)) / AW - 1.0f, (T + 2.0f * float(P.m_AtlasY)) / AH - 1.0f }, { P.m_MinX, P.m_MinY, P.m_Size, P.m_bMover ? 1.0f : 0.0f } });
+                bAny[P.m_bMover] = true;
+            }
+            // ponytail: a caster against every page of its kind until one overlaps (the epoch's hundreds of static pages: a grid if it shows)
+            const auto Touches = [&]( std::uint32_t i )
+            {
+                if( !bAny[Draws[i].m_bMover] ) return false;
+                for( const auto& P : m_VSM.m_ToRender ) if( P.m_bMover == Draws[i].m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size) ) return true;
+                return false;
+            };
+            std::vector<shadow_pairs::candidate>& Cands = m_PairCandidates;
+            std::vector<xmath::fmat4>             L2L;
+            std::unordered_map<const cluster_geom*, std::uint32_t> RunOf;
+            Cands.clear();
+            xmath::fmat4 Rot = xmath::fmat4::fromZero();
+            Rot(0, 0) = m_VSM.m_X.m_X; Rot(0, 1) = m_VSM.m_X.m_Y; Rot(0, 2) = m_VSM.m_X.m_Z;
+            Rot(1, 0) = m_VSM.m_Y.m_X; Rot(1, 1) = m_VSM.m_Y.m_Y; Rot(1, 2) = m_VSM.m_Y.m_Z;
+            Rot(2, 0) = m_VSM.m_Z.m_X; Rot(2, 1) = m_VSM.m_Z.m_Y; Rot(2, 2) = m_VSM.m_Z.m_Z;
+            Rot(3, 3) = 1.0f;
+            for( std::uint32_t i = 0; i < Draws.size(); ++i )
+            {
+                if( !Draws[i].m_bGPU || !Touches(i) ) continue;
+                const auto& D    = *Draws[i].m_pDraw;
+                const auto& G    = Draws[i].m_pMesh->m_Geom;
+                const auto  Draw = std::uint32_t(L2L.size()) | (Draws[i].m_bMover ? shadow_pairs::mover_v : 0u);
+                const auto [It, bNew] = RunOf.try_emplace(&G, std::uint32_t(PairRuns.size()));
+                if( bNew ) PairRuns.push_back({ &G, 0, 0 });
+                auto& Run = PairRuns[It->second];
+                L2L.push_back(Rot * D.m_L2W);
+                for( const auto& Sub : G.m_Submeshes )
+                {
+                    auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                    if( pMat && !MaterialVisibilityOf(pMat->m_State).m_bCastsShadow ) continue;
+                    for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                    {
+                        if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
+                        const auto& C    = G.m_Clusters[c];
+                        const auto  Ctr  = C.m_BBox.getCenter();
+                        const auto  Half = (C.m_BBox.m_Max - C.m_BBox.m_Min) * 0.5f;
+                        Cands.push_back({ It->second, 0, c, Draws[i].m_Slot, C.m_nIndices, C.m_iIndex, std::int32_t(C.m_iVertex), Draw
+                                        , { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, 0 }, { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
+                        ++Run.m_Max;
+                    }
+                }
+            }
+            if( shadow_pairs::Fits(Cands.size(), L2L.size(), Pages.size(), PairRuns.size()) )
+            {
+                std::uint32_t First = 0;        // a run's commands: its candidates' room
+                for( auto& Run : PairRuns ) { Run.m_First = First; First += Run.m_Max; }
+                for( auto& K : Cands ) K.m_RunFirst = PairRuns[K.m_Run].m_First;
+                m_pShadowPairs->Pair(Window, Cands, L2L, Pages, PairRuns.size());
+                m_PairsReport.m_nCandidates = int(Cands.size()); m_PairsReport.m_nRuns = int(PairRuns.size());
+                m_PairsReport.m_bGPU        = true;
+            }
+            else { bPairs = false; PairRuns.clear(); }
+        }
+        else bPairs = false;
+        if( !m_VSM.m_ToRender.empty() )
+            for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( !(bPairs && Draws[i].m_bGPU) ) AllCasters.push_back(i);
 
         // Draws the casters that pass Keep with W2C into the current viewport
         // Draws the casters of Indices that pass Keep with W2C into the current viewport
@@ -1375,28 +1487,9 @@ namespace xlionrender
             if( !bSunDone )
             {
                 bSunDone = true;
-                // The casters culled in light space (only when a tile or page renders): their light-space boxes, kept from frame to frame -
-                // a draw's again when its world box changes, all when the light's basis does (an epoch)
-                auto&                       LightBounds = m_CasterLight;
-                std::vector<std::uint32_t>  AllCasters;
-                if( !m_VSM.m_ToRender.empty() )
-                {
-                    const std::array<xmath::fvec3, 3> Basis = { m_VSM.m_X, m_VSM.m_Y, m_VSM.m_Z };
-                    if( std::memcmp(&Basis, &m_CasterLightBasis, sizeof(Basis)) != 0 ) { m_CasterLightWorld.clear(); m_CasterLightBasis = Basis; }
-                    m_CasterLight.resize(Draws.size());
-                    m_CasterLightWorld.resize(Draws.size(), xmath::fbbox{ xmath::fvec3(1, 1, 1), xmath::fvec3(-1, -1, -1) });
-                    AllCasters.reserve(Draws.size());
-                    for( std::uint32_t i = 0; i < Draws.size(); ++i )
-                    {
-                        if( std::memcmp(&m_CasterLightWorld[i], &Draws[i].m_World, sizeof(xmath::fbbox)) != 0 )
-                        {
-                            m_CasterLight[i]      = m_VSM.Bounds(Draws[i].m_World);
-                            m_CasterLightWorld[i] = Draws[i].m_World;
-                        }
-                        AllCasters.push_back(i);
-                    }
-                }
+
                 // The sun's virtual pages: each in its slot of the atlas, cleared, its casters (light-space rect test)
+                if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 0);
                 for( const auto& P : m_VSM.m_ToRender )
                 {
                     Viewport(Cmd, P.m_AtlasX, P.m_AtlasY, shadows::vsm::page_texels_v);
@@ -1406,6 +1499,25 @@ namespace xlionrender
                     Cmd.Draw(3);
                     DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
                 }
+                if( !PairRuns.empty() )         // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
+                {
+                    const int AW = sunAtlasWidth(), AH = shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;
+                    Cmd.setViewport(0.0f, 0.0f, float(AW), float(AH));
+                    Cmd.setScissor(0, 0, AW, AH);
+                    auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();
+                    ViewBlock.m_w2C         = xmath::fmat4::fromIdentity();
+                    ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
+                    for( std::uint32_t r = 0; r < std::uint32_t(PairRuns.size()); ++r )
+                    {
+                        const auto& Run = PairRuns[r];
+                        std::array<xgpu::buffer*, 4> Buffers{ Run.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_pShadowPairs->m_Records, &m_pShadowPairs->m_Pages };
+                        Cmd.setPipelineInstance(m_ShadowPairsInstance, std::span{ Buffers });
+                        Cmd.setDynamicUBO(m_ShadowUBO, 0);
+                        BindClusterStreams(Cmd, *Run.m_pGeom);
+                        Cmd.DrawIndexedIndirectCount(m_pShadowPairs->m_Commands, int(Run.m_First), m_pShadowPairs->m_Counts, int(r), int(Run.m_Max));
+                    }
+                }
+                if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 1);
             }
 
             for( const auto& B : Batch )

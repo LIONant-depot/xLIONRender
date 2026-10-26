@@ -33,6 +33,12 @@ namespace xlionrender
         constexpr std::uint32_t s_VSMRequestComp[] = {
             #include "xlionrender_vsm_request_comp.h"
         };
+        constexpr std::uint32_t s_ShadowPairsComp[] = {
+            #include "xlionrender_shadow_pairs_comp.h"
+        };
+        constexpr std::uint32_t s_ShadowPairsVert[] = {
+            #include "xlionrender_shadow_pairs_vert.h"
+        };
         constexpr std::uint32_t s_SkinGeomVert[] = {
             #include "xlionrender_skin_geom_vert.h"
         };
@@ -184,6 +190,9 @@ namespace xlionrender
         ReleaseBuffer(m_EntityParamsRing);
         ReleaseBuffer(m_ShadowUBO);
         for( std::size_t k = 0; k < m_ShadowPipeline.size(); ++k ) { m_Device.Destroy(std::move(m_ShadowInstance[k])); m_Device.Destroy(std::move(m_ShadowPipeline[k])); }
+        m_Device.Destroy(std::move(m_ShadowPairsInstance));
+        m_Device.Destroy(std::move(m_ShadowPairsPipeline));
+        m_pShadowPairs.reset();
         m_Device.Destroy(std::move(m_ShadowClearInstance));
         m_Device.Destroy(std::move(m_ShadowClearPipeline));
         m_Device.Destroy(std::move(m_ShadowClearPass));
@@ -517,6 +526,7 @@ namespace xlionrender
         if( auto Err = Device.Create(m_GICaptureVert,       { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
         if( auto Err = Device.Create(m_StaticGeomGIRecordsVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_StaticGeomGIRecordsVert) }); Err ) return Err;     // RIGID, GPU culled
         if( m_pCull = std::make_unique<gpu_cull>(); !m_pCull->Init(Device, s_CullComp, s_HiZComp) ) m_pCull.reset();      // (no drawIndirectCount: the CPU path)
+        if( m_pShadowPairs = std::make_unique<shadow_pairs>(); !m_pShadowPairs->Init(Device, s_ShadowPairsComp) ) m_pShadowPairs.reset();
 
         // The sun's virtual shadow pages (features/shadows/xlionrender_shadow_vsm.h): the pool is the clipmap's part of the atlas; the request
         // pass, its frame data (a ring slot each), its bits and counters (zeroed by a copy, copied back to a ring slot)
@@ -534,6 +544,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_VSMZeros,   { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data() }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nReq }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMTimes,   { .m_Count = 2 }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMRenderTimes, { .m_Count = 2 }); Err ) return Err;
         }
 
         // Shadows: the atlas's passes (a clear for its first use - a never rendered attachment cannot be loaded -, then load), the
@@ -600,6 +611,27 @@ namespace xlionrender
             if( auto Err = MakeCaster(0, m_MeshVD,       ForwardVert, sizeof(details::push_forward),     0); Err ) return Err;     // CreateMesh meshes
             if( auto Err = MakeCaster(1, m_StaticGeomVD, RigidVert,   sizeof(details::push_static_geom), 3); Err ) return Err;     // RIGID
             if( auto Err = MakeCaster(2, m_SkinGeomVD,   SkinVert,    sizeof(details::push_skin_geom),   5); Err ) return Err;     // SKIN
+            if( m_pShadowPairs )            // RIGID through the pairs' records: the caster's depth state, the records and the pages
+            {
+                xgpu::shader PairsVert;
+                if( auto Err = Device.Create(PairsVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_ShadowPairsVert) }); Err ) return Err;
+                auto PairBinds = std::array
+                { xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 2, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 3, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                };
+                auto Shaders = std::array<const xgpu::shader*, 2>{ &Depth, &PairsVert };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = Shaders, .m_UniformBinds = PairBinds };
+                Setup.m_Primitive.m_Cull                        = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_DepthBiasConstantFactor  = 2.0f;
+                Setup.m_DepthStencil.m_DepthBiasSlopeFactor     = 4.0f;
+                Setup.m_DepthStencil.m_bDepthBiasEnable         = true;
+                Setup.m_DepthStencil.m_bDepthClampEnable        = true;
+                if( auto Err = Device.Create(m_ShadowPairsPipeline, Setup); Err ) return Err;
+                if( auto Err = Device.Create(m_ShadowPairsInstance, { .m_PipeLine = m_ShadowPairsPipeline }); Err ) return Err;
+            }
 
             // The selection's mask: the same vertex paths, the mask's fragment (it samples the scene's depth), no bias, the depth test and write of its own
             {

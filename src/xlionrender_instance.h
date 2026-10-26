@@ -18,6 +18,7 @@
 #include "features/gi/xlionrender_surfel_gi_chunks.h"
 #include "plans/forward/xlionrender_plan_forward.h"     // (details::push_static_geom, draw_indexed_indirect: the half-resolution GI pass's lists)
 #include "features/cull/xlionrender_gpu_cull.h"
+#include "features/shadows/xlionrender_shadow_pairs.h"
 #include "xlionrender_view.h"
 #include <chrono>
 #include <memory>
@@ -156,6 +157,9 @@ namespace xlionrender
         // The sun's movers (casters changed lately, skinned) in mover pages of their own, never dirtying the static pages (P1b); false: every
         // caster in the pages (the tests' reference: the two layers composed must equal it)
         bool                                       m_bShadowSplitMovers = true;
+        // The sun's pages drawn through GPU page/caster pairs (P1c, features/shadows/xlionrender_shadow_pairs.h): the rigid opaque clusters, a
+        // draw a geometry; false (or no drawIndirectCount): a draw a cluster and page from the CPU (the tests' reference)
+        bool                                       m_bShadowGPUPairs = true;
         // Tests: every filter tap of the pages through the table (the border path everywhere): the image must not change
         bool                                       m_bVSMTapTranslation = false;
         // The pages' debug views (shaders/xlionrender_shadow_vsm.glsl): 0 off, 2 the level, 3 the footprint against the texel, 4 what shaded the pixel
@@ -169,8 +173,13 @@ namespace xlionrender
             std::array<std::uint32_t, 32>   m_Counters{};
             bool                            m_bCounters = false;     // the counters arrived (a ring after the first request pass)
             double                          m_RequestGpuMs = 0;      // the request pass (a ring late)
+            double                          m_RenderGpuMs  = 0;      // the sun's pages rendered (a ring late; 0: none rendered)
         };
                       const vsm_report&    getVSMReport( void ) const                                           noexcept { return m_VSMReport; }
+        struct pairs_report { int m_nCandidates = 0, m_nRuns = 0, m_nPairs = 0, m_nDropped = 0; std::int64_t m_Triangles = 0; bool m_bGPU = false; };
+        // The sun's GPU page/caster pairs (P1c): this frame's candidates and runs, whether the GPU drew the pages; a ring late the pairs, those
+        // dropped and the triangles
+                      const pairs_report&  getPairsReport( void ) const                                         noexcept { return m_PairsReport; }
         // The pages' setup (tests: a small pool, a larger budget): starts them over. Its pool must fit the clipmap's part of the atlas
                       void                 configureVSM( const shadows::vsm::setup& Setup )                    noexcept { m_VSM.Init(Setup); }
         // Invariant 1 on this frame's table (tests): every entry names a VALID slot holding exactly that page
@@ -567,6 +576,10 @@ namespace xlionrender
         xgpu::pipeline_instance                 m_ShadowClearInstance;
         std::array<xgpu::pipeline, 3>           m_ShadowPipeline;
         std::array<xgpu::pipeline_instance, 3>  m_ShadowInstance;
+        xgpu::pipeline                          m_ShadowPairsPipeline;      // RIGID clusters through the pairs' records (xlionrender_shadow_pairs_vert.glsl)
+        xgpu::pipeline_instance                 m_ShadowPairsInstance;
+        std::unique_ptr<shadow_pairs>           m_pShadowPairs;             // null: not supported (drawIndirectCount)
+        pairs_report                            m_PairsReport;
         xgpu::buffer                            m_ShadowUBO;
         // The sun's virtual pages: the CPU side, the request pass (its frame data a ring slot each, its bits and counters zeroed and copied
         // back a ring late), each ring slot's windows (to decode its requests), this frame's table in the cell ring (written once a frame)
@@ -575,6 +588,8 @@ namespace xlionrender
         xgpu::compute                           m_VSMRequest;
         xgpu::buffer                            m_VSMFrames, m_VSMReq, m_VSMReqHost, m_VSMZeros;
         xgpu::timestamps                        m_VSMTimes;                 // the request pass's GPU time
+        xgpu::timestamps                        m_VSMRenderTimes;           // the sun's pages' rendering GPU time
+        std::array<bool, ring_frames_v>         m_VSMRenderTimed{};         // whether a ring slot's frame rendered sun pages (timed)
         std::array<shadows::vsm::snapshot, ring_frames_v> m_VSMSnap{};
         std::vector<shadows::vsm::key>          m_VSMRequests;
         std::vector<std::uint32_t>              m_VSMTable;
@@ -589,6 +604,7 @@ namespace xlionrender
         std::vector<shadows::lbox>              m_CasterLight;
         std::vector<xmath::fbbox>               m_CasterLightWorld;
         std::array<xmath::fvec3, 3>             m_CasterLightBasis{};
+        std::vector<shadow_pairs::candidate>    m_PairCandidates;           // (the pairs' candidates, kept: their room)
         int                                     m_VSMSoftLevels = 0;        // the coarser levels the request pass asks for too (contact-hardening)
         static constexpr std::uint64_t          static_frames_v = 4;        // a caster unchanged this many shadow passes is static (in the sun's pages), else a mover
         int  sunAtlasWidth( void ) const noexcept { return 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }

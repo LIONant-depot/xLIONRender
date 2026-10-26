@@ -16,7 +16,20 @@ layout(std430, set = 1, binding = 0) buffer ClusterBuffer
     ClusterData cluster[];  // Unsized array of structs
 };
 
-#ifdef XLION_RECORDS
+#if defined(XLION_SHADOW_RECORDS)
+// xlionrender_shadow_pairs_vert.glsl: a page/caster pair's record (xlionrender_shadow_pairs_comp.glsl), by gl_InstanceIndex
+struct ShadowRecord
+{
+    uint    clusterIndex;
+    uint    instanceIndex;
+    uint    page;
+};
+layout(std430, set = 1, binding = 2) readonly buffer ShadowRecords
+{
+    ShadowRecord Records[];
+};
+#define push Records[gl_InstanceIndex]
+#elif defined(XLION_RECORDS)
 // xlionrender_static_geom_gi_records_vert.glsl: the push constants below, one record per draw of an indirect run (its first instance)
 struct DrawRecord
 {
