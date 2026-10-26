@@ -592,6 +592,7 @@ namespace xlionrender
         std::array<bool, ring_frames_v>         m_VSMRenderTimed{};         // whether a ring slot's frame rendered sun pages (timed)
         std::array<shadows::vsm::snapshot, ring_frames_v> m_VSMSnap{};
         std::vector<shadows::vsm::key>          m_VSMRequests;
+        std::vector<std::uint32_t>              m_VSMGot;                   // (the request readback's copy, kept: a frame's room)
         std::vector<std::uint32_t>              m_VSMTable;
         std::uint64_t                           m_VSMTableFrame = ~0ull;
         int                                     m_VSMTableBase  = 0;

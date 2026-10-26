@@ -1088,7 +1088,7 @@ namespace xlionrender
         // The casters and what changed since the last render: new and gone casters, moved or re-materialed ones, and skinned
         // ones (old and new bounds). Draws with an instance id compare against their slot's last state (no hashing, bounds kept
         // while unchanged); draws without one go through a hash of their state.
-        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; bool m_bMover; bool m_bGPU; };     // m_BoxedBase: in m_ClusterSkip (~0: none); m_bGPU: the pairs can draw it (rigid, no masked material)
+        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; bool m_bMover; bool m_bGPU; };     // m_BoxedBase: in m_ClusterSkip (~0: none); m_bGPU: the pairs can draw it (rigid; no masked material: found when a page renders)
         std::vector<draw_caster>                         Draws;
         std::vector<xmath::fbbox>                        Changed;
         std::vector<xmath::fbbox>                        SunStatic, SunMovers;  // the sun's pages: changes of the static casters (a static caster changed or
@@ -1166,13 +1166,7 @@ namespace xlionrender
             m_DrawWorld[iDraw] = World;
             if( !m_bShadowSplitMovers ) bMover = false;
             if( bMover ) SunMovers.push_back(World);
-            bool bGPU = pMesh->m_bCluster && !bSkin;
-            if( bGPU ) for( const auto& Sub : pMesh->m_Geom.m_Submeshes )
-            {
-                auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
-                if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) { bGPU = false; break; }
-            }
-            Draws.push_back({ &D, pMesh, World, Slot, BoxedBase, bMover, bGPU });
+            Draws.push_back({ &D, pMesh, World, Slot, BoxedBase, bMover, pMesh->m_bCluster && !bSkin });
         }
         for( const auto& [Key, P] : m_PrevCasters ) if( !Now.contains(Key) )
         {
@@ -1233,9 +1227,20 @@ namespace xlionrender
                 if( m_VSMSnap[Slot].m_bValid )
                 {
                     // (a ring ago: done - no wait for the frame in flight, which cost 2.3 ms of CPU; one copy out, then decoded: the mapped
-                    // memory can be the GPU's, where every read crosses the bus - a word at a time it cost 1 ms)
-                    std::vector<std::uint32_t> Got(static_cast<std::size_t>(nReq));
-                    (void)m_VSMReqHost.MemoryMapFrameRegion(Slot * nReq, nReq, [&](void* p) { std::memcpy(Got.data(), p, Got.size() * sizeof(std::uint32_t)); });
+                    // memory can be the GPU's, where every read crosses the bus - a word at a time it cost 1 ms). The bits and counters, then the
+                    // depth ranges of the bit words with a request only (all of them, 100 KB, cost 0.12 ms a frame)
+                    auto& Got = m_VSMGot;
+                    Got.resize(static_cast<std::size_t>(nReq));
+                    (void)m_VSMReqHost.MemoryMapFrameRegion(Slot * nReq, nReq, [&](void* p)
+                    {
+                        const auto* pSrc = static_cast<const std::uint32_t*>(p);
+                        std::memcpy(Got.data(), pSrc, std::size_t(nBits + 32) * sizeof(std::uint32_t));
+                        for( int w = 0; w < nBits; ++w ) if( Got[w] )
+                        {
+                            const std::size_t o = std::size_t(nBits + 32 + 64 * w);
+                            std::memcpy(Got.data() + o, pSrc + o, std::min<std::size_t>(64, Got.size() - o) * sizeof(std::uint32_t));
+                        }
+                    });
                     const auto* pDepth = reinterpret_cast<const shadows::vsm::request_depth*>(Got.data() + nBits + 32);
                     m_VSM.DecodeRequests({ Got.data(), std::size_t(nBits) }, m_VSMSnap[Slot], m_VSMRequests, { pDepth, std::size_t(m_VSM.getSetup().TableEntries()) });
                     std::memcpy(m_VSMReport.m_Counters.data(), Got.data() + nBits, m_VSMReport.m_Counters.size() * sizeof(std::uint32_t));
@@ -1315,6 +1320,13 @@ namespace xlionrender
             Rot(3, 3) = 1.0f;
             for( std::uint32_t i = 0; i < Draws.size(); ++i )
             {
+                if( !Draws[i].m_bGPU ) continue;
+                for( const auto& Sub : Draws[i].m_pMesh->m_Geom.m_Submeshes )        // (a masked material's cutout: the CPU path's material caster)
+                {
+                    const auto& Mats = Draws[i].m_pDraw->m_Materials;
+                    auto* pMat = Sub.m_iMaterial < Mats.size() ? findMaterial(Mats[Sub.m_iMaterial]) : nullptr;
+                    if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) { Draws[i].m_bGPU = false; break; }
+                }
                 if( !Draws[i].m_bGPU || !Touches(i) ) continue;
                 const auto& D    = *Draws[i].m_pDraw;
                 const auto& G    = Draws[i].m_pMesh->m_Geom;
