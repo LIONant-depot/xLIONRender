@@ -773,10 +773,16 @@ namespace xlionrender
         const xgpu::buffer::copy Z{ 0, 0, nReq };
         Window.CopyBuffer(m_VSMZeros, m_VSMReq, std::span{ &Z, 1 });
         Window.WriteTimestamp(m_VSMTimes, 0);
-        const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(vsmTableBase()), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), std::uint32_t(m_VSMSoftLevels), 0u };
+        // (each pixel's own level; then the contact-hardening's coarser levels at a quarter of the pixels: a thread a 2 x 2 quad)
+        const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(vsmTableBase()), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), 0u, 0u };
         auto Buffers  = std::array<xgpu::buffer*, 3>{ &m_VSMFrames, &m_VSMReq, &m_CellRing };
         auto Textures = std::array<const xgpu::texture*, 1>{ &View.m_Depth };
         Window.Dispatch(m_VSMRequest, Buffers, Textures, Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
+        if( m_VSMSoftLevels > 0 )
+        {
+            const std::uint32_t Coarse[8] = { Push[0], Push[1], Push[2], Push[3], Push[4], Push[5], std::uint32_t(m_VSMSoftLevels), 1u };
+            Window.Dispatch(m_VSMRequest, Buffers, Textures, Coarse, sizeof(Coarse), (View.m_Width + 15) / 16, (View.m_Height + 15) / 16);
+        }
         Window.WriteTimestamp(m_VSMTimes, 1);
         const xgpu::buffer::copy C{ 0, Slot * nReq, nReq };
         Window.CopyBuffer(m_VSMReq, m_VSMReqHost, std::span{ &C, 1 });

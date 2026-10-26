@@ -5,6 +5,10 @@
 // fits it (as the shading's ShadowVSM picks: shaders/xlionrender_shadow_vsm.glsl), and a bit for every page its filter's taps fall in
 // (the dilation). Then what the shading will find in this frame's table (the same walk to coarser levels): counters for the report.
 // The CPU reads both a ring late (instance::renderShadows).
+// Two dispatches (m_Pad1): the full-resolution pass (m_Pad0 0) asks for each pixel's own level and counts; the coarse pass at a quarter
+// of the pixels (a thread a 2 x 2 quad, its first pixel; m_Pad0 the contact-hardening's coarser levels) asks only for those levels'
+// pages - a page of which covers thousands of pixels, the request's dilation (3 to 4 texels) covers the quad. In one pass they cost
+// 0.23 of 0.54 ms on Bistro at 3093 x 1493: a wave's lanes run in lock-step, so skipping 3 of 4 pixels in it saved nothing
 layout(local_size_x = 8, local_size_y = 8) in;
 
 const int kMaxLevels   = 12;
@@ -26,7 +30,7 @@ layout(std430, set = 0, binding = 0) readonly buffer frame_b { frame_t F[]; };
 layout(std430, set = 0, binding = 1) coherent buffer req_b  { uint Req[]; };
 layout(std430, set = 0, binding = 2) readonly buffer cell_b { uint Cells[]; };     // the cell ring: this frame's page table at TableBase
 layout(set = 1, binding = 0) uniform sampler2D Depth;
-layout(push_constant) uniform push_t { uint m_Frame, m_ReqBase, m_TableBase, m_W, m_H, m_BitUints, m_Pad0, m_Pad1; } Push;
+layout(push_constant) uniform push_t { uint m_Frame, m_ReqBase, m_TableBase, m_W, m_H, m_BitUints, m_Pad0, m_Pad1; } Push;     // m_Pad0: coarser levels, m_Pad1: 1 the coarse pass
 
 shared uint s_Count[kCounters];
 
@@ -83,7 +87,8 @@ void main()
     if (gl_LocalInvocationIndex < kCounters) s_Count[gl_LocalInvocationIndex] = 0u;
     barrier();
 
-    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const bool  bCoarse = Push.m_Pad1 != 0u;
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy) * (bCoarse ? 2 : 1);
     vec3 L;
     if (World(p, L))
     {
@@ -93,8 +98,11 @@ void main()
         float Foot = max(fx < 1e29 ? fx : 0.0, fy < 1e29 ? fy : 0.0);         // the shading's max(|dFdx|, |dFdy|) of the light-space xy
         if (Foot <= 0.0) Foot = t0;                                             // (an isolated pixel: no neighbour to measure with)
         int Level = clamp(int(floor(log2(Foot / t0) + F[Push.m_Frame].P0.w)), 0, nLevels - 1);
-        atomicAdd(s_Count[0], 1u);
-        atomicAdd(s_Count[17 + clamp(int(floor(log2(Foot / (t0 * float(1 << Level))))) + 4, 0, 7)], 1u);
+        if (!bCoarse)
+        {
+            atomicAdd(s_Count[0], 1u);
+            atomicAdd(s_Count[17 + clamp(int(floor(log2(Foot / (t0 * float(1 << Level))))) + 4, 0, 7)], 1u);
+        }
 
         // The level the shading starts at, its taps' pages requested (the filter: 4 x 4 texels around the point, xlionrender_shadow_vsm.glsl)
         int  First = -1, Found = -1;
@@ -108,7 +116,7 @@ void main()
             if (First < 0)
             {
                 First = l;
-                atomicAdd(s_Count[5 + min(l, 11)], 1u);
+                if (!bCoarse) atomicAdd(s_Count[5 + min(l, 11)], 1u);
                 bCross = any(notEqual(PLo, PHi));
                 {   // (the request also covers the shading's normal offset: 2 texels more around the taps)
             const ivec2 RLo = ivec2(floor(vec2(Lo - 2) / float(kPageTexels))), RHi = ivec2(floor(vec2(Hi + 2) / float(kPageTexels)));
@@ -117,7 +125,7 @@ void main()
             const float z   = clamp((L.z - (Lv.w - Half)) / (2.0 * Half), 0.0, 1.0);
             // (rounded up to 1/256: still conservative, and after a few pixels most find the page's range holding theirs: no atomic)
             const uint  Z = floatBitsToUint(max(ceil(z * 256.0) / 256.0, 1e-7)), InvZ = floatBitsToUint(max(ceil((1.0 - z) * 256.0) / 256.0, 1e-7));
-            for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y), Z, InvZ);
+            if (!bCoarse) for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y), Z, InvZ);
             // Contact-hardening (a sun with a disc, xlionrender_shadow_vsm.glsl): the blocker search and the wide penumbrae read the coarser
             // levels' taps too
             for (int k = 1; k <= int(Push.m_Pad0) && l + k < nLevels; ++k)
@@ -134,13 +142,14 @@ void main()
             }
         }
             }
+            if (bCoarse) break;
             // What the shading finds this frame: every tap's page in the table, or a coarser level
             bool bAll = true;
             for (int y = PLo.y; y <= PHi.y; ++y) for (int x = PLo.x; x <= PHi.x; ++x) bAll = bAll && Entry(l, ivec2(x, y)) != 0u;
             if (bAll) { Found = l; break; }
         }
-        if (First >= 0) atomicAdd(s_Count[Found < 0 ? 3 : Found == First ? 1 : 2], 1u);    // (past every window: lit, beyond the shadows' reach)
-        if (bCross) atomicAdd(s_Count[4], 1u);
+        if (First >= 0 && !bCoarse) atomicAdd(s_Count[Found < 0 ? 3 : Found == First ? 1 : 2], 1u);    // (past every window: lit, beyond the shadows' reach)
+        if (bCross && !bCoarse) atomicAdd(s_Count[4], 1u);
     }
 
     barrier();
