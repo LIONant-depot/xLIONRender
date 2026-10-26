@@ -585,6 +585,7 @@ namespace xlionrender
         int                                     m_VSMTableBase  = 0;
         vsm_report                              m_VSMReport;
         int  vsmBitUints( void ) const noexcept { return (m_VSM.getSetup().TableEntries() + 31) / 32; }
+        int  vsmReqUints( void ) const noexcept { return vsmBitUints() + 32 + 2 * m_VSM.getSetup().TableEntries(); }      // bits, counters, depth ranges
         // The sun's part of the shadow atlas (from its left): the pages' pool, two clipmaps wide (the clipmap, the fallback, uses the first);
         // the local lights' part is to its right
         // renderShadows' light-space boxes of the casters, kept between frames (with the world boxes and the light basis they were of)

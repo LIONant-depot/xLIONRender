@@ -109,6 +109,9 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 VSMParams2;                     // x: window (pages per level side), y: page texels, z: pool slots per row, w: 1 every tap through the table (tests)
 	vec4 VSMLevels[12];                  // per level: xy the window's first page, z page size, w depth centre
 	vec4 VSMParams3;                     // x: the resolution bias (levels added to the footprint's)
+	mat4 VSMPrevW2Light;                 // the previous epoch (P1e): its world -> light, its levels, x: there is one, y: the current epoch's
+	vec4 VSMPrevLevels[12];              // weight (the cross-fade), z: its level 0 texel, w: its table's first uint
+	vec4 VSMPrevParams;
 #endif
 } UBOLight;
 

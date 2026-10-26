@@ -29,26 +29,26 @@ vec3 VSMLevelColor(in const int Level)
     return C[Level % 8] * (Level >= 8 ? 0.5 : 1.0);
 }
 
-// The 16-bit entry of a level's page (0: none), from this frame's table
-uint VSMEntry(in const int Level, in const ivec2 Page)
+// The 16-bit entry of a level's page (0: none), from a table (this frame's epoch's, or the previous one's: TableBase)
+uint VSMEntry(in const int Level, in const ivec2 Page, in const uint TableBase)
 {
     const int   W = int(UBOLight.VSMParams2.x);
     const ivec2 T = ((Page % W) + W) % W;
     const uint  i = uint((Level * W + T.y) * W + T.x);
-    return (LightCells[uint(UBOLight.VSMParams.w) + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
+    return (LightCells[TableBase + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
 }
 
-bool VSMInWindow(in const int Level, in const ivec2 Page)
+bool VSMInWindow(in const vec4 Lv, in const ivec2 Page)
 {
-    const ivec2 Rel = Page - ivec2(UBOLight.VSMLevels[Level].xy);
+    const ivec2 Rel = Page - ivec2(Lv.xy);
     return all(greaterThanEqual(Rel, ivec2(0))) && all(lessThan(Rel, ivec2(int(UBOLight.VSMParams2.x))));
 }
 
-// One level: 1 lit .. 0 shadowed, or -1 when a tap's page is not there
-float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope)
+// One level of an epoch (Lv: its level's window and depth centre, Texel0: its level 0 texel, TableBase: its table): 1 lit .. 0 shadowed,
+// or -1 when a tap's page is not there
+float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, in const vec4 Lv, in const float Texel0, in const uint TableBase)
 {
-    const float Texel = UBOLight.VSMParams.y * float(1 << Level);
-    const vec4  Lv    = UBOLight.VSMLevels[Level];
+    const float Texel = Texel0 * float(1 << Level);
     const float Half  = Lv.z * UBOLight.VSMParams2.x * kVSMDepthRange;                 // the level's depth half range (vsm::DepthHalfRange)
     const float Depth = clamp((L.z - (Lv.w - Half)) / (2.0 * Half), 0.0, 1.0);
     const float Bias  = kVSMDepthBias * Texel / (2.0 * Half);
@@ -58,14 +58,14 @@ float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope)
     const vec2  SlopeT = Slope * Texel / (2.0 * Half);                                // the receiver plane's depth a texel along x, y
     const float MaxB   = kVSMMaxSlopeBias * Texel / (2.0 * Half);
     const ivec2 PLo   = ivec2(floor(vec2(Lo) / float(kVSMPageTexels))), PHi = ivec2(floor(vec2(Lo + 3) / float(kVSMPageTexels)));
-    if (!VSMInWindow(Level, PLo) || !VSMInWindow(Level, PHi)) return -1.0;
+    if (!VSMInWindow(Lv, PLo) || !VSMInWindow(Lv, PHi)) return -1.0;
 
     const float Row = UBOLight.VSMParams2.z;                                           // slots per row of the pool
     const vec4  Wx  = vec4(1.0 - f.x, 1.0, 1.0, f.x), Wy = vec4(1.0 - f.y, 1.0, 1.0, f.y);
     float Lit = 0.0;
     if (PLo == PHi && UBOLight.VSMParams2.w == 0.0)                                     // (w: every tap through the table - the tests' check)
     {
-        const uint E = VSMEntry(Level, PLo);
+        const uint E = VSMEntry(Level, PLo, TableBase);
         if (E == 0u) return -1.0;
         const ivec2 Base = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - PLo * kVSMPageTexels;
         for (int y = 0; y < 4; ++y)
@@ -79,7 +79,7 @@ float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope)
     for (int j = 0; j < 4; ++j)
     {
         const ivec2 P = ivec2((j & 1) != 0 ? PHi.x : PLo.x, (j & 2) != 0 ? PHi.y : PLo.y);
-        const uint  E = VSMEntry(Level, P);
+        const uint  E = VSMEntry(Level, P, TableBase);
         if (E == 0u) return -1.0;
         Base[j] = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - P * kVSMPageTexels;
     }
@@ -104,9 +104,20 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     const vec3  NL      = mat3(UBOLight.W2Light) * Ng;                                  // the receiver plane in light space: z per x, y
     const vec2  Slope   = -NL.xy / max(abs(NL.z), 1e-3) * sign(NL.z + 1e-9);
     const float Grazing = 1.0 + 2.0 * (1.0 - abs(NL.z));                              // the normal offset grows as the surface turns from the light
+    // The previous epoch (the moving sun, P1e): where this one has no page yet its own, and while the cross-fade lasts the two blended
+    const bool  bPrev   = UBOLight.VSMPrevParams.x != 0.0;
+    const vec3  NLp     = mat3(UBOLight.VSMPrevW2Light) * Ng;
+    const vec2  SlopeP  = -NLp.xy / max(abs(NLp.z), 1e-3) * sign(NLp.z + 1e-9);
     for (int Level = First; Level < nLevels; ++Level)
     {
-        const float S = ShadowVSMLevel(Level, (UBOLight.W2Light * vec4(World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMParams.y * float(1 << Level)), 1.0)).xyz, Slope);
+        const vec3  Off = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMParams.y * float(1 << Level));
+        float S = ShadowVSMLevel(Level, (UBOLight.W2Light * vec4(Off, 1.0)).xyz, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w));
+        if (bPrev && (S < 0.0 || UBOLight.VSMPrevParams.y < 1.0))
+        {
+            const vec3  OffP = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMPrevParams.z * float(1 << Level));
+            const float SP   = ShadowVSMLevel(Level, (UBOLight.VSMPrevW2Light * vec4(OffP, 1.0)).xyz, SlopeP, UBOLight.VSMPrevLevels[Level], UBOLight.VSMPrevParams.z, uint(UBOLight.VSMPrevParams.w));
+            S = S < 0.0 ? SP : SP < 0.0 ? S : mix(SP, S, UBOLight.VSMPrevParams.y);
+        }
         if (S < 0.0) continue;
         if (Mode >= 2)
         {

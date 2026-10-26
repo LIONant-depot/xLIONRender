@@ -525,7 +525,8 @@ namespace xlionrender
         if( const char* p = std::getenv("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
         {
             using usage = xgpu::buffer::setup::usage;
-            const int nReq = (shadows::vsm::max_levels_v * m_VSM.getSetup().m_Window * m_VSM.getSetup().m_Window + 31) / 32 + 32;   // (any level count renderShadows may grow to)
+            const int nMax = shadows::vsm::max_levels_v * m_VSM.getSetup().m_Window * m_VSM.getSetup().m_Window;
+            const int nReq = (nMax + 31) / 32 + 32 + 2 * nMax;      // bits, counters, depth ranges - any level count renderShadows may grow to
             std::vector<std::uint32_t> Zeros(std::size_t(nReq), 0u);
             if( auto Err = Device.Create(m_VSMRequestShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_VSMRequestComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMRequest, { .m_pShader = &m_VSMRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;

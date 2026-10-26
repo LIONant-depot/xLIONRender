@@ -482,22 +482,69 @@ int main()
         const float Expected = std::acos(std::clamp(Scene.m_Sun.m_Direction.NormalizeCopy().Dot(Dir0.NormalizeCopy()), -1.0f, 1.0f)) * 180.0f / 3.14159265f;
         CHECK(std::abs(Renderer.getVSMReport().m_Pages.m_EpochMismatchDegrees - Expected) < 0.01f, "the mismatch reads %.3f, not %.3f", Renderer.getVSMReport().m_Pages.m_EpochMismatchDegrees, Expected);
 
+        // B5b (P1e): the sun moving at a drag's speed and at a cycle's, the renderer's budget (64 pages a frame). The image while it moves
+        // against the image settled at the same direction (the in-motion error: an epoch's direction is not the current one, the
+        // rebuild is budgeted); the net every epoch, never a hole, the pages a frame bounded, the previous epoch gone once settled
+        Renderer.configureVSM({ .m_PoolTexels = 8192, .m_PoolHeight = 4096, .m_ResolutionBias = Bias });
+        CHECK(Settle(12), "B5b settle");
         const int nNet = Renderer.getVSM().getSetup().PinnedSlots();
-        std::printf("B5 moving sun 1.5 degree yaw a frame (frame: pages rendered fine + net, pixels by their level / coarser / none %%):");
-        for (int f = 0; f < 12; ++f)
+        double MaxPop = 0;                  // the largest share of pixels whose light changes by half from one frame to the next (a pop)
+        const auto Moving = [&](const char* pName, float DegreesPerFrame, int nFrames) -> double
         {
-            const float a = (0.1f + 1.5f * float(f + 1)) * 3.14159265f / 180.0f;
-            Scene.m_Sun.m_Direction = { std::cos(a) * Dir0.m_X + std::sin(a) * Dir0.m_Z, Dir0.m_Y, -std::sin(a) * Dir0.m_X + std::cos(a) * Dir0.m_Z };
-            CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateVSM(), "moving sun frame %d (invariant 1)", f);
-            const auto& R = Renderer.getVSMReport();
-            CHECK(R.m_Pages.m_Epochs == 1 && R.m_Pages.m_RenderedPinned == nNet && R.m_Pages.m_PinnedNotValid == 0, "frame %d: epoch %d, net rendered %d of %d", f, R.m_Pages.m_Epochs, R.m_Pages.m_RenderedPinned, nNet);
-            const auto& C = R.m_Counters;
-            std::printf(" [%d] %d+%d %.0f/%.0f/%.0f", f, R.m_Pages.m_Rendered, R.m_Pages.m_RenderedPinned, Pct(C[1], C[0]), Pct(C[2], C[0]), Pct(C[3], C[0]));
-            CHECK(C[3] == 0, "the moving sun left pixels with no level (%u)", C[3]);
-        }
-        std::printf("\n");
-        Scene.m_Sun.m_Direction = Dir0;
-        CHECK(Settle(12), "settle after the moving sun");
+            std::vector<float> Last, Now;
+            MaxPop = 0;
+            std::printf("B5b %s, %.2f degree yaw a frame (frame: epochs, pages rendered fine + net, remapped, previous resident, fade):", pName, DegreesPerFrame);
+            int MaxRendered = 0;
+            float Yaw = 0;
+            for (int f = 0; f < nFrames; ++f)
+            {
+                Yaw += DegreesPerFrame;
+                Turn(Yaw);
+                CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateVSM(), "moving sun frame %d (invariant 1)", f);
+                const auto& R = Renderer.getVSMReport();
+                CHECK(R.m_Pages.m_Epochs == 0 || (R.m_Pages.m_RenderedPinned == nNet && R.m_Pages.m_PinnedNotValid == 0), "frame %d: an epoch, the net rendered %d of %d", f, R.m_Pages.m_RenderedPinned, nNet);
+                CHECK(R.m_Counters[3] == 0, "the moving sun left pixels with no level (%u)", R.m_Counters[3]);
+                MaxRendered = std::max(MaxRendered, R.m_Pages.m_Rendered);
+                CHECK(ReadHDR(Device, View, Now), "read moving frame %d", f);
+                if (!Last.empty())
+                {
+                    int nPop = 0, nLit = 0;
+                    for (std::size_t i = 0; i < Now.size(); ++i) if (std::max(Now[i], Last[i]) > 1e-3f) { ++nLit; nPop += std::abs(Now[i] - Last[i]) > 0.5f * std::max(Now[i], Last[i]); }
+                    MaxPop = std::max(MaxPop, 100.0 * double(nPop) / double(std::max(1, nLit)));
+                }
+                std::swap(Last, Now);
+                if (f % std::max(1, nFrames / 8) == 0)
+                    std::printf(" [%d] %d %d+%d %d %d %.2f", f, R.m_Pages.m_Epochs, R.m_Pages.m_Rendered, R.m_Pages.m_RenderedPinned, R.m_Pages.m_Remapped, R.m_Pages.m_ResidentPrev, R.m_Pages.m_Fade);
+            }
+            std::printf("\n");
+            std::vector<float> Move, Set, Unlit;
+            CHECK(ReadHDR(Device, View, Move), "read the moving frame");
+            for (int k = 0; k < 40; ++k) CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateVSM(), "settle at the last direction");
+            CHECK(Renderer.getVSMReport().m_Pages.m_ResidentPrev == 0, "the previous epoch still resident 40 frames after the sun stopped (%d pages)", Renderer.getVSMReport().m_Pages.m_ResidentPrev);
+            CHECK(ReadHDR(Device, View, Set), "read the settled frame");
+            Scene.m_Sun.m_bCastShadows = false;
+            CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Unlit), "read the unshadowed frame");
+            Scene.m_Sun.m_bCastShadows = true;
+            int n = 0, nDis = 0;
+            for (std::size_t i = 0; i < Unlit.size(); ++i)
+            {
+                if (Unlit[i] <= 1e-4f) continue;
+                ++n;
+                nDis += std::abs(std::clamp(Move[i] / Unlit[i], 0.0f, 1.0f) - std::clamp(Set[i] / Unlit[i], 0.0f, 1.0f)) > 0.5f;
+            }
+            const double Dis = 100.0 * double(nDis) / double(std::max(1, n));
+            std::printf("B5b %s: in motion against settled, %.2f%% of %d lit pixels differ; the largest change from a frame to the next %.2f%%; at most %d fine pages rendered a frame (budget %d)\n", pName, Dis, n, MaxPop, MaxRendered, Renderer.getVSM().getSetup().m_Budget);
+            CHECK(MaxRendered <= Renderer.getVSM().getSetup().m_Budget, "%d fine pages rendered in a frame", MaxRendered);
+            Scene.m_Sun.m_Direction = Dir0;
+            CHECK(Settle(30), "settle after the moving sun");
+            return Dis;
+        };
+        const double DisDrag  = Moving("drag", 1.5f, 12);
+        const double DisCycle = Moving("cycle", 0.1f, 60);
+        CHECK(DisDrag < 1.0 && DisCycle < 1.0, "the moving sun's image: %.2f%% (drag), %.2f%% (cycle) of the pixels differ from the settled one", DisDrag, DisCycle);
+        CHECK(MaxPop < 0.5, "the slow sun pops: %.2f%% of the pixels change by half from one frame to the next", MaxPop);
+        Renderer.configureVSM({ .m_PoolTexels = 8192, .m_PoolHeight = 4096, .m_Budget = 100000, .m_ResolutionBias = Bias });
+        CHECK(Settle(12), "settle after B5b");
     }
 
     // B11 overflow: a pool too small for the view. Without dynamic resolution: pages rejected, patches by a coarser level; with it (the

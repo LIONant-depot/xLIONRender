@@ -687,6 +687,11 @@ namespace xlionrender
         if( Frame != m_LightFrame ) { m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0; }
         if( m_VSMTableFrame == Frame ) return m_VSMTableBase;
         m_VSM.BuildTable(m_VSMTable);
+        {   // the previous epoch's table right after it (the same size): the shading reads it where this epoch has no page yet
+            std::vector<std::uint32_t> Prev;
+            m_VSM.BuildPrevTable(Prev);
+            m_VSMTable.insert(m_VSMTable.end(), Prev.begin(), Prev.end());
+        }
         const int n = int(m_VSMTable.size());
         m_VSMTableBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
         (void)m_CellRing.MemoryMapFrameRegion(m_VSMTableBase, n, [&](void* p) { std::memcpy(p, m_VSMTable.data(), std::size_t(n) * sizeof(std::uint32_t)); });   // (this frame's slot: no wait for the frame in flight)
@@ -699,7 +704,7 @@ namespace xlionrender
     // pass. Its bits and counters go to this frame's ring slot, read when the slot comes round (renderShadows), with these windows
     void instance::vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept
     {
-        const int Slot = int(m_Device.getFrameIndex() % ring_frames_v), nBits = vsmBitUints(), nReq = nBits + 32;
+        const int Slot = int(m_Device.getFrameIndex() % ring_frames_v), nBits = vsmBitUints(), nReq = vsmReqUints();
         const auto& VS = m_VSM.getSetup();
         details::vsm_frame F;
         F.m_C2W = W2C.Inverse();
@@ -1166,20 +1171,6 @@ namespace xlionrender
         m_VSM.m_ToRender.clear();
         if( Sun.m_bCastShadows && m_bVirtualShadows )
         {
-            // The requests of this ring slot's last request pass (a ring ago: done) and its counters, with the windows that made them
-            const int Slot = int(m_Device.getFrameIndex() % ring_frames_v), nBits = vsmBitUints(), nReq = nBits + 32;
-            m_VSMRequests.clear();
-            if( m_VSMSnap[Slot].m_bValid )
-            {
-                // (a ring ago: done - no wait for the frame in flight, which cost 2.3 ms of CPU; one copy out, then decoded: the mapped
-                // memory can be the GPU's, where every read crosses the bus - a word at a time it cost 1 ms)
-                std::vector<std::uint32_t> Got(static_cast<std::size_t>(nReq));
-                (void)m_VSMReqHost.MemoryMapFrameRegion(Slot * nReq, nReq, [&](void* p) { std::memcpy(Got.data(), p, Got.size() * sizeof(std::uint32_t)); });
-                m_VSM.DecodeRequests({ Got.data(), std::size_t(nBits) }, m_VSMSnap[Slot], m_VSMRequests);
-                std::memcpy(m_VSMReport.m_Counters.data(), Got.data() + nBits, m_VSMReport.m_Counters.size() * sizeof(std::uint32_t));
-                m_VSMReport.m_bCounters = true;
-                m_VSMSnap[Slot].m_bValid = false;
-            }
             if( std::vector<std::uint64_t> Ns; m_VSMTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
                 m_VSMReport.m_RequestGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
             // Level 0's texel: the clipmap's level 0 texel / 4, at most 2 mm (a scene's tile can be tens of metres: the static geom
@@ -1191,6 +1182,25 @@ namespace xlionrender
                 const float Cover = Sun.m_ShadowTileSize * float(shadows::clipmap_tiles_v << (shadows::clipmap_levels_v - 1));
                 const int   Need  = int(std::ceil(std::log2(std::max(Cover / (Level0Texel * float(VS.m_Window * shadows::vsm::page_texels_v)), 1.0f)))) + 1;
                 if( Need > VS.m_Levels && VS.m_Levels < shadows::vsm::max_levels_v ) { auto S = VS; S.m_Levels = std::min(Need, shadows::vsm::max_levels_v); m_VSM.Init(S); }
+            }
+            // This frame's epoch first, then the requests of this ring slot's last request pass (a ring ago: done) and its counters, decoded
+            // with the windows that made them - moved into this epoch when they are of an older one (their depth ranges)
+            m_VSM.OpenEpoch(Sun.m_Direction, Level0Texel, m_Device.getFrameIndex());
+            {
+                const int Slot = int(m_Device.getFrameIndex() % ring_frames_v), nBits = vsmBitUints(), nReq = vsmReqUints();
+                m_VSMRequests.clear();
+                if( m_VSMSnap[Slot].m_bValid )
+                {
+                    // (a ring ago: done - no wait for the frame in flight, which cost 2.3 ms of CPU; one copy out, then decoded: the mapped
+                    // memory can be the GPU's, where every read crosses the bus - a word at a time it cost 1 ms)
+                    std::vector<std::uint32_t> Got(static_cast<std::size_t>(nReq));
+                    (void)m_VSMReqHost.MemoryMapFrameRegion(Slot * nReq, nReq, [&](void* p) { std::memcpy(Got.data(), p, Got.size() * sizeof(std::uint32_t)); });
+                    const auto* pDepth = reinterpret_cast<const shadows::vsm::request_depth*>(Got.data() + nBits + 32);
+                    m_VSM.DecodeRequests({ Got.data(), std::size_t(nBits) }, m_VSMSnap[Slot], m_VSMRequests, { pDepth, std::size_t(m_VSM.getSetup().TableEntries()) });
+                    std::memcpy(m_VSMReport.m_Counters.data(), Got.data() + nBits, m_VSMReport.m_Counters.size() * sizeof(std::uint32_t));
+                    m_VSMReport.m_bCounters = true;
+                    m_VSMSnap[Slot].m_bValid = false;
+                }
             }
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex());
             m_VSMReport.m_Pages = m_VSM.m_Stats;
@@ -1476,6 +1486,17 @@ namespace xlionrender
                     Light.m_VSMLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
                 }
                 Light.m_VSMParams3 = { m_VSM.ResolutionBias(), 0, 0, 0 };
+                Light.m_VSMPrevW2Light = xmath::fmat4::fromIdentity();
+                {
+                    const float Axis[3][3] = { { m_VSM.m_PX.m_X, m_VSM.m_PX.m_Y, m_VSM.m_PX.m_Z }, { m_VSM.m_PY.m_X, m_VSM.m_PY.m_Y, m_VSM.m_PY.m_Z }, { m_VSM.m_PZ.m_X, m_VSM.m_PZ.m_Y, m_VSM.m_PZ.m_Z } };
+                    for( int c = 0; c < 3; ++c ) for( int r = 0; r < 3; ++r ) Light.m_VSMPrevW2Light(r, c) = Axis[r][c];
+                }
+                for( int i = 0; i < shadows::vsm::max_levels_v; ++i )
+                {
+                    const auto& Lv = m_VSM.m_PrevLevels[i];
+                    Light.m_VSMPrevLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
+                }
+                Light.m_VSMPrevParams = { bVSM && m_VSM.HasPrevious() ? 1.0f : 0.0f, m_VSM.Fade(), m_VSM.m_PrevLevel0Texel, float(vsmTableBase() + VS.TableUints()) };
 
                 writeLocalLights(Scene, Eye, Light);
                 Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, 0, 0 };

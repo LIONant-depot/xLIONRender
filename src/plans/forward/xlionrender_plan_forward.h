@@ -125,6 +125,11 @@ namespace xlionrender::details
         xmath::fvec4                            m_VSMParams2;       // x: window (pages), y: page texels, z: pool slots per row, w: 1 every tap through the table (tests)
         std::array<xmath::fvec4, shadows::vsm::max_levels_v> m_VSMLevels;   // per level: xy the window's first page, z page size, w depth centre
         xmath::fvec4                            m_VSMParams3;       // x: the resolution bias (levels added to the footprint's)
+        // The previous epoch (P1e, shadows::vsm::HasPrevious): its world -> light, its levels, x: there is one, y: the current epoch's weight
+        // (the cross-fade), z: its level 0 texel, w: its table's first uint
+        xmath::fmat4                            m_VSMPrevW2Light;
+        std::array<xmath::fvec4, shadows::vsm::max_levels_v> m_VSMPrevLevels;
+        xmath::fvec4                            m_VSMPrevParams;
     };
 
     // The sun's virtual pages: the request pass's frame data (shaders/xlionrender_vsm_request_comp.glsl frame_t, std430)

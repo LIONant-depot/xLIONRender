@@ -10,6 +10,9 @@ layout(local_size_x = 8, local_size_y = 8) in;
 const int kMaxLevels   = 12;
 const int kPageTexels  = 128;
 const int kCounters    = 32;        // after the bits: 0 pixels, 1 fine, 2 coarser, 3 none, 4 boundary-crossing, 5-16 per level, 17-24 log2(footprint / texel) + 4
+const float kDepthRange = 4.0;      // vsm::depth_range_v
+// After the counters, per table entry: the largest z and the largest 1 - z of its pixels (z in 0..1 over the level's depth range, as
+// float bits: ordered as uints) - a later epoch moves the request into its own basis with them (vsm::Remap)
 
 struct frame_t
 {
@@ -63,13 +66,16 @@ bool InWindow(int Level, ivec2 Page)
     return all(greaterThanEqual(Rel, ivec2(0))) && all(lessThan(Rel, ivec2(W)));
 }
 
-void Request(int Level, ivec2 Page)
+void Request(int Level, ivec2 Page, uint Z, uint InvZ)
 {
     if (!InWindow(Level, Page)) return;
     const int W = int(F[Push.m_Frame].P0.z);
     const ivec2 T = ((Page % W) + W) % W;
     const uint i = uint((Level * W + T.y) * W + T.x), w = Push.m_ReqBase + (i >> 5), b = 1u << (i & 31u);
     if ((Req[w] & b) == 0u) atomicOr(Req[w], b);                   // (read first: most pixels find their page asked for already)
+    const uint d = Push.m_ReqBase + Push.m_BitUints + kCounters + 2u * i;
+    if (Req[d] < Z)          atomicMax(Req[d], Z);
+    if (Req[d + 1u] < InvZ)  atomicMax(Req[d + 1u], InvZ);
 }
 
 void main()
@@ -106,7 +112,12 @@ void main()
                 bCross = any(notEqual(PLo, PHi));
                 {   // (the request also covers the shading's normal offset: 2 texels more around the taps)
             const ivec2 RLo = ivec2(floor(vec2(Lo - 2) / float(kPageTexels))), RHi = ivec2(floor(vec2(Hi + 2) / float(kPageTexels)));
-            for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y));
+            const vec4  Lv  = F[Push.m_Frame].Levels[l];
+            const float Half = Lv.z * F[Push.m_Frame].P0.z * kDepthRange;
+            const float z   = clamp((L.z - (Lv.w - Half)) / (2.0 * Half), 0.0, 1.0);
+            // (rounded up to 1/256: still conservative, and after a few pixels most find the page's range holding theirs: no atomic)
+            const uint  Z = floatBitsToUint(max(ceil(z * 256.0) / 256.0, 1e-7)), InvZ = floatBitsToUint(max(ceil((1.0 - z) * 256.0) / 256.0, 1e-7));
+            for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y), Z, InvZ);
         }
             }
             // What the shading finds this frame: every tap's page in the table, or a coarser level

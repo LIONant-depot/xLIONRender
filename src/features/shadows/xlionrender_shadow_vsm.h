@@ -17,7 +17,13 @@
 //    first; a page with no slot left is rejected (counted apart from a miss).
 //  - States: a resident page is VALID or DIRTY. A caster change makes the pages under it DIRTY at once (they leave the table: the
 //    shader falls back to a coarser level), the budget decides when they are rendered again. A new light direction or level-0 size
-//    opens a new epoch: every page goes; a level's depth range moving makes that level's pages go.
+//    opens a new epoch; a level's depth range moving makes that level's pages go.
+//  - The moving sun (P1e): epochs are quantized (setup::m_EpochDegrees). At a new epoch the VALID fine pages become the previous
+//    epoch's (their own basis, windows and table: APPROXIMATE for the current direction, as an epoch is), the net is rendered again
+//    at once, and the requests of older epochs are not dropped: each carries its page's depth range, so it is moved into the new
+//    basis (Remap). The shading reads the current epoch where it has the page, the previous one where not, then coarser levels; once
+//    the current epoch has every page asked for, it cross-fades from the previous one over setup::m_FadeFrames, then the previous
+//    pages go. They are the first evicted when a slot is needed.
 //  - The table holds a page only when it is VALID this frame (its slot + 1, 16 bits; 0: none), so the shader never reads a slot that
 //    holds another page or stale depth (invariant 1); Validate checks it. A slot reused this frame is rendered before the scene pass
 //    that samples it reads the table naming it; earlier frames still on the GPU read it before (one queue, the passes in order).
@@ -25,6 +31,7 @@
 
 #include "features/shadows/xlionrender_shadow_clipmap.h"
 #include <algorithm>
+#include <bit>
 #include <span>
 #include <unordered_map>
 
@@ -62,6 +69,8 @@ namespace xlionrender::shadows
             // slowly once they fit again - every pixel a little coarser instead of some patches a level coarser (rejected pages)
             float   m_PoolLoadFactor = 0.85f;
             float   m_MaxDynamicBias = 2.0f;            // 0: off
+            int     m_FadeFrames     = 8;               // the previous epoch to the current one, once the current has every page asked for
+            int     m_MaxPrevFrames  = 120;             // the previous epoch goes after this many frames whatever (a rebuild that never ends)
 
             int SlotsPerRow ( void ) const noexcept { return m_PoolTexels / page_texels_v; }
             int Slots       ( void ) const noexcept { return SlotsPerRow() * ((m_PoolHeight > 0 ? m_PoolHeight : m_PoolTexels) / page_texels_v); }
@@ -110,12 +119,21 @@ namespace xlionrender::shadows
             float m_EpochMismatchDegrees = 0;   // the angle between the light's direction and its epoch's (under setup::m_EpochDegrees)
             float m_PoolLoad     = 0;       // the fine pages asked for / the fine slots (above 1: more than fit)
             float m_DynamicBias  = 0;       // the resolution bias dynamic resolution adds now (ResolutionBias())
+            int   m_Remapped     = 0;       // requests of an older epoch moved into this one (pages, after the move)
+            int   m_ResidentPrev = 0;       // the previous epoch's pages still resident
+            float m_Fade         = 1;       // the current epoch's weight against the previous one (1: the current only)
         };
 
-        // Windows of one frame, to decode its requests later
+        // A request's depth range (the request pass: per table entry, the largest of z and of 1 - z, z in 0..1 over its level's range)
+        struct request_depth { std::uint32_t m_MaxZ = 0, m_MaxInvZ = 0; };
+
+        // Windows of one frame, to decode its requests later (with its basis and depth ranges: a later epoch moves them into its own)
         struct snapshot
         {
             std::array<int, max_levels_v * 2> m_Origin{};
+            std::array<float, max_levels_v>   m_DepthCenter{};
+            xmath::fvec3  m_X{ 1, 0, 0 }, m_Y{ 0, 1, 0 }, m_Z{ 0, 0, 1 };
+            float         m_Level0Texel = 0;
             std::uint64_t m_Epoch = 0;
             bool          m_bValid = false;
         };
@@ -127,7 +145,8 @@ namespace xlionrender::shadows
             m_Slots.assign(std::size_t(m_Setup.Slots()), slot{});
             m_RenderedFrame.assign(m_Slots.size(), ~0ull);
             m_Map.clear();
-            m_bHasBasis = false;
+            m_PrevMap.clear();
+            m_bHasBasis = m_bHasPrev = false;
             m_DynamicBias = 0; m_LastOverload = 0;
         }
 
@@ -158,25 +177,81 @@ namespace xlionrender::shadows
         snapshot Snapshot(void) const noexcept
         {
             snapshot S;
-            for (int L = 0; L < m_Setup.m_Levels; ++L) { S.m_Origin[2 * L] = m_Levels[L].m_OriginX; S.m_Origin[2 * L + 1] = m_Levels[L].m_OriginY; }
+            for (int L = 0; L < m_Setup.m_Levels; ++L) { S.m_Origin[2 * L] = m_Levels[L].m_OriginX; S.m_Origin[2 * L + 1] = m_Levels[L].m_OriginY; S.m_DepthCenter[L] = m_Levels[L].m_DepthCenter; }
+            S.m_X = m_X; S.m_Y = m_Y; S.m_Z = m_Z; S.m_Level0Texel = m_Level0Texel;
             S.m_Epoch = m_Epoch;
             S.m_bValid = m_bHasBasis;
             return S;
         }
 
         // The request pass's bits (a bit per table entry, level-major) as pages, with the windows of the frame that made them. Requests of
-        // an older epoch are dropped (their pages no longer exist)
-        void DecodeRequests(std::span<const std::uint32_t> Bits, const snapshot& S, std::vector<key>& Out) const noexcept
+        // an older epoch are moved into this one (Depths: the request pass's per entry; empty: they are dropped) - call it after Update
+        // opened this frame's epoch
+        void DecodeRequests(std::span<const std::uint32_t> Bits, const snapshot& S, std::vector<key>& Out, std::span<const request_depth> Depths = {}) noexcept
         {
             Out.clear();
-            if (!S.m_bValid || S.m_Epoch != m_Epoch) return;
+            if (!S.m_bValid || !m_bHasBasis) return;
+            const bool bOld = S.m_Epoch != m_Epoch;
+            if (bOld && Depths.empty()) return;
             const int W = m_Setup.m_Window, n = std::min(int(Bits.size()) * 32, m_Setup.TableEntries());
             for (int i = 0; i < n; ++i)
             {
                 if ((Bits[std::size_t(i) >> 5] & (1u << (i & 31))) == 0) continue;
                 const int L = i / (W * W), ty = (i / W) % W, tx = i % W;
-                Out.push_back({ L, Unwrap(tx, S.m_Origin[2 * L]), Unwrap(ty, S.m_Origin[2 * L + 1]) });
+                const key K{ L, Unwrap(tx, S.m_Origin[2 * L]), Unwrap(ty, S.m_Origin[2 * L + 1]) };
+                if (!bOld) { Out.push_back(K); continue; }
+                if (std::size_t(i) < Depths.size()) Remap(K, S, Depths[std::size_t(i)], Out);
             }
+            if (bOld)
+            {
+                std::sort(Out.begin(), Out.end(), [](const key& a, const key& b) { return Pack(a) < Pack(b); });
+                Out.erase(std::unique(Out.begin(), Out.end()), Out.end());
+                m_FrameRemapped = int(Out.size());
+            }
+        }
+
+        // A page asked for in an older epoch (S), into this one: its light-space box (its rect, the depth range its pixels had) through
+        // the world into this basis, the pages of the same level it covers. The previous epoch's texel size if the scale changed
+        void Remap(const key& K, const snapshot& S, const request_depth& D, std::vector<key>& Out) const noexcept
+        {
+            const float P0 = S.m_Level0Texel * float(page_texels_v) * float(1 << K.m_Level);
+            const float H0 = P0 * float(m_Setup.m_Window) * depth_range_v;
+            const float Z0 = std::bit_cast<float>(D.m_MaxInvZ), Z1 = std::bit_cast<float>(D.m_MaxZ);       // (1 - min z, max z)
+            const float ZLo = S.m_DepthCenter[K.m_Level] - H0 + (D.m_MaxInvZ ? 1.0f - Z0 : 0.5f) * 2.0f * H0;
+            const float ZHi = S.m_DepthCenter[K.m_Level] - H0 + (D.m_MaxZ ? Z1 : 0.5f) * 2.0f * H0;
+            float MinX = 1e30f, MinY = 1e30f, MaxX = -1e30f, MaxY = -1e30f;
+            for (int c = 0; c < 8; ++c)
+            {
+                const float x = float(K.m_X + (c & 1)) * P0, y = float(K.m_Y + ((c >> 1) & 1)) * P0, z = (c & 4) ? ZHi : ZLo;
+                const xmath::fvec3 World = S.m_X * x + S.m_Y * y + S.m_Z * z;
+                const float nx = World.Dot(m_X), ny = World.Dot(m_Y);
+                MinX = std::min(MinX, nx); MaxX = std::max(MaxX, nx); MinY = std::min(MinY, ny); MaxY = std::max(MaxY, ny);
+            }
+            const float P = PageSize(K.m_Level);
+            const int x0 = int(std::floor(MinX / P)), x1 = int(std::floor(MaxX / P)), y0 = int(std::floor(MinY / P)), y1 = int(std::floor(MaxY / P));
+            if ((x1 - x0 + 1) * (y1 - y0 + 1) > 16) return;      // (a degenerate move: the next requests will say)
+            for (int y = y0; y <= y1; ++y) for (int x = x0; x <= x1; ++x) Out.push_back({ K.m_Level, x, y });
+        }
+
+        // The basis: a new direction (past setup::m_EpochDegrees) or scale opens a new epoch (KeepAsPrevious). Update calls it; call it
+        // before DecodeRequests so a request of an older epoch is moved into this frame's (a second call the same frame: nothing)
+        bool OpenEpoch(const xmath::fvec3& LightDir, float Level0Texel, std::uint64_t Frame) noexcept
+        {
+            const xmath::fvec3 Z = LightDir.NormalizeCopy();
+            const float EpochCos = std::cos(m_Setup.m_EpochDegrees * 3.14159265f / 180.0f);
+            if (m_bHasBasis && Z.Dot(m_Z) >= EpochCos && Level0Texel == m_Level0Texel) return false;
+            m_PX = m_X; m_PY = m_Y; m_PZ = m_Z; m_PrevLevels = m_Levels; m_PrevLevel0Texel = m_Level0Texel;   // (the epoch now ending)
+            m_bPrevUsable = m_bHasBasis;
+            const xmath::fvec3 Up = std::abs(Z.m_Y) < 0.99f ? xmath::fvec3(0, 1, 0) : xmath::fvec3(1, 0, 0);
+            m_X = xmath::fvec3::Cross(Up, Z).NormalizeCopy();
+            m_Y = xmath::fvec3::Cross(Z, m_X);
+            m_Z = Z;
+            m_Level0Texel = Level0Texel;
+            m_bHasBasis = true;
+            ++m_Epoch; ++m_FrameEpochs;
+            KeepAsPrevious(Frame);
+            for (auto& b : m_bDepthSet) b = false;
+            return true;
         }
 
         // Once a frame, before the shadow pass: the windows, the invalidations, the net, the requested pages admitted and the pages to
@@ -185,25 +260,12 @@ namespace xlionrender::shadows
         void Update(const xmath::fvec3& LightDir, float Level0Texel, const xmath::fvec3& Camera, const std::vector<xmath::fbbox>& ChangedWorld
                    , bool bCache, std::span<const key> Requests, std::uint64_t Frame) noexcept
         {
+            OpenEpoch(LightDir, Level0Texel, Frame);
             m_ToRender.clear();
             m_Stats = {};
+            m_Stats.m_Epochs = m_FrameEpochs; m_Stats.m_Remapped = m_FrameRemapped; m_FrameEpochs = m_FrameRemapped = 0;
             m_Frame = Frame;
-
-            // The basis: a new direction or scale is a new epoch, every page goes
             const xmath::fvec3 Z = LightDir.NormalizeCopy();
-            const float EpochCos = std::cos(m_Setup.m_EpochDegrees * 3.14159265f / 180.0f);
-            if (!m_bHasBasis || Z.Dot(m_Z) < EpochCos || Level0Texel != m_Level0Texel)
-            {
-                const xmath::fvec3 Up = std::abs(Z.m_Y) < 0.99f ? xmath::fvec3(0, 1, 0) : xmath::fvec3(1, 0, 0);
-                m_X = xmath::fvec3::Cross(Up, Z).NormalizeCopy();
-                m_Y = xmath::fvec3::Cross(Z, m_X);
-                m_Z = Z;
-                m_Level0Texel = Level0Texel;
-                m_bHasBasis = true;
-                ++m_Epoch; ++m_Stats.m_Epochs;
-                FreeAll();
-                for (auto& b : m_bDepthSet) b = false;
-            }
 
             m_Stats.m_EpochMismatchDegrees = std::acos(std::clamp(Z.Dot(m_Z), -1.0f, 1.0f)) * 180.0f / 3.14159265f;
 
@@ -220,7 +282,7 @@ namespace xlionrender::shadows
                 {
                     Lv.m_DepthCenter = std::round(C.m_Z / (Half * depth_recenter_v)) * (Half * depth_recenter_v);
                     m_bDepthSet[L] = true;
-                    for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bUsed && m_Slots[s].m_Key.m_Level == L) Free(s);
+                    for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bUsed && !m_Slots[s].m_bPrev && m_Slots[s].m_Key.m_Level == L) Free(s);
                 }
             }
             m_PinX = int(std::floor(C.m_X / m_Levels[m_Setup.m_Levels - 1].m_PageSize));
@@ -230,7 +292,7 @@ namespace xlionrender::shadows
             for (int s = 0; s < int(m_Slots.size()); ++s)
             {
                 auto& S = m_Slots[s];
-                if (!S.m_bUsed) continue;
+                if (!S.m_bUsed || S.m_bPrev) continue;
                 if (!InWindow(S.m_Key) || (s < m_Setup.PinnedSlots()) != IsPinned(S.m_Key)) Free(s);
             }
 
@@ -242,11 +304,25 @@ namespace xlionrender::shadows
                 for (auto& B : ChangedWorld) Changed.push_back(Bounds(B));
                 for (auto& S : m_Slots)
                 {
-                    if (!S.m_bUsed || !S.m_bValid) continue;
+                    if (!S.m_bUsed || !S.m_bValid || S.m_bPrev) continue;
                     const float P = m_Levels[S.m_Key.m_Level].m_PageSize;
                     bool bDirty = !bCache;
                     for (std::size_t i = 0; !bDirty && i < Changed.size(); ++i) bDirty = clipmap::Overlaps(Changed[i], S.m_Key.m_X * P, S.m_Key.m_Y * P, P);
                     if (bDirty) { S.m_bValid = false; ++m_Stats.m_Dirtied; }
+                }
+                if (m_bHasPrev)                                 // (the previous epoch's pages under them go: never rendered again)
+                {
+                    std::vector<lbox> PrevChanged;
+                    for (auto& B : ChangedWorld) PrevChanged.push_back(BoundsIn(B, m_PX, m_PY, m_PZ));
+                    for (int s = 0; s < int(m_Slots.size()); ++s)
+                    {
+                        auto& S = m_Slots[s];
+                        if (!S.m_bUsed || !S.m_bPrev) continue;
+                        const float P = m_PrevLevels[S.m_Key.m_Level].m_PageSize;
+                        bool bDirty = !bCache;
+                        for (std::size_t i = 0; !bDirty && i < PrevChanged.size(); ++i) bDirty = clipmap::Overlaps(PrevChanged[i], S.m_Key.m_X * P, S.m_Key.m_Y * P, P);
+                        if (bDirty) Free(s);
+                    }
                 }
             }
 
@@ -304,12 +380,23 @@ namespace xlionrender::shadows
                 ++m_Stats.m_Rendered;
             }
 
+            // The cross-fade: once this epoch has every page asked for (none deferred or rejected), toward it over m_FadeFrames; then the
+            // previous epoch's pages go
+            if (m_bHasPrev)
+            {
+                if ((m_Stats.m_Deferred == 0 && m_Stats.m_Rejected == 0 && Frame > m_EpochFrame) || Frame - m_EpochFrame > std::uint64_t(m_Setup.m_MaxPrevFrames))
+                    m_Fade = std::min(1.0f, m_Fade + 1.0f / float(std::max(1, m_Setup.m_FadeFrames)));
+                if (m_Fade >= 1.0f) DropPrevious();
+            }
+
             for (int s = 0; s < int(m_Slots.size()); ++s)
             {
                 if (!m_Slots[s].m_bUsed) continue;
-                if (s < m_Setup.PinnedSlots()) { ++m_Stats.m_ResidentPinned; m_Stats.m_PinnedNotValid += !m_Slots[s].m_bValid; }
+                if (m_Slots[s].m_bPrev)        ++m_Stats.m_ResidentPrev;
+                else if (s < m_Setup.PinnedSlots()) { ++m_Stats.m_ResidentPinned; m_Stats.m_PinnedNotValid += !m_Slots[s].m_bValid; }
                 else                           ++m_Stats.m_ResidentFine;
             }
+            m_Stats.m_Fade = m_bHasPrev ? m_Fade : 1.0f;
 
             // Dynamic resolution (as Unreal's FVirtualShadowMapArrayCacheManager: down fast, up after 10 frames that fit, slowly); a frame
             // without requests (an epoch's first frames, nothing in view) leaves it as it is
@@ -336,11 +423,29 @@ namespace xlionrender::shadows
             for (int s = 0; s < int(m_Slots.size()); ++s)
             {
                 const auto& S = m_Slots[s];
-                if (!S.m_bUsed || !S.m_bValid || !InWindow(S.m_Key)) continue;
+                if (!S.m_bUsed || !S.m_bValid || S.m_bPrev || !InWindow(S.m_Key)) continue;
                 const int i = TableIndex(S.m_Key);
                 Out[std::size_t(i) >> 1] |= std::uint32_t(s + 1) << ((i & 1) * 16);
             }
         }
+
+        // The previous epoch's table (its windows; empty when there is none): the same layout
+        void BuildPrevTable(std::vector<std::uint32_t>& Out) const noexcept
+        {
+            Out.assign(std::size_t(m_Setup.TableUints()), 0u);
+            if (!m_bHasPrev) return;
+            for (int s = 0; s < int(m_Slots.size()); ++s)
+            {
+                const auto& S = m_Slots[s];
+                if (!S.m_bUsed || !S.m_bPrev || !S.m_bValid) continue;
+                const auto& Lv = m_PrevLevels[S.m_Key.m_Level];
+                if (S.m_Key.m_X < Lv.m_OriginX || S.m_Key.m_X >= Lv.m_OriginX + m_Setup.m_Window || S.m_Key.m_Y < Lv.m_OriginY || S.m_Key.m_Y >= Lv.m_OriginY + m_Setup.m_Window) continue;
+                const int i = TableIndex(S.m_Key);
+                Out[std::size_t(i) >> 1] |= std::uint32_t(s + 1) << ((i & 1) * 16);
+            }
+        }
+        bool HasPrevious(void) const noexcept { return m_bHasPrev; }
+        float Fade(void) const noexcept { return m_bHasPrev ? m_Fade : 1.0f; }
 
         // Invariant 1 (the tests): every table entry names a used, VALID slot holding exactly the page of that entry in this frame's window
         bool Validate(std::span<const std::uint32_t> Table) const noexcept
@@ -355,7 +460,7 @@ namespace xlionrender::shadows
                 const auto& S = m_Slots[s];
                 const int L = i / (W * W);
                 const key K{ L, Unwrap(i % W, m_Levels[L].m_OriginX), Unwrap((i / W) % W, m_Levels[L].m_OriginY) };
-                if (!S.m_bUsed || !S.m_bValid || !(S.m_Key == K)) return false;
+                if (!S.m_bUsed || !S.m_bValid || S.m_bPrev || !(S.m_Key == K)) return false;
             }
             return true;
         }
@@ -369,11 +474,15 @@ namespace xlionrender::shadows
         float DepthHalfRange(int Level) const noexcept { return PageSize(Level) * float(m_Setup.m_Window) * depth_range_v; }
         float Level0Texel   (void) const noexcept { return m_Level0Texel; }
         xmath::fvec3 ToLight(const xmath::fvec3& P) const noexcept { return { P.Dot(m_X), P.Dot(m_Y), P.Dot(m_Z) }; }
-        lbox Bounds(const xmath::fbbox& World) const noexcept
+        lbox Bounds(const xmath::fbbox& World) const noexcept { return BoundsIn(World, m_X, m_Y, m_Z); }
+        static lbox BoundsIn(const xmath::fbbox& World, const xmath::fvec3& X, const xmath::fvec3& Y, const xmath::fvec3& Z) noexcept
         {
             lbox B;
             for (int i = 0; i < 8; ++i)
-                B.Add(ToLight({ (i & 1) ? World.m_Max.m_X : World.m_Min.m_X, (i & 2) ? World.m_Max.m_Y : World.m_Min.m_Y, (i & 4) ? World.m_Max.m_Z : World.m_Min.m_Z }));
+            {
+                const xmath::fvec3 P{ (i & 1) ? World.m_Max.m_X : World.m_Min.m_X, (i & 2) ? World.m_Max.m_Y : World.m_Min.m_Y, (i & 4) ? World.m_Max.m_Z : World.m_Min.m_Z };
+                B.Add({ P.Dot(X), P.Dot(Y), P.Dot(Z) });
+            }
             return B;
         }
 
@@ -397,6 +506,9 @@ namespace xlionrender::shadows
 
         xmath::fvec3                            m_X{ 1, 0, 0 }, m_Y{ 0, 1, 0 }, m_Z{ 0, 0, 1 };      // world -> light rotation rows
         std::array<level, max_levels_v>         m_Levels{};
+        xmath::fvec3                            m_PX{ 1, 0, 0 }, m_PY{ 0, 1, 0 }, m_PZ{ 0, 0, 1 };   // the previous epoch's (HasPrevious)
+        std::array<level, max_levels_v>         m_PrevLevels{};
+        float                                   m_PrevLevel0Texel = 0;
         std::vector<page_to_render>             m_ToRender;
         stats                                   m_Stats;
 
@@ -409,6 +521,7 @@ namespace xlionrender::shadows
             std::uint32_t   m_Generation = 0;
             bool            m_bUsed  = false;
             bool            m_bValid = false;
+            bool            m_bPrev  = false;           // the previous epoch's page (in m_PrevMap)
         };
 
         float PageDistance2(const key& K, const xmath::fvec3& C) const noexcept
@@ -420,7 +533,7 @@ namespace xlionrender::shadows
         void Assign(int s, const key& K, std::uint64_t Frame) noexcept
         {
             auto& S = m_Slots[s];
-            S = { K, Frame, S.m_Generation + 1, true, false };
+            S = { K, Frame, S.m_Generation + 1, true, false, false };
             m_Map[Pack(K)] = s;
         }
 
@@ -428,15 +541,37 @@ namespace xlionrender::shadows
         {
             auto& S = m_Slots[s];
             if (!S.m_bUsed) return;
-            m_Map.erase(Pack(S.m_Key));
-            S.m_bUsed = S.m_bValid = false;
+            if (S.m_bPrev) m_PrevMap.erase(Pack(S.m_Key));
+            else           m_Map.erase(Pack(S.m_Key));
+            S.m_bUsed = S.m_bValid = S.m_bPrev = false;
             if (s >= m_Setup.PinnedSlots()) ++m_Stats.m_Evicted;
         }
 
-        void FreeAll(void) noexcept
+        // A new epoch: the previous one's pages go; this one's VALID fine pages become the previous (the net and the rest go)
+        void KeepAsPrevious(std::uint64_t Frame) noexcept
         {
-            for (auto& S : m_Slots) S.m_bUsed = S.m_bValid = false;
+            DropPrevious();
+            for (int s = 0; s < int(m_Slots.size()); ++s)
+            {
+                auto& S = m_Slots[s];
+                if (!S.m_bUsed) continue;
+                if (s < m_Setup.PinnedSlots() || !S.m_bValid || !m_bPrevUsable) { Free(s); continue; }
+                m_Map.erase(Pack(S.m_Key));
+                S.m_bPrev = true;
+                m_PrevMap[Pack(S.m_Key)] = s;
+            }
             m_Map.clear();
+            m_bHasPrev = m_bPrevUsable && !m_PrevMap.empty();
+            m_EpochFrame = Frame;
+            m_Fade = 0;
+        }
+
+        void DropPrevious(void) noexcept
+        {
+            for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bUsed && m_Slots[s].m_bPrev) Free(s);
+            m_PrevMap.clear();
+            m_bHasPrev = false;
+            m_Fade = 1;
         }
 
         int FreePinnedSlot(void) const noexcept
@@ -448,15 +583,17 @@ namespace xlionrender::shadows
         // A fine slot: a free one, else the least recently requested page that is neither requested lately nor rendered this frame
         int AdmitSlot(std::uint64_t Frame) noexcept
         {
-            int Best = -1;
+            int Best = -1, Prev = -1;
             for (int s = m_Setup.PinnedSlots(); s < int(m_Slots.size()); ++s)
             {
                 const auto& S = m_Slots[s];
                 if (!S.m_bUsed) return s;
+                if (S.m_bPrev) { if (Prev < 0) Prev = s; continue; }
                 if (S.m_LastRequested + std::uint64_t(m_Setup.m_ProtectFrames) >= Frame) continue;     // protected (requested lately)
                 if (m_RenderedFrame[s] == Frame) continue;                                              // in flight (rendered this frame)
                 if (Best < 0 || S.m_LastRequested < m_Slots[Best].m_LastRequested) Best = s;
             }
+            if (Prev >= 0) Best = Prev;                     // (the previous epoch's pages first: they only bridge the rebuild)
             if (Best >= 0) Free(Best);
             return Best;
         }
@@ -478,6 +615,11 @@ namespace xlionrender::shadows
         std::vector<slot>                       m_Slots;
         std::vector<std::uint64_t>              m_RenderedFrame;
         std::unordered_map<std::uint64_t, int>  m_Map;
+        std::unordered_map<std::uint64_t, int>  m_PrevMap;
+        std::uint64_t                           m_EpochFrame = 0;
+        int                                     m_FrameEpochs = 0, m_FrameRemapped = 0;     // (this frame's, before Update resets the stats)
+        float                                   m_Fade = 1;
+        bool                                    m_bHasPrev = false, m_bPrevUsable = false;
         std::array<bool, max_levels_v>          m_bDepthSet{};
         std::uint64_t                           m_Epoch = 0;
         float                                   m_Level0Texel = 0;
