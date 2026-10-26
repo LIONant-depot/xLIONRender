@@ -687,10 +687,12 @@ namespace xlionrender
         if( Frame != m_LightFrame ) { m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0; }
         if( m_VSMTableFrame == Frame ) return m_VSMTableBase;
         m_VSM.BuildTable(m_VSMTable);
-        {   // the previous epoch's table right after it (the same size): the shading reads it where this epoch has no page yet
-            std::vector<std::uint32_t> Prev;
-            m_VSM.BuildPrevTable(Prev);
-            m_VSMTable.insert(m_VSMTable.end(), Prev.begin(), Prev.end());
+        {   // the previous epoch's table right after it (the same size): the shading reads it where this epoch has no page yet; then the movers'
+            std::vector<std::uint32_t> More;
+            m_VSM.BuildPrevTable(More);
+            m_VSMTable.insert(m_VSMTable.end(), More.begin(), More.end());
+            m_VSM.BuildMoverTable(More);
+            m_VSMTable.insert(m_VSMTable.end(), More.begin(), More.end());
         }
         const int n = int(m_VSMTable.size());
         m_VSMTableBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
@@ -1086,10 +1088,12 @@ namespace xlionrender
         // The casters and what changed since the last render: new and gone casters, moved or re-materialed ones, and skinned
         // ones (old and new bounds). Draws with an instance id compare against their slot's last state (no hashing, bounds kept
         // while unchanged); draws without one go through a hash of their state.
-        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; };     // m_BoxedBase: in m_ClusterSkip (~0: none)
+        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; bool m_bMover; };     // m_BoxedBase: in m_ClusterSkip (~0: none)
         std::vector<draw_caster>                         Draws;
         std::vector<xmath::fbbox>                        Changed;
-        std::unordered_map<std::uint64_t, xmath::fbbox>  Now;
+        std::vector<xmath::fbbox>                        SunStatic, SunMovers;  // the sun's pages: changes of the static casters (a static caster changed or
+                                                                                 // went, a mover settled), the movers' bounds this frame
+        std::unordered_map<std::uint64_t, prev_caster>   Now;
         Draws.reserve(Scene.m_Draws.size());
         m_DrawWorld.assign(Scene.m_Draws.size(), xmath::fbbox{});
         if( m_SlotCasters.empty() ) m_SlotCasters.resize(max_instances_v);
@@ -1123,6 +1127,7 @@ namespace xlionrender
 
             const bool   bSkin = pMesh->m_bCluster && pMesh->m_Geom.m_Kind == geom_kind::SKIN;
             xmath::fbbox World;
+            bool         bMover = false;
             if( Slot < std::uint32_t(max_instances_v) )
             {
                 auto&               C     = m_SlotCasters[Slot];
@@ -1132,11 +1137,14 @@ namespace xlionrender
                 if( bChanged )
                 {
                     if( C.m_bValid ) Changed.push_back(C.m_World);
-                    C = { WorldOf(*pMesh, D), D.m_Mesh, MHash, BoxedHash, Pass, true };
+                    if( C.m_bValid && Pass - C.m_ChangedPass >= static_frames_v ) SunStatic.push_back(C.m_World);    // (a static caster starts moving)
+                    C = { WorldOf(*pMesh, D), D.m_Mesh, MHash, BoxedHash, Pass, true, Pass };
                     Changed.push_back(C.m_World);
                 }
                 C.m_Seen = Pass;
                 World    = C.m_World;
+                bMover   = bSkin || Pass - C.m_ChangedPass < static_frames_v;
+                if( !bSkin && Pass - C.m_ChangedPass == static_frames_v ) SunStatic.push_back(World);             // (a mover settles)
                 m_CasterSlots.push_back(Slot);
             }
             else
@@ -1147,21 +1155,35 @@ namespace xlionrender
                 Key = Hash(Key, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id));
                 Key = Hash(Key, &BoxedHash, sizeof(BoxedHash));
                 World = WorldOf(*pMesh, D);
-                Now.emplace(Key, World);
                 const auto It = m_PrevCasters.find(Key);
+                const std::uint64_t First = It == m_PrevCasters.end() ? Pass : It->second.m_First;
+                Now.emplace(Key, prev_caster{ World, First });
                 if( It == m_PrevCasters.end() || bSkin ) Changed.push_back(World);
-                if( It != m_PrevCasters.end() && bSkin ) Changed.push_back(It->second);
+                if( It != m_PrevCasters.end() && bSkin ) Changed.push_back(It->second.m_World);
+                bMover = bSkin || Pass - First < static_frames_v;
+                if( !bSkin && Pass - First == static_frames_v ) SunStatic.push_back(World);                       // (a mover settles)
             }
             m_DrawWorld[iDraw] = World;
-            Draws.push_back({ &D, pMesh, World, Slot, BoxedBase });
+            if( !m_bShadowSplitMovers ) bMover = false;
+            if( bMover ) SunMovers.push_back(World);
+            Draws.push_back({ &D, pMesh, World, Slot, BoxedBase, bMover });
         }
-        for( const auto& [Key, World] : m_PrevCasters ) if( !Now.contains(Key) ) Changed.push_back(World);
+        for( const auto& [Key, P] : m_PrevCasters ) if( !Now.contains(Key) )
+        {
+            Changed.push_back(P.m_World);
+            if( Pass - 1 - P.m_First >= static_frames_v ) SunStatic.push_back(P.m_World);                         // (a static caster went)
+        }
         m_PrevCasters = std::move(Now);
         m_FrameChanged = Changed;                           // the probes re-capture where casters changed
         for( auto Slot : m_CasterSlotsPrev )                                // persistent casters no longer drawn
         {
             auto& C = m_SlotCasters[Slot];
-            if( C.m_bValid && C.m_Seen != Pass ) { Changed.push_back(C.m_World); C.m_bValid = false; }
+            if( C.m_bValid && C.m_Seen != Pass )
+            {
+                Changed.push_back(C.m_World);
+                if( Pass - C.m_ChangedPass >= static_frames_v ) SunStatic.push_back(C.m_World);                   // (a static caster went)
+                C.m_bValid = false;
+            }
         }
         std::swap(m_CasterSlots, m_CasterSlotsPrev);
 
@@ -1203,7 +1225,8 @@ namespace xlionrender
                     m_VSMSnap[Slot].m_bValid = false;
                 }
             }
-            m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex());
+            // (the static pages see the static casters' changes only - every change when the movers are not split; the movers have pages of their own)
+            m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
         }
         else m_VSM.Invalidate();            // the casters changing meanwhile reach no page: all of them when it casts again
@@ -1381,7 +1404,7 @@ namespace xlionrender
                     Cmd.setBuffer(m_FullscreenVB);
                     Cmd.setBuffer(m_FullscreenIB);
                     Cmd.Draw(3);
-                    DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
+                    DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
                 }
             }
 
@@ -1470,7 +1493,8 @@ namespace xlionrender
                     const auto& Lv = m_VSM.m_Levels[i];
                     Light.m_VSMLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
                 }
-                Light.m_VSMParams3 = { m_VSM.ResolutionBias(), std::tan(std::max(L.m_SourceAngle, 0.0f) * 0.5f * 3.14159265f / 180.0f), float(m_VSMSoftLevels), 0 };
+                Light.m_VSMParams3 = { m_VSM.ResolutionBias(), std::tan(std::max(L.m_SourceAngle, 0.0f) * 0.5f * 3.14159265f / 180.0f), float(m_VSMSoftLevels)
+                                     , m_VSM.HasMovers() ? float(vsmTableBase() + 2 * VS.TableUints() + 1) : 0.0f };     // w: the movers' table + 1 (0: none)
                 Light.m_VSMPrevW2Light = xmath::fmat4::fromIdentity();
                 {
                     const float Axis[3][3] = { { m_VSM.m_PX.m_X, m_VSM.m_PX.m_Y, m_VSM.m_PX.m_Z }, { m_VSM.m_PY.m_X, m_VSM.m_PY.m_Y, m_VSM.m_PY.m_Z }, { m_VSM.m_PZ.m_X, m_VSM.m_PZ.m_Y, m_VSM.m_PZ.m_Z } };

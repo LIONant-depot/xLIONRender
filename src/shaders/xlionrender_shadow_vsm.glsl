@@ -44,9 +44,28 @@ bool VSMInWindow(in const vec4 Lv, in const ivec2 Page)
     return all(greaterThanEqual(Rel, ivec2(0))) && all(lessThan(Rel, ivec2(int(UBOLight.VSMParams2.x))));
 }
 
-// One level of an epoch (Lv: its level's window and depth centre, Texel0: its level 0 texel, TableBase: its table): 1 lit .. 0 shadowed,
-// or -1 when a tap's page is not there
-float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, in const vec4 Lv, in const float Texel0, in const uint TableBase)
+// A tap's depth: its page's, or the nearer of it and the movers' page there (P1b: the movers drawn apart; MoverBase 0: none)
+float VSMDepth(in const ivec2 At, in const ivec2 MoverAt, in const bool bMover)
+{
+    const float d = texelFetch(SamplerShadowMap, At, 0).r;
+    return bMover ? min(d, texelFetch(SamplerShadowMap, MoverAt, 0).r) : d;
+}
+
+// The mover page's origin for a page (the atlas texel of its page-space 0, as Base), or false when the movers have none there
+bool VSMMoverBase(in const int Level, in const ivec2 Page, in const uint MoverBase, out ivec2 Base)
+{
+    Base = ivec2(0);
+    if (MoverBase == 0u) return false;
+    const uint E = VSMEntry(Level, Page, MoverBase - 1u);
+    if (E == 0u) return false;
+    const float Row = UBOLight.VSMParams2.z;
+    Base = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - Page * kVSMPageTexels;
+    return true;
+}
+
+// One level of an epoch (Lv: its level's window and depth centre, Texel0: its level 0 texel, TableBase: its table, MoverBase: the
+// movers' table + 1, 0: none): 1 lit .. 0 shadowed, or -1 when a tap's page is not there
+float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, in const vec4 Lv, in const float Texel0, in const uint TableBase, in const uint MoverBase)
 {
     const float Texel = Texel0 * float(1 << Level);
     const float Half  = Lv.z * UBOLight.VSMParams2.x * kVSMDepthRange;                 // the level's depth half range (vsm::DepthHalfRange)
@@ -68,9 +87,11 @@ float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, i
         const uint E = VSMEntry(Level, PLo, TableBase);
         if (E == 0u) return -1.0;
         const ivec2 Base = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - PLo * kVSMPageTexels;
+        ivec2 MBase;
+        const bool bM = VSMMoverBase(Level, PLo, MoverBase, MBase);
         for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x)
-            Lit += Wx[x] * Wy[y] * ((texelFetch(SamplerShadowMap, Base + Lo + ivec2(x, y), 0).r < Depth - Bias - min(2.0 * max(0.0, dot(SlopeT, vec2(Lo + ivec2(x, y)) - U)), MaxB)) ? 0.0 : 1.0);
+            Lit += Wx[x] * Wy[y] * ((VSMDepth(Base + Lo + ivec2(x, y), MBase + Lo + ivec2(x, y), bM) < Depth - Bias - min(2.0 * max(0.0, dot(SlopeT, vec2(Lo + ivec2(x, y)) - U)), MaxB)) ? 0.0 : 1.0);
         return Lit / 9.0;
     }
     // Across a page border: the footprint (4 texels) touches at most 2 x 2 pages - their entries once, each tap picks its page by which side
@@ -89,7 +110,13 @@ float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, i
     {
         const ivec2 T = Lo + ivec2(x, y);
         const int   j = (T.x >= Border.x && PHi.x != PLo.x ? 1 : 0) + (T.y >= Border.y && PHi.y != PLo.y ? 2 : 0);
-        Lit += Wx[x] * Wy[y] * ((texelFetch(SamplerShadowMap, Base[j] + T, 0).r < Depth - Bias - min(2.0 * max(0.0, dot(SlopeT, vec2(T) - U)), MaxB)) ? 0.0 : 1.0);
+        float d = texelFetch(SamplerShadowMap, Base[j] + T, 0).r;
+        if (MoverBase != 0u)                                                           // (movers: the tap's mover page looked up here - few registers kept)
+        {
+            ivec2 MB;
+            if (VSMMoverBase(Level, ivec2((j & 1) != 0 ? PHi.x : PLo.x, (j & 2) != 0 ? PHi.y : PLo.y), MoverBase, MB)) d = min(d, texelFetch(SamplerShadowMap, MB + T, 0).r);
+        }
+        Lit += Wx[x] * Wy[y] * ((d < Depth - Bias - min(2.0 * max(0.0, dot(SlopeT, vec2(T) - U)), MaxB)) ? 0.0 : 1.0);
     }
     return Lit / 9.0;
 }
@@ -99,11 +126,14 @@ float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, i
 float ShadowVSMAt(in const int Level, in const vec3 World, in const vec3 Ng, in const vec2 Slope, in const vec2 SlopeP, in const float Grazing)
 {
     const vec3 Off = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMParams.y * float(1 << Level));
-    float S = ShadowVSMLevel(Level, (UBOLight.W2Light * vec4(Off, 1.0)).xyz, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w));
+    const vec3 Lo = (UBOLight.W2Light * vec4(Off, 1.0)).xyz;
+    float S = UBOLight.VSMParams3.w == 0.0                                            // (no mover this frame: a copy without the movers' code)
+            ? ShadowVSMLevel(Level, Lo, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w), 0u)
+            : ShadowVSMLevel(Level, Lo, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w), uint(UBOLight.VSMParams3.w));
     if (UBOLight.VSMPrevParams.x != 0.0 && (S < 0.0 || UBOLight.VSMPrevParams.y < 1.0))
     {
         const vec3  OffP = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMPrevParams.z * float(1 << Level));
-        const float SP   = ShadowVSMLevel(Level, (UBOLight.VSMPrevW2Light * vec4(OffP, 1.0)).xyz, SlopeP, UBOLight.VSMPrevLevels[Level], UBOLight.VSMPrevParams.z, uint(UBOLight.VSMPrevParams.w));
+        const float SP   = ShadowVSMLevel(Level, (UBOLight.VSMPrevW2Light * vec4(OffP, 1.0)).xyz, SlopeP, UBOLight.VSMPrevLevels[Level], UBOLight.VSMPrevParams.z, uint(UBOLight.VSMPrevParams.w), 0u);
         S = S < 0.0 ? SP : SP < 0.0 ? S : mix(SP, S, UBOLight.VSMPrevParams.y);
     }
     return S;
@@ -111,7 +141,7 @@ float ShadowVSMAt(in const int Level, in const vec3 World, in const vec3 Ng, in 
 
 // Contact-hardening's blocker search (the current epoch): the 4 x 4 texels of a level around the point, the light-space distance from the
 // receiver to the mean of those nearer the light than it. -2: the level's pages are not there; -1: no blocker
-float VSMBlockerDistance(in const int Level, in const vec3 L)
+float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint MoverBase)
 {
     const vec4  Lv    = UBOLight.VSMLevels[Level];
     const float Texel = UBOLight.VSMParams.y * float(1 << Level);
@@ -139,7 +169,12 @@ float VSMBlockerDistance(in const int Level, in const vec3 L)
     {
         const ivec2 T = Lo + ivec2(x, y);
         const int   j = (T.x >= Border.x && PHi.x != PLo.x ? 1 : 0) + (T.y >= Border.y && PHi.y != PLo.y ? 2 : 0);
-        const float d = texelFetch(SamplerShadowMap, Base[j] + T, 0).r;
+        float d = texelFetch(SamplerShadowMap, Base[j] + T, 0).r;
+        if (MoverBase != 0u)
+        {
+            ivec2 MB;
+            if (VSMMoverBase(Level, ivec2((j & 1) != 0 ? PHi.x : PLo.x, (j & 2) != 0 ? PHi.y : PLo.y), MoverBase, MB)) d = min(d, texelFetch(SamplerShadowMap, MB + T, 0).r);
+        }
         if (d < Depth - Bias) { Sum += d; n += 1.0; }
     }
     return n > 0.0 ? (Depth - Sum / n) * 2.0 * Half : -1.0;
@@ -168,7 +203,8 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
         for (int ls = Top; ls >= First; ls -= 2)                                       // (the coarsest, then two finer: a thin caster lost in a coarse level)
         {
             const float Tl = UBOLight.VSMParams.y * float(1 << ls);
-            const float D  = VSMBlockerDistance(ls, (UBOLight.W2Light * vec4(World + Ng * (kVSMNormalOffset * Grazing * Tl), 1.0)).xyz);
+            const vec3  Ls = (UBOLight.W2Light * vec4(World + Ng * (kVSMNormalOffset * Grazing * Tl), 1.0)).xyz;
+            const float D  = UBOLight.VSMParams3.w == 0.0 ? VSMBlockerDistance(ls, Ls, 0u) : VSMBlockerDistance(ls, Ls, uint(UBOLight.VSMParams3.w));
             if (D < 0.0) continue;                                                     // (no page there, or no blocker: a finer level)
             {
                 const float Penumbra = D * UBOLight.VSMParams3.y;                       // world units, half the width

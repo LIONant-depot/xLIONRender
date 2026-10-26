@@ -153,6 +153,9 @@ namespace xlionrender
         int                                        m_ShadowUpdatesPerFrame = 16;
         // Local light maps draw, per face, only the casters in that face's frustum (false: every caster in the light's sphere)
         bool                                       m_bShadowFaceCull = true;
+        // The sun's movers (casters changed lately, skinned) in mover pages of their own, never dirtying the static pages (P1b); false: every
+        // caster in the pages (the tests' reference: the two layers composed must equal it)
+        bool                                       m_bShadowSplitMovers = true;
         // Tests: every filter tap of the pages through the table (the border path everywhere): the image must not change
         bool                                       m_bVSMTapTranslation = false;
         // The pages' debug views (shaders/xlionrender_shadow_vsm.glsl): 0 off, 2 the level, 3 the footprint against the texel, 4 what shaded the pixel
@@ -493,6 +496,7 @@ namespace xlionrender
             std::uint64_t           m_BoxedHash     = 0;        // its clusters left out as boxes (renderShadows' BoxedHash): the shadow changes with them
             std::uint64_t           m_Seen          = 0;
             bool                    m_bValid        = false;
+            std::uint64_t           m_ChangedPass   = 0;        // the shadow pass it last changed in (a mover until static_frames_v later)
         };
         std::vector<slot_caster>    m_SlotCasters;
         std::vector<std::uint32_t>  m_CasterSlots, m_CasterSlotsPrev;
@@ -586,13 +590,15 @@ namespace xlionrender
         std::vector<xmath::fbbox>               m_CasterLightWorld;
         std::array<xmath::fvec3, 3>             m_CasterLightBasis{};
         int                                     m_VSMSoftLevels = 0;        // the coarser levels the request pass asks for too (contact-hardening)
+        static constexpr std::uint64_t          static_frames_v = 4;        // a caster unchanged this many shadow passes is static (in the sun's pages), else a mover
         int  sunAtlasWidth( void ) const noexcept { return 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
         void vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
         int  vsmTableBase( void ) noexcept;
         shadows::local_shadows                  m_LocalShadows;
         std::vector<shadows::local_map_to_render> m_LocalToRender;
         std::vector<shadows::local_map>         m_LocalMaps;        // per scene local light: its map (m_Size 0: none)
-        std::unordered_map<std::uint64_t, xmath::fbbox> m_PrevCasters;  // last frame's casters (key -> world bounds), to find what changed
+        struct prev_caster { xmath::fbbox m_World; std::uint64_t m_First; };       // (m_First: the shadow pass the key first appeared in)
+        std::unordered_map<std::uint64_t, prev_caster> m_PrevCasters;   // last frame's casters (key -> world bounds), to find what changed
         int                                     m_nShadowTilesRendered = 0;
         bool                                    m_bShadowAtlasReady    = false;         // stands in for the shadow map until shadows exist
         xgpu::buffer                m_LightUBO;

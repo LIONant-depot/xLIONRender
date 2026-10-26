@@ -70,7 +70,7 @@ int main()
     Scene.m_Sun.m_bCastShadows = true;
     CHECK(App.RenderFrame(Scene, View, Camera), "Render with shadows");
     const int nNet = Renderer.getVSM().getSetup().PinnedSlots();
-    CHECK(Renderer.getShadowTilesRendered() == nNet, "The first shadowed frame renders the coarse net (%d of %d)", Renderer.getShadowTilesRendered(), nNet);
+    CHECK(Renderer.getShadowTilesRendered() >= nNet, "The first shadowed frame renders the coarse net (%d of %d; new casters are movers for a few frames: their pages too)", Renderer.getShadowTilesRendered(), nNet);
     const int nFirst = Settle();
     const int total_tiles_v = Renderer.getVSMReport().m_Pages.m_ResidentFine + Renderer.getVSMReport().m_Pages.m_ResidentPinned;
     std::printf("pages: the net %d, then %d as the requests came; %d resident\n", nNet, nFirst, total_tiles_v);

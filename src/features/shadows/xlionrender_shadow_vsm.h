@@ -24,6 +24,11 @@
 //    basis (Remap). The shading reads the current epoch where it has the page, the previous one where not, then coarser levels; once
 //    the current epoch has every page asked for, it cross-fades from the previous one over setup::m_FadeFrames, then the previous
 //    pages go. They are the first evicted when a slot is needed.
+//  - Movers (P1b): a page holds the static casters only; a mover (a caster that changed lately, or skinned) never dirties it. Each
+//    frame every page asked for (and of the net) that a mover overlaps gets a mover page - its own slot, its own table - with only the
+//    movers drawn; the shading takes the nearer of the two depths per filter tap: the depth both drawn into one page would have, without
+//    re-rendering the static casters under a moving character every frame. (The strategy's restore-then-draw needs a copy within the
+//    atlas; this is its R-C alternative, exact per tap.)
 //  - The table holds a page only when it is VALID this frame (its slot + 1, 16 bits; 0: none), so the shader never reads a slot that
 //    holds another page or stale depth (invariant 1); Validate checks it. A slot reused this frame is rendered before the scene pass
 //    that samples it reads the table naming it; earlier frames still on the GPU read it before (one queue, the passes in order).
@@ -100,6 +105,7 @@ namespace xlionrender::shadows
             xmath::fmat4    m_W2C;                      // world -> the page's clip space
             float           m_MinX, m_MinY, m_Size;     // its light-space rect (culling the casters)
             bool            m_bPinned;
+            bool            m_bMover = false;           // a mover page: the movers only (else the static casters only)
         };
 
         struct stats
@@ -110,10 +116,11 @@ namespace xlionrender::shadows
             int m_Rejected  = 0;            //   no slot left (pressure)
             int m_Deferred  = 0;            //   waiting for the budget (absent or dirty)
             int m_Rendered  = 0;            // fine pages rendered
+            int m_RenderedMover = 0;        // mover pages rendered (each frame, the movers only)
             int m_RenderedPinned = 0;       // net pages rendered (mandatory: beyond the budget)
             int m_Dirtied   = 0;            // pages a caster change invalidated
             int m_Evicted   = 0;
-            int m_ResidentFine = 0, m_ResidentPinned = 0;
+            int m_ResidentFine = 0, m_ResidentPinned = 0, m_ResidentMover = 0;
             int m_PinnedNotValid = 0;       // net pages not VALID when the table is published (a readiness failure: 0 by construction)
             int m_Epochs    = 0;            // 1: this frame opened a new epoch (a new direction or scale)
             float m_EpochMismatchDegrees = 0;   // the angle between the light's direction and its epoch's (under setup::m_EpochDegrees)
@@ -146,6 +153,7 @@ namespace xlionrender::shadows
             m_RenderedFrame.assign(m_Slots.size(), ~0ull);
             m_Map.clear();
             m_PrevMap.clear();
+            m_DynMap.clear();
             m_bHasBasis = m_bHasPrev = false;
             m_DynamicBias = 0; m_LastOverload = 0;
         }
@@ -258,7 +266,7 @@ namespace xlionrender::shadows
         // render (m_ToRender), then the table (BuildTable). Level0Texel: world units per texel of level 0. bCache false: every resident
         // page renders again (the reference)
         void Update(const xmath::fvec3& LightDir, float Level0Texel, const xmath::fvec3& Camera, const std::vector<xmath::fbbox>& ChangedWorld
-                   , bool bCache, std::span<const key> Requests, std::uint64_t Frame) noexcept
+                   , bool bCache, std::span<const key> Requests, std::uint64_t Frame, std::span<const xmath::fbbox> MoverWorld = {}) noexcept
         {
             OpenEpoch(LightDir, Level0Texel, Frame);
             m_ToRender.clear();
@@ -282,7 +290,7 @@ namespace xlionrender::shadows
                 {
                     Lv.m_DepthCenter = std::round(C.m_Z / (Half * depth_recenter_v)) * (Half * depth_recenter_v);
                     m_bDepthSet[L] = true;
-                    for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bUsed && !m_Slots[s].m_bPrev && m_Slots[s].m_Key.m_Level == L) Free(s);
+                    for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bUsed && !m_Slots[s].m_bPrev && !m_Slots[s].m_bMover && m_Slots[s].m_Key.m_Level == L) Free(s);
                 }
             }
             m_PinX = int(std::floor(C.m_X / m_Levels[m_Setup.m_Levels - 1].m_PageSize));
@@ -292,7 +300,7 @@ namespace xlionrender::shadows
             for (int s = 0; s < int(m_Slots.size()); ++s)
             {
                 auto& S = m_Slots[s];
-                if (!S.m_bUsed || S.m_bPrev) continue;
+                if (!S.m_bUsed || S.m_bPrev || S.m_bMover) continue;
                 if (!InWindow(S.m_Key) || (s < m_Setup.PinnedSlots()) != IsPinned(S.m_Key)) Free(s);
             }
 
@@ -304,7 +312,7 @@ namespace xlionrender::shadows
                 for (auto& B : ChangedWorld) Changed.push_back(Bounds(B));
                 for (auto& S : m_Slots)
                 {
-                    if (!S.m_bUsed || !S.m_bValid || S.m_bPrev) continue;
+                    if (!S.m_bUsed || !S.m_bValid || S.m_bPrev || S.m_bMover) continue;
                     const float P = m_Levels[S.m_Key.m_Level].m_PageSize;
                     bool bDirty = !bCache;
                     for (std::size_t i = 0; !bDirty && i < Changed.size(); ++i) bDirty = RectOverlaps(Changed[i], S.m_Key.m_X * P, S.m_Key.m_Y * P, P);
@@ -380,6 +388,45 @@ namespace xlionrender::shadows
                 ++m_Stats.m_Rendered;
             }
 
+            // The movers' pages: every page asked for (and of the net) a mover overlaps, the movers drawn into it this frame; the others go
+            {
+                std::vector<lbox> Movers;
+                for (const auto& B : MoverWorld) Movers.push_back(Bounds(B));
+                std::vector<key> Need;
+                const auto Consider = [&](const key& K)
+                {
+                    const float P = m_Levels[K.m_Level].m_PageSize;
+                    for (const auto& M : Movers) if (RectOverlaps(M, K.m_X * P, K.m_Y * P, P)) { Need.push_back(K); return; }
+                };
+                if (!Movers.empty())
+                {
+                    for (const auto& K : Requests) if (K.m_Level >= 0 && K.m_Level < m_Setup.m_Levels && InWindow(K)) Consider(K);
+                    const int Lc = m_Setup.m_Levels - 1, R = m_Setup.m_PinnedRadius;
+                    for (int y = m_PinY - R; y < m_PinY + R; ++y) for (int x = m_PinX - R; x < m_PinX + R; ++x) Consider({ Lc, x, y });
+                    std::sort(Need.begin(), Need.end(), [](const key& a, const key& b) { return Pack(a) < Pack(b); });
+                    Need.erase(std::unique(Need.begin(), Need.end()), Need.end());
+                }
+                std::unordered_map<std::uint64_t, int> Keep;
+                for (const auto& K : Need)
+                {
+                    int s = -1;
+                    if (const auto It = m_DynMap.find(Pack(K)); It != m_DynMap.end()) s = It->second;
+                    else
+                    {
+                        s = AdmitSlot(Frame);
+                        if (s < 0) { ++m_Stats.m_Rejected; continue; }
+                        auto& S = m_Slots[s];
+                        S = { K, Frame, S.m_Generation + 1, true, false, false, true };
+                    }
+                    m_Slots[s].m_LastRequested = Frame;
+                    Keep[Pack(K)] = s;
+                    Render(s, false, true);
+                    ++m_Stats.m_RenderedMover;
+                }
+                for (const auto& [k, s] : m_DynMap) if (!Keep.contains(k)) { auto& S = m_Slots[s]; S.m_bUsed = S.m_bValid = S.m_bMover = false; }
+                m_DynMap = std::move(Keep);
+            }
+
             // The cross-fade: once this epoch has every page asked for (none deferred or rejected), toward it over m_FadeFrames; then the
             // previous epoch's pages go
             if (m_bHasPrev)
@@ -392,7 +439,8 @@ namespace xlionrender::shadows
             for (int s = 0; s < int(m_Slots.size()); ++s)
             {
                 if (!m_Slots[s].m_bUsed) continue;
-                if (m_Slots[s].m_bPrev)        ++m_Stats.m_ResidentPrev;
+                if (m_Slots[s].m_bMover)       ++m_Stats.m_ResidentMover;
+                else if (m_Slots[s].m_bPrev)   ++m_Stats.m_ResidentPrev;
                 else if (s < m_Setup.PinnedSlots()) { ++m_Stats.m_ResidentPinned; m_Stats.m_PinnedNotValid += !m_Slots[s].m_bValid; }
                 else                           ++m_Stats.m_ResidentFine;
             }
@@ -423,11 +471,25 @@ namespace xlionrender::shadows
             for (int s = 0; s < int(m_Slots.size()); ++s)
             {
                 const auto& S = m_Slots[s];
-                if (!S.m_bUsed || !S.m_bValid || S.m_bPrev || !InWindow(S.m_Key)) continue;
+                if (!S.m_bUsed || !S.m_bValid || S.m_bPrev || S.m_bMover || !InWindow(S.m_Key)) continue;
                 const int i = TableIndex(S.m_Key);
                 Out[std::size_t(i) >> 1] |= std::uint32_t(s + 1) << ((i & 1) * 16);
             }
         }
+
+        // The movers' table (this frame's mover pages): the same layout
+        void BuildMoverTable(std::vector<std::uint32_t>& Out) const noexcept
+        {
+            Out.assign(std::size_t(m_Setup.TableUints()), 0u);
+            for (const auto& [k, s] : m_DynMap)
+            {
+                const auto& S = m_Slots[s];
+                if (!S.m_bUsed || !S.m_bValid || !InWindow(S.m_Key)) continue;
+                const int i = TableIndex(S.m_Key);
+                Out[std::size_t(i) >> 1] |= std::uint32_t(s + 1) << ((i & 1) * 16);
+            }
+        }
+        bool HasMovers(void) const noexcept { return !m_DynMap.empty(); }
 
         // The previous epoch's table (its windows; empty when there is none): the same layout
         void BuildPrevTable(std::vector<std::uint32_t>& Out) const noexcept
@@ -460,7 +522,7 @@ namespace xlionrender::shadows
                 const auto& S = m_Slots[s];
                 const int L = i / (W * W);
                 const key K{ L, Unwrap(i % W, m_Levels[L].m_OriginX), Unwrap((i / W) % W, m_Levels[L].m_OriginY) };
-                if (!S.m_bUsed || !S.m_bValid || S.m_bPrev || !(S.m_Key == K)) return false;
+                if (!S.m_bUsed || !S.m_bValid || S.m_bPrev || S.m_bMover || !(S.m_Key == K)) return false;
             }
             return true;
         }
@@ -522,6 +584,7 @@ namespace xlionrender::shadows
             bool            m_bUsed  = false;
             bool            m_bValid = false;
             bool            m_bPrev  = false;           // the previous epoch's page (in m_PrevMap)
+            bool            m_bMover = false;           // a mover page (in m_DynMap): the movers only, this frame
         };
 
         float PageDistance2(const key& K, const xmath::fvec3& C) const noexcept
@@ -533,7 +596,7 @@ namespace xlionrender::shadows
         void Assign(int s, const key& K, std::uint64_t Frame) noexcept
         {
             auto& S = m_Slots[s];
-            S = { K, Frame, S.m_Generation + 1, true, false, false };
+            S = { K, Frame, S.m_Generation + 1, true, false, false, false };
             m_Map[Pack(K)] = s;
         }
 
@@ -541,9 +604,10 @@ namespace xlionrender::shadows
         {
             auto& S = m_Slots[s];
             if (!S.m_bUsed) return;
-            if (S.m_bPrev) m_PrevMap.erase(Pack(S.m_Key));
-            else           m_Map.erase(Pack(S.m_Key));
-            S.m_bUsed = S.m_bValid = S.m_bPrev = false;
+            if (S.m_bMover)     m_DynMap.erase(Pack(S.m_Key));
+            else if (S.m_bPrev) m_PrevMap.erase(Pack(S.m_Key));
+            else                m_Map.erase(Pack(S.m_Key));
+            S.m_bUsed = S.m_bValid = S.m_bPrev = S.m_bMover = false;
             if (s >= m_Setup.PinnedSlots()) ++m_Stats.m_Evicted;
         }
 
@@ -555,6 +619,7 @@ namespace xlionrender::shadows
             {
                 auto& S = m_Slots[s];
                 if (!S.m_bUsed) continue;
+                if (S.m_bMover) { Free(s); continue; }
                 if (s < m_Setup.PinnedSlots() || !S.m_bValid || !m_bPrevUsable) { Free(s); continue; }
                 m_Map.erase(Pack(S.m_Key));
                 S.m_bPrev = true;
@@ -598,14 +663,14 @@ namespace xlionrender::shadows
             return Best;
         }
 
-        void Render(int s, bool bPinned) noexcept
+        void Render(int s, bool bPinned, bool bMover = false) noexcept
         {
             auto& S = m_Slots[s];
             S.m_bValid = true;
             m_RenderedFrame[s] = m_Frame;
             const float P = m_Levels[S.m_Key.m_Level].m_PageSize;
             const int   R = m_Setup.SlotsPerRow();
-            m_ToRender.push_back({ S.m_Key, s, (s % R) * page_texels_v, (s / R) * page_texels_v, PageW2C(S.m_Key), S.m_Key.m_X * P, S.m_Key.m_Y * P, P, bPinned });
+            m_ToRender.push_back({ S.m_Key, s, (s % R) * page_texels_v, (s / R) * page_texels_v, PageW2C(S.m_Key), S.m_Key.m_X * P, S.m_Key.m_Y * P, P, bPinned, bMover });
         }
 
         setup                                   m_Setup;
@@ -616,6 +681,7 @@ namespace xlionrender::shadows
         std::vector<std::uint64_t>              m_RenderedFrame;
         std::unordered_map<std::uint64_t, int>  m_Map;
         std::unordered_map<std::uint64_t, int>  m_PrevMap;
+        std::unordered_map<std::uint64_t, int>  m_DynMap;               // this frame's mover pages
         std::uint64_t                           m_EpochFrame = 0;
         int                                     m_FrameEpochs = 0, m_FrameRemapped = 0;     // (this frame's, before Update resets the stats)
         float                                   m_Fade = 1;

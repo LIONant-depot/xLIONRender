@@ -557,6 +557,63 @@ int main()
         CHECK(Settle(12), "settle after B5b");
     }
 
+    // P1b - movers in pages of their own: the six transitions (a mover enters a page, crosses into another, leaves the view, is deleted,
+    // settles into the static pages, moves again after being cached). Each against the same frame with every caster in one layer
+    // (m_bShadowSplitMovers off, every page rendered again): the two layers composed per tap must give the same image, bit for bit.
+    // While the mover moves, no static page renders (the split's point): the movers' pages only
+    {
+        const auto Reference = [&](const char* pWhat) -> bool
+        {
+            std::vector<float> Split, One;
+            if (!App.RenderFrame(Scene, View, Camera) || !Renderer.validateVSM() || !ReadHDR(Device, View, Split)) return false;
+            const auto& R = Renderer.getVSMReport().m_Pages;
+            std::printf("P1b %s: static pages rendered %d, mover pages %d (resident %d)", pWhat, R.m_Rendered, R.m_RenderedMover, R.m_ResidentMover);
+            Renderer.m_bShadowSplitMovers = false; Renderer.m_bShadowCache = false;
+            const bool bOk = App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, One);
+            Renderer.m_bShadowSplitMovers = true;
+            if (!bOk || !App.RenderFrame(Scene, View, Camera)) return false;         // (the split's pages rendered again from scratch)
+            Renderer.m_bShadowCache = true;
+            int nDiff = 0;
+            for (std::size_t i = 0; i < Split.size(); ++i) nDiff += Split[i] != One[i];
+            std::printf(" - %d pixels differ from one layer\n", nDiff);
+            if (nDiff) std::printf("FAIL: P1b %s: the movers' pages composed differ from one layer on %d pixels\n", pWhat, nDiff);
+            return nDiff == 0;
+        };
+        const auto Mover = [](float X, float Z) { return xmath::fmat4::fromTranslation({ X, 0.6f, Z }) * xmath::fmat4::fromScale({ 0.5f, 0.5f, 0.5f }); };
+        CHECK(Settle(12), "P1b settle");
+        Scene.m_Draws.push_back({ .m_Mesh = Sphere, .m_L2W = Mover(-30.0f, 0.0f) });            // (out of view)
+        const std::size_t iMover = Scene.m_Draws.size() - 1;
+        for (int k = 0; k < 8; ++k) CHECK(App.RenderFrame(Scene, View, Camera), "P1b: the mover settles out of view");
+        int nStaticWhileMoving = 0;
+        for (int f = 0; f < 6; ++f)                                     // enters, then moves across a page border
+        {
+            Scene.m_Draws[iMover].m_L2W = Mover(-0.3f + 0.25f * float(f), 0.8f);
+            CHECK(App.RenderFrame(Scene, View, Camera), "P1b moving frame %d", f);
+            if (f >= 2) nStaticWhileMoving += Renderer.getVSMReport().m_Pages.m_Rendered;
+        }
+        CHECK(Reference("entered, crossing"), "P1b: entered and crossing a page border");
+        std::printf("P1b: static pages rendered while the mover moved (4 frames, after the requests caught up): %d\n", nStaticWhileMoving);
+        Scene.m_Draws[iMover].m_L2W = Mover(1.4f, 0.8f);
+        CHECK(Reference("crossed"), "P1b: crossed into another page");
+        Scene.m_Draws[iMover].m_L2W = Mover(-30.0f, 0.0f);
+        CHECK(Reference("left the view"), "P1b: left the visible region");
+        Scene.m_Draws[iMover].m_L2W = Mover(0.5f, 0.8f);
+        CHECK(Reference("back"), "P1b: back in view");
+        const auto Gone = Scene.m_Draws[iMover];
+        Scene.m_Draws.pop_back();
+        CHECK(Reference("deleted"), "P1b: deleted");
+        Scene.m_Draws.push_back(Gone);
+        for (int k = 0; k < 8; ++k) CHECK(App.RenderFrame(Scene, View, Camera), "P1b: settles (static after a few frames)");
+        CHECK(Reference("settled (static)"), "P1b: settled into the static pages");
+        CHECK(Renderer.getVSMReport().m_Pages.m_ResidentMover == 0, "P1b: a settled caster still has mover pages (%d)", Renderer.getVSMReport().m_Pages.m_ResidentMover);
+        Scene.m_Draws[iMover].m_L2W = Mover(0.8f, 0.5f);
+        CHECK(App.RenderFrame(Scene, View, Camera), "P1b: moves again");
+        CHECK(Reference("moves again after cached"), "P1b: moves again after being cached");
+        Scene.m_Draws.pop_back();
+        CHECK(Settle(12), "P1b done");
+        CHECK(nStaticWhileMoving == 0, "P1b: %d static pages rendered while only the mover moved", nStaticWhileMoving);
+    }
+
     // B11 overflow: a pool too small for the view. Without dynamic resolution: pages rejected, patches by a coarser level; with it (the
     // default): the whole view's bias rises until the pages fit - fewer rejected, fewer patches coarser. Never a pixel by no level
     {
