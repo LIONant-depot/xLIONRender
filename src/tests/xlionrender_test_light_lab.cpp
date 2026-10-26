@@ -284,6 +284,68 @@ int main()
     // Unbiased: the error of a mean of N frames falls as 1/sqrt(N) - 8 -> 64 frames is x0.354 (a bias would flatten it)
     CHECK(Err8 < One.m_MeanRel * 0.5 && Err64 < Err8 * 0.5, "SAMPLED does not converge to EXACT (1: %f, 8: %f, 64: %f)", One.m_MeanRel, Err8, Err64);
 
+    // A light ramp (P2's gate: no pops). 8 equal lights over one area (K = 4: they compete for the heads) and a ninth at their middle
+    // ramping from 0 to 3 times their intensity in 24 steps: it overtakes them, its head weight a rising. Measured on the values all of
+    // them light, per step: the mean of 16 SAMPLED frames against EXACT (the step between consecutive means never exceeds EXACT's own
+    // step plus twice the mean's noise: the estimator is unbiased, its mean cannot pop) and the per-frame noise, which must change
+    // gradually (a light switching from the tail to the head at once - sampled one step, exact the next - drops it in one step)
+    {
+        auto Ramp = Scene;
+        Ramp.m_LocalLights.clear();
+        const xmath::fvec3 Middle{ 0.5f, 1.2f, 1.0f };
+        for (int k = 0; k < 8; ++k)
+        {
+            const float A = 6.2831853f * float(k) / 8.0f;
+            Ramp.m_LocalLights.push_back({ .m_Position = Middle + xmath::fvec3(1.2f * std::cos(A), 0.3f * float(k % 2), 1.2f * std::sin(A)), .m_Radius = 6.0f, .m_Intensity = 2.0f, .m_bCastShadows = false });
+        }
+        const std::size_t iRamp = Ramp.m_LocalLights.size();
+        Ramp.m_LocalLights.push_back({ .m_Position = Middle, .m_Radius = 6.0f, .m_Intensity = 0.0f, .m_bCastShadows = false });
+        constexpr int steps_v = 24;
+        const float Top = 6.0f;
+        std::vector<float> Ex0, PrevMean, PrevExact, Ex, Fr;
+        Renderer.m_LightMode = mode::EXACT;
+        CHECK(App.RenderFrame(Ramp, View, Camera) && App.RenderFrame(Ramp, View, Camera) && ReadHDR(Device, View, Ex0), "ramp exact 0");
+        std::vector<std::size_t> Mask;
+        for (std::size_t i = 0; i < Ex0.size(); ++i) if (Ex0[i] > 0.05f) Mask.push_back(i);
+        CHECK(Mask.size() > 5000, "the ramp's lights light only %zu values", Mask.size());
+        const auto Rel = [&](const std::vector<float>& A, const std::vector<float>& B)      // sum |A - B| / sum B over the mask
+        {
+            double d = 0, r = 0;
+            for (auto i : Mask) { d += std::abs(double(A[i]) - B[i]); r += std::abs(double(B[i])); }
+            return d / std::max(r, 1e-9);
+        };
+        double WorstRatio = 0, Noise = 0, PrevFrameErr = 0, WorstNoiseJump = 1;
+        std::printf("ramp noise per step:");
+        for (int step = 0; step <= steps_v; ++step)
+        {
+            Ramp.m_LocalLights[iRamp].m_Intensity = Top * float(step) / float(steps_v);
+            Renderer.m_LightMode = mode::EXACT;
+            CHECK(App.RenderFrame(Ramp, View, Camera) && App.RenderFrame(Ramp, View, Camera) && ReadHDR(Device, View, Ex), "ramp exact %d", step);
+            Renderer.m_LightMode = mode::SAMPLED;
+            std::vector<double> Sum(Ex.size(), 0.0);
+            double FrameErr = 0;
+            for (int f = 0; f < 16; ++f)
+            {
+                CHECK(App.RenderFrame(Ramp, View, Camera) && ReadHDR(Device, View, Fr), "ramp sampled %d", step);
+                for (std::size_t i = 0; i < Fr.size(); ++i) Sum[i] += Fr[i];
+                FrameErr += Rel(Fr, Ex) / 16.0;
+            }
+            std::printf(" %.3f", FrameErr);
+            if (PrevFrameErr > 0) WorstNoiseJump = std::max(WorstNoiseJump, std::max(FrameErr / PrevFrameErr, PrevFrameErr / FrameErr));
+            PrevFrameErr = FrameErr;
+            std::vector<float> Mean(Ex.size());
+            for (std::size_t i = 0; i < Mean.size(); ++i) Mean[i] = float(Sum[i] / 16.0);
+            const double Err = Rel(Mean, Ex);
+            Noise = std::max(Noise, Err);
+            if (!PrevMean.empty()) WorstRatio = std::max(WorstRatio, Rel(Mean, PrevMean) / (Rel(Ex, PrevExact) + 2.0 * Err));
+            PrevMean = Mean; PrevExact = Ex;
+        }
+        std::printf("\nramp (%zu values): the worst step of the 16-frame means over (EXACT's step + twice the mean's error) %.2f; the means' error at most %.4f; the per-frame noise's worst change between steps x%.2f\n", Mask.size(), WorstRatio, Noise, WorstNoiseJump);
+        CHECK(WorstRatio < 2.0, "the ramp pops: a step of the means %.2f x EXACT's step plus the noise", WorstRatio);
+        CHECK(WorstNoiseJump < 1.5, "the ramp pops: the per-frame noise changes x%.2f between two steps", WorstNoiseJump);
+        Renderer.m_LightMode = mode::EXACT;
+    }
+
     // More stratified tail samples: same estimator, less noise per frame
     double OneBySamples[3] = {};
     for (int si = 0; si < 3; ++si)
