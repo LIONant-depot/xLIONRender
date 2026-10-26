@@ -34,19 +34,20 @@ namespace xlionrender::shadows
     {
         static constexpr int page_texels_v  = 128;
         static constexpr int max_levels_v   = 12;
-        static constexpr float max_level0_texel_v = 0.002f;
+        static constexpr float max_level0_texel_v = 0.002f;    // level 0 is never coarser than 2 mm (Unreal's finest directional level is under 0.1 mm)
         // A level's depth range: +-depth_range_v x its window's extent around the camera, re-centered (snapped to depth_recenter_v of it)
         // once the camera is depth_recenter_v of it away. A pixel shaded by a level is up to 4 x H / (2 tan(fov/2)) of its texels from the
         // camera (resolution bias -1; 10430 at 2160 lines and 45 degrees) - along the light too, so the range less the drift must reach that:
         // with the window's extent (4096) and half of it as the drift, a low sun left the ground and the casters near it out (Tomas: the
         // Velociraptor's leg shadow cut off). 4 and a quarter: 12288 texels; 16 bits still give half a texel a step
         static constexpr float depth_range_v      = 4.0f;
-        static constexpr float depth_recenter_v   = 0.25f;    // level 0 is never coarser than 2 mm (Unreal's finest directional level is under 0.1 mm)
+        static constexpr float depth_recenter_v   = 0.25f;
         static constexpr int filter_reach_v = 2;        // texels a lookup's filter reaches past its centre texel (the request pass dilates by it)
 
         struct setup
         {
-            int     m_PoolTexels    = 4096;             // the pool's side in the atlas: 4096^2 x 16-bit = 32 MiB, 1024 slots
+            int     m_PoolTexels    = 4096;             // the pool's width in the atlas (the renderer's: 8192 x 4096 x 16-bit = 64 MiB, 2048 slots -
+            int     m_PoolHeight    = 0;                // Unreal's r.Shadow.Virtual.MaxPhysicalPages, at half its 32-bit memory); its height, 0: square
             int     m_Levels        = 10;               // level L's texel: level 0's x 2^L; the coarsest is the net
             int     m_Window        = 32;               // pages per level side kept in the table around the camera
             int     m_PinnedRadius  = 8;                // the net: the coarsest level's pages within this many of the camera's (a 16 x 16 square)
@@ -56,9 +57,14 @@ namespace xlionrender::shadows
                                                         // -1 measured against the clipmap and the rays (tests/xlionrender_test_vsm.cpp)
             float   m_EpochDegrees  = 0.25f;            // the light turning less than this keeps its epoch: the pages are of its direction then, the
                                                         // shading's is the current one (an approximation; the mismatch in stats::m_EpochMismatchDegrees)
+            // Dynamic resolution (Unreal's r.Shadow.Virtual.DynamicRes): while the pages asked for pass m_PoolLoadFactor of the fine slots,
+            // the whole view's resolution bias rises (toward the bias that would fit them: each +1 a quarter of the pages), and comes back
+            // slowly once they fit again - every pixel a little coarser instead of some patches a level coarser (rejected pages)
+            float   m_PoolLoadFactor = 0.85f;
+            float   m_MaxDynamicBias = 2.0f;            // 0: off
 
             int SlotsPerRow ( void ) const noexcept { return m_PoolTexels / page_texels_v; }
-            int Slots       ( void ) const noexcept { return SlotsPerRow() * SlotsPerRow(); }
+            int Slots       ( void ) const noexcept { return SlotsPerRow() * ((m_PoolHeight > 0 ? m_PoolHeight : m_PoolTexels) / page_texels_v); }
             int PinnedSlots ( void ) const noexcept { return (2 * m_PinnedRadius) * (2 * m_PinnedRadius); }
             int TableEntries( void ) const noexcept { return m_Levels * m_Window * m_Window; }
             int TableUints  ( void ) const noexcept { return (TableEntries() + 1) / 2; }
@@ -102,6 +108,8 @@ namespace xlionrender::shadows
             int m_PinnedNotValid = 0;       // net pages not VALID when the table is published (a readiness failure: 0 by construction)
             int m_Epochs    = 0;            // 1: this frame opened a new epoch (a new direction or scale)
             float m_EpochMismatchDegrees = 0;   // the angle between the light's direction and its epoch's (under setup::m_EpochDegrees)
+            float m_PoolLoad     = 0;       // the fine pages asked for / the fine slots (above 1: more than fit)
+            float m_DynamicBias  = 0;       // the resolution bias dynamic resolution adds now (ResolutionBias())
         };
 
         // Windows of one frame, to decode its requests later
@@ -120,6 +128,7 @@ namespace xlionrender::shadows
             m_RenderedFrame.assign(m_Slots.size(), ~0ull);
             m_Map.clear();
             m_bHasBasis = false;
+            m_DynamicBias = 0; m_LastOverload = 0;
         }
 
         const setup& getSetup( void ) const noexcept { return m_Setup; }
@@ -301,7 +310,23 @@ namespace xlionrender::shadows
                 if (s < m_Setup.PinnedSlots()) { ++m_Stats.m_ResidentPinned; m_Stats.m_PinnedNotValid += !m_Slots[s].m_bValid; }
                 else                           ++m_Stats.m_ResidentFine;
             }
+
+            // Dynamic resolution (as Unreal's FVirtualShadowMapArrayCacheManager: down fast, up after 10 frames that fit, slowly); a frame
+            // without requests (an epoch's first frames, nothing in view) leaves it as it is
+            if (!Requests.empty() && m_Setup.m_MaxDynamicBias > 0)
+            {
+                const float Load   = float(m_Stats.m_Requested) / float(std::max(1, m_Setup.Slots() - m_Setup.PinnedSlots()));
+                const float Target = std::max(0.0f, m_DynamicBias + std::log2(std::max(Load, 1e-3f) / m_Setup.m_PoolLoadFactor));
+                if (Load > m_Setup.m_PoolLoadFactor) { m_LastOverload = Frame; m_DynamicBias += (Target - m_DynamicBias) * 0.5f; }
+                else if (Frame - m_LastOverload > 10) m_DynamicBias += (Target - m_DynamicBias) * 0.1f;
+                m_DynamicBias = std::clamp(m_DynamicBias, 0.0f, m_Setup.m_MaxDynamicBias);
+                m_Stats.m_PoolLoad = Load;
+            }
+            m_Stats.m_DynamicBias = m_DynamicBias;
         }
+
+        // The resolution bias of this frame's request pass and shading: the setup's and dynamic resolution's
+        float ResolutionBias(void) const noexcept { return m_Setup.m_ResolutionBias + m_DynamicBias; }
 
         // The page table of this frame: per entry (level-major, then the toroidal row, column) a 16-bit slot + 1 of a VALID page, 0 none;
         // two entries a uint (even index: low half)
@@ -448,6 +473,8 @@ namespace xlionrender::shadows
 
         setup                                   m_Setup;
         std::uint64_t                           m_Frame = 0;
+        float                                   m_DynamicBias  = 0;
+        std::uint64_t                           m_LastOverload = 0;
         std::vector<slot>                       m_Slots;
         std::vector<std::uint64_t>              m_RenderedFrame;
         std::unordered_map<std::uint64_t, int>  m_Map;

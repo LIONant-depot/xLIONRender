@@ -705,7 +705,7 @@ namespace xlionrender
         F.m_C2W = W2C.Inverse();
         F.m_Eye = xmath::fvec4(Eye, 1);
         F.m_LX  = xmath::fvec4(m_VSM.m_X, 0); F.m_LY = xmath::fvec4(m_VSM.m_Y, 0); F.m_LZ = xmath::fvec4(m_VSM.m_Z, 0);
-        F.m_P0  = { m_VSM.Level0Texel(), float(VS.m_Levels), float(VS.m_Window), VS.m_ResolutionBias };
+        F.m_P0  = { m_VSM.Level0Texel(), float(VS.m_Levels), float(VS.m_Window), m_VSM.ResolutionBias() };
         for( int i = 0; i < shadows::vsm::max_levels_v; ++i )
         {
             const auto& Lv = m_VSM.m_Levels[i];
@@ -748,7 +748,7 @@ namespace xlionrender
                     Out.m_PosRadius   = xmath::fvec4(LL.m_Position - Eye, LL.m_Radius);
                     Out.m_Color       = xmath::fvec4(LL.m_Color * LL.m_Intensity, std::cos(LL.m_InnerAngle));
                     Out.m_DirCosOuter = bSpot ? xmath::fvec4(LL.m_Direction.NormalizeCopy(), std::cos(LL.m_OuterAngle)) : xmath::fvec4(0, 0, 0, -2);
-                    Out.m_Shadow      = { float(shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize + Map.m_X), float(Map.m_Y), float(Map.m_Size), bSpot ? shadows::SpotTanHalf(LL) : 1.0f };
+                    Out.m_Shadow      = { float(sunAtlasWidth() + Map.m_X), float(Map.m_Y), float(Map.m_Size), bSpot ? shadows::SpotTanHalf(LL) : 1.0f };
                 }
             });
         m_LightRingUsed += std::max(nLights, 0);
@@ -1301,7 +1301,7 @@ namespace xlionrender
         struct face_batch { int m_iRender; std::array<shadows::buddy::pos, 2> m_Blocks; };
         std::vector<face_batch> Batch;
         std::vector<std::uint32_t> LightCasters;        // a local light's casters (reused per light)
-        const int LocalX = shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;     // the local part's origin in the atlas
+        const int LocalX = sunAtlasWidth();                                                // the local part's origin in the atlas
         bool      bClipmapDone = false;
 
         const auto FacePos = [&]( const face_batch& B, int Face, int Size, bool bPoint ) -> shadows::buddy::pos
@@ -1462,7 +1462,7 @@ namespace xlionrender
                     const auto& Lv = m_VSM.m_Levels[i];
                     Light.m_VSMLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
                 }
-                Light.m_VSMParams3 = { VS.m_ResolutionBias, 0, 0, 0 };
+                Light.m_VSMParams3 = { m_VSM.ResolutionBias(), 0, 0, 0 };
 
                 writeLocalLights(Scene, Eye, Light);
                 Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, 0, 0 };
@@ -2616,10 +2616,10 @@ namespace xlionrender
                     Med[r] = V[V.size() / 2]; P95[r] = V[std::min(V.size() - 1, V.size() * 95 / 100)]; P99[r] = V[std::min(V.size() - 1, V.size() * 99 / 100)];
                     V.clear();
                 }
-                std::printf("LEDGER view %dx%d records+grid cpu %.3f/%.3f/%.3f, shadow prep gpu %.3f/%.3f/%.3f cpu %.3f/%.3f/%.3f, direct shading (scene pass) gpu %.3f/%.3f/%.3f, reconstruction 0, rays 0, cache 0 ms (median/p95/p99 of 120); lights %d (dropped %d), shadowed %d (fallback %d, stale %d), overflow cells %d; sun pages %s: request pass %.3f ms, rendered %d + net %d, rejected %d, resident %d + net %d of %d slots, pixels by their level %.1f%% / coarser %.1f%% / none %.1f%%\n"
+                std::printf("LEDGER view %dx%d records+grid cpu %.3f/%.3f/%.3f, shadow prep gpu %.3f/%.3f/%.3f cpu %.3f/%.3f/%.3f, direct shading (scene pass) gpu %.3f/%.3f/%.3f, reconstruction 0, rays 0, cache 0 ms (median/p95/p99 of 120); lights %d (dropped %d), shadowed %d (fallback %d, stale %d), overflow cells %d; sun pages %s: request pass %.3f ms, rendered %d + net %d, rejected %d, resident %d + net %d of %d slots, load %.2f, dynamic bias %.2f, pixels by their level %.1f%% / coarser %.1f%% / none %.1f%%\n"
                            , View.m_Width, View.m_Height, Med[0], P95[0], P99[0], Med[2], P95[2], P99[2], Med[1], P95[1], P99[1], Med[3], P95[3], P99[3], m_LightStats.m_nLights, m_LightStats.m_nDropped, m_LightStats.m_nShadowed
                            , m_LightStats.m_nShadowFallback, m_LightStats.m_nShadowStale, m_LightStats.m_nOverflowCells
-                           , m_bVirtualShadows ? "on" : "off", m_VSMReport.m_RequestGpuMs, m_VSMReport.m_Pages.m_Rendered, m_VSMReport.m_Pages.m_RenderedPinned, m_VSMReport.m_Pages.m_Rejected, m_VSMReport.m_Pages.m_ResidentFine, m_VSMReport.m_Pages.m_ResidentPinned, m_VSM.getSetup().Slots()
+                           , m_bVirtualShadows ? "on" : "off", m_VSMReport.m_RequestGpuMs, m_VSMReport.m_Pages.m_Rendered, m_VSMReport.m_Pages.m_RenderedPinned, m_VSMReport.m_Pages.m_Rejected, m_VSMReport.m_Pages.m_ResidentFine, m_VSMReport.m_Pages.m_ResidentPinned, m_VSM.getSetup().Slots(), m_VSMReport.m_Pages.m_PoolLoad, m_VSMReport.m_Pages.m_DynamicBias
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[1] / m_VSMReport.m_Counters[0] : 0.0, m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[2] / m_VSMReport.m_Counters[0] : 0.0
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[3] / m_VSMReport.m_Counters[0] : 0.0);
                 std::fflush(stdout);

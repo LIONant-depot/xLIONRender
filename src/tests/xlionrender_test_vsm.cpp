@@ -251,7 +251,7 @@ int main()
     // Unshadowed, then the pages settled (a budget for everything, as the full redraw below needs)
     std::vector<float> Unlit, Lit, Clip;
     const float Bias = std::getenv("XLION_VSM_TEST_BIAS") ? float(std::atof(std::getenv("XLION_VSM_TEST_BIAS"))) : vsm::setup{}.m_ResolutionBias;
-    Renderer.configureVSM({ .m_Budget = 100000, .m_ResolutionBias = Bias });
+    Renderer.configureVSM({ .m_PoolTexels = 8192, .m_PoolHeight = 4096, .m_Budget = 100000, .m_ResolutionBias = Bias });     // (the renderer's pool)
     Scene.m_Sun.m_bCastShadows = false;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Unlit), "render unshadowed");
     Scene.m_Sun.m_bCastShadows = true;
@@ -479,20 +479,29 @@ int main()
         CHECK(Settle(12), "settle after the moving sun");
     }
 
-    // B11 overflow: a pool too small for the view - pages rejected, pixels by a coarser level, none by no level
+    // B11 overflow: a pool too small for the view. Without dynamic resolution: pages rejected, patches by a coarser level; with it (the
+    // default): the whole view's bias rises until the pages fit - fewer rejected, fewer patches coarser. Never a pixel by no level
     {
-        Renderer.configureVSM({ .m_PoolTexels = 1664, .m_PinnedRadius = 6, .m_Budget = 100000 });     // 169 slots: 144 net, 25 fine (the view asks for 27)
-        CHECK(Settle(12), "overflow settle (invariant 1)");
-        const auto& R = Renderer.getVSMReport();
-        const auto& C = R.m_Counters;
-        std::printf("B11 overflow: rejected %d pages; %u pixels - by their level %.2f%%, coarser %.2f%%, none %.2f%%\n", R.m_Pages.m_Rejected, C[0], Pct(C[1], C[0]), Pct(C[2], C[0]), Pct(C[3], C[0]));
-        CHECK(R.m_Pages.m_Rejected > 0 && C[2] > 0, "the small pool did not overflow (rejected %d, coarser %u)", R.m_Pages.m_Rejected, C[2]);
-        CHECK(C[3] == 0, "%u pixels had no level at all (a hole)", C[3]);
+        int Rejected[2] = {}; double Coarser[2] = {};
+        for (int Dyn = 0; Dyn < 2; ++Dyn)
+        {
+            Renderer.configureVSM({ .m_PoolTexels = 1664, .m_PinnedRadius = 6, .m_Budget = 100000, .m_MaxDynamicBias = Dyn ? 2.0f : 0.0f });  // 169 slots: 144 net, 25 fine
+            CHECK(Settle(30), "overflow settle (invariant 1)");
+            const auto& R = Renderer.getVSMReport();
+            const auto& C = R.m_Counters;
+            Rejected[Dyn] = R.m_Pages.m_Rejected; Coarser[Dyn] = Pct(C[2], C[0]);
+            std::printf("B11 overflow, dynamic resolution %s: rejected %d pages, load %.2f, dynamic bias %.2f; %u pixels - by their level %.2f%%, coarser %.2f%%, none %.2f%%\n"
+                       , Dyn ? "on" : "off", R.m_Pages.m_Rejected, R.m_Pages.m_PoolLoad, R.m_Pages.m_DynamicBias, C[0], Pct(C[1], C[0]), Pct(C[2], C[0]), Pct(C[3], C[0]));
+            CHECK(C[3] == 0, "%u pixels had no level at all (a hole)", C[3]);
+            CHECK(Dyn || (R.m_Pages.m_Rejected > 0 && C[2] > 0), "the small pool did not overflow (rejected %d, coarser %u)", R.m_Pages.m_Rejected, C[2]);
+            CHECK(!Dyn || R.m_Pages.m_DynamicBias > 0.5f, "dynamic resolution did not raise the bias (%.2f)", R.m_Pages.m_DynamicBias);
+        }
+        CHECK(Rejected[1] < Rejected[0] && Coarser[1] < Coarser[0], "dynamic resolution: rejected %d -> %d, coarser %.1f%% -> %.1f%%", Rejected[0], Rejected[1], Coarser[0], Coarser[1]);
     }
 
     // B7 teleport: settled here, then a jump to the far cluster; the counters arrive a ring late (renderShadows reads them back)
     {
-        Renderer.configureVSM({});
+        Renderer.configureVSM({ .m_PoolTexels = 8192, .m_PoolHeight = 4096 });
         CHECK(Settle(12), "teleport settle");
         Camera.LookAt(xmath::fvec3{ 60.0f, 6.0f, -9.0f }, xmath::fvec3{ 60.0f, 0, 1.0f });
         std::printf("B7 teleport (frame after the jump: by their level / coarser / none %%):");

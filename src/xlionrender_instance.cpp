@@ -304,7 +304,7 @@ namespace xlionrender
         // The shadow atlas: every lit pipeline samples it in slot 0
         {
             const int Clipmap = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, Local = ShadowSetup.m_LocalAtlasSize;
-            if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = Clipmap + Local, .m_Height = std::max(Clipmap, Local), .m_isGamma = false }); Err ) return Err;
+            if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = 2 * Clipmap + Local, .m_Height = std::max(Clipmap, Local), .m_isGamma = false }); Err ) return Err;
             if( auto Err = Device.Create(m_ShadowScratch, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = ShadowSetup.m_ScratchSize, .m_Height = ShadowSetup.m_ScratchSize, .m_isGamma = false }); Err ) return Err;
         }
 
@@ -520,7 +520,7 @@ namespace xlionrender
 
         // The sun's virtual shadow pages (features/shadows/xlionrender_shadow_vsm.h): the pool is the clipmap's part of the atlas; the request
         // pass, its frame data (a ring slot each), its bits and counters (zeroed by a copy, copied back to a ring slot)
-        m_VSM.Init({ .m_PoolTexels = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize });
+        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize });     // (2048 slots)
         if( const char* p = std::getenv("XLION_VSM") ) m_bVirtualShadows = std::atoi(p) != 0;
         if( const char* p = std::getenv("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
         {

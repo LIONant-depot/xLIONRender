@@ -585,6 +585,9 @@ namespace xlionrender
         int                                     m_VSMTableBase  = 0;
         vsm_report                              m_VSMReport;
         int  vsmBitUints( void ) const noexcept { return (m_VSM.getSetup().TableEntries() + 31) / 32; }
+        // The sun's part of the shadow atlas (from its left): the pages' pool, two clipmaps wide (the clipmap, the fallback, uses the first);
+        // the local lights' part is to its right
+        int  sunAtlasWidth( void ) const noexcept { return 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
         void vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
         int  vsmTableBase( void ) noexcept;
         shadows::local_shadows                  m_LocalShadows;
