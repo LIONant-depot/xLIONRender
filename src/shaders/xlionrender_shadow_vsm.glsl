@@ -68,15 +68,23 @@ float ShadowVSMLevel(in const int Level, in const vec3 L)
             Lit += Wx[x] * Wy[y] * ((texelFetch(SamplerShadowMap, Base + Lo + ivec2(x, y), 0).r < Depth - Bias) ? 0.0 : 1.0);
         return Lit / 9.0;
     }
-    for (int y = 0; y < 4; ++y)                                                        // across a page border: each tap through the table
+    // Across a page border: the footprint (4 texels) touches at most 2 x 2 pages - their entries once, each tap picks its page by which side
+    // of the border it is on (was a table read and a division a tap)
+    ivec2 Base[4];
+    for (int j = 0; j < 4; ++j)
+    {
+        const ivec2 P = ivec2((j & 1) != 0 ? PHi.x : PLo.x, (j & 2) != 0 ? PHi.y : PLo.y);
+        const uint  E = VSMEntry(Level, P);
+        if (E == 0u) return -1.0;
+        Base[j] = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - P * kVSMPageTexels;
+    }
+    const ivec2 Border = PHi * kVSMPageTexels;                                          // (PLo == PHi on an axis: no tap reaches it)
+    for (int y = 0; y < 4; ++y)
     for (int x = 0; x < 4; ++x)
     {
         const ivec2 T = Lo + ivec2(x, y);
-        const ivec2 P = ivec2(floor(vec2(T) / float(kVSMPageTexels)));
-        const uint  E = VSMEntry(Level, P);
-        if (E == 0u) return -1.0;
-        const ivec2 Base = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels;
-        Lit += Wx[x] * Wy[y] * ((texelFetch(SamplerShadowMap, Base + (T - P * kVSMPageTexels), 0).r < Depth - Bias) ? 0.0 : 1.0);
+        const int   j = (T.x >= Border.x && PHi.x != PLo.x ? 1 : 0) + (T.y >= Border.y && PHi.y != PLo.y ? 2 : 0);
+        Lit += Wx[x] * Wy[y] * ((texelFetch(SamplerShadowMap, Base[j] + T, 0).r < Depth - Bias) ? 0.0 : 1.0);
     }
     return Lit / 9.0;
 }

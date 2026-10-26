@@ -587,6 +587,10 @@ namespace xlionrender
         int  vsmBitUints( void ) const noexcept { return (m_VSM.getSetup().TableEntries() + 31) / 32; }
         // The sun's part of the shadow atlas (from its left): the pages' pool, two clipmaps wide (the clipmap, the fallback, uses the first);
         // the local lights' part is to its right
+        // renderShadows' light-space boxes of the casters, kept between frames (with the world boxes and the light basis they were of)
+        std::vector<shadows::lbox>              m_CasterLight;
+        std::vector<xmath::fbbox>               m_CasterLightWorld;
+        std::array<xmath::fvec3, 3>             m_CasterLightBasis{};
         int  sunAtlasWidth( void ) const noexcept { return 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
         void vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
         int  vsmTableBase( void ) noexcept;

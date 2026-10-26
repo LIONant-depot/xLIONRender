@@ -1343,13 +1343,26 @@ namespace xlionrender
             if( !bClipmapDone )
             {
                 bClipmapDone = true;
-                std::vector<shadows::lbox>  LightBounds;        // the clipmap culls in light space (only when a tile renders)
+                // The casters culled in light space (only when a tile or page renders): their light-space boxes, kept from frame to frame -
+                // a draw's again when its world box changes, all when the light's basis does (an epoch, the switch)
+                auto&                       LightBounds = m_CasterLight;
                 std::vector<std::uint32_t>  AllCasters;
                 if( !m_ShadowTiles.empty() || !m_VSM.m_ToRender.empty() )
                 {
-                    LightBounds.reserve(Draws.size());
+                    const std::array<xmath::fvec3, 3> Basis = m_bVirtualShadows ? std::array{ m_VSM.m_X, m_VSM.m_Y, m_VSM.m_Z } : std::array{ m_Clipmap.m_X, m_Clipmap.m_Y, m_Clipmap.m_Z };
+                    if( std::memcmp(&Basis, &m_CasterLightBasis, sizeof(Basis)) != 0 ) { m_CasterLightWorld.clear(); m_CasterLightBasis = Basis; }
+                    m_CasterLight.resize(Draws.size());
+                    m_CasterLightWorld.resize(Draws.size(), xmath::fbbox{ xmath::fvec3(1, 1, 1), xmath::fvec3(-1, -1, -1) });
                     AllCasters.reserve(Draws.size());
-                    for( std::uint32_t i = 0; i < Draws.size(); ++i ) { LightBounds.push_back(m_bVirtualShadows ? m_VSM.Bounds(Draws[i].m_World) : m_Clipmap.Bounds(Draws[i].m_World)); AllCasters.push_back(i); }
+                    for( std::uint32_t i = 0; i < Draws.size(); ++i )
+                    {
+                        if( std::memcmp(&m_CasterLightWorld[i], &Draws[i].m_World, sizeof(xmath::fbbox)) != 0 )
+                        {
+                            m_CasterLight[i]      = m_bVirtualShadows ? m_VSM.Bounds(Draws[i].m_World) : m_Clipmap.Bounds(Draws[i].m_World);
+                            m_CasterLightWorld[i] = Draws[i].m_World;
+                        }
+                        AllCasters.push_back(i);
+                    }
                 }
                 // The sun's virtual pages: each in its slot of the atlas, cleared, its casters (light-space rect test)
                 for( const auto& P : m_VSM.m_ToRender )
