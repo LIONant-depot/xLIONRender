@@ -34,6 +34,7 @@ namespace xlionrender::shadows
     {
         static constexpr int page_texels_v  = 128;
         static constexpr int max_levels_v   = 12;
+        static constexpr float max_level0_texel_v = 0.002f;    // level 0 is never coarser than 2 mm (Unreal's finest directional level is under 0.1 mm)
         static constexpr int filter_reach_v = 2;        // texels a lookup's filter reaches past its centre texel (the request pass dilates by it)
 
         struct setup

@@ -503,6 +503,23 @@ int main()
         CHECK(Curve.back()[0] > 99.0, "not recovered 12 frames after the teleport (%.1f%% by their level)", Curve.back()[0]);
     }
 
+    // A large scene's tile (the static geom preview's is the model's radius / 2: 40 m for Bistro): level 0 stays at 2 mm or finer,
+    // and a close view gets texels within its pixels (Tomas: "Texels from sun dont look smaller" - level 0 was the clipmap's / 4, 2 cm)
+    {
+        Scene.m_Sun.m_ShadowTileSize = 40.0f;
+        Camera.LookAt(xmath::fvec3{ 0, 1.5f, -1.0f }, xmath::fvec3{ 0, 0, 0.5f });
+        CHECK(Settle(12), "40 m tile settle (invariant 1)");
+        const auto& R = Renderer.getVSMReport();
+        const auto& C = R.m_Counters;
+        const std::uint32_t Larger = C[17] + C[18] + C[19] + C[20];         // log2(footprint / texel) < 0: the texel larger than the pixel
+        std::printf("40 m tile, 1.5 m away: level 0 texel %.2f mm, %d levels; pixels by their level %.1f%%, texel larger than the pixel %.2f%%, pages resident %d + net\n"
+                   , Renderer.getVSM().Level0Texel() * 1000.0f, Renderer.getVSM().getSetup().m_Levels, Pct(C[1], C[0]), Pct(Larger, C[0]), R.m_Pages.m_ResidentFine);
+        CHECK(Renderer.getVSM().Level0Texel() <= vsm::max_level0_texel_v, "level 0 texel %.4f m with a 40 m tile", Renderer.getVSM().Level0Texel());
+        CHECK(C[0] > 0 && Pct(C[1], C[0]) > 99.0, "a close view on a 40 m tile: %.1f%% by their level", Pct(C[1], C[0]));
+        CHECK(Pct(Larger, C[0]) < 1.0, "a close view on a 40 m tile: %.2f%% of the pixels have texels larger than themselves", Pct(Larger, C[0]));
+        Scene.m_Sun.m_ShadowTileSize = 4.0f;
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");

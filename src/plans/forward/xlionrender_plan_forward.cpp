@@ -1182,8 +1182,17 @@ namespace xlionrender
             }
             if( std::vector<std::uint64_t> Ns; m_VSMTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
                 m_VSMReport.m_RequestGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
-            // (level 0's texel: the clipmap's level 0 texel / 4 - two finer levels for the pixels near the camera; ten levels reach as far)
-            m_VSM.Update(Sun.m_Direction, Sun.m_ShadowTileSize / float(4 * m_ShadowSetup.m_ClipmapTileSize), Eye, Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex());
+            // Level 0's texel: the clipmap's level 0 texel / 4, at most 2 mm (a scene's tile can be tens of metres: the static geom
+            // preview's is the model's radius / 2); the screen picks the level, so the 2 mm only show where a pixel asks for them. The
+            // levels: at least the setup's, more (up to max_levels_v) when the coarsest would not cover what the clipmap covers
+            const float Level0Texel = std::min(Sun.m_ShadowTileSize / float(4 * m_ShadowSetup.m_ClipmapTileSize), shadows::vsm::max_level0_texel_v);
+            {
+                const auto& VS    = m_VSM.getSetup();
+                const float Cover = Sun.m_ShadowTileSize * float(shadows::clipmap_tiles_v << (shadows::clipmap_levels_v - 1));
+                const int   Need  = int(std::ceil(std::log2(std::max(Cover / (Level0Texel * float(VS.m_Window * shadows::vsm::page_texels_v)), 1.0f)))) + 1;
+                if( Need > VS.m_Levels && VS.m_Levels < shadows::vsm::max_levels_v ) { auto S = VS; S.m_Levels = std::min(Need, shadows::vsm::max_levels_v); m_VSM.Init(S); }
+            }
+            m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex());
             m_VSMReport.m_Pages = m_VSM.m_Stats;
             m_ShadowTiles.clear();
         }
@@ -2606,10 +2615,10 @@ namespace xlionrender
                     Med[r] = V[V.size() / 2]; P95[r] = V[std::min(V.size() - 1, V.size() * 95 / 100)]; P99[r] = V[std::min(V.size() - 1, V.size() * 99 / 100)];
                     V.clear();
                 }
-                std::printf("LEDGER view %dx%d records+grid cpu %.3f/%.3f/%.3f, shadow prep gpu %.3f/%.3f/%.3f cpu %.3f/%.3f/%.3f, direct shading (scene pass) gpu %.3f/%.3f/%.3f, reconstruction 0, rays 0, cache 0 ms (median/p95/p99 of 120); lights %d (dropped %d), shadowed %d (fallback %d, stale %d), overflow cells %d; sun pages %s: request pass %.3f ms, rendered %d + net %d, rejected %d, pixels by their level %.1f%% / coarser %.1f%% / none %.1f%%\n"
+                std::printf("LEDGER view %dx%d records+grid cpu %.3f/%.3f/%.3f, shadow prep gpu %.3f/%.3f/%.3f cpu %.3f/%.3f/%.3f, direct shading (scene pass) gpu %.3f/%.3f/%.3f, reconstruction 0, rays 0, cache 0 ms (median/p95/p99 of 120); lights %d (dropped %d), shadowed %d (fallback %d, stale %d), overflow cells %d; sun pages %s: request pass %.3f ms, rendered %d + net %d, rejected %d, resident %d + net %d of %d slots, pixels by their level %.1f%% / coarser %.1f%% / none %.1f%%\n"
                            , View.m_Width, View.m_Height, Med[0], P95[0], P99[0], Med[2], P95[2], P99[2], Med[1], P95[1], P99[1], Med[3], P95[3], P99[3], m_LightStats.m_nLights, m_LightStats.m_nDropped, m_LightStats.m_nShadowed
                            , m_LightStats.m_nShadowFallback, m_LightStats.m_nShadowStale, m_LightStats.m_nOverflowCells
-                           , m_bVirtualShadows ? "on" : "off", m_VSMReport.m_RequestGpuMs, m_VSMReport.m_Pages.m_Rendered, m_VSMReport.m_Pages.m_RenderedPinned, m_VSMReport.m_Pages.m_Rejected
+                           , m_bVirtualShadows ? "on" : "off", m_VSMReport.m_RequestGpuMs, m_VSMReport.m_Pages.m_Rendered, m_VSMReport.m_Pages.m_RenderedPinned, m_VSMReport.m_Pages.m_Rejected, m_VSMReport.m_Pages.m_ResidentFine, m_VSMReport.m_Pages.m_ResidentPinned, m_VSM.getSetup().Slots()
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[1] / m_VSMReport.m_Counters[0] : 0.0, m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[2] / m_VSMReport.m_Counters[0] : 0.0
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[3] / m_VSMReport.m_Counters[0] : 0.0);
                 std::fflush(stdout);
