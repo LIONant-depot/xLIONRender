@@ -272,6 +272,9 @@ namespace xlionrender
             }
             R.m_Renderer.m_bBoxesOnly    = m_ViewOptions.m_bBoxesOnly;         // huge meshes: their boxes, or the clusters a frame budget allows
             R.m_Renderer.m_FrameBudgetMs = m_ViewOptions.m_FrameBudgetMs;
+            R.m_Renderer.m_bGPUCull      = !m_ViewOptions.m_bNoGPUCull;        // GPU cluster culling: on, its occlusion, frozen
+            R.m_Renderer.m_bGPUOcclusion = !m_ViewOptions.m_bNoGPUOcclusion;
+            R.m_Renderer.m_bFreezeCull   = m_ViewOptions.m_bFreezeCull;
             {   // the Meshes, with their MeshMaterial when they have one (old files: OldMaterials lists them for the editor to convert)
                 xecs::query::instance Query;
                 Query.m_Must.AddFromComponents<xlioncore::transform, mesh>();
@@ -316,11 +319,13 @@ namespace xlionrender
             if (!m_pScene) return "DescribeScene: not rendered yet";
             const auto& S  = m_pScene->m_Stats;
             const auto& GI = m_pScene->m_Renderer.getGIStats();
-            return std::format("DescribeScene: ok\nMeshes={}\nDrawn={}\nWaiting={}\nConstantSlots={}\nMaterials={}\nSun={}\nLights={}\nDrawsRendered={}\nGIMeshes={}\nGIUpdated={}\nGIRays={}\nGIMs={:.2f}\nGILoadMs={:.0f}\nGILoadParts={:.0f}/{:.0f}/{:.0f}\nGIBad={}\nGICaptured={}\nGIEmissive={}\nGIAlbedo={:.3f},{:.3f},{:.3f}\nGILinks={}\nGIMaxEmitted={:.4f}\nGIMaxEmitter={:.3f},{:.3f},{:.3f}\nGICapturing={}\nGIUnsupported={}\nGITraceMs={:.2f}\nGIUploadMs={:.2f}\nBoxesOnly={}\nFrameBudgetMs={:.0f}\nClustersInView={}\nClustersDrawn={}\nBoxes={}\nIndexAllowance={}\nBudgetFrameMs={:.1f}"
+            const auto  C  = m_pScene->m_Renderer.getCullStats();     // (the clusters kept: read back a few frames late)
+            return std::format("DescribeScene: ok\nMeshes={}\nDrawn={}\nWaiting={}\nConstantSlots={}\nMaterials={}\nSun={}\nLights={}\nDrawsRendered={}\nGIMeshes={}\nGIUpdated={}\nGIRays={}\nGIMs={:.2f}\nGILoadMs={:.0f}\nGILoadParts={:.0f}/{:.0f}/{:.0f}\nGIBad={}\nGICaptured={}\nGIEmissive={}\nGIAlbedo={:.3f},{:.3f},{:.3f}\nGILinks={}\nGIMaxEmitted={:.4f}\nGIMaxEmitter={:.3f},{:.3f},{:.3f}\nGICapturing={}\nGIUnsupported={}\nGITraceMs={:.2f}\nGIUploadMs={:.2f}\nBoxesOnly={}\nFrameBudgetMs={:.0f}\nClustersInView={}\nClustersDrawn={}\nBoxes={}\nIndexAllowance={}\nBudgetFrameMs={:.1f}\nGPUCullCandidates={}\nGPUCullRuns={}\nGPUCullDrawn={}\nGPUCullPrepass={}\nGPUCullPass2={}\nGPUCullFrozen={}\nGPUCullTriangles={}"
                               , S.m_Meshes, S.m_Drawn, S.m_Waiting, S.m_ConstantSlots, S.m_Materials, S.m_bSun, S.m_Lights, m_pScene->m_Renderer.getDrawsRendered()
                               , S.m_GIMeshes, GI.m_Updated, GI.m_Rays, GI.m_Ms, m_pScene->m_TotalGILoadMs, m_pScene->m_GILoadPartMs[0], m_pScene->m_GILoadPartMs[1], m_pScene->m_GILoadPartMs[2], GI.m_nBad, GI.m_nColored, GI.m_nEmissive, GI.m_MeanAlbedo.m_X, GI.m_MeanAlbedo.m_Y, GI.m_MeanAlbedo.m_Z, GI.m_nLinks, GI.m_MaxEmitted, GI.m_MaxEmitter.m_X, GI.m_MaxEmitter.m_Y, GI.m_MaxEmitter.m_Z, int(m_pScene->m_Renderer.isGICapturingAny()), GI.m_nUnsupported, GI.m_TraceMs, GI.m_UploadMs
                               , int(m_pScene->m_Renderer.m_bBoxesOnly), m_pScene->m_Renderer.m_FrameBudgetMs, m_pScene->m_Renderer.getBudgetStats().m_nClusters, m_pScene->m_Renderer.getBudgetStats().m_nDrawn
-                              , m_pScene->m_Renderer.getNotDrawn().size(), m_pScene->m_Renderer.getBudgetStats().m_Allowance, m_pScene->m_Renderer.getBudgetStats().m_FrameMs);
+                              , m_pScene->m_Renderer.getNotDrawn().size(), m_pScene->m_Renderer.getBudgetStats().m_Allowance, m_pScene->m_Renderer.getBudgetStats().m_FrameMs
+                              , C.m_nCandidates, C.m_nRuns, C.m_nDrawn, C.m_nPrepassDrawn, C.m_nDrawnPass2, int(C.m_bFrozen), C.m_nTriangles);
         }
 
         // The GI's main-thread time in the last RenderScene, all of it (the update and the upload: what the host's shared allowance is charged)

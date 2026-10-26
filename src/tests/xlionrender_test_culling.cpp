@@ -121,6 +121,69 @@ int main()
         if (Device.hasDrawIndirectCount() && std::getenv("XLION_NO_GPU_CULL") == nullptr)
             CHECK(Kept.m_nDrawn > 0 && Kept.m_nDrawn <= nCulled && Kept.m_nPrepassDrawn == (std::getenv("XLION_NO_PREPASS") ? 0 : Kept.m_nDrawn), "The GPU kept %d (prepass %d), the CPU's draw test %d", Kept.m_nDrawn, Kept.m_nPrepassDrawn, nCulled);
 
+        // Occlusion, two passes: a big sphere in front hides most of the field. The camera moves each frame (what was hidden comes out
+        // from behind it): every frame's image equals the CPU path's - nothing appears a frame late - and the hidden spheres are not drawn
+        if (Device.hasDrawIndirectCount() && std::getenv("XLION_NO_GPU_CULL") == nullptr)
+        {
+            auto Occluded = Scene;
+            Occluded.m_Draws.push_back({ .m_Mesh = Clusters, .m_L2W = xmath::fmat4::fromTranslation({ 1.2f, 0.4f, 4.0f }) * xmath::fmat4::fromScale({ 5, 5, 5 }), .m_Materials = { Material } });
+            const auto Look = [&](int f) { Camera.LookAt(xmath::fvec3{ 0.15f * float(f), 0.5f, 0 }, xmath::fvec3{ 3, 0.3f, 10 }); };
+            int nWorst = 0;
+            for (int f = 0; f < 12; ++f)
+            {
+                Look(f);
+                Renderer.m_bFrustumCull = true; Renderer.m_bGPUCull = false;
+                CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, CPU), "Render the occluded field on the CPU path, frame %d", f);
+                Renderer.m_bFrustumCull = false; Renderer.m_bGPUCull = true; Renderer.m_bGPUOcclusion = true;
+                CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, GPU), "Render the occluded field GPU culled, frame %d", f);
+                int n = 0;
+                for (std::size_t i = 0; i < CPU.size(); ++i) n += CPU[i] != GPU[i];
+                nWorst = std::max(nWorst, n);
+                CHECK(n == 0, "Occlusion, frame %d: %d texels differ from the CPU path (a cluster drawn late or culled wrongly)", f, n);
+            }
+            // What the two passes kept, against the frustum only (the camera still: what the GPU kept is read back a few frames late)
+            for (int k = 0; k < 4; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render occluded %d", k);
+            const auto Occl = Renderer.getCullStats();
+            Renderer.m_bGPUOcclusion = false;
+            for (int k = 0; k < 4; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render frustum only %d", k);
+            const auto Frus = Renderer.getCullStats();
+            Renderer.m_bGPUOcclusion = true;
+            std::printf("occlusion: %d drawn (pass 2: %d), the frustum only %d; every moving frame exact (worst %d texels)\n", Occl.m_nDrawn, Occl.m_nDrawnPass2, Frus.m_nDrawn, nWorst);
+            if (std::getenv("XLION_NO_GPU_OCCLUSION") == nullptr)
+                CHECK(Occl.m_nDrawn > 0 && Occl.m_nDrawn < Frus.m_nDrawn, "Occlusion drew %d clusters, the frustum only %d", Occl.m_nDrawn, Frus.m_nDrawn);
+            CHECK(Occl.m_nDrawnPass2 == 0, "A still camera: pass 1 draws everything visible (%d in pass 2)", Occl.m_nDrawnPass2);
+            CHECK(Occl.m_nTriangles == std::int64_t(Occl.m_nDrawn) * (Buffers.m_nIndices / 3), "Triangles shaded %lld, %d clusters of %u", (long long)Occl.m_nTriangles, Occl.m_nDrawn, Buffers.m_nIndices / 3);
+
+            // The editor's frame budget (on by default there): the GPU culls the clusters the budget keeps - the same picture
+            Renderer.m_FrameBudgetMs = 1000.0f;
+            Renderer.m_bFrustumCull = true; Renderer.m_bGPUCull = false;
+            CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, CPU), "Render with a frame budget on the CPU path");
+            Renderer.m_bGPUCull = true;
+            CHECK(App.RenderFrame(Occluded, View, Camera) && App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, GPU), "Render with a frame budget GPU culled");
+            int nBudget = 0;
+            for (std::size_t i = 0; i < CPU.size(); ++i) nBudget += CPU[i] != GPU[i];
+            CHECK(Renderer.getCullStats().m_nCandidates > 0 && nBudget == 0, "A frame budget: %d candidates, %d texels differ", Renderer.getCullStats().m_nCandidates, nBudget);
+            Renderer.m_FrameBudgetMs = 0;
+
+            // Freeze: the camera still, the cull frozen; the camera moves out from behind the occluder - the spheres it uncovers stay
+            // undrawn (the frozen lists), unfrozen they are back
+            Look(0);
+            Renderer.m_bFrustumCull = false;        // (the same candidates wherever the camera is: the frozen lists stay valid)
+            Renderer.m_bFreezeCull = false;
+            for (int k = 0; k < 2; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render before freezing %d", k);
+            Renderer.m_bFreezeCull = true;
+            CHECK(App.RenderFrame(Occluded, View, Camera), "Render frozen");
+            Camera.LookAt(xmath::fvec3{ -3.0f, 0.5f, 0 }, xmath::fvec3{ 3, 0.3f, 10 });
+            CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, GPU), "Render frozen, moved");
+            const bool bFrozen = Renderer.getCullStats().m_bFrozen;
+            Renderer.m_bFreezeCull = false;
+            CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, CPU), "Render unfrozen, moved");
+            int nFrozen = 0, nUnfrozen = 0;
+            for (std::size_t i = 0; i < CPU.size(); ++i) { nFrozen += GPU[i] != 0; nUnfrozen += CPU[i] != 0; }
+            std::printf("freeze: %d texels covered frozen, %d unfrozen\n", nFrozen, nUnfrozen);
+            CHECK(bFrozen && nFrozen < nUnfrozen, "Frozen (%d): %d texels covered, unfrozen %d", int(bFrozen), nFrozen, nUnfrozen);
+        }
+
         Renderer.m_bFrustumCull = true;
         Renderer.DestroyMaterial(Material);
         Device.Destroy(std::move(Texture));

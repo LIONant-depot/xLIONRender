@@ -2,6 +2,7 @@
 #include "xlionrender_instance.h"
 #include "plans/forward/xlionrender_plan_forward.h"
 #include <chrono>
+#include <optional>
 
 namespace xlionrender
 {
@@ -1573,16 +1574,19 @@ namespace xlionrender
             // GPU culling (features/cull, documentation/gpu_cluster_culling.md): the main view's opaque rigid clusters with a material, a
             // candidate each, in runs (a bind state each; a prepass run a geometry), culled here - outside the pass - into their runs' commands
             static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
-            static const bool s_bNoGPUCull = std::getenv("XLION_NO_GPU_CULL") != nullptr;
+            static const bool s_bNoGPUCull      = std::getenv("XLION_NO_GPU_CULL") != nullptr;
+            static const bool s_bNoGPUOcclusion = std::getenv("XLION_NO_GPU_OCCLUSION") != nullptr;
             m_CullCandidates.clear(); m_CullMatrices.clear(); m_CullRuns.clear(); m_CullRunOf.clear(); m_CullSub.clear();
             m_CullSubBase.assign(Scene.m_Draws.size(), ~0u);
-            if( bMain && m_pCull && m_bGPUCull && !s_bNoGPUCull && !bPlan )
+            bool          bOcclude   = false;       // the two passes: pass 1 (seen last frame), the Hi-Z, pass 2 (the rest)
+            bool          bPass2     = false;       // pass 2's lists drawn (occlusion, or a frozen cull that had them)
+            std::uint32_t CullSecond = 0;           // pass 2's commands: after pass 1's
+            if( bMain && m_pCull && m_bGPUCull && !s_bNoGPUCull && !(bPlan && m_bBoxesOnly) )      // (a frame budget: the clusters it keeps)
             {
                 const auto RunOf = [&]( xgpu::pipeline_instance* pInstance, material_slot* pMat, const cluster_geom* pGeom, xgpu::buffer* pGI )
                 {
                     const auto [It, bNew] = m_CullRunOf.try_emplace({ pInstance, pMat, pGeom, pGI }, std::uint32_t(m_CullRuns.size()));
                     if( bNew ) m_CullRuns.push_back({ pInstance, pMat, pGeom, pGI });
-                    ++m_CullRuns[It->second].m_Max;
                     return It->second;
                 };
                 for( const auto& Vis : m_Visible )
@@ -1595,6 +1599,8 @@ namespace xlionrender
                     const auto&         G     = pMesh->m_Geom;
                     const auto          Draw  = std::uint32_t(m_CullMatrices.size());
                     const auto          Base  = std::uint32_t(m_CullSub.size());
+                    const auto          VisBase = m_pCull->VisKey(Slot, std::uint32_t(G.m_Clusters.size()));
+                    const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
                     m_CullSub.resize(Base + G.m_Submeshes.size(), 0);
                     bool bAny = false;
                     for( std::size_t s = 0; s < G.m_Submeshes.size(); ++s )
@@ -1607,16 +1613,24 @@ namespace xlionrender
                         auto* pInstance = getRecordsInstance(*pMat);
                         if( pInstance == nullptr ) continue;
                         const auto GIOf = RigidGI(iDraw, pMat);
+                        // (a run looked up again only when the GI buffer changes: GI sections; the prepass run: the geometry's)
+                        const std::uint32_t Prepass = s_bNoPrepass ? ~0u : RunOf(nullptr, nullptr, &G, nullptr);
+                        std::uint32_t       Run     = ~0u;
+                        const xgpu::buffer* pRunBuf = nullptr;
                         for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                         {
+                            if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
                             const auto [pBuf, Rec] = GIOf(c, Slot, pMat->m_ParamBase);
+                            if( Run == ~0u || pBuf != pRunBuf ) { Run = RunOf(pInstance, pMat, &G, pBuf); pRunBuf = pBuf; }
+                            ++m_CullRuns[Run].m_Max;
+                            if( Prepass != ~0u ) ++m_CullRuns[Prepass].m_Max;
                             const auto& C    = G.m_Clusters[c];
                             const auto  Ctr  = C.m_BBox.getCenter();
                             const auto  Half = (C.m_BBox.m_Max - C.m_BBox.m_Min) * 0.5f;
-                            m_CullCandidates.push_back({ .m_Run = RunOf(pInstance, pMat, &G, pBuf), .m_RunFirst = 0
-                                                       , .m_PrepassRun = s_bNoPrepass ? ~0u : RunOf(nullptr, nullptr, &G, nullptr), .m_PrepassFirst = 0
+                            m_CullCandidates.push_back({ .m_Run = Run, .m_RunFirst = 0
+                                                       , .m_PrepassRun = Prepass, .m_PrepassFirst = 0
                                                        , .m_Draw = Draw, .m_nIndices = std::uint32_t(C.m_nIndices), .m_iFirstIndex = std::uint32_t(C.m_iIndex), .m_VertexOffset = std::int32_t(C.m_iVertex)
-                                                       , .m_Record = Rec, .m_Center = { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, 0 }, .m_Half = { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
+                                                       , .m_Record = Rec, .m_VisKey = VisBase + c, .m_Center = { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, 0 }, .m_Half = { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
                         }
                         m_CullSub[Base + s] = 1;
                         bAny = true;
@@ -1626,6 +1640,7 @@ namespace xlionrender
                 }
                 std::uint32_t First = 0;        // a run's commands: its candidates' room
                 for( auto& R : m_CullRuns ) { R.m_First = First; First += R.m_Max; }
+                CullSecond = First;
                 for( auto& K : m_CullCandidates )
                 {
                     K.m_RunFirst = m_CullRuns[K.m_Run].m_First;
@@ -1633,15 +1648,46 @@ namespace xlionrender
                 }
                 m_CullPrepass.resize(m_CullRuns.size());
                 for( std::size_t r = 0; r < m_CullRuns.size(); ++r ) m_CullPrepass[r] = m_CullRuns[r].m_pInstance == nullptr;
-                m_pCull->Cull(Window, m_Device.getFrameIndex(), m_CullCandidates, m_CullMatrices, m_CullPrepass);
+                // Frozen (m_bFreezeCull): the last cull's lists as they are - no cull, no Hi-Z - while the runs are the same
+                if( m_bFreezeCull && m_CullFrozen.m_bValid && m_CullFrozen.m_nRuns == m_CullRuns.size() && m_CullFrozen.m_Second == CullSecond ) bPass2 = m_CullFrozen.m_bPass2;
+                else
+                {
+                    bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && createCullTargets(View) == nullptr;
+                    m_pCull->Cull(Window, m_Device.getFrameIndex(), m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
+                    m_CullFrozen = { true, m_CullRuns.size(), CullSecond, bOcclude };
+                }
             }
             const auto CulledOnGPU = [&]( std::size_t iDraw, const cluster_geom& G, const cluster_geom::submesh& Sub )
             {
                 return m_CullSubBase[iDraw] != ~0u && m_CullSub[m_CullSubBase[iDraw] + std::size_t(&Sub - G.m_Submeshes.data())] != 0;
             };
 
-            auto Cmd = Window.StartRenderPass(View.m_ScenePass);
+            std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
+            CmdPass.emplace(Window.StartRenderPass(View.m_ScenePass));
+            auto& Cmd = *CmdPass;
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
+
+            // A GPU culled run's draws in a pass (0: pass 1, 1: pass 2)
+            const auto DrawCulled = [&]( std::size_t r, int Pass )
+            {
+                const auto& R = m_CullRuns[r];
+                Cmd.DrawIndexedIndirectCount(m_pCull->m_Commands, int(R.m_First + (Pass ? CullSecond : 0u)), m_pCull->m_Counts, int(r) + (Pass ? gpu_cull::max_runs_v : 0), int(R.m_Max));
+            };
+            // The GPU culled prepass runs (a run a geometry), a pass's
+            const auto PrepassCulled = [&]( int Pass )
+            {
+                for( std::size_t r = 0; r < m_CullRuns.size(); ++r )
+                {
+                    const auto& R = m_CullRuns[r];
+                    if( R.m_pInstance ) continue;
+                    std::array<xgpu::buffer*, 10> Buffers{ R.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &m_pCull->m_Records };
+                    Cmd.setPipelineInstance(m_GIScreenDepthInstance, std::span{ Buffers });     // (the depth prepass's pipeline reading the records)
+                    Cmd.setDynamicUBO(m_LightUBO, 1);
+                    Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                    BindClusterStreams(Cmd, *R.m_pGeom);
+                    DrawCulled(r, Pass);
+                }
+            };
 
             const void*                    pBound     = nullptr;      // the state the last cluster draw left bound (texture-table materials of one pipeline share it)
             const cluster_geom*            pBoundGeom = nullptr;
@@ -1715,18 +1761,9 @@ namespace xlionrender
             // no depth write or test, wireframe, skin. XLION_NO_PREPASS=1: none (measurement)
             if( !s_bNoPrepass )
             {
-                for( std::size_t r = 0; r < m_CullRuns.size(); ++r )       // GPU culled: a run a geometry
-                {
-                    const auto& R = m_CullRuns[r];
-                    if( R.m_pInstance ) continue;
-                    std::array<xgpu::buffer*, 10> Buffers{ R.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &m_pCull->m_Records };
-                    Cmd.setPipelineInstance(m_GIScreenDepthInstance, std::span{ Buffers });     // (the depth prepass's pipeline reading the records)
-                    Cmd.setDynamicUBO(m_LightUBO, 1);
-                    Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
-                    BindClusterStreams(Cmd, *R.m_pGeom);
-                    Cmd.DrawIndexedIndirectCount(m_pCull->m_Commands, int(R.m_First), m_pCull->m_Counts, int(r), int(R.m_Max));
-                    pBound = nullptr;
-                }
+                PrepassCulled(0);
+                if( bPass2 && !bOcclude ) PrepassCulled(1);     // (frozen: both lists now)
+                pBound = nullptr;
                 const cluster_geom* pPrepassGeom = nullptr;
                 for( const auto& Vis : m_Visible )
                 {
@@ -1766,6 +1803,17 @@ namespace xlionrender
                         }
                     }
                 }
+            }
+
+            // GPU culling's second pass: the depth laid so far (the clusters seen last frame, the CPU path's) into the Hi-Z pyramid, every other
+            // cluster in the view tested against it; the visible ones' depth too, in the pass loaded again - then the shading of both passes
+            if( bOcclude )
+            {
+                CmdPass.reset();        // (the pass ends: the copy and the cull run outside it)
+                m_pCull->Occlude(Window, View.m_Depth, View.m_HiZ, View.m_Width, View.m_Height);
+                CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad));
+                if( !s_bNoPrepass ) PrepassCulled(1);
+                pBound = nullptr;
             }
 
             // Translucent and additive submeshes: after the opaque ones and the sky, by priority, then back to front
@@ -1846,7 +1894,8 @@ namespace xlionrender
                     }
                     else if( R.m_pMat->m_bTable ) Cmd.setTextureTable(R.m_pMat->m_Table);
                     Cmd.setPushConstants(details::push_static_geom{ 0u, 0u, 0u, 0xFFFFFFFFu, R.m_pMat->m_ParamBase });     // (the fragment's material base)
-                    Cmd.DrawIndexedIndirectCount(m_pCull->m_Commands, int(R.m_First), m_pCull->m_Counts, int(r), int(R.m_Max));
+                    DrawCulled(r, 0);
+                    if( bPass2 ) DrawCulled(r, 1);
                 }
             }
             pBound = nullptr;

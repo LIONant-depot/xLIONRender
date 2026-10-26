@@ -177,9 +177,15 @@ namespace xlionrender
         // The main view's opaque rigid clusters with a material are culled on the GPU and drawn indirectly (documentation/gpu_cluster_culling.md;
         // false or XLION_NO_GPU_CULL=1: the CPU path). The last Render's candidates (its clusters handed to the cull) and runs (indirect draws)
         bool                                       m_bGPUCull     = true;
-        // and, read back a few frames late, the clusters the GPU kept (drawn shaded, drawn in the depth prepass)
-        struct cull_stats { int m_nCandidates = 0; int m_nRuns = 0; int m_nDrawn = 0; int m_nPrepassDrawn = 0; };
-                      cull_stats           getCullStats( void ) const                                           noexcept { return { int(m_CullCandidates.size()), int(m_CullRuns.size()), m_pCull ? m_pCull->m_Drawn : 0, m_pCull ? m_pCull->m_PrepassDrawn : 0 }; }
+        // with occlusion, in two passes (the clusters seen last frame, then the rest against the Hi-Z of their depth; false or
+        // XLION_NO_GPU_OCCLUSION=1: the frustum only)
+        bool                                       m_bGPUOcclusion = true;
+        // Freeze: the last cull's lists drawn again, seen from wherever the camera goes - what was culled shows as missing (a debug view;
+        // ignored when the scene's runs change)
+        bool                                       m_bFreezeCull   = false;
+        // and, read back a few frames late, the clusters the GPU kept (drawn shaded - both passes -, in the depth prepass, shaded by pass 2)
+        struct cull_stats { int m_nCandidates = 0; int m_nRuns = 0; int m_nDrawn = 0; int m_nPrepassDrawn = 0; int m_nDrawnPass2 = 0; bool m_bFrozen = false; std::int64_t m_nTriangles = 0; };
+                      cull_stats           getCullStats( void ) const                                           noexcept { return { int(m_CullCandidates.size()), int(m_CullRuns.size()), m_pCull ? m_pCull->m_Drawn : 0, m_pCull ? m_pCull->m_PrepassDrawn : 0, m_pCull ? m_pCull->m_Drawn2 : 0, m_bFreezeCull && m_CullFrozen.m_bValid, m_pCull ? m_pCull->m_Triangles : 0 }; }
         // How many of the scene's draws the last Render drew in the scene pass
                       int                  getDrawsRendered( void ) const                                       noexcept { return m_nDrawsRendered; }
         // How many persistent instance slots this frame wrote (new or changed: transform, constant material, entity parameters)
@@ -294,6 +300,7 @@ namespace xlionrender
         void                        destroyOutlineTargets( render_view& View ) noexcept;
         xgpu::device::error*        createGIScreenTargets( render_view& View ) noexcept;
         void                        destroyGIScreenTargets( render_view& View ) noexcept;
+        xgpu::device::error*        createCullTargets   ( render_view& View ) noexcept;      // render_view::m_ScenePassLoad, m_HiZ (the first time)
         void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        prefilterInto   ( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept;
         std::vector<xgpu::pipeline::sampler>                    LitSamplers ( void ) const                     noexcept;
@@ -478,6 +485,7 @@ namespace xlionrender
         std::vector<xmath::fmat4>                   m_CullMatrices;
         std::vector<cull_run>                       m_CullRuns;
         std::vector<std::uint8_t>                   m_CullPrepass;          // per run: a prepass run
+        struct cull_frozen { bool m_bValid = false; std::size_t m_nRuns = 0; std::uint32_t m_Second = 0; bool m_bPass2 = false; } m_CullFrozen;   // the last cull (m_bFreezeCull)
         std::map<std::tuple<const void*, const void*, const void*, const void*>, std::uint32_t> m_CullRunOf;
         std::vector<std::uint32_t>                  m_CullSubBase;          // per scene draw: its submeshes' first flag in m_CullSub (~0: none)
         std::vector<std::uint8_t>                   m_CullSub;              // 1: the submesh is culled on the GPU (the CPU loops leave it)

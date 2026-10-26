@@ -26,6 +26,11 @@ namespace xlionrender
         // and grows back as they are faster)
         bool        m_bBoxesOnly    = false;
         float       m_FrameBudgetMs = 0;
+        // GPU cluster culling (version 12, documentation/gpu_cluster_culling.md): off (the CPU path), its occlusion off (the frustum only),
+        // frozen (the last cull's lists drawn from wherever the camera goes: what was culled shows as missing)
+        bool        m_bNoGPUCull      = false;
+        bool        m_bNoGPUOcclusion = false;
+        bool        m_bFreezeCull     = false;
         bool operator==(const view_options&) const noexcept = default;
     };
 

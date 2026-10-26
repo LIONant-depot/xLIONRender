@@ -59,6 +59,10 @@ namespace xlionrender
         // and its draws (instance::renderScenePass): a record a cluster (details::push_static_geom, read by gl_InstanceIndex) and an
         // indirect command (details::draw_indexed_indirect), host visible, a region per ring frame (instance::screen_draws_v each)
         xgpu::buffer            m_GIScreenRecords, m_GIScreenCommands;
+        // GPU culling's occlusion (instance::createCullTargets, the main view's): the scene pass again, loaded (its second pass draws after
+        // the Hi-Z), and the Hi-Z pyramid (gpu_cull::HiZFloats floats)
+        xgpu::renderpass        m_ScenePassLoad;
+        xgpu::buffer            m_HiZ;
         int                     m_GIScreenWidth  = 0;
         int                     m_GIScreenHeight = 0;
         int                     m_MaskWidth  = 0;

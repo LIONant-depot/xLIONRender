@@ -27,6 +27,9 @@ namespace xlionrender
         constexpr std::uint32_t s_CullComp[] = {
             #include "xlionrender_cull_comp.h"
         };
+        constexpr std::uint32_t s_HiZComp[] = {
+            #include "xlionrender_hiz_comp.h"
+        };
         constexpr std::uint32_t s_SkinGeomVert[] = {
             #include "xlionrender_skin_geom_vert.h"
         };
@@ -510,7 +513,7 @@ namespace xlionrender
         if( auto Err = Device.Create(m_SkinGeomVert,        { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_SkinGeomVert) }); Err ) return Err;
         if( auto Err = Device.Create(m_GICaptureVert,       { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
         if( auto Err = Device.Create(m_StaticGeomGIRecordsVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_StaticGeomGIRecordsVert) }); Err ) return Err;     // RIGID, GPU culled
-        if( m_pCull = std::make_unique<gpu_cull>(); !m_pCull->Init(Device, s_CullComp) ) m_pCull.reset();      // (no drawIndirectCount: the CPU path)
+        if( m_pCull = std::make_unique<gpu_cull>(); !m_pCull->Init(Device, s_CullComp, s_HiZComp) ) m_pCull.reset();      // (no drawIndirectCount: the CPU path)
 
         // Shadows: the atlas's passes (a clear for its first use - a never rendered attachment cannot be loaded -, then load), the
         // tile clear (depth 1, ALWAYS) and the casters' depth pipelines: depth bias against acne, depth clamp so casters nearer to the
@@ -1347,6 +1350,16 @@ namespace xlionrender
         View.m_MaskWidth = View.m_MaskHeight = 0;
     }
 
+    xgpu::device::error* instance::createCullTargets( render_view& View ) noexcept
+    {
+        if( View.m_HiZ.m_Private ) return nullptr;
+        auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_Depth } };
+        if( auto Err = m_Device.Create(View.m_ScenePassLoad, { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
+        const std::vector<float> Zeros(std::size_t(gpu_cull::HiZFloats(View.m_Width, View.m_Height)), 0.0f);     // (a device-local buffer is made from its first data)
+        return m_Device.Create(View.m_HiZ, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(float)
+                                           , .m_EntryCount = int(Zeros.size()), .m_pData = const_cast<float*>(Zeros.data()) });
+    }
+
     xgpu::device::error* instance::createGIScreenTargets( render_view& View ) noexcept
     {
         const int W = (View.m_Width + 1) / 2, H = (View.m_Height + 1) / 2;
@@ -1395,6 +1408,8 @@ namespace xlionrender
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));
+        if( View.m_ScenePassLoad.m_Private )   m_Device.Destroy(std::move(View.m_ScenePassLoad));
+        if( View.m_HiZ.m_Private )             ReleaseBuffer(View.m_HiZ);
         if( View.m_OutputPass.m_Private )      m_Device.Destroy(std::move(View.m_OutputPass));
         if( View.m_OverlayPass.m_Private )     m_Device.Destroy(std::move(View.m_OverlayPass));
         if( View.m_HDR.m_Private )             m_Device.Destroy(std::move(View.m_HDR));
