@@ -346,6 +346,61 @@ int main()
         Renderer.m_LightMode = mode::EXACT;
     }
 
+    // The glossy floor (P2's gate, measured): a metallic floor of roughness 0.15 seen from low, 1 strong light and 12 weak ones whose
+    // highlights fall on it. The cells' importance is diffuse (the light at the cell's nearest point), so a weak light's highlight is
+    // a tail sample: unbiased (the 64-frame mean converges to EXACT), noisy per frame (falling with more tail samples). Measured on the
+    // highlights - the values the lights make 3x brighter than the floor's diffuse - and logged; per-pixel resampling is P3's
+    {
+        auto Glossy = Scene;
+        Glossy.m_Draws = { { .m_Mesh = Scene.m_Draws[0].m_Mesh, .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.55f, 1 }) * xmath::fmat4::fromScale({ 20.0f, 0.1f, 20.0f })
+                           , .m_Material = { .m_Metallic = 0.9f, .m_Roughness = 0.15f } } };
+        Glossy.m_LocalLights = { { .m_Position = { 0.0f, 1.0f, 3.0f }, .m_Radius = 9.0f, .m_Intensity = 8.0f, .m_bCastShadows = false } };
+        for (int k = 0; k < 12; ++k)
+            Glossy.m_LocalLights.push_back({ .m_Position = { -5.0f + 0.9f * float(k), 0.6f + 0.1f * float(k % 3), 1.0f + 0.8f * float(k % 4) }, .m_Radius = 6.0f
+                                           , .m_Color = { 0.4f + 0.05f * float(k % 5), 0.6f, 0.9f - 0.05f * float(k % 4) }, .m_Intensity = 1.0f, .m_bCastShadows = false });
+        xgpu::tools::view Low;
+        Low.setFov(xmath::radian{ 1.0f });
+        Low.setViewport({ 0, 0, size_v, size_v });
+        Low.LookAt(xmath::fvec3{ 0, 1.2f, -6.0f }, xmath::fvec3{ 0, -0.3f, 3.0f });
+        std::vector<float> Ex, Rough, Fr;
+        Renderer.m_LightMode = mode::EXACT;
+        CHECK(App.RenderFrame(Glossy, View, Low) && App.RenderFrame(Glossy, View, Low) && ReadHDR(Device, View, Ex), "glossy exact");
+        auto Matte = Glossy;
+        Matte.m_Draws[0].m_Material = { .m_Metallic = 0.0f, .m_Roughness = 1.0f };
+        CHECK(App.RenderFrame(Matte, View, Low) && App.RenderFrame(Matte, View, Low) && ReadHDR(Device, View, Rough), "glossy matte");
+        std::vector<std::size_t> Mask;
+        for (std::size_t i = 0; i < Ex.size(); ++i) if (Ex[i] > 3.0f * Rough[i] + 0.02f) Mask.push_back(i);
+        CHECK(Mask.size() > 300, "the glossy floor has only %zu highlight values", Mask.size());
+        const auto Rel = [&](const std::vector<float>& A, const std::vector<float>& B)
+        {
+            double d = 0, r = 0;
+            for (auto i : Mask) { d += std::abs(double(A[i]) - B[i]); r += std::abs(double(B[i])); }
+            return d / std::max(r, 1e-9);
+        };
+        Renderer.m_LightMode = mode::SAMPLED;
+        double Err[3] = {}, PerFrame[3] = {};
+        for (int si = 0; si < 3; ++si)
+        {
+            Renderer.m_LightTailSamples = 1 << (2 * si);           // 1, 4, 16
+            std::vector<double> Sum(Ex.size(), 0.0);
+            for (int f = 0; f < 64; ++f)
+            {
+                CHECK(App.RenderFrame(Glossy, View, Low) && ReadHDR(Device, View, Fr), "glossy sampled");
+                for (std::size_t i = 0; i < Fr.size(); ++i) Sum[i] += Fr[i];
+                PerFrame[si] += Rel(Fr, Ex) / 64.0;
+            }
+            std::vector<float> Mean(Ex.size());
+            for (std::size_t i = 0; i < Mean.size(); ++i) Mean[i] = float(Sum[i] / 64.0);
+            Err[si] = Rel(Mean, Ex);
+        }
+        Renderer.m_LightTailSamples = 1;
+        Renderer.m_LightMode = mode::EXACT;
+        std::printf("glossy floor (%zu highlight values): per-frame error %.3f / %.3f / %.3f, 64-frame mean %.4f / %.4f / %.4f (1 / 4 / 16 tail samples)\n"
+                   , Mask.size(), PerFrame[0], PerFrame[1], PerFrame[2], Err[0], Err[1], Err[2]);
+        CHECK(Err[0] < 0.25 * PerFrame[0] && Err[2] < 0.25 * PerFrame[2], "the glossy floor's mean does not converge (1: %f of %f, 16: %f of %f)", Err[0], PerFrame[0], Err[2], PerFrame[2]);
+        CHECK(PerFrame[1] < PerFrame[0] && PerFrame[2] < PerFrame[1], "more tail samples do not reduce the glossy floor's noise");
+    }
+
     // More stratified tail samples: same estimator, less noise per frame
     double OneBySamples[3] = {};
     for (int si = 0; si < 3; ++si)
