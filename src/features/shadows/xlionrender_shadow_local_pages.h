@@ -16,7 +16,10 @@
 //  - The table (BuildTable): an entry per face and page, 16 bits (slot + 1, 0 none), a face's entries contiguous (face_entries_v): the
 //    shading reads it from the cell buffer. A page a changed caster touches renders again when asked for; until then it keeps its last
 //    render (stale, counted - as the maps before it).
-//  - A light that moves or changes frees its slot's pages: a new light (its key) starts again.
+//  - A light that changes (type, radius, cone) or goes frees its slot's pages: a new light (its key) starts again. A light that only
+//    moves or turns (the same scene light, the same type: a torch, a car's lights) keeps its slot and its requests (a page's key is
+//    relative to the light): its requested pages render again every frame it moves, mandatory as the pinned ones (Unreal re-renders a
+//    moving light's pages uncached alike), the ones not asked for go - none keeps a render from where the light was.
 // ponytail: a page's casters by a frustum test per caster and page on the CPU (the sun's pairs: P1c); dirty pages by a frustum test per
 // changed box and resident page of the lights it reaches
 
@@ -123,8 +126,9 @@ namespace xlionrender::shadows
             const int nLights = std::min(int(Lights.size()), max_local_lights_v);
             m_SlotOf.assign(Lights.size(), -1);
 
-            // Match: a slot keeps its light while the key is the same; the rest go (their pages freed), new lights take free slots
-            for (auto& L : m_Lights) L.m_bSeen = false;
+            // Match: a slot keeps its light while the key is the same; then a slot whose scene light only moved or turned keeps it (moved);
+            // the rest go (their pages freed), new lights take free slots
+            for (auto& L : m_Lights) L.m_bSeen = L.m_bMoved = false;
             for (int i = 0; i < nLights; ++i)
             {
                 const auto& L = Lights[i];
@@ -132,6 +136,18 @@ namespace xlionrender::shadows
                 const std::uint64_t K = LightKey(L);
                 for (int s = 0; s < max_local_lights_v; ++s)
                     if (m_Lights[s].m_bUsed && !m_Lights[s].m_bSeen && m_Lights[s].m_Key == K) { m_Lights[s].m_bSeen = true; m_Lights[s].m_iLight = i; m_SlotOf[i] = s; break; }
+            }
+            for (int s = 0; s < max_local_lights_v; ++s)
+            {
+                auto& LS = m_Lights[s];
+                if (!LS.m_bUsed || LS.m_bSeen) continue;
+                const int i = LS.m_iLight;
+                if (i >= 0 && i < nLights && m_SlotOf[i] < 0 && Lights[i].m_bCastShadows && Lights[i].m_Radius > 0 && ShapeKey(Lights[i]) == LS.m_Shape)
+                {
+                    LS.m_Key = LightKey(Lights[i]);
+                    LS.m_bSeen = LS.m_bMoved = true;
+                    m_SlotOf[i] = s;
+                }
             }
             for (int s = 0; s < max_local_lights_v; ++s) if (m_Lights[s].m_bUsed && !m_Lights[s].m_bSeen) FreeLight(s);
             for (int i = 0; i < nLights; ++i)
@@ -142,12 +158,30 @@ namespace xlionrender::shadows
                     if (!m_Lights[s].m_bUsed)
                     {
                         auto& LS = m_Lights[s];
-                        LS = { LightKey(L), LS.m_Generation + 1, i, true, true };
+                        LS = { LightKey(L), LS.m_Generation + 1, i, true, true, false, ShapeKey(L) };
                         m_SlotOf[i] = s;
                         break;
                     }
             }
             for (const auto& L : m_Lights) m_Stats.m_Lights += L.m_bUsed;
+
+            // A moved light's pages: the pinned and the requested ones render again (mandatory), the others go
+            {
+                bool bAnyMoved = false;
+                for (const auto& L : m_Lights) bAnyMoved |= L.m_bMoved;
+                if (bAnyMoved)
+                {
+                    std::unordered_map<int, int> Asked;
+                    for (const auto& K : Requests) Asked[Entry(K)] = 1;
+                    for (int s = 0; s < int(m_Slots.size()); ++s)
+                    {
+                        auto& S = m_Slots[s];
+                        if (!S.m_bUsed || !m_Lights[S.m_Key.m_Face / faces_per_light_v].m_bMoved) continue;
+                        if (S.m_bPinned || Asked.contains(Entry(S.m_Key))) S.m_bDirty = true;
+                        else Free(s);
+                    }
+                }
+            }
 
             // Dirty: every resident page of a light a changed caster reaches whose frustum holds it (bCache false: all of them)
             for (int s = 0; s < int(m_Slots.size()) && (!bCache || !Changed.empty()); ++s)
@@ -216,13 +250,14 @@ namespace xlionrender::shadows
             {
                 int s = Find(K);
                 if (s >= 0 && m_Slots[s].m_bValid && !m_Slots[s].m_bDirty) { m_Waiting.erase(Entry(K)); continue; }
-                if (Budget <= 0) break;
+                const bool bMoved = m_Lights[K.m_Face / faces_per_light_v].m_bMoved;
+                if (Budget <= 0 && !bMoved) continue;
                 if (s < 0) { s = Admit(K, false); if (s < 0) { ++m_Stats.m_Rejected; continue; } }
                 m_Slots[s].m_LastRequested = Frame;
                 const int iLight = m_Lights[K.m_Face / faces_per_light_v].m_iLight;
                 Render(Lights[std::size_t(iLight)], iLight, s, false);
                 m_Waiting.erase(Entry(K));
-                --Budget;
+                if (!bMoved) --Budget;
             }
             if (!bCache)        // a full rebuild: every resident page again
                 for (int s = 0; s < int(m_Slots.size()); ++s)
@@ -312,6 +347,8 @@ namespace xlionrender::shadows
             std::uint32_t   m_Generation = 0;
             int             m_iLight = -1;
             bool            m_bUsed = false, m_bSeen = false;
+            bool            m_bMoved = false;           // this frame: the same light, moved or turned
+            std::uint64_t   m_Shape = 0;                // its type, radius and cone (ShapeKey): what a move keeps
         };
 
         int Find(const key& K) const noexcept { const auto It = m_Map.find(Entry(K)); return It == m_Map.end() ? -1 : It->second; }
@@ -357,6 +394,15 @@ namespace xlionrender::shadows
             const int R = m_Setup.SlotsPerRow();
             m_ToRender.push_back({ iLight, S.m_Key, s, (s % R) * page_texels_v, (s / R) * page_texels_v, PageW2C(L, S.m_Key), bPinned });
             ++(bPinned ? m_Stats.m_RenderedPinned : m_Stats.m_Rendered);
+        }
+
+        static std::uint64_t ShapeKey(const local_light& L) noexcept
+        {
+            const bool  bSpot = L.m_Type == local_light::type::SPOT;
+            const float V[] = { float(L.m_Type), L.m_Radius, bSpot ? L.m_OuterAngle : 0 };
+            std::uint64_t H = 1469598103934665603ull;
+            for (auto* p = reinterpret_cast<const std::uint8_t*>(V); p != reinterpret_cast<const std::uint8_t*>(V + std::size(V)); ++p) H = (H ^ *p) * 1099511628211ull;
+            return H;
         }
 
         static std::uint64_t LightKey(const local_light& L) noexcept

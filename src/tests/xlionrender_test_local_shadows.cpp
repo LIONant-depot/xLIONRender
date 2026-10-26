@@ -110,18 +110,44 @@ int main()
         S.Update(L, {}, true, More, 13);
         CHECK(S.m_Stats.m_Rejected == 1 && S.m_Stats.m_ResidentPinned == 7 && S.Validate(Table(S)), "a full pool rejects, keeps the pinned (rejected %d)", S.m_Stats.m_Rejected);
 
-        // The point moves: its pages go, a new generation; requests of the old one are dropped
+        // The point changes (its radius): its pages go, a new generation; requests of the old one are dropped
         const std::vector<std::uint32_t> OldGen{ S.Generation(0), S.Generation(1) };
-        L[0].m_Position.m_X += 0.5f;
+        L[0].m_Radius += 0.5f;
         S.Update(L, {}, true, {}, 14);
-        CHECK(S.m_Stats.m_RenderedPinned == 6 && S.Validate(Table(S)), "a moved point renders its 6 pinned pages again (%d)", S.m_Stats.m_RenderedPinned);
+        CHECK(S.m_Stats.m_RenderedPinned == 6 && S.Validate(Table(S)), "a changed point renders its 6 pinned pages again (%d)", S.m_Stats.m_RenderedPinned);
         std::vector<std::uint32_t> Bits(std::size_t(pages::max_faces_v * pages::face_entries_v / 32 + 1), 0u);
         for (const auto& K : Req) Bits[std::size_t(pages::Entry(K)) >> 5] |= 1u << (pages::Entry(K) & 31);
         std::vector<pages::key> Decoded;
         pages::DecodeRequests(Bits, OldGen, S, Decoded);
         int nPoint = 0;
         for (const auto& K : Decoded) nPoint += K.m_Face / pages::faces_per_light_v == f0 / pages::faces_per_light_v;
-        CHECK(nPoint == 0, "requests of the moved light's old generation dropped (%d kept)", nPoint);
+        CHECK(nPoint == 0, "requests of the changed light's old generation dropped (%d kept)", nPoint);
+
+        // The point moves (a torch): the same slot and generation, its requests kept; its requested pages render again every frame it
+        // moves, even past the budget, its pinned ones too; a page it no longer asks for goes (none keeps a render from where it was)
+        S.Init({ .m_PoolTexels = 1024, .m_Budget = 0 });
+        S.Update(L, {}, true, {}, 30);
+        const int fm = S.SlotOfLight(0) * pages::faces_per_light_v;
+        const std::uint32_t Gen = S.Generation(S.SlotOfLight(0));
+        const std::vector<pages::key> Asked{ { fm + 0, 1, 3, 3 }, { fm + 0, 1, 4, 3 }, { fm + 2, 0, 9, 9 } };
+        S.setBudget(100);
+        S.Update(L, {}, true, Asked, 31);
+        S.setBudget(0);
+        const int Resident = S.m_Stats.m_Resident;
+        L[0].m_Position.m_X += 0.25f;
+        const std::vector<pages::key> Fewer{ Asked[0], Asked[1] };
+        S.Update(L, {}, true, Fewer, 32);
+        CHECK(S.Generation(S.SlotOfLight(0)) == Gen && S.SlotOfLight(0) * pages::faces_per_light_v == fm, "a moved point lost its slot or generation");
+        CHECK(Resident == 3 && S.m_Stats.m_Rendered == 2 && S.m_Stats.m_RenderedPinned == 6 && S.m_Stats.m_Resident == 2 && S.Validate(Table(S))
+             , "a moving point: %d requested rendered past a budget of 0 (2), %d pinned (6), %d resident of %d (2: the one not asked for goes)"
+             , S.m_Stats.m_Rendered, S.m_Stats.m_RenderedPinned, S.m_Stats.m_Resident, Resident);
+        S.Update(L, {}, true, Fewer, 33);
+        CHECK(S.m_ToRender.empty(), "a point that stopped renders again (%d)", int(S.m_ToRender.size()));
+        L[0].m_Position.m_X -= 0.25f;
+        L[1].m_Position.m_X += 0.25f;               // (the spot moves too: each keeps its own slot)
+        S.Update(L, {}, true, Fewer, 34);
+        CHECK(S.Generation(S.SlotOfLight(0)) == Gen && S.m_Stats.m_RenderedPinned == 7, "two lights moving: pinned pages rendered %d (7)", S.m_Stats.m_RenderedPinned);
+        S.Init({ .m_PoolTexels = 512, .m_Budget = 100 });
 
         // A changed caster below the point (its -Y face) dirties that face's pages, not the +Y face's
         S.Init({ .m_PoolTexels = 1024, .m_Budget = 100 });
@@ -230,6 +256,22 @@ int main()
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Again), "Render again");
     CHECK(Renderer.getShadowTilesRendered() == 0, "An unchanged scene re-rendered %d pages", Renderer.getShadowTilesRendered());
     for (std::size_t i = 0; i < On.size(); ++i) CHECK(Again[i] == On[i], "The cached frame differs at %d", int(i));
+
+    // The point light moves every frame (a torch): it keeps its pages' requests, so its pixels stay shaded by their own level - not by the
+    // pinned coarse pages a light that starts again would fall back to
+    {
+        const auto Home = Scene.m_LocalLights[0].m_Position;
+        for (int f = 0; f < 12; ++f)
+        {
+            Scene.m_LocalLights[0].m_Position = Home + xmath::fvec3(0.02f * float(f), 0.0f, 0.01f * float(f));
+            CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateLocalPages(), "Render a moving light %d", f);
+        }
+        const auto& C = Renderer.getLocalReport().m_Counters;
+        std::printf("moving light: pixel-light pairs %u - by their level %u, coarser %u, none %u; pages rendered %d\n", C[0], C[1], C[2], C[3], Renderer.getShadowTilesRendered());
+        CHECK(C[0] > 1000 && C[1] > C[0] * 9 / 10 && C[3] == 0, "a moving light's pixels: %u of %u by their level, %u by none", C[1], C[0], C[3]);
+        Scene.m_LocalLights[0].m_Position = Home;
+        CHECK(Settle(8), "Settle back");
+    }
 
     // The sphere moves: the near light's pages that see it render again, the far light's do not; settled, cached equals rebuilt
     Scene.m_Draws[1].m_L2W = Lifted(0.4f);
