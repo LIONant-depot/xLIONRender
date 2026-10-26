@@ -104,6 +104,10 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 CellOrigin[5];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
 	vec4 EnvParams;                      // x: 1 the environment probe replaces the flat ambient, y: its intensity
 	vec4 ProbeCount;                     // x: reflection probes (innermost first), y: the first's record in LocalLightList, z: their cell headers in LightCells (-1: none)
+	// the sun's virtual shadow pages (xlionrender_shadow_vsm.glsl; appended: materials compiled before them read the fields above only)
+	vec4 VSMParams;                      // x: 1 the virtual pages (0: the clipmap), y: level 0 texel, z: levels, w: the page table's first uint in LightCells
+	vec4 VSMParams2;                     // x: window (pages per level side), y: page texels, z: pool slots per row, w: 1 every tap through the table (tests)
+	vec4 VSMLevels[12];                  // per level: xy the window's first page, z page size, w depth centre
 #endif
 } UBOLight;
 
@@ -233,6 +237,7 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 #ifndef XLION_LDR_OUTPUT
 #include "xlionrender_local_lights.glsl"
 #include "xlionrender_environment.glsl"
+#include "xlionrender_shadow_vsm.glsl"
 #endif
 
 #ifndef XLION_LDR_OUTPUT
@@ -369,7 +374,7 @@ vec3 PBRLighting
 #elif defined(XLION_LDR_OUTPUT)
 	float Shadow = ShadowPCF(In.ShadowPosition / In.ShadowPosition.w);       // editors that draw materials themselves: their own shadow map
 #else
-	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? ShadowClipmap(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
+	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz) : 1.0;   // ponytail: point lights unshadowed until their atlas tiles (phase 2)
 #endif
 	// xLIONRender: W == 0 is a directional light (XYZ = direction towards the light, no falloff); W > 0 a point
 	// light with that falloff radius. (The original treated W == 0 as a zero-radius point light: always black.)

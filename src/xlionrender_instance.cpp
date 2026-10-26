@@ -30,6 +30,9 @@ namespace xlionrender
         constexpr std::uint32_t s_HiZComp[] = {
             #include "xlionrender_hiz_comp.h"
         };
+        constexpr std::uint32_t s_VSMRequestComp[] = {
+            #include "xlionrender_vsm_request_comp.h"
+        };
         constexpr std::uint32_t s_SkinGeomVert[] = {
             #include "xlionrender_skin_geom_vert.h"
         };
@@ -514,6 +517,23 @@ namespace xlionrender
         if( auto Err = Device.Create(m_GICaptureVert,       { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
         if( auto Err = Device.Create(m_StaticGeomGIRecordsVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_StaticGeomGIRecordsVert) }); Err ) return Err;     // RIGID, GPU culled
         if( m_pCull = std::make_unique<gpu_cull>(); !m_pCull->Init(Device, s_CullComp, s_HiZComp) ) m_pCull.reset();      // (no drawIndirectCount: the CPU path)
+
+        // The sun's virtual shadow pages (features/shadows/xlionrender_shadow_vsm.h): the pool is the clipmap's part of the atlas; the request
+        // pass, its frame data (a ring slot each), its bits and counters (zeroed by a copy, copied back to a ring slot)
+        m_VSM.Init({ .m_PoolTexels = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize });
+        m_bVirtualShadows = std::getenv("XLION_VSM") != nullptr;
+        {
+            using usage = xgpu::buffer::setup::usage;
+            const int nReq = vsmBitUints() + 32;
+            std::vector<std::uint32_t> Zeros(std::size_t(nReq), 0u);
+            if( auto Err = Device.Create(m_VSMRequestShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_VSMRequestComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMRequest, { .m_pShader = &m_VSMRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::vsm_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data() }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMZeros,   { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data() }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nReq }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMTimes,   { .m_Count = 2 }); Err ) return Err;
+        }
 
         // Shadows: the atlas's passes (a clear for its first use - a never rendered attachment cannot be loaded -, then load), the
         // tile clear (depth 1, ALWAYS) and the casters' depth pipelines: depth bias against acne, depth clamp so casters nearer to the

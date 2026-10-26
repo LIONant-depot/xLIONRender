@@ -153,6 +153,28 @@ namespace xlionrender
         int                                        m_ShadowUpdatesPerFrame = 16;
         // Local light maps draw, per face, only the casters in that face's frustum (false: every caster in the light's sphere)
         bool                                       m_bShadowFaceCull = true;
+        // The sun's shadows from virtual pages (documentation/lighting_strategy.md P1a; features/shadows/xlionrender_shadow_vsm.h) instead
+        // of the clipmap (false: the rollback). XLION_VSM=1 turns it on at Init. A switch re-renders every page or tile. Materials compiled
+        // before the pages existed sample no sun shadow while it is on (their shader knows only the clipmap)
+        bool                                       m_bVirtualShadows = false;
+        // Tests: every filter tap of the pages through the table (the border path everywhere): the image must not change
+        bool                                       m_bVSMTapTranslation = false;
+        // The pages' numbers: this frame's admission (shadows::vsm::stats) and the request pass's counters of a ring ago (the pixels, the
+        // ones shaded by their own level, by a coarser one, by none; crossing a page border; per level; per log2(footprint / texel) + 4)
+        struct vsm_report
+        {
+            shadows::vsm::stats             m_Pages;
+            std::array<std::uint32_t, 32>   m_Counters{};
+            bool                            m_bCounters = false;     // the counters arrived (a ring after the first request pass)
+            double                          m_RequestGpuMs = 0;      // the request pass (a ring late)
+        };
+                      const vsm_report&    getVSMReport( void ) const                                           noexcept { return m_VSMReport; }
+        // The pages' setup (tests: a small pool, a larger budget): starts them over. Its pool must fit the clipmap's part of the atlas
+                      void                 configureVSM( const shadows::vsm::setup& Setup )                    noexcept { m_VSM.Init(Setup); }
+        // Invariant 1 on this frame's table (tests): every entry names a VALID slot holding exactly that page
+                      bool                 validateVSM ( void ) const                                           noexcept { std::vector<std::uint32_t> T; m_VSM.BuildTable(T); return m_VSM.Validate(T); }
+        // The pages' CPU side, read only (tests: levels, texel size)
+                      const shadows::vsm&  getVSM      ( void ) const                                           noexcept { return m_VSM; }
 
         // The lighting lab (features/lights/xlionrender_light_cells.h): how local lights are found per pixel
         enum class light_mode : std::uint8_t
@@ -545,6 +567,23 @@ namespace xlionrender
         xgpu::buffer                            m_ShadowUBO;
         shadows::clipmap                        m_Clipmap;
         std::vector<shadows::tile_to_render>    m_ShadowTiles;
+        // The sun's virtual pages: the CPU side, the request pass (its frame data a ring slot each, its bits and counters zeroed and copied
+        // back a ring late), each ring slot's windows (to decode its requests), this frame's table in the cell ring (written once a frame)
+        shadows::vsm                            m_VSM;
+        bool                                    m_bVSMLast = false;
+        xgpu::shader                            m_VSMRequestShader;
+        xgpu::compute                           m_VSMRequest;
+        xgpu::buffer                            m_VSMFrames, m_VSMReq, m_VSMReqHost, m_VSMZeros;
+        xgpu::timestamps                        m_VSMTimes;                 // the request pass's GPU time
+        std::array<shadows::vsm::snapshot, ring_frames_v> m_VSMSnap{};
+        std::vector<shadows::vsm::key>          m_VSMRequests;
+        std::vector<std::uint32_t>              m_VSMTable;
+        std::uint64_t                           m_VSMTableFrame = ~0ull;
+        int                                     m_VSMTableBase  = 0;
+        vsm_report                              m_VSMReport;
+        int  vsmBitUints( void ) const noexcept { return (m_VSM.getSetup().TableEntries() + 31) / 32; }
+        void vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
+        int  vsmTableBase( void ) noexcept;
         shadows::local_shadows                  m_LocalShadows;
         std::vector<shadows::local_map_to_render> m_LocalToRender;
         std::vector<shadows::local_map>         m_LocalMaps;        // per scene local light: its map (m_Size 0: none)

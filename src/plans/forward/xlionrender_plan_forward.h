@@ -9,6 +9,7 @@
 #include "dependencies/xmath/source/xmath.h"
 #include "scene/xlionrender_scene.h"
 #include "features/lights/xlionrender_light_cells.h"
+#include "features/shadows/xlionrender_shadow_vsm.h"
 #include <array>
 #include <cstddef>
 
@@ -119,7 +120,22 @@ namespace xlionrender::details
         xmath::fvec4                            m_EnvParams;        // x: 1 the environment probe lights (scene::m_Sky), y: its intensity
         xmath::fvec4                            m_ProbeCount;       // x: captured probes (innermost first), y: the first's record in the light buffer,
                                                                     // z: their cell headers' first uint in the cell buffer (-1: no cells, every probe)
+        // the sun's virtual shadow pages (shaders/xlionrender_shadow_vsm.glsl; appended, so materials compiled before read the rest as it was)
+        xmath::fvec4                            m_VSMParams;        // x: 1 the virtual pages (0: the clipmap), y: level 0 texel, z: levels, w: the page table's first uint in the cell buffer
+        xmath::fvec4                            m_VSMParams2;       // x: window (pages), y: page texels, z: pool slots per row, w: 1 every tap through the table (tests)
+        std::array<xmath::fvec4, shadows::vsm::max_levels_v> m_VSMLevels;   // per level: xy the window's first page, z page size, w depth centre
     };
+
+    // The sun's virtual pages: the request pass's frame data (shaders/xlionrender_vsm_request_comp.glsl frame_t, std430)
+    struct vsm_frame
+    {
+        xmath::fmat4                            m_C2W;              // the main view's clip -> camera-centred world
+        xmath::fvec4                            m_Eye;              // the camera's world position
+        xmath::fvec4                            m_LX, m_LY, m_LZ;   // world -> light rows
+        xmath::fvec4                            m_P0;               // x: level 0 texel, y: levels, z: window
+        std::array<xmath::fvec4, shadows::vsm::max_levels_v> m_Levels;     // per level: xy the window's first page, z page size, w depth centre
+    };
+    static_assert(sizeof(vsm_frame) == 64 + 5 * 16 + shadows::vsm::max_levels_v * 16);
 
     // A point or spot light in the light buffer (std430 LocalLightData)
     struct local_light_data

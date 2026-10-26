@@ -1,0 +1,120 @@
+#version 450
+// The sun's virtual shadow pages: the request pass (features/shadows/xlionrender_shadow_vsm.h; documentation/lighting_strategy.md
+// sec. 7). Per pixel of the main view's depth: its world position, its footprint in light space (the smaller of the forward and
+// backward differences to its neighbours, per screen axis, so a silhouette does not ask for a coarse level), the level whose texel
+// fits it (as the shading's ShadowVSM picks: shaders/xlionrender_shadow_vsm.glsl), and a bit for every page its filter's taps fall in
+// (the dilation). Then what the shading will find in this frame's table (the same walk to coarser levels): counters for the report.
+// The CPU reads both a ring late (instance::renderShadows).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+const int kMaxLevels   = 12;
+const int kPageTexels  = 128;
+const int kCounters    = 32;        // after the bits: 0 pixels, 1 fine, 2 coarser, 3 none, 4 boundary-crossing, 5-16 per level, 17-24 log2(footprint / texel) + 4
+
+struct frame_t
+{
+    mat4 C2W;                       // the main view's clip -> camera-centred world
+    vec4 Eye;                       // the camera's world position
+    vec4 LX, LY, LZ;                // world -> light rows
+    vec4 P0;                        // x: level 0 texel, y: levels, z: window (pages), w: -
+    vec4 Levels[kMaxLevels];        // per level: xy the window's first page, z page size, w depth centre
+};
+layout(std430, set = 0, binding = 0) readonly buffer frame_b { frame_t F[]; };
+layout(std430, set = 0, binding = 1) coherent buffer req_b  { uint Req[]; };
+layout(std430, set = 0, binding = 2) readonly buffer cell_b { uint Cells[]; };     // the cell ring: this frame's page table at TableBase
+layout(set = 1, binding = 0) uniform sampler2D Depth;
+layout(push_constant) uniform push_t { uint m_Frame, m_ReqBase, m_TableBase, m_W, m_H, m_BitUints, m_Pad0, m_Pad1; } Push;
+
+shared uint s_Count[kCounters];
+
+bool World(ivec2 p, out vec3 L)
+{
+    if (any(lessThan(p, ivec2(0))) || p.x >= int(Push.m_W) || p.y >= int(Push.m_H)) return false;
+    const float d = texelFetch(Depth, p, 0).r;
+    if (d >= 1.0) return false;                                                     // the sky
+    const vec2 Ndc = (vec2(p) + 0.5) / vec2(Push.m_W, Push.m_H) * 2.0 - 1.0;
+    vec4 W = F[Push.m_Frame].C2W * vec4(Ndc, d, 1.0);
+    const vec3 P = W.xyz / W.w + F[Push.m_Frame].Eye.xyz;
+    L = vec3(dot(P, F[Push.m_Frame].LX.xyz), dot(P, F[Push.m_Frame].LY.xyz), dot(P, F[Push.m_Frame].LZ.xyz));
+    return true;
+}
+
+float AxisFootprint(ivec2 p, ivec2 Step, vec3 L)
+{
+    vec3 A, B;
+    const bool bA = World(p + Step, A), bB = World(p - Step, B);
+    const float a = bA ? length(A.xy - L.xy) : 1e30, b = bB ? length(L.xy - B.xy) : 1e30;
+    return min(a, b);
+}
+
+uint Entry(int Level, ivec2 Page)
+{
+    const int W = int(F[Push.m_Frame].P0.z);
+    const ivec2 T = ((Page % W) + W) % W;
+    const uint i = uint((Level * W + T.y) * W + T.x);
+    return (Cells[Push.m_TableBase + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
+}
+
+bool InWindow(int Level, ivec2 Page)
+{
+    const vec4 Lv = F[Push.m_Frame].Levels[Level];
+    const ivec2 Rel = Page - ivec2(Lv.xy);
+    const int W = int(F[Push.m_Frame].P0.z);
+    return all(greaterThanEqual(Rel, ivec2(0))) && all(lessThan(Rel, ivec2(W)));
+}
+
+void Request(int Level, ivec2 Page)
+{
+    if (!InWindow(Level, Page)) return;
+    const int W = int(F[Push.m_Frame].P0.z);
+    const ivec2 T = ((Page % W) + W) % W;
+    const uint i = uint((Level * W + T.y) * W + T.x), w = Push.m_ReqBase + (i >> 5), b = 1u << (i & 31u);
+    if ((Req[w] & b) == 0u) atomicOr(Req[w], b);                   // (read first: most pixels find their page asked for already)
+}
+
+void main()
+{
+    if (gl_LocalInvocationIndex < kCounters) s_Count[gl_LocalInvocationIndex] = 0u;
+    barrier();
+
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    vec3 L;
+    if (World(p, L))
+    {
+        const float t0 = F[Push.m_Frame].P0.x;
+        const int   nLevels = int(F[Push.m_Frame].P0.y);
+        const float fx = AxisFootprint(p, ivec2(1, 0), L), fy = AxisFootprint(p, ivec2(0, 1), L);
+        float Foot = max(fx < 1e29 ? fx : 0.0, fy < 1e29 ? fy : 0.0);         // the shading's max(|dFdx|, |dFdy|) of the light-space xy
+        if (Foot <= 0.0) Foot = t0;                                             // (an isolated pixel: no neighbour to measure with)
+        int Level = clamp(int(floor(log2(Foot / t0))), 0, nLevels - 1);
+        atomicAdd(s_Count[0], 1u);
+        atomicAdd(s_Count[17 + clamp(int(floor(log2(Foot / (t0 * float(1 << Level))))) + 4, 0, 7)], 1u);
+
+        // The level the shading starts at, its taps' pages requested (the filter: 4 x 4 texels around the point, xlionrender_shadow_vsm.glsl)
+        int  First = -1, Found = -1;
+        bool bCross = false;
+        for (int l = Level; l < nLevels; ++l)
+        {
+            const float Texel = t0 * float(1 << l);
+            const ivec2 Lo = ivec2(floor(L.xy / Texel - 0.5)) - 1, Hi = Lo + 3;
+            const ivec2 PLo = ivec2(floor(vec2(Lo) / float(kPageTexels))), PHi = ivec2(floor(vec2(Hi) / float(kPageTexels)));
+            if (!InWindow(l, PLo) || !InWindow(l, PHi)) continue;                     // past this level's window: a coarser one
+            if (First < 0)
+            {
+                First = l;
+                atomicAdd(s_Count[5 + min(l, 11)], 1u);
+                bCross = any(notEqual(PLo, PHi));
+                for (int y = PLo.y; y <= PHi.y; ++y) for (int x = PLo.x; x <= PHi.x; ++x) Request(l, ivec2(x, y));
+            }
+            // What the shading finds this frame: every tap's page in the table, or a coarser level
+            bool bAll = true;
+            for (int y = PLo.y; y <= PHi.y; ++y) for (int x = PLo.x; x <= PHi.x; ++x) bAll = bAll && Entry(l, ivec2(x, y)) != 0u;
+            if (bAll) { Found = l; break; }
+        }
+        if (First >= 0) atomicAdd(s_Count[Found < 0 ? 3 : Found == First ? 1 : 2], 1u);    // (past every window: lit, beyond the shadows' reach)
+        if (bCross) atomicAdd(s_Count[4], 1u);
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex < kCounters && s_Count[gl_LocalInvocationIndex] != 0u) atomicAdd(Req[Push.m_ReqBase + Push.m_BitUints + gl_LocalInvocationIndex], s_Count[gl_LocalInvocationIndex]);
+}

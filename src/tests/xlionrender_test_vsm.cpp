@@ -1,14 +1,42 @@
 // The sun's virtual shadow pages (features/shadows/xlionrender_shadow_vsm.h; documentation/lighting_strategy.md P1a):
 //  P1a-0 (CPU): addressing, the table, admission and eviction under pressure, protected and pinned slots, slot reuse and generations
 //  (B13), epochs and invalidations; every published table checked against invariant 1 (Validate)
+//  P1a-1 (GPU): a ground, spheres and a thin pole under the sun, the pages on:
+//   - they settle: every pixel shaded by its own level's pages; the shadow is there; invariant 1 every frame
+//   - the cached pages equal a full redraw (no cache, a budget for everything): bitwise
+//   - B12 boundaries: against the GI's rays on the same triangles, pixels whose filter crosses a page border disagree no more than the rest
+//   - B11 overflow: a small pool - rejections, pixels shaded by a coarser level, none by no level (resolution lost, no hole)
+//   - B7 teleport: the recovery per frame (pixels by their own level / a coarser one / none) after a jump to unvisited ground
 #include "xlionrender_test_common.h"
 #include "features/shadows/xlionrender_shadow_vsm.h"
+#include "features/gi/xlionrender_surfel_gi.h"
 
 using namespace xlionrender::test;
 using vsm = xlionrender::shadows::vsm;
 
 namespace
 {
+    bool MakeMesh(xlionrender::instance& Renderer, const xprim_geom::mesh& Prim, xlionrender::mesh_id& Id) noexcept
+    {
+        std::vector<xlionrender::vertex> Verts(Prim.m_Vertices.size());
+        for (std::size_t i = 0; i < Verts.size(); ++i)
+        {
+            const auto& V = Prim.m_Vertices[i];
+            Verts[i] = { { V.m_Position.m_X, V.m_Position.m_Y, V.m_Position.m_Z }, { V.m_Texcoord.m_X, V.m_Texcoord.m_Y }, 0xffffffffu
+                       , { V.m_Normal.m_X, V.m_Normal.m_Y, V.m_Normal.m_Z }, { V.m_Tangent.m_X, V.m_Tangent.m_Y, V.m_Tangent.m_Z, V.m_Tangent.m_D } };
+        }
+        return Renderer.CreateMesh(Id, Verts, Prim.m_Indices) == nullptr;
+    }
+
+    xlionrender::gi::surfel_mesh RayMesh(const xprim_geom::mesh& Prim)
+    {
+        xlionrender::gi::surfel_mesh M;
+        for (const auto& V : Prim.m_Vertices) { M.m_Pos.push_back({ V.m_Position.m_X, V.m_Position.m_Y, V.m_Position.m_Z }); M.m_Nrm.push_back({ V.m_Normal.m_X, V.m_Normal.m_Y, V.m_Normal.m_Z }); }
+        for (std::size_t i = 0; i + 2 < Prim.m_Indices.size(); i += 3) M.m_Tris.push_back({ int(Prim.m_Indices[i]), int(Prim.m_Indices[i + 1]), int(Prim.m_Indices[i + 2]) });
+        M.Bake(0.08f, 0.25f);
+        return M;
+    }
+
     // One frame of the CPU side: Update then the table, checked
     bool Frame(vsm& V, std::uint64_t F, std::span<const vsm::key> Requests, const std::vector<xmath::fbbox>& Changed = {}, xmath::fvec3 Camera = { 0, 0, 0 }
               , xmath::fvec3 Dir = { 0.3f, -1, 0.2f }, float Texel = 1.0f / 128)
@@ -164,6 +192,196 @@ int main()
     }
 
     std::printf("P1a-0 (CPU): addressing, net, budget, dirty pages, pressure, slot reuse (B13), epochs, decoding, windows: ok\n");
+
+    //------------------------------------------------------------------------------------------------------------------------------
+    // P1a-1 (GPU)
+    app App;
+    CHECK(App.Init(), "Init");
+    App.m_bQuietTimes = true;
+    auto& Renderer = App.m_Renderer;
+    auto& Device   = App.m_Device;
+
+    const auto SpherePrim = MakeSphere();
+    const auto BoxPrim    = xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 });
+    xlionrender::mesh_id Sphere, Box;
+    CHECK(MakeMesh(Renderer, SpherePrim, Sphere), "sphere");
+    CHECK(MakeMesh(Renderer, BoxPrim, Box), "box");
+
+    constexpr int size_v = 256;
+    xlionrender::render_view View;
+    CHECK(!Renderer.CreateView(View, { .m_Width = size_v, .m_Height = size_v }), "CreateView");
+    xgpu::tools::view Camera;
+    Camera.setFov(xmath::radian{ 1.1f });
+    Camera.setViewport({ 0, 0, size_v, size_v });
+    Camera.LookAt(xmath::fvec3{ 0, 6.0f, -9.0f }, xmath::fvec3{ 0, 0, 1.0f });
+
+    // A wide ground (draw 0), a grid of spheres, a thin pole (its shadow is a thin line across pages), a cluster far away (the teleport's)
+    xlionrender::scene Scene;
+    Scene.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = xmath::fmat4::fromTranslation({ 30, -0.55f, 0 }) * xmath::fmat4::fromScale({ 120.0f, 0.1f, 60.0f }) });
+    for (int z = 0; z < 4; ++z) for (int x = 0; x < 5; ++x)
+        Scene.m_Draws.push_back({ .m_Mesh = Sphere, .m_L2W = xmath::fmat4::fromTranslation({ -4.0f + 2.0f * x, 0.0f, -2.0f + 2.5f * z }) });
+    Scene.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = xmath::fmat4::fromTranslation({ 1.2f, 0.45f, 0.6f }) * xmath::fmat4::fromScale({ 0.04f, 2.0f, 0.04f }) });
+    for (int z = 0; z < 3; ++z) for (int x = 0; x < 3; ++x)
+        Scene.m_Draws.push_back({ .m_Mesh = Sphere, .m_L2W = xmath::fmat4::fromTranslation({ 58.0f + 2.0f * x, 0.0f, 0.0f + 2.5f * z }) });
+    Scene.m_Sun     = { .m_Direction = { 0.3f, -1.0f, 0.2f }, .m_Intensity = 3, .m_ShadowTileSize = 1.0f };
+    Scene.m_Ambient = { 0, 0, 0 };          // a pixel is the sun's light only (its visibility: shadowed / unshadowed)
+    Renderer.m_bVirtualShadows = true;
+
+    const auto Settle = [&](int n)
+    {
+        for (int i = 0; i < n; ++i) if (!App.RenderFrame(Scene, View, Camera) || !Renderer.validateVSM()) return false;
+        return true;
+    };
+    const auto Pct = [](std::uint32_t a, std::uint32_t b) { return b ? 100.0 * double(a) / double(b) : 0.0; };
+
+    // Unshadowed, then the pages settled (a budget for everything, as the full redraw below needs)
+    std::vector<float> Unlit, Lit;
+    Renderer.configureVSM({ .m_Budget = 100000 });
+    Scene.m_Sun.m_bCastShadows = false;
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Unlit), "render unshadowed");
+    Scene.m_Sun.m_bCastShadows = true;
+    CHECK(Settle(12), "settle (invariant 1 failed on a frame)");
+    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Lit), "render settled");
+    {
+        const auto& R = Renderer.getVSMReport();
+        const auto& C = R.m_Counters;
+        std::printf("settled: %u pixels - by their level %.2f%%, coarser %.2f%%, none %.2f%%, crossing a page border %.2f%%; pages: requested %d, resident %d + net %d; request pass %.3f ms\n"
+                   , C[0], Pct(C[1], C[0]), Pct(C[2], C[0]), Pct(C[3], C[0]), Pct(C[4], C[0]), R.m_Pages.m_Requested, R.m_Pages.m_ResidentFine, R.m_Pages.m_ResidentPinned, R.m_RequestGpuMs);
+        std::printf("levels:"); for (int l = 0; l < 12; ++l) if (C[5 + l]) std::printf(" L%d %.1f%%", l, Pct(C[5 + l], C[0])); std::printf("\n");
+        std::printf("log2(footprint / texel):"); for (int b = 0; b < 8; ++b) if (C[17 + b]) std::printf(" [%d] %.1f%%", b - 4, Pct(C[17 + b], C[0])); std::printf("\n");
+        CHECK(R.m_bCounters && C[0] > 10000, "the request pass counted %u pixels", C[0]);
+        CHECK(C[3] == 0 && C[2] == 0, "not settled: %u pixels by a coarser level, %u by none", C[2], C[3]);
+        int nDarker = 0;
+        for (std::size_t i = 0; i < Lit.size(); ++i)
+        {
+            CHECK(std::isfinite(Lit[i]) && Lit[i] <= Unlit[i] * 1.001f + 1e-4f, "texel %zu brighter with shadows (%f -> %f)", i, Unlit[i], Lit[i]);
+            nDarker += Lit[i] < Unlit[i] * 0.6f;
+        }
+        // The clipmap (the rollback) on the same view: the pages shadow about as much (finer, so not the same pixels)
+        std::vector<float> Clip;
+        Renderer.m_bVirtualShadows = false;
+        CHECK(App.RenderFrame(Scene, View, Camera) && App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Clip), "render the clipmap");
+        Renderer.m_bVirtualShadows = true;
+        CHECK(Settle(12), "settle again after the clipmap");
+        int nClip = 0;
+        for (std::size_t i = 0; i < Clip.size(); ++i) nClip += Clip[i] < Unlit[i] * 0.6f;
+        std::printf("shadowed pixels: pages %d, clipmap %d\n", nDarker, nClip);
+        CHECK(nDarker > 200 && nDarker > nClip * 3 / 4 && nDarker < nClip * 4 / 3 + 100, "pages shadow %d pixels, the clipmap %d", nDarker, nClip);
+    }
+
+    // The cached pages equal a full redraw (every resident page rendered again this frame)
+    {
+        std::vector<float> Full;
+        Renderer.m_bShadowCache = false;
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Full) && Renderer.validateVSM(), "render without the cache");
+        Renderer.m_bShadowCache = true;
+        int nDiff = 0;
+        for (std::size_t i = 0; i < Full.size(); ++i) nDiff += Full[i] != Lit[i];
+        std::printf("full redraw: %d pixels differ from the cached pages (%d pages rendered)\n", nDiff, Renderer.getVSMReport().m_Pages.m_Rendered + Renderer.getVSMReport().m_Pages.m_RenderedPinned);
+        CHECK(nDiff == 0, "the cached pages differ from a full redraw on %d pixels", nDiff);
+
+        // Invariant 2's path: every tap through the table (as across a page border) gives the same image as the one-page fast path
+        std::vector<float> Taps;
+        Renderer.m_bVSMTapTranslation = true;
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Taps), "render with every tap translated");
+        Renderer.m_bVSMTapTranslation = false;
+        int nTapDiff = 0;
+        for (std::size_t i = 0; i < Taps.size(); ++i) nTapDiff += Taps[i] != Lit[i];
+        std::printf("per-tap translation: %d pixels differ from the one-page path\n", nTapDiff);
+        CHECK(nTapDiff == 0, "the border path differs from the one-page path on %d pixels", nTapDiff);
+    }
+
+    // B12: against the GI's rays on the same triangles, per pixel; the pixels whose filter crosses a page border (found as the request
+    // pass finds them: the footprint from the neighbours' hits, the level, the 4 x 4 taps) disagree no more than the others
+    {
+        const auto RaySphere = RayMesh(SpherePrim), RayBox = RayMesh(BoxPrim);
+        xlionrender::gi::world World;
+        for (const auto& D : Scene.m_Draws) World.Add(D.m_Mesh.m_Index == Sphere.m_Index ? RaySphere : RayBox, D.m_L2W, { 0.5f, 0.5f, 0.5f });
+        const xmath::fmat4 C2W = Camera.getC2W();
+        const xmath::fvec3 Eye = Camera.getPosition(), Forward = Camera.getForward();
+        std::vector<xmath::fvec3> Hit(std::size_t(size_v) * size_v), Nrm(Hit.size());
+        std::vector<char> bHit(Hit.size(), 0);
+        for (int y = 0; y < size_v; ++y) for (int x = 0; x < size_v; ++x)
+        {
+            const float nx = 2.0f * (float(x) + 0.5f) / size_v - 1.0f, ny = 2.0f * (float(y) + 0.5f) / size_v - 1.0f;   // (the light reference's mapping)
+            const auto At = [&](float z) { const xmath::fvec4 P = C2W * xmath::fvec4{ nx, ny, z, 1.0f }; return xmath::fvec3{ P.m_X, P.m_Y, P.m_Z } * (1.0f / P.m_W); };
+            auto D = (At(0.6f) - At(0.2f)).NormalizeCopy();
+            if (D.Dot(Forward) < 0) D = D * -1.0f;
+            const auto H = World.Cast(Eye, D);
+            const std::size_t i = std::size_t(y) * size_v + x;
+            if (H.m_Inst < 0) continue;
+            bHit[i] = 1; Hit[i] = World.HitPosition(H); Nrm[i] = World.HitNormal(H).NormalizeCopy();
+        }
+        const auto& V = Renderer.getVSM();
+        const float t0 = V.Level0Texel();
+        const xmath::fvec3 ToSun = Scene.m_Sun.m_Direction.NormalizeCopy() * -1.0f;
+        int nB = 0, nBD = 0, nO = 0, nOD = 0, nMiss = 0;
+        for (int y = 1; y < size_v - 1; ++y) for (int x = 1; x < size_v - 1; ++x)
+        {
+            const std::size_t i = std::size_t(y) * size_v + x;
+            if (Unlit[i] <= 1e-4f) continue;
+            if (!bHit[i]) { ++nMiss; continue; }
+            const auto L = V.ToLight(Hit[i]);
+            const auto Axis = [&](std::size_t a, std::size_t b)
+            {
+                float f = 1e30f;
+                for (const std::size_t j : { a, b }) if (bHit[j]) { const auto Q = V.ToLight(Hit[j]); f = std::min(f, std::sqrt((Q.m_X - L.m_X) * (Q.m_X - L.m_X) + (Q.m_Y - L.m_Y) * (Q.m_Y - L.m_Y))); }
+                return f < 1e29f ? f : 0.0f;
+            };
+            float Foot = std::max(Axis(i - 1, i + 1), Axis(i - size_v, i + size_v));
+            if (Foot <= 0) Foot = t0;
+            const int   Level = std::clamp(int(std::floor(std::log2(Foot / t0))), 0, V.getSetup().m_Levels - 1);
+            const float Texel = t0 * float(1 << Level);
+            const int   LoX = int(std::floor(L.m_X / Texel - 0.5f)) - 1, LoY = int(std::floor(L.m_Y / Texel - 0.5f)) - 1;
+            const auto  Pg = [](int t) { return int(std::floor(float(t) / float(vsm::page_texels_v))); };
+            const bool  bCross = Pg(LoX) != Pg(LoX + 3) || Pg(LoY) != Pg(LoY + 3);
+            const float VMap = std::clamp(Lit[i] / Unlit[i], 0.0f, 1.0f);
+            const float VRay = World.Occluded(Hit[i] + Nrm[i] * 0.01f, ToSun, 1e4f) ? 0.0f : 1.0f;
+            const bool  bDis = std::abs(VMap - VRay) > 0.5f;
+            if (bCross) { ++nB; nBD += bDis; } else { ++nO; nOD += bDis; }
+        }
+        const double DB = Pct(nBD, nB), DO = Pct(nOD, nO);
+        std::printf("B12 boundaries: %d pixels cross a page border, %.2f%% disagree with the rays; %d do not, %.2f%% disagree (%d lit pixels the rays missed)\n", nB, DB, nO, DO, nMiss);
+        CHECK(nMiss * 100 < nB + nO, "the pixel to ray mapping is off (%d missed)", nMiss);
+        CHECK(nB > 200, "only %d pixels cross a page border", nB);
+        CHECK(DB <= DO * 1.5 + 1.0, "pixels across page borders disagree more (%.2f%%) than the others (%.2f%%)", DB, DO);
+    }
+
+    // B11 overflow: a pool too small for the view - pages rejected, pixels by a coarser level, none by no level
+    {
+        Renderer.configureVSM({ .m_PoolTexels = 1664, .m_PinnedRadius = 6, .m_Budget = 100000 });     // 169 slots: 144 net, 25 fine (the view asks for 27)
+        CHECK(Settle(12), "overflow settle (invariant 1)");
+        const auto& R = Renderer.getVSMReport();
+        const auto& C = R.m_Counters;
+        std::printf("B11 overflow: rejected %d pages; %u pixels - by their level %.2f%%, coarser %.2f%%, none %.2f%%\n", R.m_Pages.m_Rejected, C[0], Pct(C[1], C[0]), Pct(C[2], C[0]), Pct(C[3], C[0]));
+        CHECK(R.m_Pages.m_Rejected > 0 && C[2] > 0, "the small pool did not overflow (rejected %d, coarser %u)", R.m_Pages.m_Rejected, C[2]);
+        CHECK(C[3] == 0, "%u pixels had no level at all (a hole)", C[3]);
+    }
+
+    // B7 teleport: settled here, then a jump to the far cluster; the counters arrive a ring late (renderShadows reads them back)
+    {
+        Renderer.configureVSM({});
+        CHECK(Settle(12), "teleport settle");
+        Camera.LookAt(xmath::fvec3{ 60.0f, 6.0f, -9.0f }, xmath::fvec3{ 60.0f, 0, 1.0f });
+        std::printf("B7 teleport (frame after the jump: by their level / coarser / none %%):");
+        std::vector<std::array<double, 3>> Curve;
+        for (int f = 0; f < 16; ++f)
+        {
+            CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateVSM(), "teleport frame %d (invariant 1)", f);
+            if (f >= 3)         // (frame f reports frame f - 3)
+            {
+                const auto& C = Renderer.getVSMReport().m_Counters;
+                Curve.push_back({ Pct(C[1], C[0]), Pct(C[2], C[0]), Pct(C[3], C[0]) });
+                std::printf(" [%d] %.0f/%.0f/%.0f", f - 3, Curve.back()[0], Curve.back()[1], Curve.back()[2]);
+            }
+        }
+        std::printf("\n");
+        for (const auto& c : Curve) CHECK(c[2] == 0.0, "a frame after the teleport had pixels with no level (%.2f%%)", c[2]);
+        CHECK(Curve.back()[0] > 99.0, "not recovered 12 frames after the teleport (%.1f%% by their level)", Curve.back()[0]);
+    }
+
+    Renderer.DestroyView(View);
+    CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");
     return 0;
 }
