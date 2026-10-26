@@ -1662,7 +1662,7 @@ namespace xlionrender
                     m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
                     static const bool s_bCullTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
                     if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
-                        std::printf("CULLGPU pass 1 cull %.3f, pyramid + pass 2 cull %.3f ms; occlusion %s (it hid %.0f%% of what it tested); %d clusters, %lld triangles shaded\n"
+                        std::printf("CULLGPU pass 1 cull %.3f, pyramid + pass 2 cull %.3f ms; occlusion %s (it hid %.0f%% of the triangles it tested); %d clusters, %lld triangles shaded\n"
                                    , m_pCull->m_CullGpuMs, m_pCull->m_OccludeGpuMs, m_pCull->isOcclusionSkipped() ? "skipped" : "on", 100.0 * m_pCull->m_OccludedShare, m_pCull->m_Drawn, (long long)m_pCull->m_Triangles), std::fflush(stdout);
                     m_CullFrozen = { true, m_CullRuns.size(), CullSecond, bOcclude };
                 }

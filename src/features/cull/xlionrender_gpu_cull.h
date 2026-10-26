@@ -168,14 +168,14 @@ namespace xlionrender
         // The clusters the cull kept, a few frames late (ring_frames_v): drawn shaded (both passes), in the depth prepass, shaded by pass 2
         int                 m_Drawn = 0, m_PrepassDrawn = 0, m_Drawn2 = 0;
         std::int64_t        m_Triangles = 0;            // the triangles shaded
-        float               m_OccludedShare = 0;        // of the clusters pass 2 tested, the share it hid (adaptive occlusion)
+        float               m_OccludedShare = 0;        // of the triangles pass 2 tested, the share it hid (adaptive occlusion)
         double              m_CullGpuMs = 0, m_OccludeGpuMs = 0;     // the GPU's time: pass 1's cull; the pyramid and pass 2's cull
 
         xgpu::buffer        m_Commands, m_Records, m_Counts;        // the scene pass's: the runs' commands, their records (binding 12), a count a run and pass
 
     private:
 
-        static constexpr float low_share_v   = 0.10f;   // adaptive occlusion: a frame hiding less than this share of what it tested is "low",
+        static constexpr float low_share_v   = 0.10f;   // adaptive occlusion: a frame hiding less than this share of the triangles it tested is "low",
         static constexpr int   low_frames_v  = 30;      //   this many low frames in a row skip it for
         static constexpr int   skip_frames_v = 120;     //   this many frames
 

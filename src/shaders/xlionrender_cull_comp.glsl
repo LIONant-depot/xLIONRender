@@ -19,7 +19,7 @@ struct candidate
 layout(std430, set = 0, binding = 0) readonly  buffer cand_b    { candidate C[]; };
 layout(std430, set = 0, binding = 1) readonly  buffer mat_b     { mat4 L2C[]; };
 layout(std430, set = 0, binding = 2)           buffer count_b   { uint Counts[]; };     // pass 1's, then (at m_RunsCap) pass 2's; at 2 m_RunsCap: the triangles shaded,
-                                                                                         // then pass 2's tested (in the view) and occluded (adaptive occlusion)
+                                                                                         // then pass 2's triangles tested (in the view) and occluded (adaptive occlusion)
 layout(std430, set = 0, binding = 3) writeonly buffer cmd_b     { uint Cmd[]; };        // VkDrawIndexedIndirectCommand: 5 each
 layout(std430, set = 0, binding = 4) writeonly buffer rec_b     { uint Rec[]; };        // the vertex shader's DrawRecord: 6 each
 layout(std430, set = 0, binding = 5)           buffer vis_b     { uint Vis[]; };        // 1: visible last frame
@@ -94,8 +94,8 @@ void main()
     {
         const bool bOccluded = bIn && Occluded(Cc, Ax, Ay, Az);
         const bool bVisible  = bIn && !bOccluded;
-        if (bIn) atomicAdd(Counts[2u * Push.m_RunsCap + 1u], 1u);
-        if (bOccluded) atomicAdd(Counts[2u * Push.m_RunsCap + 2u], 1u);
+        if (bIn) atomicAdd(Counts[2u * Push.m_RunsCap + 1u], K.Draw.y / 3u);           // (triangles: what it saves; many small clusters hide little)
+        if (bOccluded) atomicAdd(Counts[2u * Push.m_RunsCap + 2u], K.Draw.y / 3u);
         const bool bWas     = Vis[K.Rec1.z] != 0u;
         Vis[K.Rec1.z] = bVisible ? 1u : 0u;
         if (!bVisible || bWas) return;          // (bWas and in the view: pass 1 drew it)
