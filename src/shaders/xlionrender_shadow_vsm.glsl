@@ -9,7 +9,7 @@
 //    neighbour in the atlas is an unrelated page). Inside one page: one table read. Across a page border: each tap's page read from
 //    the table. A tap whose page is not VALID this frame fails the level: the next coarser one is tried, down to the pinned net.
 //  - Nothing valid on any level (the net not ready): lit; the request pass counts it.
-// SunShadow() picks this or the clipmap (ShadowClipmap) by UBOLight.VSMParams.x.
+// SunShadow(): the sun's shadow (the clipmap it replaced went 2026-10-27; its UBO fields stay reserved for the compiled materials).
 
 #define XLIONRENDER_SHADOW_VSM_GLSL
 const int   kVSMPageTexels   = 128;
@@ -135,8 +135,8 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     return 1.0;
 }
 
-// The sun's shadow: the virtual pages, or the clipmap (the rollback)
+// The sun's shadow (VSMParams.x 0: the sun casts none)
 float SunShadow(in const vec3 World, in const vec3 Ng)
 {
-    return UBOLight.VSMParams.x != 0.0 ? ShadowVSM(World, Ng) : ShadowClipmap(World);
+    return UBOLight.VSMParams.x != 0.0 ? ShadowVSM(World, Ng) : 1.0;
 }

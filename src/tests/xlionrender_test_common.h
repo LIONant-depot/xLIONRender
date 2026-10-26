@@ -270,10 +270,7 @@ namespace xlionrender::test
             if (xgpu::CreateInstance(m_Instance, { .m_bDebugMode = bValidation, .m_bEnableRenderDoc = false, .m_pLogErrorFunc = LogError, .m_pLogWarning = LogWarning })) return false;
             if (m_Instance.Create(m_Device))                                    return false;
             if (m_Device.Create(m_Window, { .m_Width = 256, .m_Height = 256 })) return false;
-            if (m_Renderer.Init(m_Device)) return false;
-            // The tests' saved images are the clipmap's (the rollback, bitwise): pages only where a test asks (or XLION_VSM=1)
-            if (!std::getenv("XLION_VSM")) m_Renderer.m_bVirtualShadows = false;
-            return true;
+            return m_Renderer.Init(m_Device) == nullptr;
         }
 
         instance::gpu_times m_LastTimes;

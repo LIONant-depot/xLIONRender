@@ -1166,10 +1166,9 @@ namespace xlionrender
         std::swap(m_CasterSlots, m_CasterSlotsPrev);
 
         const auto& Sun = Scene.m_Sun;
-        // The sun: its virtual pages (m_bVirtualShadows), or the clipmap. A switch starts both over
-        if( m_bVirtualShadows != m_bVSMLast ) { m_Clipmap.Invalidate(); m_VSM.Invalidate(); m_bVSMLast = m_bVirtualShadows; }
+        // The sun: its virtual pages
         m_VSM.m_ToRender.clear();
-        if( Sun.m_bCastShadows && m_bVirtualShadows )
+        if( Sun.m_bCastShadows )
         {
             if( std::vector<std::uint64_t> Ns; m_VSMTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
                 m_VSMReport.m_RequestGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
@@ -1204,10 +1203,8 @@ namespace xlionrender
             }
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex());
             m_VSMReport.m_Pages = m_VSM.m_Stats;
-            m_ShadowTiles.clear();
         }
-        else if( Sun.m_bCastShadows ) m_Clipmap.Update(Sun.m_Direction, Sun.m_ShadowTileSize, Eye, Changed, m_bShadowCache, m_ShadowTiles);
-        else                   { m_ShadowTiles.clear(); m_Clipmap.Invalidate(); m_VSM.Invalidate(); }      // the casters changing meanwhile reach no tile: all of them when it casts again
+        else m_VSM.Invalidate();            // the casters changing meanwhile reach no page: all of them when it casts again
         m_LocalShadows.Update(Scene.m_LocalLights, Changed, m_bShadowCache, Eye, ProjScale, m_ShadowUpdatesPerFrame, m_LocalMaps, m_LocalToRender);
         m_LightStats.m_nShadowed = m_LightStats.m_nShadowFallback = 0;
         for( std::size_t i = 0; i < Scene.m_LocalLights.size(); ++i ) if( Scene.m_LocalLights[i].m_bCastShadows )
@@ -1217,7 +1214,7 @@ namespace xlionrender
         }
         m_LightStats.m_nShadowStale = m_LocalShadows.StaleCount();
 
-        m_nShadowTilesRendered = static_cast<int>(m_ShadowTiles.size() + m_VSM.m_ToRender.size() + m_LocalToRender.size());
+        m_nShadowTilesRendered = static_cast<int>(m_VSM.m_ToRender.size() + m_LocalToRender.size());
         if( m_nShadowTilesRendered == 0 ) return;
 
         // Draws the casters that pass Keep with W2C into the current viewport
@@ -1312,7 +1309,7 @@ namespace xlionrender
         std::vector<face_batch> Batch;
         std::vector<std::uint32_t> LightCasters;        // a local light's casters (reused per light)
         const int LocalX = sunAtlasWidth();                                                // the local part's origin in the atlas
-        bool      bClipmapDone = false;
+        bool      bSunDone = false;
 
         const auto FacePos = [&]( const face_batch& B, int Face, int Size, bool bPoint ) -> shadows::buddy::pos
         {
@@ -1350,16 +1347,16 @@ namespace xlionrender
 
             auto Cmd = Window.StartRenderPass(m_ShadowPass);
 
-            if( !bClipmapDone )
+            if( !bSunDone )
             {
-                bClipmapDone = true;
+                bSunDone = true;
                 // The casters culled in light space (only when a tile or page renders): their light-space boxes, kept from frame to frame -
-                // a draw's again when its world box changes, all when the light's basis does (an epoch, the switch)
+                // a draw's again when its world box changes, all when the light's basis does (an epoch)
                 auto&                       LightBounds = m_CasterLight;
                 std::vector<std::uint32_t>  AllCasters;
-                if( !m_ShadowTiles.empty() || !m_VSM.m_ToRender.empty() )
+                if( !m_VSM.m_ToRender.empty() )
                 {
-                    const std::array<xmath::fvec3, 3> Basis = m_bVirtualShadows ? std::array{ m_VSM.m_X, m_VSM.m_Y, m_VSM.m_Z } : std::array{ m_Clipmap.m_X, m_Clipmap.m_Y, m_Clipmap.m_Z };
+                    const std::array<xmath::fvec3, 3> Basis = { m_VSM.m_X, m_VSM.m_Y, m_VSM.m_Z };
                     if( std::memcmp(&Basis, &m_CasterLightBasis, sizeof(Basis)) != 0 ) { m_CasterLightWorld.clear(); m_CasterLightBasis = Basis; }
                     m_CasterLight.resize(Draws.size());
                     m_CasterLightWorld.resize(Draws.size(), xmath::fbbox{ xmath::fvec3(1, 1, 1), xmath::fvec3(-1, -1, -1) });
@@ -1368,7 +1365,7 @@ namespace xlionrender
                     {
                         if( std::memcmp(&m_CasterLightWorld[i], &Draws[i].m_World, sizeof(xmath::fbbox)) != 0 )
                         {
-                            m_CasterLight[i]      = m_bVirtualShadows ? m_VSM.Bounds(Draws[i].m_World) : m_Clipmap.Bounds(Draws[i].m_World);
+                            m_CasterLight[i]      = m_VSM.Bounds(Draws[i].m_World);
                             m_CasterLightWorld[i] = Draws[i].m_World;
                         }
                         AllCasters.push_back(i);
@@ -1382,17 +1379,7 @@ namespace xlionrender
                     Cmd.setBuffer(m_FullscreenVB);
                     Cmd.setBuffer(m_FullscreenIB);
                     Cmd.Draw(3);
-                    DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return shadows::clipmap::Overlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
-                }
-                const int S = m_ShadowSetup.m_ClipmapTileSize;
-                for( const auto& T : m_ShadowTiles )
-                {
-                    Viewport(Cmd, T.m_AtlasX * S, T.m_AtlasY * S, S);
-                    Cmd.setPipelineInstance(m_ShadowClearInstance);
-                    Cmd.setBuffer(m_FullscreenVB);
-                    Cmd.setBuffer(m_FullscreenIB);
-                    Cmd.Draw(3);
-                    DrawCasters(Cmd, T.m_W2C, AllCasters, [&](std::uint32_t i) { return shadows::clipmap::Overlaps(LightBounds[i], T.m_MinX, T.m_MinY, T.m_Size); });
+                    DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
                 }
             }
 
@@ -1439,7 +1426,7 @@ namespace xlionrender
             }
             Batch.push_back(B);
         }
-        if( !Batch.empty() || !bClipmapDone ) Flush();
+        if( !Batch.empty() || !bSunDone ) Flush();
     }
 
     //------------------------------------------------------------------------------------------------
@@ -1462,8 +1449,8 @@ namespace xlionrender
 
                 // The sun's shadow: the virtual pages (its basis, levels and this frame's table) or the clipmap. With the pages on, the
                 // clipmap's flag is off: materials compiled before the pages read only it, and sample no sun shadow rather than pages as tiles
-                const bool bVSM = m_bVirtualShadows && L.m_bCastShadows;
-                const xmath::fvec3 BX = bVSM ? m_VSM.m_X : m_Clipmap.m_X, BY = bVSM ? m_VSM.m_Y : m_Clipmap.m_Y, BZ = bVSM ? m_VSM.m_Z : m_Clipmap.m_Z;
+                const bool bVSM = L.m_bCastShadows;
+                const xmath::fvec3 BX = m_VSM.m_X, BY = m_VSM.m_Y, BZ = m_VSM.m_Z;
                 Light.m_W2Light = xmath::fmat4::fromIdentity();
                 for( int c = 0; c < 3; ++c )
                 {
@@ -1471,12 +1458,8 @@ namespace xlionrender
                     for( int r = 0; r < 3; ++r ) Light.m_W2Light(r, c) = Axis[r][c];
                 }
                 Light.m_CameraPos = xmath::fvec4(Eye, 1);
-                for( int i = 0; i < shadows::clipmap_levels_v; ++i )
-                {
-                    const auto& Lv = m_Clipmap.m_Levels[i];
-                    Light.m_ShadowLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_TileSize, Lv.m_DepthCenter };
-                }
-                Light.m_ShadowParams = { L.m_bCastShadows && !bVSM ? 1.0f : 0.0f, m_Clipmap.DepthHalfRange(0), float(m_ShadowSetup.m_ClipmapTileSize), 0 };
+                Light.m_ShadowLevels = {};           // (the clipmap's: reserved, zero - the compiled materials' layout keeps them)
+                Light.m_ShadowParams = {};
                 const auto& VS = m_VSM.getSetup();
                 Light.m_VSMParams  = bVSM ? xmath::fvec4{ 1.0f, m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };
                 Light.m_VSMParams2 = { float(VS.m_Window), float(shadows::vsm::page_texels_v), float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
@@ -2594,7 +2577,7 @@ namespace xlionrender
         updateBudget();
         const auto T2b = clock::now();
         renderScenePass(Window, Scene, View, W2C, Eye, true);
-        if( m_bVirtualShadows && Scene.m_Sun.m_bCastShadows ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
+        if( Scene.m_Sun.m_bCastShadows ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
         const auto T2c = clock::now();
 
         // HDR -> exposure -> LionMapper -> sRGB output (alpha = coverage)
@@ -2653,7 +2636,7 @@ namespace xlionrender
                 std::printf("LEDGER view %dx%d records+grid cpu %.3f/%.3f/%.3f, shadow prep gpu %.3f/%.3f/%.3f cpu %.3f/%.3f/%.3f, direct shading (scene pass) gpu %.3f/%.3f/%.3f, reconstruction 0, rays 0, cache 0 ms (median/p95/p99 of 120); lights %d (dropped %d), shadowed %d (fallback %d, stale %d), overflow cells %d; sun pages %s: request pass %.3f ms, rendered %d + net %d, rejected %d, resident %d + net %d of %d slots, load %.2f, dynamic bias %.2f, pixels by their level %.1f%% / coarser %.1f%% / none %.1f%%\n"
                            , View.m_Width, View.m_Height, Med[0], P95[0], P99[0], Med[2], P95[2], P99[2], Med[1], P95[1], P99[1], Med[3], P95[3], P99[3], m_LightStats.m_nLights, m_LightStats.m_nDropped, m_LightStats.m_nShadowed
                            , m_LightStats.m_nShadowFallback, m_LightStats.m_nShadowStale, m_LightStats.m_nOverflowCells
-                           , m_bVirtualShadows ? "on" : "off", m_VSMReport.m_RequestGpuMs, m_VSMReport.m_Pages.m_Rendered, m_VSMReport.m_Pages.m_RenderedPinned, m_VSMReport.m_Pages.m_Rejected, m_VSMReport.m_Pages.m_ResidentFine, m_VSMReport.m_Pages.m_ResidentPinned, m_VSM.getSetup().Slots(), m_VSMReport.m_Pages.m_PoolLoad, m_VSMReport.m_Pages.m_DynamicBias
+                           , Scene.m_Sun.m_bCastShadows ? "on" : "off", m_VSMReport.m_RequestGpuMs, m_VSMReport.m_Pages.m_Rendered, m_VSMReport.m_Pages.m_RenderedPinned, m_VSMReport.m_Pages.m_Rejected, m_VSMReport.m_Pages.m_ResidentFine, m_VSMReport.m_Pages.m_ResidentPinned, m_VSM.getSetup().Slots(), m_VSMReport.m_Pages.m_PoolLoad, m_VSMReport.m_Pages.m_DynamicBias
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[1] / m_VSMReport.m_Counters[0] : 0.0, m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[2] / m_VSMReport.m_Counters[0] : 0.0
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[3] / m_VSMReport.m_Counters[0] : 0.0);
                 std::fflush(stdout);

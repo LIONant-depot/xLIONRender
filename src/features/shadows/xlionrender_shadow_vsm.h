@@ -307,7 +307,7 @@ namespace xlionrender::shadows
                     if (!S.m_bUsed || !S.m_bValid || S.m_bPrev) continue;
                     const float P = m_Levels[S.m_Key.m_Level].m_PageSize;
                     bool bDirty = !bCache;
-                    for (std::size_t i = 0; !bDirty && i < Changed.size(); ++i) bDirty = clipmap::Overlaps(Changed[i], S.m_Key.m_X * P, S.m_Key.m_Y * P, P);
+                    for (std::size_t i = 0; !bDirty && i < Changed.size(); ++i) bDirty = RectOverlaps(Changed[i], S.m_Key.m_X * P, S.m_Key.m_Y * P, P);
                     if (bDirty) { S.m_bValid = false; ++m_Stats.m_Dirtied; }
                 }
                 if (m_bHasPrev)                                 // (the previous epoch's pages under them go: never rendered again)
@@ -320,7 +320,7 @@ namespace xlionrender::shadows
                         if (!S.m_bUsed || !S.m_bPrev) continue;
                         const float P = m_PrevLevels[S.m_Key.m_Level].m_PageSize;
                         bool bDirty = !bCache;
-                        for (std::size_t i = 0; !bDirty && i < PrevChanged.size(); ++i) bDirty = clipmap::Overlaps(PrevChanged[i], S.m_Key.m_X * P, S.m_Key.m_Y * P, P);
+                        for (std::size_t i = 0; !bDirty && i < PrevChanged.size(); ++i) bDirty = RectOverlaps(PrevChanged[i], S.m_Key.m_X * P, S.m_Key.m_Y * P, P);
                         if (bDirty) Free(s);
                     }
                 }

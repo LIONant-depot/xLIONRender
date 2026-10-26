@@ -1,9 +1,10 @@
-// The directional light's shadow clipmap (features/shadows). A sphere over a ground slab, a directional light:
+// The directional light's shadow - its virtual pages (features/shadows/xlionrender_shadow_vsm.h; the clipmap this test was written for
+// went 2026-10-27). A sphere over a ground slab, a directional light:
 //  - the shadow is there: with shadows on no texel gets brighter and a patch of the ground gets clearly darker
-//  - caching: an unchanged scene renders no shadow tile on its next frame
-//  - differential: after the sphere moves, the cached image equals the image with every tile re-rendered (m_bShadowCache = false),
-//    and only some of the tiles were re-rendered
-//  - the camera moving re-renders only the newly exposed tiles, not all of them
+//  - caching: once the requested pages are in (a ring late), an unchanged scene renders no page on its next frame
+//  - differential: after the sphere moves, the cached image equals the image with every page re-rendered (m_bShadowCache = false),
+//    and only some of the pages were re-rendered
+//  - the camera moving re-renders only the newly needed pages, not all of them
 #include "xlionrender_test_common.h"
 
 using namespace xlionrender::test;
@@ -28,7 +29,6 @@ int main()
     app App;
     CHECK(App.Init(), "Init");
     auto& Renderer = App.m_Renderer;
-    Renderer.m_bVirtualShadows = false;         // the clipmap's own test (its tiles), whatever XLION_VSM says
     auto& Device   = App.m_Device;
 
     xlionrender::mesh_id Sphere, Box;
@@ -50,15 +50,32 @@ int main()
     Scene.m_Sun   = { .m_Direction = { 0.3f, -1.0f, 0.2f }, .m_Intensity = 3, .m_ShadowTileSize = 0.5f };
     Scene.m_Ambient = { 0.1f, 0.1f, 0.1f };
 
-    constexpr int total_tiles_v = xlionrender::shadows::clipmap_levels_v * xlionrender::shadows::clipmap_tiles_v * xlionrender::shadows::clipmap_tiles_v;
+    // Frames until no page renders (the requests are read back a ring late, the budget spreads them): the number rendered meanwhile
+    const auto Settle = [&]() -> int
+    {
+        int n = 0;
+        for (int k = 0; k < 30; ++k)
+        {
+            if (!App.RenderFrame(Scene, View, Camera)) return -1;
+            if (k >= 4 && Renderer.getShadowTilesRendered() == 0) return n;
+            n += Renderer.getShadowTilesRendered();
+        }
+        return -1;
+    };
 
     // Shadows off vs on
     std::vector<float> Off, On;
     Scene.m_Sun.m_bCastShadows = false;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Off), "Render without shadows");
     Scene.m_Sun.m_bCastShadows = true;
-    CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, On), "Render with shadows");
-    CHECK(Renderer.getShadowTilesRendered() == total_tiles_v, "The first shadowed frame renders every tile (%d of %d)", Renderer.getShadowTilesRendered(), total_tiles_v);
+    CHECK(App.RenderFrame(Scene, View, Camera), "Render with shadows");
+    const int nNet = Renderer.getVSM().getSetup().PinnedSlots();
+    CHECK(Renderer.getShadowTilesRendered() == nNet, "The first shadowed frame renders the coarse net (%d of %d)", Renderer.getShadowTilesRendered(), nNet);
+    const int nFirst = Settle();
+    const int total_tiles_v = Renderer.getVSMReport().m_Pages.m_ResidentFine + Renderer.getVSMReport().m_Pages.m_ResidentPinned;
+    std::printf("pages: the net %d, then %d as the requests came; %d resident\n", nNet, nFirst, total_tiles_v);
+    CHECK(nFirst > 0, "No page rendered for the requests");
+    CHECK(ReadHDR(Device, View, On), "Read the settled frame");
 
     int nDarker = 0;
     for (std::size_t i = 0; i < On.size(); ++i)
@@ -81,23 +98,24 @@ int main()
     std::vector<float> Cached, Rebuilt;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Cached), "Render moved (cached)");
     const int nMoved = Renderer.getShadowTilesRendered();
+    CHECK(Settle() >= 0, "Settle after the move");
+    CHECK(ReadHDR(Device, View, Cached), "Read the moved frame, settled");
     std::printf("tiles re-rendered for the moved sphere: %d of %d\n", nMoved, total_tiles_v);
     CHECK(nMoved > 0 && nMoved < total_tiles_v, "A moved caster re-rendered %d of %d tiles", nMoved, total_tiles_v);
 
     Renderer.m_bShadowCache = false;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Rebuilt), "Render moved (rebuilt)");
-    CHECK(Renderer.getShadowTilesRendered() == total_tiles_v, "Without the cache every tile renders");
+    CHECK(Renderer.getShadowTilesRendered() > nMoved, "Without the cache every page renders (%d, the move %d)", Renderer.getShadowTilesRendered(), nMoved);
     Renderer.m_bShadowCache = true;
     for (std::size_t i = 0; i < Cached.size(); ++i) CHECK(Cached[i] == Rebuilt[i], "Cached and rebuilt shadows differ at %d (%f vs %f)", int(i), Cached[i], Rebuilt[i]);
     int nChanged = 0;
     for (std::size_t i = 0; i < Cached.size(); ++i) nChanged += Cached[i] != On[i];
     CHECK(nChanged > 0, "Moving the sphere changed nothing on screen");
 
-    // The camera moves sideways by about a level-0 tile: only the tiles that come into the windows render
-    CHECK(App.RenderFrame(Scene, View, Camera), "Settle");        // (the rebuilt frame left every tile valid)
+    // The camera moves sideways: only the pages newly asked for render
+    CHECK(Settle() >= 0, "Settle");
     Camera.LookAt(xmath::fvec3{ 0.6f, 2.5f, -3.0f }, xmath::fvec3{ 0.6f, 0, 0 });
-    CHECK(App.RenderFrame(Scene, View, Camera), "Render moved camera");
-    const int nCamera = Renderer.getShadowTilesRendered();
+    const int nCamera = Settle();
     std::printf("tiles re-rendered for the moved camera: %d of %d\n", nCamera, total_tiles_v);
     CHECK(nCamera > 0 && nCamera < total_tiles_v, "A camera move re-rendered %d of %d tiles", nCamera, total_tiles_v);
 
@@ -107,12 +125,13 @@ int main()
         const auto CachedEqualsRebuilt = [&](const char* pWhat) -> bool
         {
             std::vector<float> A, B;
-            if (!App.RenderFrame(Scene, View, Camera) || !ReadHDR(Device, View, A)) return false;
+            if (!App.RenderFrame(Scene, View, Camera)) return false;
             const int nTiles = Renderer.getShadowTilesRendered();
+            if (Settle() < 0 || !ReadHDR(Device, View, A)) return false;
             Renderer.m_bShadowCache = false;
             const bool bOk = App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, B);
             Renderer.m_bShadowCache = true;
-            if (!bOk || !App.RenderFrame(Scene, View, Camera)) return false;          // settle (the rebuild made every tile valid)
+            if (!bOk || Settle() < 0) return false;
             std::printf("ids: %s re-rendered %d tiles\n", pWhat, nTiles);
             if (nTiles == 0) { std::printf("FAIL: %s rendered no tile\n", pWhat); return false; }
             for (std::size_t i = 0; i < A.size(); ++i) if (A[i] != B[i]) { std::printf("FAIL: %s: cached and rebuilt differ at %d\n", pWhat, int(i)); return false; }
@@ -121,7 +140,7 @@ int main()
         Scene.m_Draws[0].m_Instance = 1;
         Scene.m_Draws[1].m_Instance = 2;
         CHECK(CachedEqualsRebuilt("new ids"), "Ids: first frame");
-        CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.getShadowTilesRendered() == 0, "Ids: an unchanged scene re-rendered %d tiles", Renderer.getShadowTilesRendered());
+        CHECK(Settle() >= 0 && App.RenderFrame(Scene, View, Camera) && Renderer.getShadowTilesRendered() == 0, "Ids: an unchanged scene re-rendered %d tiles", Renderer.getShadowTilesRendered());
         Scene.m_Draws[1].m_L2W = Lifted(-0.3f);
         CHECK(CachedEqualsRebuilt("moved"), "Ids: moved");
         const auto Sphere1 = Scene.m_Draws[1];

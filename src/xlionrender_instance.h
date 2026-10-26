@@ -153,10 +153,6 @@ namespace xlionrender
         int                                        m_ShadowUpdatesPerFrame = 16;
         // Local light maps draw, per face, only the casters in that face's frustum (false: every caster in the light's sphere)
         bool                                       m_bShadowFaceCull = true;
-        // The sun's shadows from virtual pages (documentation/lighting_strategy.md P1a; features/shadows/xlionrender_shadow_vsm.h) instead
-        // of the clipmap - the default; XLION_VSM=0 at Init: the clipmap (a fallback until the moving sun, P1e: then it goes).
-        // A switch re-renders every page or tile. Materials compiled before the pages existed sample no sun shadow while it is on
-        bool                                       m_bVirtualShadows = true;
         // Tests: every filter tap of the pages through the table (the border path everywhere): the image must not change
         bool                                       m_bVSMTapTranslation = false;
         // The pages' debug views (shaders/xlionrender_shadow_vsm.glsl): 0 off, 2 the level, 3 the footprint against the texel, 4 what shaded the pixel
@@ -568,12 +564,9 @@ namespace xlionrender
         std::array<xgpu::pipeline, 3>           m_ShadowPipeline;
         std::array<xgpu::pipeline_instance, 3>  m_ShadowInstance;
         xgpu::buffer                            m_ShadowUBO;
-        shadows::clipmap                        m_Clipmap;
-        std::vector<shadows::tile_to_render>    m_ShadowTiles;
         // The sun's virtual pages: the CPU side, the request pass (its frame data a ring slot each, its bits and counters zeroed and copied
         // back a ring late), each ring slot's windows (to decode its requests), this frame's table in the cell ring (written once a frame)
         shadows::vsm                            m_VSM;
-        bool                                    m_bVSMLast = false;
         xgpu::shader                            m_VSMRequestShader;
         xgpu::compute                           m_VSMRequest;
         xgpu::buffer                            m_VSMFrames, m_VSMReq, m_VSMReqHost, m_VSMZeros;
@@ -586,7 +579,7 @@ namespace xlionrender
         vsm_report                              m_VSMReport;
         int  vsmBitUints( void ) const noexcept { return (m_VSM.getSetup().TableEntries() + 31) / 32; }
         int  vsmReqUints( void ) const noexcept { return vsmBitUints() + 32 + 2 * m_VSM.getSetup().TableEntries(); }      // bits, counters, depth ranges
-        // The sun's part of the shadow atlas (from its left): the pages' pool, two clipmaps wide (the clipmap, the fallback, uses the first);
+        // The sun's part of the shadow atlas (from its left): the pages' pool, 8192 x 4096;
         // the local lights' part is to its right
         // renderShadows' light-space boxes of the casters, kept between frames (with the world boxes and the light basis they were of)
         std::vector<shadows::lbox>              m_CasterLight;

@@ -239,7 +239,6 @@ int main()
         Scene.m_Draws.push_back({ .m_Mesh = Sphere, .m_L2W = xmath::fmat4::fromTranslation({ 58.0f + 2.0f * x, 0.0f, 0.0f + 2.5f * z }) });
     Scene.m_Sun     = { .m_Direction = { 0.3f, -1.0f, 0.2f }, .m_Intensity = 3, .m_ShadowTileSize = 4.0f };     // (the Police level's)
     Scene.m_Ambient = { 0, 0, 0 };          // a pixel is the sun's light only (its visibility: shadowed / unshadowed)
-    Renderer.m_bVirtualShadows = true;
 
     const auto Settle = [&](int n)
     {
@@ -249,7 +248,7 @@ int main()
     const auto Pct = [](std::uint32_t a, std::uint32_t b) { return b ? 100.0 * double(a) / double(b) : 0.0; };
 
     // Unshadowed, then the pages settled (a budget for everything, as the full redraw below needs)
-    std::vector<float> Unlit, Lit, Clip;
+    std::vector<float> Unlit, Lit;
     const float Bias = std::getenv("XLION_VSM_TEST_BIAS") ? float(std::atof(std::getenv("XLION_VSM_TEST_BIAS"))) : vsm::setup{}.m_ResolutionBias;
     Renderer.configureVSM({ .m_PoolTexels = 8192, .m_PoolHeight = 4096, .m_Budget = 100000, .m_ResolutionBias = Bias });     // (the renderer's pool)
     Scene.m_Sun.m_bCastShadows = false;
@@ -272,14 +271,9 @@ int main()
             CHECK(std::isfinite(Lit[i]) && Lit[i] <= Unlit[i] * 1.001f + 1e-4f, "texel %zu brighter with shadows (%f -> %f)", i, Unlit[i], Lit[i]);
             nDarker += Lit[i] < Unlit[i] * 0.6f;
         }
-        // The clipmap (the rollback) on the same view: the pages shadow about as much (finer, so not the same pixels)
-        Renderer.m_bVirtualShadows = false;
-        CHECK(App.RenderFrame(Scene, View, Camera) && App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Clip), "render the clipmap");
-        Renderer.m_bVirtualShadows = true;
-        CHECK(Settle(12), "settle again after the clipmap");
-        int nClip = 0;
-        for (std::size_t i = 0; i < Clip.size(); ++i) nClip += Clip[i] < Unlit[i] * 0.6f;
-        std::printf("shadowed pixels: pages %d, clipmap %d\n", nDarker, nClip);
+        // The pages shadow about as much as the clipmap they replaced did on this view (1365 pixels; finer, so not the same pixels)
+        const int nClip = 1365;
+        std::printf("shadowed pixels: pages %d, the clipmap had %d\n", nDarker, nClip);
         CHECK(nDarker > 200 && nDarker > nClip * 3 / 4 && nDarker < nClip * 4 / 3 + 100, "pages shadow %d pixels, the clipmap %d", nDarker, nClip);
     }
 
@@ -305,13 +299,15 @@ int main()
         CHECK(nTapDiff == 0, "the border path differs from the one-page path on %d pixels", nTapDiff);
     }
 
-    // Against the GI's rays on the same triangles, per pixel, the pages and the clipmap: disagreement overall and at the shadow edges, the
-    // texel against the pixel. On the near view, B12: the pixels whose filter crosses a page border (found as the request pass finds
-    // them: the footprint from the neighbours' hits, the level, the 4 x 4 taps) disagree no more than the others
+    // Against the GI's rays on the same triangles, per pixel: disagreement overall and at the shadow edges, the texel against the pixel.
+    // The gates: no worse than the clipmap the pages replaced (its numbers measured on these views before it went, 2026-10-27). On the
+    // near views, B12: the pixels whose filter crosses a page border (found as the request pass finds them: the footprint from the
+    // neighbours' hits, the level, the 4 x 4 taps) disagree no more than the others
+    struct clipmap_ref { double m_Dis, m_Edge, m_Under; int m_Acne, m_Leaks; };
     const auto RaySphere = RayMesh(SpherePrim), RayBox = RayMesh(BoxPrim);
     xlionrender::gi::world World;
     for (const auto& D : Scene.m_Draws) World.Add(D.m_Mesh.m_Index == Sphere.m_Index ? RaySphere : RayBox, D.m_L2W, { 0.5f, 0.5f, 0.5f });
-    const auto Measure = [&](const char* pName, const std::vector<float>& Unlit, const std::vector<float>& Lit, const std::vector<float>& Clip, bool bNear, int S) -> int
+    const auto Measure = [&](const char* pName, const std::vector<float>& Unlit, const std::vector<float>& Lit, bool bNear, int S, const clipmap_ref& Ref) -> int
     {
         const xmath::fmat4 C2W = Camera.getC2W();
         const xmath::fvec3 Eye = Camera.getPosition(), Forward = Camera.getForward();
@@ -333,11 +329,10 @@ int main()
         const xmath::fvec3 ToSun = Scene.m_Sun.m_Direction.NormalizeCopy() * -1.0f;
         std::vector<float> Ray(Hit.size(), 1.0f);            // the rays' visibility per pixel (a shadow edge: a neighbour's differs)
         for (std::size_t i = 0; i < Hit.size(); ++i) if (bHit[i]) Ray[i] = World.Occluded(Hit[i] + Nrm[i] * 0.01f, ToSun, 1e4f) ? 0.0f : 1.0f;
-        const xmath::fvec3 CamL = V.ToLight(Eye);           // (the clipmap's basis is the pages': the same construction)
         int nB = 0, nBD = 0, nO = 0, nOD = 0, nMiss = 0;
-        int nPix = 0, nDisV = 0, nDisC = 0, nEdge = 0, nEdgeV = 0, nEdgeC = 0;
-        int nFitV = 0, nFitC = 0, nUnderV = 0, nUnderC = 0;     // texel within [pixel/2, pixel]; texel larger than the pixel
-        int nInDarkV = 0, nInLeakV = 0, nInDarkC = 0, nInLeakC = 0;  // away from the edges: shadowed where the rays see the sun (acne), lit where they do not (leaks)
+        int nPix = 0, nDisV = 0, nEdge = 0, nEdgeV = 0;
+        int nFitV = 0, nUnderV = 0;                             // texel within [pixel/2, pixel]; texel larger than the pixel
+        int nInDarkV = 0, nInLeakV = 0;                         // away from the edges: shadowed where the rays see the sun (acne), lit where they do not (leaks)
         std::vector<std::uint8_t> Dump(std::getenv("XLION_VSM_TEST_DUMP") ? std::size_t(S) * S * 3 : 0, 0);    // (where the pages disagree: acne red, leaks blue)
         for (int y = 1; y < S - 1; ++y) for (int x = 1; x < S - 1; ++x)
         {
@@ -363,36 +358,25 @@ int main()
             const bool  bDis = std::abs(VMap - VRay) > 0.5f;
             if (bCross) { ++nB; nBD += bDis; } else { ++nO; nOD += bDis; }
 
-            // Against the clipmap (the rollback) on the same pixels: disagreement overall and at the shadow edges, texel against pixel
-            const float VClip = std::clamp(Clip[i] / Unlit[i], 0.0f, 1.0f);
-            const bool  bDisC = std::abs(VClip - VRay) > 0.5f;
             const bool  bEdge = Ray[i - 1] != VRay || Ray[i + 1] != VRay || Ray[i - S] != VRay || Ray[i + S] != VRay;
-            ++nPix; nDisV += bDis; nDisC += bDisC;
-            if (!bEdge) { nInDarkV += bDis && VMap < VRay; nInLeakV += bDis && VMap > VRay; nInDarkC += bDisC && VClip < VRay; nInLeakC += bDisC && VClip > VRay; }
+            ++nPix; nDisV += bDis;
+            if (!bEdge) { nInDarkV += bDis && VMap < VRay; nInLeakV += bDis && VMap > VRay; }
             if (!Dump.empty()) { auto* d = &Dump[i * 3]; const std::uint8_t g = std::uint8_t(60 + 120 * VRay); d[0] = bDis && VMap < VRay ? 255 : g; d[1] = bDis ? 0 : g; d[2] = bDis && VMap > VRay ? 255 : g; }
-            if (bEdge) { ++nEdge; nEdgeV += bDis; nEdgeC += bDisC; }
-            float TexelC = Scene.m_Sun.m_ShadowTileSize * 8.0f / 512.0f;        // past the clipmap's levels: the coarsest's texel
-            for (int Lc = 0; Lc < xlionrender::shadows::clipmap_levels_v; ++Lc)
-            {
-                const float T = Scene.m_Sun.m_ShadowTileSize * float(1 << Lc);
-                const int   ox = int(std::floor(CamL.m_X / T)) - 2, oy = int(std::floor(CamL.m_Y / T)) - 2;
-                const int   tx = int(std::floor(L.m_X / T)) - ox, ty = int(std::floor(L.m_Y / T)) - oy;
-                if (tx >= 0 && tx < 4 && ty >= 0 && ty < 4) { TexelC = T / 512.0f; break; }
-            }
-            const float rV = std::log2(Foot / Texel), rC = std::log2(Foot / TexelC);
-            nFitV += rV >= 0 && rV < 1; nFitC += rC >= 0 && rC < 1;
-            nUnderV += rV < 0; nUnderC += rC < 0;
+            if (bEdge) { ++nEdge; nEdgeV += bDis; }
+            const float rV = std::log2(Foot / Texel);
+            nFitV += rV >= 0 && rV < 1;
+            nUnderV += rV < 0;
         }
         if (!Dump.empty())
             if (FILE* f = std::fopen((std::string(pName).substr(0, std::string(pName).find(' ')) + "_disagree.ppm").c_str(), "wb")) { std::fprintf(f, "P6 %d %d 255\n", S, S); std::fwrite(Dump.data(), 1, Dump.size(), f); std::fclose(f); }
-        std::printf("%s: against the rays: pages disagree on %.2f%% of %d lit pixels (%.2f%% of %d at shadow edges), the clipmap %.2f%% (%.2f%% at edges)\n"
-                   , pName, Pct(nDisV, nPix), nPix, Pct(nEdgeV, nEdge), nEdge, Pct(nDisC, nPix), Pct(nEdgeC, nEdge));
-        std::printf("%s: texel against pixel: pages %.1f%% within [pixel/2, pixel], %.1f%% larger than the pixel; clipmap %.1f%% within, %.1f%% larger\n"
-                   , pName, Pct(nFitV, nPix), Pct(nUnderV, nPix), Pct(nFitC, nPix), Pct(nUnderC, nPix));
-        std::printf("%s: away from the edges - pages %d dark (acne) %d lit (leaks), clipmap %d dark %d lit\n", pName, nInDarkV, nInLeakV, nInDarkC, nInLeakC);
+        std::printf("%s: against the rays: pages disagree on %.2f%% of %d lit pixels (%.2f%% of %d at shadow edges), the clipmap had %.2f%% (%.2f%% at edges)\n"
+                   , pName, Pct(nDisV, nPix), nPix, Pct(nEdgeV, nEdge), nEdge, Ref.m_Dis, Ref.m_Edge);
+        std::printf("%s: texel against pixel: pages %.1f%% within [pixel/2, pixel], %.1f%% larger than the pixel; the clipmap had %.1f%% larger\n"
+                   , pName, Pct(nFitV, nPix), Pct(nUnderV, nPix), Ref.m_Under);
+        std::printf("%s: away from the edges - pages %d dark (acne) %d lit (leaks), the clipmap had %d dark %d lit\n", pName, nInDarkV, nInLeakV, Ref.m_Acne, Ref.m_Leaks);
         CHECK(nMiss * 100 < nPix, "the pixel to ray mapping is off (%d missed)", nMiss);
-        CHECK(nDisV <= nDisC && nEdgeV <= nEdgeC, "%s: the pages disagree with the rays more than the clipmap (%d vs %d, edges %d vs %d)", pName, nDisV, nDisC, nEdgeV, nEdgeC);
-        CHECK(nUnderV <= nUnderC, "%s: more of the pages' texels are larger than the pixel than the clipmap's (%d vs %d)", pName, nUnderV, nUnderC);
+        CHECK(Pct(nDisV, nPix) <= Ref.m_Dis && Pct(nEdgeV, nEdge) <= Ref.m_Edge, "%s: the pages disagree with the rays more than the clipmap did (%.2f%% vs %.2f%%, edges %.2f%% vs %.2f%%)", pName, Pct(nDisV, nPix), Ref.m_Dis, Pct(nEdgeV, nEdge), Ref.m_Edge);
+        CHECK(Pct(nUnderV, nPix) <= Ref.m_Under, "%s: more of the pages' texels are larger than the pixel than the clipmap's were (%.1f%% vs %.1f%%)", pName, Pct(nUnderV, nPix), Ref.m_Under);
         if (!bNear) return 0;
         const double DB = Pct(nBD, nB), DO = Pct(nOD, nO);
         std::printf("B12 boundaries: %d pixels cross a page border, %.2f%% disagree with the rays; %d do not, %.2f%% disagree (%d lit pixels the rays missed)\n", nB, DB, nO, DO, nMiss);
@@ -404,48 +388,45 @@ int main()
     constexpr int hires_v = 1536;
     xlionrender::render_view Hi;
     CHECK(!Renderer.CreateView(Hi, { .m_Width = hires_v, .m_Height = hires_v }), "CreateView hi");
-    const auto Triple = [&](std::vector<float>& U, std::vector<float>& C, std::vector<float>& P) -> bool
+    const auto Pair = [&](std::vector<float>& U, std::vector<float>& P) -> bool
     {
         Scene.m_Sun.m_bCastShadows = false;
         if (!App.RenderFrame(Scene, Hi, Camera) || !ReadHDR(Device, Hi, U)) return false;
         Scene.m_Sun.m_bCastShadows = true;
-        Renderer.m_bVirtualShadows = false;
-        if (!App.RenderFrame(Scene, Hi, Camera) || !App.RenderFrame(Scene, Hi, Camera) || !ReadHDR(Device, Hi, C)) return false;
-        Renderer.m_bVirtualShadows = true;
         for (int k = 0; k < 12; ++k) if (!App.RenderFrame(Scene, Hi, Camera) || !Renderer.validateVSM()) return false;
         return App.RenderFrame(Scene, Hi, Camera) && ReadHDR(Device, Hi, P);
     };
     {
-        std::vector<float> HUnlit, HClip, HLit;
-        CHECK(Triple(HUnlit, HClip, HLit), "near view at 1536");
+        std::vector<float> HUnlit, HLit;
+        CHECK(Pair(HUnlit, HLit), "near view at 1536");
         const auto& C = Renderer.getVSMReport().m_Counters;
         std::printf("near view (1536): %u pixels by their level %.2f%%; pages requested %d; request pass %.3f ms\n", C[0], Pct(C[1], C[0]), Renderer.getVSMReport().m_Pages.m_Requested, Renderer.getVSMReport().m_RequestGpuMs);
-        if (Measure("near view (1536)", HUnlit, HLit, HClip, true, hires_v)) return 1;
+        if (Measure("near view (1536)", HUnlit, HLit, true, hires_v, { 0.07, 13.79, 28.0, 66, 27 })) return 1;
     }
 
     // The far view: the ground to 60 m (Tomas: the texels too large on screen)
     {
-        std::vector<float> FUnlit, FClip, FLit;
+        std::vector<float> FUnlit, FLit;
         Camera.LookAt(xmath::fvec3{ 0, 2.5f, -6.0f }, xmath::fvec3{ 0, 0, 40.0f });
-        CHECK(Triple(FUnlit, FClip, FLit), "far view at 1536");
+        CHECK(Pair(FUnlit, FLit), "far view at 1536");
         const auto& C = Renderer.getVSMReport().m_Counters;
         std::printf("far view (1536): %u pixels by their level %.2f%%; pages requested %d; request pass %.3f ms\n", C[0], Pct(C[1], C[0]), Renderer.getVSMReport().m_Pages.m_Requested, Renderer.getVSMReport().m_RequestGpuMs);
-        if (Measure("far view (1536)", FUnlit, FLit, FClip, false, hires_v)) return 1;
+        if (Measure("far view (1536)", FUnlit, FLit, false, hires_v, { 0.13, 13.08, 35.9, 272, 54 })) return 1;
     }
 
     // A low sun (the static geom preview's default: 20 degrees up) on the ground and a pole, a small model's tile (the radius / 2:
     // 0.78 mm level 0): grazing receivers. A constant depth bias left them acne (more than the clipmap's): the receiver plane's slope per
     // filter tap (Unreal's ComputeVirtualShadowMapOptimalSlopeBias) is what keeps the comparison on the receiver's own depth
     {
-        std::vector<float> UUnlit, UClip, ULit;
+        std::vector<float> UUnlit, ULit;
         const xmath::fvec3 Dir0 = Scene.m_Sun.m_Direction;
         Scene.m_Sun.m_ShadowTileSize = 1.6f;
         Scene.m_Sun.m_Direction      = { -0.599603f, -0.345631f, -0.721815f };
         Camera.LookAt(xmath::fvec3{ 1.0f + 2.7f, 2.6f, 12.0f + 3.25f }, xmath::fvec3{ 1.0f, 0.3f, 12.0f });     // 4.5 m up the light from the pole's foot
-        CHECK(Triple(UUnlit, UClip, ULit), "low sun view at 1536");
+        CHECK(Pair(UUnlit, ULit), "low sun view at 1536");
         const auto& C = Renderer.getVSMReport().m_Counters;
         std::printf("low sun (1536): %u pixels by their level %.2f%%; level 0 texel %.2f mm\n", C[0], Pct(C[1], C[0]), Renderer.getVSM().Level0Texel() * 1000.0f);
-        if (Measure("low sun (1536)", UUnlit, ULit, UClip, true, hires_v)) return 1;
+        if (Measure("low sun (1536)", UUnlit, ULit, true, hires_v, { 0.58, 27.08, 26.2, 8948, 176 })) return 1;
         Scene.m_Sun.m_ShadowTileSize = 4.0f;
         Scene.m_Sun.m_Direction      = Dir0;
         Camera.LookAt(xmath::fvec3{ 0, 6.0f, -9.0f }, xmath::fvec3{ 0, 0, 1.0f });

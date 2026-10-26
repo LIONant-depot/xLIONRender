@@ -331,7 +331,7 @@ namespace xlionrender
                  + std::format("\nLightsLocal={}\nLightsDropped={}\nLightsShadowed={}\nLightsShadowFallback={}\nLightsShadowStale={}\nLightCellsOverflow={}"
                               , L.m_nLights, L.m_nDropped, L.m_nShadowed, L.m_nShadowFallback, L.m_nShadowStale, L.m_nOverflowCells)
                  + std::format("\nSunPages={}\nSunPagesRendered={}\nSunPagesNet={}\nSunPagesRejected={}\nSunPagesResident={}\nSunPoolLoad={:.2f}\nSunDynamicBias={:.2f}\nSunPixels={}\nSunPixelsOwnLevel={}\nSunPixelsCoarser={}\nSunPixelsNone={}\nSunRequestMs={:.3f}"
-                              , int(m_pScene->m_Renderer.m_bVirtualShadows), V.m_Pages.m_Rendered, V.m_Pages.m_RenderedPinned, V.m_Pages.m_Rejected, V.m_Pages.m_ResidentFine + V.m_Pages.m_ResidentPinned, V.m_Pages.m_PoolLoad, V.m_Pages.m_DynamicBias
+                              , 1, V.m_Pages.m_Rendered, V.m_Pages.m_RenderedPinned, V.m_Pages.m_Rejected, V.m_Pages.m_ResidentFine + V.m_Pages.m_ResidentPinned, V.m_Pages.m_PoolLoad, V.m_Pages.m_DynamicBias
                               , V.m_Counters[0], V.m_Counters[1], V.m_Counters[2], V.m_Counters[3], V.m_RequestGpuMs);
         }
 
