@@ -128,21 +128,26 @@ int main()
             auto Occluded = Scene;
             Occluded.m_Draws.push_back({ .m_Mesh = Clusters, .m_L2W = xmath::fmat4::fromTranslation({ 1.2f, 0.4f, 4.0f }) * xmath::fmat4::fromScale({ 5, 5, 5 }), .m_Materials = { Material } });
             const auto Look = [&](int f) { Camera.LookAt(xmath::fvec3{ 0.15f * float(f), 0.5f, 0 }, xmath::fvec3{ 3, 0.3f, 10 }); };
+            // (also in a big view of odd sizes: a pyramid of more levels than a work group makes - the last group's - and odd edges)
+            xlionrender::render_view BigView;
+            CHECK(!Renderer.CreateView(BigView, { .m_Width = 777, .m_Height = 333 }), "CreateView 777 x 333");
             int nWorst = 0;
-            for (int f = 0; f < 12; ++f)
-            {
-                Look(f);
-                Renderer.m_bFrustumCull = true; Renderer.m_bGPUCull = false;
-                CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, CPU), "Render the occluded field on the CPU path, frame %d", f);
-                Renderer.m_bFrustumCull = false; Renderer.m_bGPUCull = true; Renderer.m_bGPUOcclusion = true;
-                CHECK(App.RenderFrame(Occluded, View, Camera) && ReadHDR(Device, View, GPU), "Render the occluded field GPU culled, frame %d", f);
-                int n = 0;
-                for (std::size_t i = 0; i < CPU.size(); ++i) n += CPU[i] != GPU[i];
-                nWorst = std::max(nWorst, n);
-                CHECK(n == 0, "Occlusion, frame %d: %d texels differ from the CPU path (a cluster drawn late or culled wrongly)", f, n);
-            }
+            for (auto* pView : { &View, &BigView })
+                for (int f = 0; f < 12; ++f)
+                {
+                    Look(f);
+                    Renderer.m_bFrustumCull = true; Renderer.m_bGPUCull = false;
+                    CHECK(App.RenderFrame(Occluded, *pView, Camera) && ReadHDR(Device, *pView, CPU), "Render the occluded field on the CPU path, frame %d", f);
+                    Renderer.m_bFrustumCull = false; Renderer.m_bGPUCull = true; Renderer.m_bGPUOcclusion = true;
+                    CHECK(App.RenderFrame(Occluded, *pView, Camera) && ReadHDR(Device, *pView, GPU), "Render the occluded field GPU culled, frame %d", f);
+                    int n = 0;
+                    for (std::size_t i = 0; i < CPU.size(); ++i) n += CPU[i] != GPU[i];
+                    nWorst = std::max(nWorst, n);
+                    CHECK(n == 0, "Occlusion, %d wide, frame %d: %d texels differ from the CPU path (a cluster drawn late or culled wrongly)", pView->m_Width, f, n);
+                }
+            Renderer.DestroyView(BigView);
             // What the two passes kept, against the frustum only (the camera still: what the GPU kept is read back a few frames late)
-            for (int k = 0; k < 4; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render occluded %d", k);
+            for (int k = 0; k < 8; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render occluded %d", k);      // (settled: the stats are read a ring late)
             const auto Occl = Renderer.getCullStats();
             Renderer.m_bGPUOcclusion = false;
             for (int k = 0; k < 4; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render frustum only %d", k);
@@ -182,6 +187,30 @@ int main()
             for (std::size_t i = 0; i < CPU.size(); ++i) { nFrozen += GPU[i] != 0; nUnfrozen += CPU[i] != 0; }
             std::printf("freeze: %d texels covered frozen, %d unfrozen\n", nFrozen, nUnfrozen);
             CHECK(bFrozen && nFrozen < nUnfrozen, "Frozen (%d): %d texels covered, unfrozen %d", int(bFrozen), nFrozen, nUnfrozen);
+
+            // Adaptive occlusion: looking down at the open field (it hides nothing) it is skipped after a while - the same picture; a camera
+            // cut tries it again at once
+            if (std::getenv("XLION_NO_GPU_OCCLUSION") == nullptr)
+            {
+                Camera.LookAt(xmath::fvec3{ 0, 30, 0.1f }, xmath::fvec3{ 0, 0, 0 });
+                bool bSkipped = false;
+                for (int k = 0; k < 60 && !bSkipped; ++k)
+                {
+                    CHECK(App.RenderFrame(Scene, View, Camera), "Render the open field %d", k);
+                    bSkipped = Renderer.getCullStats().m_bOcclusionSkipped;
+                }
+                CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, GPU), "Render the open field, occlusion skipped");
+                Renderer.m_bFrustumCull = true; Renderer.m_bGPUCull = false;
+                CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, CPU), "Render the open field on the CPU path");
+                Renderer.m_bFrustumCull = false; Renderer.m_bGPUCull = true;
+                int nOpen = 0;
+                for (std::size_t i = 0; i < CPU.size(); ++i) nOpen += CPU[i] != GPU[i];
+                std::printf("adaptive occlusion: skipped %d (it hid %.0f%%), %d texels differ\n", int(bSkipped), 100.0 * Renderer.getCullStats().m_OccludedShare, nOpen);
+                CHECK(bSkipped && nOpen == 0, "The open field: occlusion skipped %d, %d texels differ", int(bSkipped), nOpen);
+                Camera.LookAt(xmath::fvec3{ 0, 0.5f, 0 }, xmath::fvec3{ 3, 0.3f, 10 });      // (a cut: down to the ground)
+                CHECK(App.RenderFrame(Occluded, View, Camera), "Render after the cut");
+                CHECK(!Renderer.getCullStats().m_bOcclusionSkipped, "A camera cut tries the occlusion again");
+            }
         }
 
         Renderer.m_bFrustumCull = true;

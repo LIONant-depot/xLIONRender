@@ -18,7 +18,8 @@ struct candidate
 };
 layout(std430, set = 0, binding = 0) readonly  buffer cand_b    { candidate C[]; };
 layout(std430, set = 0, binding = 1) readonly  buffer mat_b     { mat4 L2C[]; };
-layout(std430, set = 0, binding = 2)           buffer count_b   { uint Counts[]; };     // pass 1's, then (at m_RunsCap) pass 2's; at 2 m_RunsCap: the triangles shaded
+layout(std430, set = 0, binding = 2)           buffer count_b   { uint Counts[]; };     // pass 1's, then (at m_RunsCap) pass 2's; at 2 m_RunsCap: the triangles shaded,
+                                                                                         // then pass 2's tested (in the view) and occluded (adaptive occlusion)
 layout(std430, set = 0, binding = 3) writeonly buffer cmd_b     { uint Cmd[]; };        // VkDrawIndexedIndirectCommand: 5 each
 layout(std430, set = 0, binding = 4) writeonly buffer rec_b     { uint Rec[]; };        // the vertex shader's DrawRecord: 6 each
 layout(std430, set = 0, binding = 5)           buffer vis_b     { uint Vis[]; };        // 1: visible last frame
@@ -54,13 +55,14 @@ bool Occluded(vec4 Cc, vec4 Ax, vec4 Ay, vec4 Az)
     const ivec2 Last = ivec2(Push.m_W, Push.m_H) - 1;
     const ivec2 P0   = clamp(ivec2(floor((Lo.xy * 0.5 + 0.5) * Size)), ivec2(0), Last);
     const ivec2 P1   = clamp(ivec2(floor((Hi.xy * 0.5 + 0.5) * Size)), ivec2(0), Last);
-    uint Offset = 0u, W = Push.m_W, H = Push.m_H;
+    const ivec2 Q0 = P0 >> 1, Q1 = P1 >> 1;             // (level 0: half the view's size - xlionrender_hiz_comp.glsl)
+    uint Offset = 0u, W = (Push.m_W + 1u) / 2u, H = (Push.m_H + 1u) / 2u;
     int  L = 0;
-    while (any(greaterThan((P1 >> L) - (P0 >> L), ivec2(1))) && (W > 1u || H > 1u))
+    while (any(greaterThan((Q1 >> L) - (Q0 >> L), ivec2(1))) && (W > 1u || H > 1u))
     {
         Offset += W * H; W = (W + 1u) / 2u; H = (H + 1u) / 2u; ++L;
     }
-    const ivec2 T0 = P0 >> L, T1 = P1 >> L;
+    const ivec2 T0 = Q0 >> L, T1 = Q1 >> L;
     float Far = 0.0;
     for (int y = T0.y; y <= T1.y; ++y)
         for (int x = T0.x; x <= T1.x; ++x)
@@ -90,7 +92,10 @@ void main()
     }
     else if (Push.m_Mode == 1u)
     {
-        const bool bVisible = bIn && !Occluded(Cc, Ax, Ay, Az);
+        const bool bOccluded = bIn && Occluded(Cc, Ax, Ay, Az);
+        const bool bVisible  = bIn && !bOccluded;
+        if (bIn) atomicAdd(Counts[2u * Push.m_RunsCap + 1u], 1u);
+        if (bOccluded) atomicAdd(Counts[2u * Push.m_RunsCap + 2u], 1u);
         const bool bWas     = Vis[K.Rec1.z] != 0u;
         Vis[K.Rec1.z] = bVisible ? 1u : 0u;
         if (!bVisible || bWas) return;          // (bWas and in the view: pass 1 drew it)

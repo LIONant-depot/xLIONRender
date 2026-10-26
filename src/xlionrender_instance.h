@@ -184,8 +184,10 @@ namespace xlionrender
         // ignored when the scene's runs change)
         bool                                       m_bFreezeCull   = false;
         // and, read back a few frames late, the clusters the GPU kept (drawn shaded - both passes -, in the depth prepass, shaded by pass 2)
-        struct cull_stats { int m_nCandidates = 0; int m_nRuns = 0; int m_nDrawn = 0; int m_nPrepassDrawn = 0; int m_nDrawnPass2 = 0; bool m_bFrozen = false; std::int64_t m_nTriangles = 0; };
-                      cull_stats           getCullStats( void ) const                                           noexcept { return { int(m_CullCandidates.size()), int(m_CullRuns.size()), m_pCull ? m_pCull->m_Drawn : 0, m_pCull ? m_pCull->m_PrepassDrawn : 0, m_pCull ? m_pCull->m_Drawn2 : 0, m_bFreezeCull && m_CullFrozen.m_bValid, m_pCull ? m_pCull->m_Triangles : 0 }; }
+        struct cull_stats { int m_nCandidates = 0; int m_nRuns = 0; int m_nDrawn = 0; int m_nPrepassDrawn = 0; int m_nDrawnPass2 = 0; bool m_bFrozen = false; std::int64_t m_nTriangles = 0;
+                            bool m_bOcclusionSkipped = false; float m_OccludedShare = 0; double m_CullGpuMs = 0, m_OccludeGpuMs = 0; };     // (adaptive occlusion; the GPU's times)
+                      cull_stats           getCullStats( void ) const                                           noexcept { return { int(m_CullCandidates.size()), int(m_CullRuns.size()), m_pCull ? m_pCull->m_Drawn : 0, m_pCull ? m_pCull->m_PrepassDrawn : 0, m_pCull ? m_pCull->m_Drawn2 : 0, m_bFreezeCull && m_CullFrozen.m_bValid, m_pCull ? m_pCull->m_Triangles : 0
+                                                                                                                       , m_pCull && m_pCull->isOcclusionSkipped(), m_pCull ? m_pCull->m_OccludedShare : 0.0f, m_pCull ? m_pCull->m_CullGpuMs : 0.0, m_pCull ? m_pCull->m_OccludeGpuMs : 0.0 }; }
         // How many of the scene's draws the last Render drew in the scene pass
                       int                  getDrawsRendered( void ) const                                       noexcept { return m_nDrawsRendered; }
         // How many persistent instance slots this frame wrote (new or changed: transform, constant material, entity parameters)
@@ -486,6 +488,7 @@ namespace xlionrender
         std::vector<cull_run>                       m_CullRuns;
         std::vector<std::uint8_t>                   m_CullPrepass;          // per run: a prepass run
         struct cull_frozen { bool m_bValid = false; std::size_t m_nRuns = 0; std::uint32_t m_Second = 0; bool m_bPass2 = false; } m_CullFrozen;   // the last cull (m_bFreezeCull)
+        xmath::fvec3                                m_CullPrevEye{ 0, 0, 0 }, m_CullPrevFwd{ 0, 0, 0 };     // the last cull's camera (a cut: gpu_cull::WantOcclusion)
         std::map<std::tuple<const void*, const void*, const void*, const void*>, std::uint32_t> m_CullRunOf;
         std::vector<std::uint32_t>                  m_CullSubBase;          // per scene draw: its submeshes' first flag in m_CullSub (~0: none)
         std::vector<std::uint8_t>                   m_CullSub;              // 1: the submesh is culled on the GPU (the CPU loops leave it)

@@ -1652,8 +1652,18 @@ namespace xlionrender
                 if( m_bFreezeCull && m_CullFrozen.m_bValid && m_CullFrozen.m_nRuns == m_CullRuns.size() && m_CullFrozen.m_Second == CullSecond ) bPass2 = m_CullFrozen.m_bPass2;
                 else
                 {
-                    bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && createCullTargets(View) == nullptr;
-                    m_pCull->Cull(Window, m_Device.getFrameIndex(), m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
+                    // A camera cut (a jump past 2 m, or the view turned past 45 degrees) tries the occlusion again at once (adaptive: gpu_cull::WantOcclusion)
+                    const auto Fwd = []( const xmath::fmat4& M ) { const float* p = reinterpret_cast<const float*>(&M); const xmath::fvec3 F{ p[3], p[7], p[11] }; return F / std::max(F.Length(), 1e-12f); };
+                    const xmath::fvec3 Jump = Eye - m_CullPrevEye;
+                    const bool bCut = Jump.Dot(Jump) > 4.0f || Fwd(W2C).Dot(m_CullPrevFwd) < 0.7071f;
+                    m_CullPrevEye = Eye; m_CullPrevFwd = Fwd(W2C);
+                    m_pCull->Begin(m_Device.getFrameIndex());
+                    bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut) && createCullTargets(View) == nullptr;
+                    m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
+                    static const bool s_bCullTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                    if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
+                        std::printf("CULLGPU pass 1 cull %.3f, pyramid + pass 2 cull %.3f ms; occlusion %s (it hid %.0f%% of what it tested); %d clusters, %lld triangles shaded\n"
+                                   , m_pCull->m_CullGpuMs, m_pCull->m_OccludeGpuMs, m_pCull->isOcclusionSkipped() ? "skipped" : "on", 100.0 * m_pCull->m_OccludedShare, m_pCull->m_Drawn, (long long)m_pCull->m_Triangles), std::fflush(stdout);
                     m_CullFrozen = { true, m_CullRuns.size(), CullSecond, bOcclude };
                 }
             }
