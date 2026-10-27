@@ -653,6 +653,17 @@ namespace xlionrender::gi
         std::size_t     DataWords   ( void ) const noexcept { return m_Data.size(); }
         std::size_t     UploadWords ( void ) const noexcept { return m_UploadWords; }  // the last slice's refresh
 
+        // Lighting's traced visibility (documentation/lighting_gi_interface_notice.md, P4), read only: the BVH as the GI's rays walk it
+        // (shaders/xlionrender_gi_bvh.glsl: GINode, GITri4, GIInstance, the TLAS leaves; g_GIBvhTlasRoot, g_GIBvhPrimOffset), absolute world
+        // space. Valid for the frame it is asked in, after the GI's update (a pack or a move may replace or rebuild them): ask every frame.
+        // Coverage: the opaque rigid meshes that have GI. bEmpty: never walk it (an empty scene's BVH is a placeholder: its root walks off
+        // the buffers and loses the device)
+        struct bvh_view { const xgpu::buffer *m_pNodes, *m_pTri4, *m_pInstances, *m_pTlas; int m_TlasRoot, m_PrimOffset; bool m_bEmpty; };
+        bvh_view getBvh( void ) const noexcept
+        {
+            return { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, m_Scene.m_bEmpty || !m_Nodes.m_Private || !m_Tlas.m_Private };
+        }
+
     protected:
 
         // A device-local buffer made with V (GPU_READ: xGPU copies it through a staging buffer; the GPU reads its own memory, not the host's

@@ -2232,6 +2232,7 @@ namespace xlionrender::gi
         // at their center. O(surfels): the triangles were done batch by batch as they came
         void ResolveSurfEmission(int Id) noexcept
         {
+            ++m_EmitterGen;                               // (the emitter view: an emission changed)
             ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
             auto& I = m_Instances[Id];
             I.m_SurfEmission = I.m_SurfEmissionPoint;
@@ -2334,7 +2335,7 @@ namespace xlionrender::gi
             I.m_Links.clear(); I.m_LinkFirst.clear(); I.m_EmitB.clear(); I.m_bLinkHull = false; I.m_SurfLinkLo.clear(); I.m_SurfLinkHi.clear();
             m_bTlasDirty = true;
             if (!Transports(I)) I.m_EmitSurfs.clear();                                                      // (it was in nobody's light)
-            else if (!I.m_EmitSurfs.empty()) { I.m_EmitSurfs.clear(); m_bEmittersDirty = true; MarkAllLinks(); }   // its light is gone for everyone
+            else if (!I.m_EmitSurfs.empty()) { I.m_EmitSurfs.clear(); m_bEmittersDirty = true; ++m_EmitterGen; MarkAllLinks(); }   // its light is gone for everyone
             else MarkLinksCrossing(I.m_Lo, I.m_Hi);                                                          // what it hid is seen again
         }
 
@@ -2352,7 +2353,7 @@ namespace xlionrender::gi
             m_bTlasDirty = true;
             AffectNear(I.m_Lo, I.m_Hi, Id);
             MarkLinksCrossing(I.m_Lo, I.m_Hi);
-            if (!I.m_EmitSurfs.empty()) { m_bEmittersDirty = true; MarkAllLinks(); }
+            if (!I.m_EmitSurfs.empty()) { m_bEmittersDirty = true; ++m_EmitterGen; MarkAllLinks(); }
         }
         role GetRole(int Id) const noexcept { return m_Instances[Id].m_Role; }
 
@@ -2377,7 +2378,7 @@ namespace xlionrender::gi
             // The links (Phase 2): an emitter that moves changes what everyone sees of it; an occluder, only the links whose segments
             // cross its old or new box; a receiver, its own. They are rebuilt in bounded chunks (PumpLinks), the published ones stay in use
             if (!Transports(I)) MarkLinks(Id);                                         // its own links only
-            else if (!I.m_EmitSurfs.empty()) { m_bEmittersDirty = true; MarkAllLinks(); }
+            else if (!I.m_EmitSurfs.empty()) { m_bEmittersDirty = true; ++m_EmitterGen; MarkAllLinks(); }
             else { MarkLinks(Id); MarkLinksCrossing(OldLo, OldHi); MarkLinksCrossing(I.m_Lo, I.m_Hi); }
             ++m_nMovesAcc;
             m_MovesMsAcc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
@@ -2393,7 +2394,7 @@ namespace xlionrender::gi
         {
             auto& I = m_Instances[std::size_t(Id)];
             I.m_nOwned = nOwned; I.m_GhostOwner = std::move(Owners);
-            m_bEmittersDirty = true;
+            m_bEmittersDirty = true; ++m_EmitterGen;
             ++m_GPUGen;                                         // (gpu_trace: its ghost list, packed again)
         }
         std::uint32_t OwnedSurfels(int Id) const noexcept { const auto& I = m_Instances[std::size_t(Id)]; return std::min<std::uint32_t>(I.m_nOwned, std::uint32_t(I.m_E.size())); }
@@ -3209,6 +3210,33 @@ namespace xlionrender::gi
         // G4: the estimator changes since the last call (gpu_trace applies them to the GPU's copy)
         std::vector<gpu_op> TakeGPUOps() noexcept { return std::exchange(m_GPUOps, {}); }
         std::uint32_t EmitGen(int Id) const noexcept { return m_Instances[Id].m_EmitGen; }       // its emitted light's version (m_EmitB)
+
+        // Lighting's emitters (documentation/lighting_gi_interface_notice.md, "emissive surfaces as lights"), read only: every emitting
+        // level-0 surfel of an alive instance that emits for the others (Transports; the owner's, never a ghost) - world centre and normal,
+        // its share of the surface (1.47 r^2, as RebuildEmitterList), its radiance with the emissive scale (EmitterRadiance). Whether or not
+        // the GI's own emitter list exists (links or emitter sampling). EmittersGen() changes whenever any of it may have: the list, a move,
+        // an emission, the scale - lighting rebuilds its emitter lights then only
+        struct emitter_view { v3 m_Pos, m_Normal; float m_Area; v3 m_Radiance; int m_Instance; };
+        template <class T_FN> void ForEachEmitter(T_FN&& Fn) const noexcept
+        {
+            for (int i = 0; i < int(m_Instances.size()); ++i)
+            {
+                const auto& I = m_Instances[std::size_t(i)];
+                if (!I.m_bAlive || !Transports(I)) continue;
+                for (const int e : I.m_EmitSurfs)
+                {
+                    if (std::uint32_t(e) >= I.m_nOwned || std::size_t(e) >= I.m_SurfEmission.size()) continue;
+                    const auto& S = I.m_pMesh->m_Levels[0][std::size_t(e)];
+                    const float r = S.m_Radius * I.m_MeanScale;
+                    Fn(emitter_view{ I.m_L2W * S.m_Center, NormalToWorld(I, S.m_Normal), 1.47f * r * r, I.m_SurfEmission[std::size_t(e)] * m_Setup.m_EmissiveScale, i });
+                }
+            }
+        }
+        std::uint64_t EmittersGen() const noexcept
+        {
+            if (m_EmitterScaleSeen != m_Setup.m_EmissiveScale) { m_EmitterScaleSeen = m_Setup.m_EmissiveScale; ++m_EmitterGen; }
+            return m_EmitterGen;
+        }
         const std::vector<basis>& EmittedLight(int Id) const noexcept { return m_Instances[Id].m_EmitB; }
         const std::vector<basis>& BasisFractions(int Id) const noexcept { return m_Instances[Id].m_Frac; }
         const estimator&          Estimator(int Id, int s) const noexcept { return m_Instances[Id].m_Est[std::size_t(s)]; }
@@ -4770,7 +4798,7 @@ namespace xlionrender::gi
             m_bEmitDirty = true;
             if (Now == I.m_EmitSurfs) return;
             I.m_EmitSurfs = std::move(Now);
-            m_bEmittersDirty = true;
+            m_bEmittersDirty = true; ++m_EmitterGen;
             MarkAllLinks();
         }
 
@@ -5126,6 +5154,8 @@ namespace xlionrender::gi
         mutable float                           m_CaptureScale = 1;         //   (a vertex's share of the triangle read)
         mutable std::vector<std::pair<int, float>>   m_CapT1, m_CapT2;          //   (ReadPoint's two tiers)
         bool                                    m_bEmittersDirty = false;   // m_Emitters / m_Em are made again (PumpLinks)
+        mutable std::uint64_t                   m_EmitterGen       = 1;     // the emitter view's version (EmittersGen)
+        mutable float                           m_EmitterScaleSeen = -1;
         std::deque<int>                         m_LinkQueue;                // receivers waiting for a link build (MarkLinks)
         link_build                              m_LinkCur;                  // the one being built
         std::vector<emitter_pt>                 m_Em;                       // per m_Emitters: world center, normal, area
