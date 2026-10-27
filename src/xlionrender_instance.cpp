@@ -176,6 +176,7 @@ namespace xlionrender
     {
         if( m_bReady == false ) return;
         for( auto& V : m_CaptureViews ) DestroyView(V);
+        if( m_PlanarView.m_Width ) DestroyView(m_PlanarView);
         m_Device.Destroy(std::move(m_CubeToOctInstance));
         m_Device.Destroy(std::move(m_CubeToOctPipeline));
         m_Device.Destroy(std::move(m_ProbeAtlasClearPass));
@@ -618,7 +619,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 8, .m_nTextures = 3, .m_PushConstantsSize = 48 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 8, .m_nTextures = 4, .m_PushConstantsSize = 64 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 4 * ring_frames_v, .m_pData = Zeros.data() }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflTimes, { .m_Count = 2 }); Err ) return Err;
             if( const char* p = std::getenv("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } if( m_ReflTraceBench > 0 ) m_LightMode = light_mode::SCREEN; }     // (its rays start from the thin G-buffer: the screen tail's)

@@ -484,6 +484,11 @@ int main()
         Scene.m_ReflectionMaxRoughness = 0.3f;
         for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "render the traced reflections");
         CHECK(ReadRGB(Device, View, Traced), "read the traced reflections");
+        rgb_image Planar;
+        Scene.m_ReflectionPlane = { 0, 1, 0, 0 };          // (the floor's top: y = 0)
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "render the planar view");
+        CHECK(ReadRGB(Device, View, Planar), "read the planar reflections");
+        Scene.m_ReflectionPlane = { 0, 0, 0, 0 };
 
         rgb_image Ref(Today.size(), 0.0f);
         mask MFloor(size_v * size_v, 0), MChrome = MFloor, MGold = MFloor;
@@ -505,19 +510,21 @@ int main()
         double MeanRef = 0, n = 0;
         for (std::size_t i = 0; i < MFloor.size(); ++i) if (MFloor[i] || MChrome[i] || MGold[i]) { MeanRef += Lum(&Ref[i * 3]); ++n; }
         const double Floor = 1e-3 * MeanRef / std::max(n, 1.0);
-        std::printf("milestone B, the lab with GI (R^ against the reference; RMAE | dark-leak):\n  %-10s %-24s %-24s\n", "receiver", "today (probes / sky)", "traced (sharp: r < 0.3)");
+        std::printf("milestone B, the lab with GI (R^ against the reference; RMAE | dark-leak):\n  %-10s %-24s %-24s %-24s\n", "receiver", "today (probes / sky)", "traced (sharp: r < 0.3)", "+ the floor's planar view");
         const std::pair<const char*, const mask*> Rows[] = { { "floor", &MFloor }, { "chrome", &MChrome }, { "rough gold", &MGold } };
-        double ChromeTraced = 0, ChromeToday = 0, FloorTraced = 0, FloorToday = 0;
+        double ChromeTraced = 0, ChromeToday = 0, FloorTraced = 0, FloorToday = 0, FloorPlanar = 0;
         for (const auto& [pName, pM] : Rows)
         {
-            const double Et = RMAE(Today, Ref, *pM, Floor), Er = RMAE(Traced, Ref, *pM, Floor);
-            std::printf("  %-10s RMAE %6.3f | leak %6.3f   RMAE %6.3f | leak %6.3f\n", pName, Et, DarkLeak(Today, Ref, *pM, Floor), Er, DarkLeak(Traced, Ref, *pM, Floor));
+            const double Et = RMAE(Today, Ref, *pM, Floor), Er = RMAE(Traced, Ref, *pM, Floor), Ep = RMAE(Planar, Ref, *pM, Floor);
+            std::printf("  %-10s RMAE %6.3f | leak %6.3f   RMAE %6.3f | leak %6.3f   RMAE %6.3f | leak %6.3f\n", pName, Et, DarkLeak(Today, Ref, *pM, Floor), Er, DarkLeak(Traced, Ref, *pM, Floor), Ep, DarkLeak(Planar, Ref, *pM, Floor));
             if (pM == &MChrome) { ChromeTraced = Er; ChromeToday = Et; }
-            if (pM == &MFloor) { FloorTraced = Er; FloorToday = Et; }
+            if (pM == &MFloor) { FloorTraced = Er; FloorToday = Et; FloorPlanar = Ep; }
         }
         DumpRGB("refl_b_ref", Ref, size_v, size_v);
         DumpRGB("refl_b_today", Today, size_v, size_v);
         DumpRGB("refl_b_traced", Traced, size_v, size_v);
+        DumpRGB("refl_b_planar", Planar, size_v, size_v);
+        CHECK(FloorPlanar < FloorTraced, "the planar view does not improve the floor over the traced rays (%.3f against %.3f)", FloorPlanar, FloorTraced);
         CHECK(FloorTraced < 0.7 * FloorToday, "the traced reflections do not improve the floor (%.3f against today's %.3f)", FloorTraced, FloorToday);
         CHECK(ChromeTraced < 0.5 * ChromeToday, "the traced reflections do not improve the chrome sphere (%.3f against today's %.3f)", ChromeTraced, ChromeToday);
         Scene.m_ReflectionMaxRoughness = 0;

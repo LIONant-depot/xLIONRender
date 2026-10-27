@@ -388,6 +388,7 @@ namespace xlionrender
         void                        destroyGIScreenTargets( render_view& View ) noexcept;
         xgpu::device::error*        createCullTargets   ( render_view& View ) noexcept;      // render_view::m_ScenePassLoad, m_HiZ (the first time)
         void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
+        void                        renderPlanar    ( xgpu::window& Window, const scene& Scene, const render_view& Main, const xgpu::tools::view& Camera ) noexcept;
         void                        prefilterInto   ( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept;
         std::vector<xgpu::pipeline::sampler>                    LitSamplers ( void ) const                     noexcept;
         std::vector<xgpu::pipeline_instance::sampler_binding>   LitBindings ( std::span<xgpu::texture* const> Textures, bool bShadowAtlas = true ) noexcept;     // false: white in slot 0 (a pass that renders into the atlas)
@@ -746,6 +747,8 @@ namespace xlionrender
         xgpu::renderpass            m_ProbeAtlasClearPass, m_ProbeAtlasPass;
         bool                        m_bProbeAtlasReady      = false;
         std::array<render_view, 6>  m_CaptureViews;
+        render_view                 m_PlanarView;                   // reflections' planar view (renderPlanar): the scene mirrored in scene::m_ReflectionPlane, the screen tail's size
+        bool                        m_bPlanarOn = false;            // (this frame's: the reflection pass resolves its records from it)
         xgpu::pipeline              m_CubeToOctPipeline;
         xgpu::pipeline_instance     m_CubeToOctInstance;
         std::vector<probe_state>    m_ProbeStates;                      // per scene probe

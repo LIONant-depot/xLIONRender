@@ -22,10 +22,11 @@ layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records
 layout(set = 1, binding = 0) uniform sampler2D GColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 1) uniform sampler2D GDepth;
 layout(set = 1, binding = 2) uniform sampler2D EnvAtlas;   // the sky's prefiltered atlas (xlionrender_environment.glsl EnvSample)
+layout(set = 1, binding = 3) uniform sampler2D Planar;     // the planar view (instance::renderPlanar), this size, x mirrored; alpha: drawn (m_bPlanar)
 
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_Pad0, m_Pad1; } Push;
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_Pad1; vec4 m_Plane; } Push;
 
-const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, nothing traced
+const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
 shared uint s_Rays, s_Hits, s_Visits;
 
@@ -66,7 +67,18 @@ void main()
         const float Rough = Push.m_Mode == 1u ? 0.0 : Push.m_Mode == 2u ? 0.5 : G.z;
         const vec2  OctN = OctEncode(N) * 0.5 + 0.5;
         Rec.w = packHalf2x16(vec2(Pc.w > 0.0 ? 1.0 / Pc.w : 0.0, 0.0)) | (uint(OctN.x * 15.0 + 0.5) << 16) | (uint(OctN.y * 15.0 + 0.5) << 20);    // (the view depth: clip w, as the tail's)
-        if (Push.m_Mode != 0u || Rough < Push.m_MaxRough)
+        const float PlaneDist = dot(Push.m_Plane.xyz, P + Push.m_Eye) + Push.m_Plane.w;
+        if (Push.m_Mode == 0u && Push.m_bPlanar > 0.5 && Rough < Push.m_MaxRough && abs(PlaneDist) < 0.01 + 0.002 * length(P) && dot(N, Push.m_Plane.xyz) > 0.95)
+        {
+            // a planar receiver: the planar view at the mirrored texel (a point of the plane lands there); nothing drawn there: the probes
+            const vec4  C    = texelFetch(Planar, ivec2(Size.x - 1 - p.x, p.y), 0);
+            const float Conf = C.a > 0.5 ? 1.0 - smoothstep(0.5 * Push.m_MaxRough, Push.m_MaxRough, Rough) : 0.0;
+            Rec.x = packHalf2x16(C.rg);
+            Rec.y = packHalf2x16(vec2(C.b, Conf));
+            Rec.z = packHalf2x16(vec2(0.0, 1.0));
+            Rec.w |= refl_planar_v << 24;
+        }
+        else if (Push.m_Mode != 0u || Rough < Push.m_MaxRough)
         {
             const vec3  V   = normalize(-P);
             const vec3  T   = normalize(abs(N.z) < 0.999 ? cross(vec3(0.0, 0.0, 1.0), N) : cross(vec3(1.0, 0.0, 0.0), N));

@@ -1970,11 +1970,15 @@ namespace xlionrender
             }
             const xmath::fvec3 E = Eye;
             const float MaxRough = m_ReflTraceBench > 0 ? 0.0f : Scene.m_ReflectionMaxRoughness;
-            const struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_Pad0, m_Pad1; } Push
-                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, 0, 0 };
+            const bool  bPlanar  = m_bPlanarOn && m_PlanarView.m_Width == W && m_PlanarView.m_Height == H;
+            const auto& Pl = Scene.m_ReflectionPlane;
+            const float PlLen = std::sqrt(Pl.m_X * Pl.m_X + Pl.m_Y * Pl.m_Y + Pl.m_Z * Pl.m_Z);
+            const struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_Pad1; float m_Plane[4]; } Push
+                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, 0
+                , { bPlanar ? Pl.m_X / PlLen : 0.0f, bPlanar ? Pl.m_Y / PlLen : 0.0f, bPlanar ? Pl.m_Z / PlLen : 0.0f, bPlanar ? Pl.m_W / PlLen : 0.0f } };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
             auto Buffers  = std::array<xgpu::buffer*, 8>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult };
-            auto Textures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas };
+            auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor };
             Window.WriteTimestamp(m_ReflTimes, 0);
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
             Window.WriteTimestamp(m_ReflTimes, 1);
@@ -1982,6 +1986,52 @@ namespace xlionrender
         }
         View.m_TailPrevC2W = C2W; View.m_TailPrevW2C = W2C; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
         m_pTailRecords = &View.m_TailResult;
+    }
+
+    // Reflections, the planar view (documentation/reflections_strategy.md sec. 8): the scene mirrored in scene::m_ReflectionPlane, at the
+    // screen tail's size - the reflection pass resolves its records from it 1:1 (xlionrender_refl_trace_comp.glsl). The main projection
+    // times the plane's reflection, x flipped (two reflections: the triangles keep their winding; a point of the plane lands on the
+    // mirrored texel), its depth row oblique (Lengyel 2005): the near plane is the mirror plane, nothing behind it is drawn. A pass as a
+    // probe's face (bMain false: no screen tail, no reflections of its own - no feedback)
+    void instance::renderPlanar( xgpu::window& Window, const scene& Scene, const render_view& Main, const xgpu::tools::view& Camera ) noexcept
+    {
+        m_bPlanarOn = false;
+        const auto& Pl = Scene.m_ReflectionPlane;
+        const float Len = std::sqrt(Pl.m_X * Pl.m_X + Pl.m_Y * Pl.m_Y + Pl.m_Z * Pl.m_Z);
+        if( Scene.m_ReflectionMaxRoughness <= 0 || Len < 1e-6f ) return;
+        const int W = (Main.m_Width + 1) / 2, H = (Main.m_Height + 1) / 2;
+        if( m_PlanarView.m_Width != W || m_PlanarView.m_Height != H )
+        {
+            if( m_PlanarView.m_Width ) DestroyView(m_PlanarView);
+            if( CreateView(m_PlanarView, { .m_Width = W, .m_Height = H }) ) { m_PlanarView = {}; return; }
+        }
+        const xmath::fvec3 n{ Pl.m_X / Len, Pl.m_Y / Len, Pl.m_Z / Len };
+        const float        d = Pl.m_W / Len;
+        xmath::fmat4 Reflect = xmath::fmat4::fromIdentity();
+        for( int r = 0; r < 3; ++r )
+        {
+            for( int c = 0; c < 3; ++c ) Reflect(r, c) = (r == c ? 1.0f : 0.0f) - 2.0f * n[r] * n[c];
+            Reflect(r, 3) = -2.0f * d * n[r];
+        }
+        const xmath::fvec3 Eye  = Camera.getPosition();
+        const xmath::fvec3 EyeM = Eye - n * (2.0f * (n.Dot(Eye) + d));
+        xgpu::tools::view Cam = Camera;
+        Cam.setViewport({ 0, 0, W, H });
+        xmath::fmat4 M = Cam.getW2C() * Reflect;
+        {   // the oblique near plane: the depth row a multiple of the plane, scaled so the far plane still passes the frustum's far corner
+            const xmath::fmat4 Inv = M.Inverse();
+            const xmath::fvec4 C{ n.m_X, n.m_Y, n.m_Z, d };
+            xmath::fvec4 Cc;
+            for( int j = 0; j < 4; ++j ) Cc[j] = C[0] * Inv(0, j) + C[1] * Inv(1, j) + C[2] * Inv(2, j) + C[3] * Inv(3, j);
+            const xmath::fvec4 q = Inv * xmath::fvec4{ Cc[0] >= 0 ? 1.0f : -1.0f, Cc[1] >= 0 ? 1.0f : -1.0f, 1.0f, 1.0f };
+            const float Wq = M(3, 0) * q[0] + M(3, 1) * q[1] + M(3, 2) * q[2] + M(3, 3) * q[3];
+            const float Cq = C[0] * q[0] + C[1] * q[1] + C[2] * q[2] + C[3] * q[3];
+            if( std::abs(Cq) < 1e-12f ) return;
+            for( int c = 0; c < 4; ++c ) M(2, c) = C[c] * (Wq / Cq);
+        }
+        for( int c = 0; c < 4; ++c ) M(0, c) = -M(0, c);
+        renderScenePass(Window, Scene, m_PlanarView, M * xmath::fmat4::fromTranslation(EyeM), EyeM, false);
+        m_bPlanarOn = true;
     }
 
     void instance::renderScenePass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept
@@ -3163,6 +3213,7 @@ namespace xlionrender
         Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
         renderShadows(Window, Scene, Eye, ProjScale);
         updateProbes(Window, Scene, Eye);
+        renderPlanar(Window, Scene, View, Camera);
         const auto T2 = clock::now();
 
         updateBudget();
