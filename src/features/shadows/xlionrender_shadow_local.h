@@ -44,7 +44,10 @@ namespace xlionrender::shadows
     }
 
     inline float LocalNear(float Radius) noexcept { return std::max(Radius * 0.01f, 0.005f); }
-    inline float SpotTanHalf(const local_light& L) noexcept { return std::tan(std::min(L.m_OuterAngle, 1.0f)); }
+    // A spot's shadow frustum: its cone, at most 1.45 radians from the axis (83 degrees; 1 before the virtual pages - a wider spot was
+    // unshadowed past 57 degrees; the pages' levels keep the near texels fine whatever the frustum's width)
+    constexpr float max_spot_angle_v = 1.45f;
+    inline float SpotTanHalf(const local_light& L) noexcept { return std::tan(std::min(L.m_OuterAngle, max_spot_angle_v)); }
 
     // World -> clip of a face: perspective along F with a half field of view of atan(TanHalf), depth [Near, Far] -> [0, 1]
     inline xmath::fmat4 FaceW2C(const xmath::fvec3& Pos, const xmath::fvec3& F, float TanHalf, float Near, float Far) noexcept

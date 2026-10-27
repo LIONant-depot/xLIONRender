@@ -152,7 +152,7 @@ namespace xlionrender
         xmath::fvec3    m_Direction     { 0, -1, 0 };               // SPOT: where it points
         float           m_Radius        = 5.0f;                     // falloff radius (zero light at and beyond it)
         float           m_InnerAngle    = 0.4f;                     // SPOT: radians from the axis: full light inside, fading to the outer
-        float           m_OuterAngle    = 0.6f;                     // SPOT: radians (at most ~1 rad: a 115 degree shadow frustum)
+        float           m_OuterAngle    = 0.6f;                     // SPOT: radians (shadowed up to 1.45: shadows::max_spot_angle_v)
         xmath::fvec3    m_Color         { 1, 1, 1 };
         float           m_Intensity     = 4.0f;
         bool            m_bCastShadows  = true;

@@ -77,6 +77,12 @@ int main()
             }
         }
 
+        // A wide spot (1.3 rad): its shadow frustum holds a point 1.2 rad off its axis (capped at 1 rad before: unshadowed past 57 degrees)
+        {
+            const xlionrender::local_light Wide{ .m_Type = xlionrender::local_light::type::SPOT, .m_Position = { 0, 3, 0 }, .m_Direction = { 0, -1, 0 }, .m_Radius = 10, .m_OuterAngle = 1.3f };
+            const auto C = pages::FaceProjection(Wide, 0) * xmath::fvec4(xmath::fvec3(0, 3, 0) + xmath::fvec3(std::sin(1.2f), -std::cos(1.2f), 0) * 2.0f, 1);
+            CHECK(C.m_W > 0 && std::abs(C.m_X / C.m_W) < 1 && std::abs(C.m_Y / C.m_W) < 1, "a 1.3 rad spot's frustum misses a point 1.2 rad off its axis (%f, %f)", C.m_X / C.m_W, C.m_Y / C.m_W);
+        }
         const auto Table = [](const pages& S) { std::vector<std::uint32_t> T; S.BuildTable(T); return T; };
         pages S;
         S.Init({ .m_PoolTexels = 512, .m_Budget = 2 });        // 16 slots
