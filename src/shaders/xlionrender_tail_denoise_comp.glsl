@@ -97,6 +97,7 @@ void TemporalPass(ivec2 p)
     // last frame's: this texel's world position into its clip space, the 2 x 2 texels around, bilinear, where they were this surface
     vec3 HD = vec3(0.0), HS = vec3(0.0);
     float nD = 0.0, nS = 0.0;
+    float MaxMove = kMaxFrames;                                                 // (a texel that moves: a shorter history, below)
     if (F[Push.m_Slot].Params.z > 0.5)
     {
         // where the point was last frame and its depth there: the G-buffer's motion (a mover), else the camera's
@@ -106,6 +107,9 @@ void TemporalPass(ivec2 p)
         const vec2  Pn  = Mo.w > 0.5 ? Mo.xy : C.xy / C.w;
         const float dP  = Mo.w > 0.5 ? Mo.z : C.w * Dist;                        // (C is last frame's clip / this frame's w)
         const vec2  hp  = (Pn * 0.5 + 0.5) * vec2(Size()) - 0.5;
+        // a mover's texel: its light changes as it goes (it crosses other lights' reach) - a long history lags behind it: 4 frames (the
+        // test's box crossing the street, its own pixels: 12 frames 0.085 against 0.081 without its motion, 4 frames 0.080, 2 frames 0.084)
+        if (Mo.w > 0.5 && length(hp - vec2(p)) > 0.5) MaxMove = 4.0;
         const vec2  i0  = floor(hp), f = hp - i0;
         float Wsum = 0.0, Nd = 0.0, Ns = 0.0;
         for (int t = 0; t < 4; ++t)
@@ -130,7 +134,7 @@ void TemporalPass(ivec2 p)
     HD = clamp(HD, m1D - 1.25 * sdD, m1D + 1.25 * sdD);
     HS = clamp(HS, m1S - 1.25 * sdS, m1S + 1.25 * sdS);
     const float MaxS = mix(4.0, kMaxFrames, clamp(G.z * 2.0, 0.0, 1.0));      // (glossy: a shorter specular history)
-    nD = min(floor(nD + 0.5) + 1.0, kMaxFrames); nS = min(floor(nS + 0.5) + 1.0, MaxS);
+    nD = min(floor(nD + 0.5) + 1.0, min(kMaxFrames, MaxMove)); nS = min(floor(nS + 0.5) + 1.0, min(MaxS, MaxMove));
     Temporal[i] = Rec(mix(HD, D, 1.0 / nD), mix(HS, S, 1.0 / nS), Meta(Dist, N, nD, nS));
 }
 

@@ -244,6 +244,65 @@ int main()
         CHECK(EMoving < EStatic && EMoving < EI, "the mover's motion does not help: %.3f with it, %.3f without (inline %.3f)", EMoving, EStatic, EI);
     }
 
+    // The mover's own pixels (its sweep: the texels its motion says moved): with its motion its history follows it, a short one (its light
+    // changes as it crosses the street: a long history lags) - no worse than without (its texels then start over each frame), for the
+    // constant material and the default one (a material's G-buffer variant)
+    {
+        std::vector<std::uint8_t> Mask;
+        const auto Run = [&](bool bDefault, std::uint64_t Inst, bool bCollect) -> std::vector<std::pair<std::vector<float>, std::vector<float>>>
+        {
+            std::vector<std::pair<std::vector<float>, std::vector<float>>> Out;
+            Look(0); Scene.m_LocalLights = Base;
+            const auto Draws = Scene.m_Draws;
+            const auto Pose  = [&](int f) { return At(-3.0f + 0.12f * float(f), 1.2f, -8.0f, 1.5f, 2.4f, 1.5f); };
+            xlionrender::draw D{ .m_Mesh = ClusterBox, .m_L2W = Pose(0), .m_Material = { .m_Roughness = 0.4f }, .m_Instance = Inst };
+            if (bDefault) D.m_Materials = { SkinMaterial };
+            Scene.m_Draws.push_back(D);
+            for (int f = 0; f < 20; ++f) (void)Frame(mode::SCREEN, false);
+            for (int f = 0; f < 24; ++f)
+            {
+                Scene.m_Draws.back().m_L2W = Pose(f + 1);
+                (void)Frame(mode::SCREEN, true);
+                Out.push_back({ Img, Exact });
+                if (bCollect)
+                {
+                    std::vector<std::byte> Raw; int MW = 0, MH = 0;
+                    if (Device.ReadTexture(View.m_TailGMotion, Raw, MW, MH) == nullptr)
+                    {
+                        Mask.resize(std::size_t(W) * H, 0);
+                        const auto* q = reinterpret_cast<const std::uint16_t*>(Raw.data());
+                        for (int y = 0; y < MH; ++y) for (int x = 0; x < MW; ++x)
+                        {
+                            const auto* t = q + 4 * (std::size_t(y) * MW + x);
+                            if (HalfToFloat(t[3]) < 0.5f) continue;
+                            const float dx = (HalfToFloat(t[0]) * 0.5f + 0.5f) * float(MW) - (float(x) + 0.5f), dy = (HalfToFloat(t[1]) * 0.5f + 0.5f) * float(MH) - (float(y) + 0.5f);
+                            if (dx * dx + dy * dy <= 1.0f) continue;
+                            for (int yy = 0; yy < 2; ++yy) for (int xx = 0; xx < 2; ++xx) Mask[std::size_t(2 * y + yy) * W + std::size_t(2 * x + xx)] = 1;
+                        }
+                    }
+                }
+            }
+            Scene.m_Draws = Draws;
+            return Out;
+        };
+        const auto Masked = [&](const std::vector<std::pair<std::vector<float>, std::vector<float>>>& V) -> double
+        {
+            double E = 0;
+            for (const auto& [A, B] : V)
+            {
+                double d = 0, r = 0;
+                for (std::size_t i = 0; i < A.size() && i < Mask.size(); ++i) if (Mask[i]) { d += std::abs(double(A[i]) - B[i]); r += std::abs(double(B[i])); }
+                E += d / std::max(r, 1e-9) / double(V.size());
+            }
+            return E;
+        };
+        const auto C77 = Run(false, 77, true), C0 = Run(false, 0, false), D77 = Run(true, 77, false), D0 = Run(true, 0, false);
+        std::size_t nMask = 0; for (auto m : Mask) nMask += m;
+        const double EC0 = Masked(C0), EC = Masked(C77), ED0 = Masked(D0), ED = Masked(D77);
+        std::printf("the mover's sweep (%zu pixels): constant material without its motion %.3f, with %.3f; default material without %.3f, with %.3f\n", nMask, EC0, EC, ED0, ED);
+        CHECK(nMask > 1000 && EC < 1.02 * EC0 && ED < 1.05 * ED0, "the mover's motion makes its own pixels worse: constant %.3f against %.3f, default %.3f against %.3f", EC, EC0, ED, ED0);
+    }
+
     // A skinned mover (its pose's motion): the box crossing the street moved by its bone (the instance stays where it is) - its last pose after
     // this frame's in the bone buffer (cluster_geom::m_PrevBones: the skin vertex shader's last clip position) - against the same box without
     // it. The G-buffer's motion target says where each texel was last frame: the camera is still, so a texel that moved is the box's own motion
@@ -409,6 +468,13 @@ int main()
         for (int f = 0; f < 300 && bOk; ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
         bOk = bOk && ReadHDR(Device, GView, On) && On.size() == Off.size() && On.size() == std::size_t(GW) * GH;
         const auto Stats = Renderer.getLightStats();
+        // over the limit: 20 kept, the other 144 folded into their nearest (their flux kept) - the floor lit as by all of them
+        std::vector<float> Merged;
+        Renderer.m_EmitterLightsMax = 20;
+        for (int f = 0; f < 60 && bOk; ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
+        bOk = bOk && ReadHDR(Device, GView, Merged) && Merged.size() == On.size();
+        const auto MStats = Renderer.getLightStats();
+        Renderer.m_EmitterLightsMax = 2048;
         Renderer.m_bEmitterLights = false;
         CHECK(bOk && Renderer.getGIWorld() != nullptr, "Render the glowing panel (images %zu / %zu values, the GI %s, capturing %d)", Off.size(), On.size(), Renderer.getGIWorld() ? "there" : "none", int(Renderer.isGICapturing()));
         if (!bOk) return 1;
@@ -435,6 +501,8 @@ int main()
         std::printf("a glowing panel: %d emitter surfels (%d lights, %d left out); flux %.3f against the panel's %.3f, irradiance under it %.4f against %.4f; the floor there: the GI alone %.4f, the emitter lights + the GI's bounces %.4f\n"
                    , n, Stats.m_nEmitters, Stats.m_nEmittersLeftOut, Flux, FluxPanel, E, EPanel, Off[c], On[c]);
         CHECK(n > 0 && Stats.m_nEmitters == n, "the emitter lights: %d of the view's %d", Stats.m_nEmitters, n);
+        std::printf("the panel's emitters over a limit of 20: %d lights, %d folded into them, %d left out (no kept one facing their way); the floor %.4f (all of them: %.4f)\n", MStats.m_nEmitters, MStats.m_nEmittersMerged, MStats.m_nEmittersLeftOut, Merged[c], On[c]);
+        CHECK(MStats.m_nEmitters == 20 && MStats.m_nEmittersMerged + MStats.m_nEmittersLeftOut == n - 20 && MStats.m_nEmittersMerged > 0 && std::abs(Merged[c] / On[c] - 1.0f) < 0.1f, "the folded emitters: %d lights, %d folded, the floor %.4f against %.4f", MStats.m_nEmitters, MStats.m_nEmittersMerged, Merged[c], On[c]);
         CHECK(std::abs(Flux / FluxPanel - 1.0) < 0.05, "the emitter view's flux %.3f, the panel's %.3f", Flux, FluxPanel);
         CHECK(std::abs(E / EPanel - 1.0) < 0.05, "the emitter discs' irradiance %.4f, the panel's %.4f", E, EPanel);
         CHECK(Off[c] > 0.02f && std::abs(On[c] / Off[c] - 1.0f) < 0.2f, "the floor under the panel: the GI alone %.4f, the emitter lights with the GI's bounces %.4f (twice the light: counted twice)", Off[c], On[c]);

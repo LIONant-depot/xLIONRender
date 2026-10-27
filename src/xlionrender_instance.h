@@ -223,7 +223,7 @@ namespace xlionrender
         // both, it counts twice - so this one switch also hands that term to lighting (gi::world::setup::m_bEmitterDirectExternal: the GI keeps
         // the emitters' bounces, not their direct light). Or scene::gi_settings::m_bEmitterLights (the Environment's GIEmitterLights)
         bool                                       m_bEmitterLights   = false;
-        int                                        m_EmitterLightsMax = 2048;               // the strongest by power (luminance x area); the rest left out (getLightStats)
+        int                                        m_EmitterLightsMax = 2048;               // the strongest by power (luminance x area); the rest folded into their nearest (getLightStats m_nEmittersMerged)
         float                                      m_EmitterCutoff    = 0.002f;             // an emitter light's reach: where its luminance x A / (d^2 + A) falls under this
         int                                        m_LightHead     = 4;
         int                                        m_LightTailSamples = 1;     // SAMPLED: stratified tail samples per pixel
@@ -242,7 +242,7 @@ namespace xlionrender
         // The last render's local lights and what it could not shade as asked (documentation/lighting_strategy.md sec. 3, 9): lights past
         // the buffer (not shaded at all), shadowed lights shaded unshadowed (no map yet: the declared fallback), maps sampled while waiting
         // for a redraw (stale: what P1a removes), cells whose list overflowed (shaded with every light: exact, slower)
-        struct light_stats { int m_nLights = 0; int m_nDropped = 0; int m_nShadowed = 0; int m_nShadowFallback = 0; int m_nShadowStale = 0; int m_nOverflowCells = 0; double m_CellRingMB = 0; int m_nEmitters = 0; int m_nEmittersLeftOut = 0; };     // (m_nEmitters: emitter lights among m_nLights)     // (m_CellRingMB: the light cell ring's memory)
+        struct light_stats { int m_nLights = 0; int m_nDropped = 0; int m_nShadowed = 0; int m_nShadowFallback = 0; int m_nShadowStale = 0; int m_nOverflowCells = 0; double m_CellRingMB = 0; int m_nEmitters = 0; int m_nEmittersLeftOut = 0; int m_nEmittersMerged = 0; };     // (m_nEmitters: emitter lights among m_nLights)     // (m_CellRingMB: the light cell ring's memory)
                       light_stats          getLightStats( void ) const                                          noexcept { return m_LightStats; }
         // How many clipmap tiles + local light maps the last Render drew (a static scene: 0 after its first frame)
                       int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
@@ -770,7 +770,9 @@ namespace xlionrender
         struct emitter_light { xmath::fvec3 m_Pos, m_Normal, m_Radiance; float m_Area, m_Radius; };
         std::vector<emitter_light>      m_EmitterLights;                    // the GI's emitters as lights (m_bEmitterLights), made again when its generation changes
         std::uint64_t                   m_EmitterLightsGen  = 0;
+        int                             m_EmitterLightsMaxUsed = 0;
         int                             m_nEmittersLeftOut  = 0;
+        int                             m_nEmittersMerged   = 0;                    // folded into their neighbours (over m_EmitterLightsMax)
         void                            refreshEmitterLights( bool bOn ) noexcept;
         int                         m_LightRingUsed         = 0;
         int                         m_CellRingUsed          = 0;

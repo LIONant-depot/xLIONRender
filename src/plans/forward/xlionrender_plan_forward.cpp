@@ -828,10 +828,10 @@ namespace xlionrender
     void instance::refreshEmitterLights( bool bOn ) noexcept
     {
         const auto* pW = m_pGIWorld.get();
-        if( !bOn || pW == nullptr ) { m_EmitterLights.clear(); m_EmitterLightsGen = 0; m_nEmittersLeftOut = 0; return; }
+        if( !bOn || pW == nullptr ) { m_EmitterLights.clear(); m_EmitterLightsGen = 0; m_nEmittersLeftOut = m_nEmittersMerged = 0; return; }
         const std::uint64_t Gen = pW->EmittersGen();
-        if( Gen == m_EmitterLightsGen ) return;
-        m_EmitterLightsGen = Gen;
+        if( Gen == m_EmitterLightsGen && m_EmitterLightsMaxUsed == m_EmitterLightsMax ) return;     // (the same emitters, the same limit)
+        m_EmitterLightsGen = Gen; m_EmitterLightsMaxUsed = m_EmitterLightsMax;
         m_EmitterLights.clear();
         const auto Lum = []( const xmath::fvec3& c ) { return 0.2126f * c.m_X + 0.7152f * c.m_Y + 0.0722f * c.m_Z; };
         pW->ForEachEmitter([&]( const auto& E )
@@ -841,13 +841,47 @@ namespace xlionrender
             const float R = std::clamp(std::sqrt(E.m_Area * L / m_EmitterCutoff), std::sqrt(E.m_Area), 50.0f);     // (A / (d^2 + A) x L = cutoff)
             m_EmitterLights.push_back({ E.m_Pos, E.m_Normal, E.m_Radiance, E.m_Area, R });
         });
-        const std::size_t Max = std::size_t(std::max(m_EmitterLightsMax, 0));
-        m_nEmittersLeftOut = int(m_EmitterLights.size() > Max ? m_EmitterLights.size() - Max : 0);
-        if( m_EmitterLights.size() > Max )      // ponytail: the weak ones dropped, not folded into their neighbours (their flux lost) - fold them when a level shows it
+        // Over m_EmitterLightsMax: the strongest kept, each of the others folded into the nearest kept one facing its way - its flux
+        // (radiance x area) added to that one's radiance: the light kept, moved to its neighbour. None facing its way: left out (counted) -
+        // folded into one facing elsewhere it would light what it never reached (a panel's back into its front: +17% under it)
+        // ponytail: O(folded x kept) on a generation change - a grid of the kept ones when a level's emitters show it
+        const std::size_t Max = std::size_t(std::max(m_EmitterLightsMax, 1));
+        m_nEmittersLeftOut = 0;
+        m_nEmittersMerged  = int(m_EmitterLights.size() > Max ? m_EmitterLights.size() - Max : 0);
+        if( m_EmitterLights.size() > Max )
         {
             std::nth_element(m_EmitterLights.begin(), m_EmitterLights.begin() + std::ptrdiff_t(Max), m_EmitterLights.end()
                             , [&]( const emitter_light& a, const emitter_light& b ) { return Lum(a.m_Radiance) * a.m_Area > Lum(b.m_Radiance) * b.m_Area; });
+            // (each group a larger disc: its area the sum, at the centre of its flux, the flux kept - radiance = flux / area)
+            std::vector<xmath::fvec3> Flux(Max, xmath::fvec3{ 0, 0, 0 }), At(Max, xmath::fvec3{ 0, 0, 0 });
+            std::vector<float>        Area(Max, 0.0f), W(Max, 0.0f);
+            for( std::size_t d = Max; d < m_EmitterLights.size(); ++d )
+            {
+                const auto& E = m_EmitterLights[d];
+                std::size_t Best = Max;
+                float       BestD = std::numeric_limits<float>::max();
+                for( std::size_t k = 0; k < Max; ++k )
+                {
+                    const auto&  K  = m_EmitterLights[k];
+                    const xmath::fvec3 D = K.m_Pos - E.m_Pos;
+                    const float  d2 = D.Dot(D);
+                    if( d2 < BestD && K.m_Normal.Dot(E.m_Normal) > 0.5f ) { BestD = d2; Best = k; }
+                }
+                if( Best == Max ) { ++m_nEmittersLeftOut; --m_nEmittersMerged; continue; }
+                const float w = Lum(E.m_Radiance) * E.m_Area;
+                Flux[Best] += E.m_Radiance * E.m_Area; Area[Best] += E.m_Area; At[Best] += E.m_Pos * w; W[Best] += w;
+            }
             m_EmitterLights.resize(Max);
+            for( std::size_t k = 0; k < Max; ++k )
+            {
+                auto& K = m_EmitterLights[k];
+                if( Area[k] <= 0 ) continue;
+                const float w = Lum(K.m_Radiance) * K.m_Area;
+                K.m_Pos      = (K.m_Pos * w + At[k]) / std::max(w + W[k], 1e-12f);
+                K.m_Radiance = (K.m_Radiance * K.m_Area + Flux[k]) / (K.m_Area + Area[k]);
+                K.m_Area    += Area[k];
+                K.m_Radius   = std::clamp(std::sqrt(K.m_Area * Lum(K.m_Radiance) / m_EmitterCutoff), std::sqrt(K.m_Area), 50.0f);     // (its reach grows with it)
+            }
         }
     }
 
@@ -1016,6 +1050,7 @@ namespace xlionrender
         m_LightStats.m_nDropped       = int(Scene.m_LocalLights.size()) - nScene;
         m_LightStats.m_nEmitters      = nEm;
         m_LightStats.m_nEmittersLeftOut = m_nEmittersLeftOut + int(m_EmitterLights.size()) - nEm;
+        m_LightStats.m_nEmittersMerged  = m_nEmittersMerged;
         m_LightStats.m_nOverflowCells = 0;           // (a cell's list never overflows: 2-uint headers)
         m_LightStats.m_CellRingMB     = double(ring_frames_v) * double(m_CellStride) * 4.0 / (1024.0 * 1024.0);
         Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_bLightTailVisibility ? -m_LightTailCandidates : m_LightTailCandidates) };
