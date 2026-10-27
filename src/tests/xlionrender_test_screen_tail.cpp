@@ -61,6 +61,29 @@ int main()
     CHECK(MakeMesh(Renderer, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), Box), "box");
     cluster_buffers ClusterBuffers;                                             // (a mover: a cluster mesh with an instance id - its transform kept)
     cluster_buffers WallBuffers, PanelBuffers;                                  // (P4's wall and the glowing panel: GI meshes - rigid cluster meshes)
+    cluster_buffers SkinBuffers;                                                // (a skinned mover: one bone, its last pose after this frame's in the bone buffer)
+    xgpu::buffer    SkinBones;
+    xlionrender::mesh_id SkinMoving, SkinStill;
+    CHECK(MakeSkinBuffers(Device, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), 0.5f, SkinBuffers)
+       && !Device.Create(SkinBones, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = 2 }), "skin box");
+    {
+        auto G = SkinBuffers.Geom(xlionrender::geom_kind::SKIN, &SkinBones, 1);
+        G.m_BBox = { xmath::fvec3(-20.0f), xmath::fvec3(20.0f) };             // (its bone carries it across the street: bounds over every pose)
+        for (auto& C : G.m_Clusters) C.m_BBox = G.m_BBox;
+        CHECK(!Renderer.CreateClusterGeom(SkinStill, G), "skin box without its last pose");
+        G.m_PrevBones = 1;
+        CHECK(!Renderer.CreateClusterGeom(SkinMoving, G), "skin box with its last pose");
+    }
+    xgpu::texture            White;                                             // (the skin path draws no constant material: the default one, white)
+    xlionrender::material_id SkinMaterial;
+    {
+        const std::uint32_t Texel = 0xffffffffu;
+        const auto Mips  = std::array{ xgpu::texture::setup::mip_size{ sizeof(Texel) } };
+        const auto Slots = std::array<xgpu::texture*, 2>{ nullptr, &White };
+        CHECK(!Device.Create(White, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
+                                    , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Texel), sizeof(Texel) }, .m_isGamma = false })
+           && !Renderer.CreateDefaultMaterial(SkinMaterial, Slots), "the skin box's material");
+    }
     CHECK(MakeStaticBuffers(Device, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), 0.5f, ClusterBuffers) && !Renderer.CreateClusterGeom(ClusterBox, ClusterBuffers.Geom()), "cluster box");
 
     xlionrender::scene Scene;
@@ -219,6 +242,50 @@ int main()
         const double EI = Cross(mode::SAMPLED, 77), EStatic = Cross(mode::SCREEN, 0), EMoving = Cross(mode::SCREEN, 77);
         std::printf("a mover crossing: per-frame error inline %.3f, screen without its motion %.3f, with it %.3f\n", EI, EStatic, EMoving);
         CHECK(EMoving < EStatic && EMoving < EI, "the mover's motion does not help: %.3f with it, %.3f without (inline %.3f)", EMoving, EStatic, EI);
+    }
+
+    // A skinned mover (its pose's motion): the box crossing the street moved by its bone (the instance stays where it is) - its last pose after
+    // this frame's in the bone buffer (cluster_geom::m_PrevBones: the skin vertex shader's last clip position) - against the same box without
+    // it. The G-buffer's motion target says where each texel was last frame: the camera is still, so a texel that moved is the box's own motion
+    // (with its last pose: the box's texels; without: none). The error over the crossing is printed (the box is a small part of the picture)
+    {
+        const auto Cross = [&](xlionrender::mesh_id Mesh, int& nMoved) -> double
+        {
+            Look(0);
+            Scene.m_LocalLights = Base;
+            const auto Draws = Scene.m_Draws;
+            const auto Pose  = [&](int f) { return At(-3.0f + 0.12f * float(f), 1.2f, -8.0f, 1.5f, 2.4f, 1.5f); };
+            const auto Bones = [&](int f) { const xmath::fmat4 B[2] = { Pose(f), Pose(std::max(f - 1, 0)) }; (void)SkinBones.MemoryMap(0, 2, [&](void* p) { std::memcpy(p, B, sizeof(B)); }); };
+            Bones(0);
+            Scene.m_Draws.push_back({ .m_Mesh = Mesh, .m_L2W = xmath::fmat4::fromIdentity(), .m_Materials = { SkinMaterial }, .m_Instance = 78 });
+            for (int f = 0; f < 20; ++f) if (!Frame(mode::SCREEN, false)) return -1;
+            double E = 0;
+            for (int f = 0; f < 24; ++f)
+            {
+                Bones(f + 1);
+                if (!Frame(mode::SCREEN, true)) return -1;
+                E += RelErr(Img, Exact) / 24;
+            }
+            nMoved = 0;
+            std::vector<std::byte> Raw; int MW = 0, MH = 0;
+            if (Device.ReadTexture(View.m_TailGMotion, Raw, MW, MH)) return -1;
+            const auto* q = reinterpret_cast<const std::uint16_t*>(Raw.data());
+            for (int y = 0; y < MH; ++y)
+            for (int x = 0; x < MW; ++x)
+            {
+                const auto* t = q + 4 * (std::size_t(y) * MW + x);
+                if (HalfToFloat(t[3]) < 0.5f) continue;                                  // (no motion of its own: the camera's)
+                const float dx = (HalfToFloat(t[0]) * 0.5f + 0.5f) * float(MW) - (float(x) + 0.5f);
+                const float dy = (HalfToFloat(t[1]) * 0.5f + 0.5f) * float(MH) - (float(y) + 0.5f);
+                nMoved += dx * dx + dy * dy > 1.0f;                                      // (a texel or more since last frame)
+            }
+            Scene.m_Draws = Draws;
+            return E;
+        };
+        int nStill = 0, nMoving = 0;
+        const double EStill = Cross(SkinStill, nStill), EMoving = Cross(SkinMoving, nMoving);
+        std::printf("a skinned mover crossing (its pose): texels whose motion says they moved: without its last pose %d, with it %d; per-frame error screen %.3f, %.3f\n", nStill, nMoving, EStill, EMoving);
+        CHECK(EStill >= 0 && EMoving >= 0 && nMoving > 50 && nStill * 10 < nMoving, "the skinned mover's last pose is not in its motion: %d texels moved with it, %d without", nMoving, nStill);
     }
 
     // The screen trace (P3: "the tail contact-shadowed"): a wall, 32 point lights on one side within reach of the other. The reference: the

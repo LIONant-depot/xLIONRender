@@ -50,8 +50,8 @@ void main()
     const InstanceData I    = instances.Instances[push.instanceIndex];
     const mat3x4 L2wRows    = mat3x4(I.Rows[0], I.Rows[1], I.Rows[2]);
     Out.wSpacePosition      = vec4(VertData.LocalPos * L2wRows + mesh.WorldOffset.xyz, 1.0);
-    // last frame's clip position (the screen tail's motion): the instance's last transform; the pose's own motion is not kept (this frame's bones)
-    OutPrevClip             = mesh.PrevWorldOffset.w > 0.5 ? mesh.PrevW2C * vec4(VertData.LocalPos * mat3x4(I.PrevRows[0], I.PrevRows[1], I.PrevRows[2]) + mesh.PrevWorldOffset.xyz, 1.0) : vec4(0.0);
+    // last frame's clip position (the screen tail's motion): last frame's pose (push.prevBones; without one this frame's) at the instance's last transform
+    OutPrevClip             = mesh.PrevWorldOffset.w > 0.5 ? mesh.PrevW2C * vec4(g_PrevLocalPos * mat3x4(I.PrevRows[0], I.PrevRows[1], I.PrevRows[2]) + mesh.PrevWorldOffset.xyz, 1.0) : vec4(0.0);
     Out.ShadowPosition      = vec4(0.5, 0.5, 2.0, 1.0);                 // the editors' single shadow map (LDR materials) only
     gl_Position             = mesh.w2C * Out.wSpacePosition;
 

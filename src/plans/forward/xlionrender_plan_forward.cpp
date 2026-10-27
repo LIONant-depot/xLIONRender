@@ -1674,7 +1674,7 @@ namespace xlionrender
                     {
                         if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
                         const auto& C = G.m_Clusters[c];
-                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot, 0u, MaterialBase });
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot, 0u, MaterialBase, G.m_PrevBones });
                         else        Cmd.setPushConstants(details::push_static_geom{ c, Draws[i].m_Slot, 0u, 0xFFFFFFFFu, MaterialBase });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                     }
@@ -1843,7 +1843,7 @@ namespace xlionrender
                     {
                         if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
                         const auto& C = G.m_Clusters[c];
-                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase });
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase, G.m_PrevBones });
                         else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, MaterialBase });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                         ++nDraws;
@@ -2404,7 +2404,7 @@ namespace xlionrender
                 {
                     if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
                     const auto& C = G.m_Clusters[c];
-                    if( bSkin ) { Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, SkinGI != &m_GIDummy ? 1u : 0u, MaterialBase }); }
+                    if( bSkin ) { Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, SkinGI != &m_GIDummy ? 1u : 0u, MaterialBase, G.m_PrevBones }); }
                     else
                     {
                         const auto [pBuf, Push] = GIOf(c, Slot, MaterialBase);

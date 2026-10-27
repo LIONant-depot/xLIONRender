@@ -19,6 +19,9 @@ layout(location = 6) in uint  in_OctTangentY_Sign; // oct tangent Y (15 bits) + 
 layout(location = 7) in vec4  in_Color;         // the optional COLOR0 stream (R8G8B8A8_UNORM, sRGB); a geometry without it binds constant white
 layout(location = 8) in vec2  in_UV1;           // the optional UV1 stream (R32G32_SFLOAT); a geometry without it binds a marker: UV0
 
+// Last frame's pose of the vertex (xLIONRender: the screen tail's motion; this frame's without one)
+vec4 g_PrevLocalPos;
+
 //
 // Fast oct-encoded normal/tangent decode
 //
@@ -71,7 +74,8 @@ mb_full_vertex getVertexData()
     // Build this vertex's skin matrix and deform position/normal/tangent from bind pose
     //
     const uint lo32 = in_PackedLo | (in_PackedHi.x << 16);
-    const mat4 Skin = ComputeSkinMatrix(lo32, in_PackedHi.y, selectedCluster, push.maxInfluences);
+    const mat4 Skin = ComputeSkinMatrix(lo32, in_PackedHi.y, selectedCluster, push.maxInfluences, 0u);
+    g_PrevLocalPos  = push.prevBones != 0u ? ComputeSkinMatrix(lo32, in_PackedHi.y, selectedCluster, push.maxInfluences, push.prevBones) * bindPos : Skin * bindPos;
     const mat3 SkinRot = mat3(Skin);
 
     Data.LocalPos    = Skin * bindPos;

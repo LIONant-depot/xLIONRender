@@ -9,8 +9,9 @@
 //
 // The cluster's bone addressing (xgeom_skin.h cluster_data) is read once and branched on once per vertex, outside the influence loop:
 // the same for every vertex of a cluster. BASE_OFFSET: base bone + the 7 bit index; PALETTE: BoneMap[palette start + the 7 bit index].
+// boneBase: where the pose's matrices start (0 this frame's; xLIONRender: last frame's after them, push.prevBones)
 //
-mat4 ComputeSkinMatrix(uint lo32, uint hi16, ClusterData Cluster, uint maxInfluences)
+mat4 ComputeSkinMatrix(uint lo32, uint hi16, ClusterData Cluster, uint maxInfluences, uint boneBase)
 {
     const uint boneOffset0 =  lo32        & 0x7Fu;
     const uint boneOffset1 = (lo32 >>  7) & 0x7Fu;
@@ -53,7 +54,7 @@ mat4 ComputeSkinMatrix(uint lo32, uint hi16, ClusterData Cluster, uint maxInflue
 
     mat4 Skin = mat4(0.0);
     for (uint i = 0u; i < maxInfluences; ++i)
-        Skin += boneMatrix[boneIndex[i]] * usedWeight[i];
+        Skin += boneMatrix[boneBase + boneIndex[i]] * usedWeight[i];
 
     return Skin;
 }

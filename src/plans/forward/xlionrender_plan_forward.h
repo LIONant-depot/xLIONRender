@@ -103,8 +103,9 @@ namespace xlionrender::details
         std::uint32_t   m_InstanceIndex;
         std::uint32_t   m_Pad           = 0;
         std::uint32_t   m_MaterialBase  = 0;            // as push_static_geom's: one material fragment serves both paths
+        std::uint32_t   m_PrevBones     = 0;            // cluster_geom::m_PrevBones: last frame's pose (the motion), 0 none
     };
-    static_assert(offsetof(push_skin_geom, m_MaterialBase) == 16);
+    static_assert(offsetof(push_skin_geom, m_MaterialBase) == 16 && sizeof(push_skin_geom) <= sizeof(push_static_geom));
 
     // mb_standard_pbr.frag "lighting_uniforms" (set 2, binding 1)
     struct ubo_lighting

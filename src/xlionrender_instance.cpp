@@ -107,6 +107,9 @@ namespace xlionrender
         constexpr std::uint32_t s_GeomStandardGBFrag[] = {
             #include "xlionrender_geom_standard_frag_gbuffer.h"
         };
+        constexpr std::uint32_t s_DefaultMaterialGBFrag[] = {
+            #include "xlionrender_default_material_frag_gbuffer.h"
+        };
         constexpr std::uint32_t s_ClearDepthVert[] = {
             #include "xlionrender_clear_depth_vert.h"
         };
@@ -573,6 +576,7 @@ namespace xlionrender
         }
 
         if( auto Err = Device.Create(m_DefaultMaterialFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DefaultMaterialFrag) }); Err ) return Err;
+        if( auto Err = Device.Create(m_DefaultMaterialGBFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DefaultMaterialGBFrag) }); Err ) return Err;
         if( auto Err = Device.Create(m_StaticGeomGIVert,    { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_StaticGeomGIVert) }); Err ) return Err;     // RIGID: reads the surfel GI
         if( auto Err = Device.Create(m_SkinGeomVert,        { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_SkinGeomVert) }); Err ) return Err;
         if( auto Err = Device.Create(m_GICaptureVert,       { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
@@ -1278,7 +1282,8 @@ namespace xlionrender
 
     xgpu::device::error* instance::CreateDefaultMaterial( material_id& Id, std::span<xgpu::texture* const> Textures ) noexcept
     {
-        return CreateMaterial(Id, m_DefaultMaterialFrag, Textures);
+        if( auto Err = CreateMaterial(Id, m_DefaultMaterialFrag, Textures); Err ) return Err;
+        return SetMaterialGBuffer(Id, m_DefaultMaterialGBFrag);     // (in the screen tail's thin G-buffer, as the materials the compiler makes)
     }
 
     //------------------------------------------------------------------------------------------------

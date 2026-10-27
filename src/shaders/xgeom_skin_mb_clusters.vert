@@ -48,4 +48,6 @@ layout(push_constant) uniform PushConstants
     uint    maxInfluences;  // 1..4 - how many bone weights to actually use (weight-truncation skin LOD)
     uint    instanceIndex;  // xLIONRender: the draw's slot in the instance buffer
     uint    giProbes;       // xLIONRender: 1 the probe grid is bound as GIMesh (the fragment's SurfelGIProbes)
+    uint    materialBase;   // xLIONRender: the fragment's (push_skin_geom)
+    uint    prevBones;      // xLIONRender: last frame's pose in boneMatrix from this matrix on (the screen tail's motion); 0: none
 } push;

@@ -76,6 +76,7 @@ namespace xlionrender
         {
             const void*                         m_pGeom  = nullptr;
             int                                 m_nBones = 0;
+            std::vector<xmath::fmat4>           m_Last;             // last frame's skinning matrices (each buffer: this frame's, then these - the motion)
             std::array<xgpu::buffer, skin_frames_v> m_Bones;
             std::array<mesh_id, skin_frames_v>  m_Mesh;
             std::uint32_t                       m_Frame  = 0;
@@ -356,16 +357,27 @@ namespace xlionrender
             {
                 ReleaseSkinned(E);
                 for (int k = 0; k < skin_frames_v; ++k)
-                    if (m_pDevice->Create(E.m_Bones[k], { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = nBones, .m_bWriteOnly = true })
-                        || m_Renderer.CreateClusterGeom(E.m_Mesh[k], MakeSkinGeom(*pGeom, E.m_Bones[k])))
+                {
+                    auto Geom = MakeSkinGeom(*pGeom, E.m_Bones[k]);
+                    Geom.m_PrevBones = std::uint32_t(nBones);
+                    if (m_pDevice->Create(E.m_Bones[k], { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = 2 * nBones, .m_bWriteOnly = true })
+                        || m_Renderer.CreateClusterGeom(E.m_Mesh[k], Geom))
                     { ReleaseSkinned(E); ++m_Stats.m_Waiting; return; }
+                }
+                E.m_Last.clear();
                 E.m_pGeom = pGeom; E.m_nBones = nBones;
             }
             E.m_Frame = m_Frame;
             const int k = int(m_Frame % skin_frames_v);
             m_SkinMatrices.resize(std::size_t(nBones));
             for (int i = 0; i < nBones; ++i) m_SkinMatrices[std::size_t(i)] = m_PoseWorlds[std::size_t(i)] * Bones[std::size_t(i)].m_InvBindPose;
-            (void)E.m_Bones[k].MemoryMapFrameRegion(0, nBones, [&](void* p) { std::memcpy(p, m_SkinMatrices.data(), std::size_t(nBones) * sizeof(xmath::fmat4)); });     // (this frame's buffer: the frames in flight read the others)
+            if (E.m_Last.size() != m_SkinMatrices.size()) E.m_Last = m_SkinMatrices;     // (its first frame: no motion of its own)
+            (void)E.m_Bones[k].MemoryMapFrameRegion(0, 2 * nBones, [&](void* p)        // (this frame's buffer: the frames in flight read the others)
+            {
+                std::memcpy(p, m_SkinMatrices.data(), std::size_t(nBones) * sizeof(xmath::fmat4));
+                std::memcpy(static_cast<xmath::fmat4*>(p) + nBones, E.m_Last.data(), std::size_t(nBones) * sizeof(xmath::fmat4));
+            });
+            E.m_Last = m_SkinMatrices;
 
             draw D{ .m_Mesh = E.m_Mesh[k], .m_L2W = L2W, .m_UserID = Entity, .m_Instance = std::uint64_t(m_InstanceIds.Of(Entity)) | (std::uint64_t(gi_role::RECEIVER) << draw_gi_role_shift_v) };
             const auto Defaults = pGeom->getDefaultMaterialInstances();

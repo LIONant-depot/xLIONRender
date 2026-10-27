@@ -611,7 +611,7 @@ namespace xlionrender
         xgpu::pipeline              m_ToneMapPipeline;
         xgpu::pipeline              m_BlitPipeline;
         xgpu::texture               m_WhiteTexture;
-        xgpu::shader                m_DefaultMaterialFrag;
+        xgpu::shader                m_DefaultMaterialFrag, m_DefaultMaterialGBFrag;     // (CreateDefaultMaterial: its HDR fragment and its G-buffer variant)
 
         // Shadows (features/shadows): the atlas (16 bits: the clipmap's 8x8 tiles on the left, the local maps' square on the right),
         // its passes (a clear for its first use, then load), the tile clear, the casters' depth pipelines per vertex path (float

@@ -43,6 +43,7 @@ namespace xlionrender
         xgpu::buffer*               m_pBones        = nullptr;  // SKIN: SSBO of the bone matrices (the caller fills it each frame), every bone of the skeleton
         xgpu::buffer*               m_pBoneMap      = nullptr;  // SKIN: SSBO of the palettes (xgeom_skin BoneMap); null: the renderer binds a dummy
         std::uint32_t               m_MaxInfluences = 4;        // SKIN: 1..4 bone weights used
+        std::uint32_t               m_PrevBones     = 0;        // SKIN: last frame's pose in m_pBones from this matrix on (the screen tail's motion); 0: none (this frame's)
         xmath::fbbox                m_BBox;                     // local bounds (shadow culling and invalidation); SKIN: covering every pose
         std::vector<cluster>        m_Clusters;
         std::vector<submesh>        m_Submeshes;
