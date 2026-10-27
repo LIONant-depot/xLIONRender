@@ -124,7 +124,7 @@ int main(int argc, char** argv)
     std::printf("%-10s %6s %9s %9s %9s %9s %9s %8s |", "view", "lights", "overflow", "cpu Build", "cpu part", "gpu cells", "gpu split", "ring MB");
     for (const auto& V : Variants) std::printf(" %8s ms", V.Name);
     for (int v = 1; v < nV; ++v) std::printf(" %8s err", Variants[v].Name);
-    std::printf(" | screen: G-buffer, tail, denoiser ms, MB");
+    std::printf(" | screen: G-buffer, tail, temporal, spatial ms, MB");
     std::printf("\n");
     for (const auto& Sz : Sizes)
     {
@@ -137,7 +137,7 @@ int main(int argc, char** argv)
         for (int n : Densities)
         {
             Scene.m_LocalLights = Lights(n);
-            double Gpu[nV] = {}, Err[nV] = {}, Build = 0, CpuPart = 0, GpuBuild[nV] = {}, RingMB = 0, Tail[4] = {}; int Over = 0; bool bFell[nV] = {};
+            double Gpu[nV] = {}, Err[nV] = {}, Build = 0, CpuPart = 0, GpuBuild[nV] = {}, RingMB = 0, Tail[5] = {}; int Over = 0; bool bFell[nV] = {};
             {   // the CPU's Build, for comparison (the GPU builds the cells by default)
                 Renderer.m_bLightCellsGPU = false; Renderer.m_LightMode = mode::CELLS;
                 for (int f = 0; f < 8; ++f) { if (!App.RenderFrame(Scene, View, Camera)) return 1; if (f >= 4) Build += Renderer.getLightBuildMs() / 4; }
@@ -158,7 +158,7 @@ int main(int argc, char** argv)
                     if (App.m_bGotTimes) { Gpu[v] += App.m_LastTimes.m_SceneMs; ++nGpu; }
                     if (v == 0) CpuPart += Renderer.getLightBuildMs() / nFrames;
                     GpuBuild[v] += Renderer.getLightBuildGpuMs() / nFrames;
-                    if (Variants[v].M == mode::SCREEN) { const auto& T = Renderer.getTailReport(); Tail[0] += T.m_GBufferMs / nFrames; Tail[1] += T.m_TailMs / nFrames; Tail[2] += T.m_DenoiseMs / nFrames; Tail[3] = T.m_MemoryMB; }
+                    if (Variants[v].M == mode::SCREEN) { const auto& T = Renderer.getTailReport(); Tail[0] += T.m_GBufferMs / nFrames; Tail[1] += T.m_TailMs / nFrames; Tail[2] += T.m_TemporalMs / nFrames; Tail[3] += (T.m_DenoiseMs - T.m_TemporalMs) / nFrames; Tail[4] = T.m_MemoryMB; }
                     if (v > 0 && f < 4)            // (the error: a few frames' readbacks - 4.6 M pixels each at the big size)
                     {
                         if (!ReadHDR(Device, View, Fr)) return 1;
@@ -174,7 +174,7 @@ int main(int argc, char** argv)
             std::printf("%-10s %6d %9d %9.3f %9.3f %9.3f %9.3f %8.1f |", Sz.Name, n, Over, Build, CpuPart, GpuBuild[0], GpuBuild[2], RingMB);
             for (int v = 0; v < nV; ++v) std::printf(" %10.3f%c", Gpu[v], bFell[v] ? '*' : ' ');
             for (int v = 1; v < nV; ++v) std::printf(" %12.3f", Err[v]);
-            std::printf(" | %.3f %.3f %.3f %.1f", Tail[0], Tail[1], Tail[2], Tail[3]);
+            std::printf(" | %.3f %.3f %.3f %.3f %.1f", Tail[0], Tail[1], Tail[2], Tail[3], Tail[4]);
             std::printf("\n");
             std::fflush(stdout);
         }

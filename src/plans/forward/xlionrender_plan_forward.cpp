@@ -806,9 +806,9 @@ namespace xlionrender
         if( m_CellNeed <= m_CellStride ) return;
         const int Stride = ((m_CellNeed + m_CellNeed / 4) + 65535) / 65536 * 65536;
         m_Device.Destroy(std::move(m_CellRing));
-        if( m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * Stride }) == nullptr )
+        if( m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * Stride, .m_bWriteOnly = true }) == nullptr )
             m_CellStride = Stride;
-        else (void)m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * m_CellStride });
+        else (void)m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * m_CellStride, .m_bWriteOnly = true });
         m_CellNeed = 0;
     }
 
@@ -1708,9 +1708,10 @@ namespace xlionrender
     {
         if( createTailTargets(View) ) { Light.m_LocalCount.m_Y = float(int(light_mode::CELLS)); return; }      // (no targets: the split lists exactly)
         const int W = View.m_TailWidth, H = View.m_TailHeight;
-        if( std::vector<std::uint64_t> Ns; m_TailTimes.getResults(Ns) && Ns.size() >= 4 && Ns[1] >= Ns[0] && Ns[2] >= Ns[1] && Ns[3] >= Ns[2] && Ns[0] != ~0ull )
+        if( std::vector<std::uint64_t> Ns; m_TailTimes.getResults(Ns) && Ns.size() >= 5 && Ns[1] >= Ns[0] && Ns[2] >= Ns[1] && Ns[4] >= Ns[2] && Ns[3] >= Ns[4] && Ns[0] != ~0ull )
         {
             m_TailReport.m_GBufferMs = double(Ns[1] - Ns[0]) * 1e-6; m_TailReport.m_TailMs = double(Ns[2] - Ns[1]) * 1e-6; m_TailReport.m_DenoiseMs = double(Ns[3] - Ns[2]) * 1e-6;
+            m_TailReport.m_TemporalMs = double(Ns[4] - Ns[2]) * 1e-6;
         }
         m_TailReport.m_bOn = true; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
         m_TailReport.m_MemoryMB = double(W) * double(H) * (4 + 8 + 4 + 4 + 4 + 2 * 16) / (1024.0 * 1024.0);     // (G-buffer, motion, depth, the tail's two, the denoiser's two)
@@ -1831,6 +1832,7 @@ namespace xlionrender
             {
                 const std::uint32_t Push[8] = { Pass, std::uint32_t(Slot), 0u, 0u, 0u, 0u, 0u, 0u };
                 Window.Dispatch(m_TailDenoise, Buffers, Textures, Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
+                if( Pass == 0 ) Window.WriteTimestamp(m_TailTimes, 4);
             }
         }
         Window.WriteTimestamp(m_TailTimes, 3);

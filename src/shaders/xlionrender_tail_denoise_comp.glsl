@@ -52,8 +52,7 @@ uvec4 Rec(vec3 D, vec3 S, uint w) { return uvec4(packHalf2x16(D.rg), packHalf2x1
 // This frame's tail around the workgroup (its 8 x 8 texels and kNb more each side): the samples and their distances, read once
 const int kNb   = 3;                        // the neighbourhood: 7 x 7 texels
 const int kTile = 8 + 2 * kNb;
-shared vec3  s_D[kTile * kTile], s_S[kTile * kTile];
-shared float s_Dist[kTile * kTile];
+shared vec4  s_D[kTile * kTile], s_S[kTile * kTile];          // (D, its distance), (S, 0): one 16-byte read each
 
 void LoadTile()
 {
@@ -62,9 +61,8 @@ void LoadTile()
     {
         const ivec2 q  = clamp(Org + ivec2(int(t) % kTile, int(t) / kTile), ivec2(0), Size() - 1);
         const float zq = texelFetch(GDepth, q, 0).r;
-        s_D[t]    = texelFetch(TailDiffuse, q, 0).rgb;
-        s_S[t]    = texelFetch(TailSpecular, q, 0).rgb;
-        s_Dist[t] = zq >= 1.0 ? -1.0 : DepthAt(q, zq);
+        s_D[t] = vec4(texelFetch(TailDiffuse, q, 0).rgb, zq >= 1.0 ? -1.0 : DepthAt(q, zq));
+        s_S[t] = vec4(texelFetch(TailSpecular, q, 0).rgb, 0.0);
     }
     barrier();
 }
@@ -78,7 +76,7 @@ void TemporalPass(ivec2 p)
     const vec3  N    = Nrm(G);
     const float Dist = DepthAt(p, z);
     const ivec2 l    = ivec2(gl_LocalInvocationID.xy) + kNb;
-    const vec3  D = s_D[l.y * kTile + l.x], S = s_S[l.y * kTile + l.x];
+    const vec3  D = s_D[l.y * kTile + l.x].rgb, S = s_S[l.y * kTile + l.x].rgb;
 
     // this frame's neighbourhood (the same surface's texels, 7 x 7): mean and deviation, the history's clamp. A 3 x 3 window shaved the
     // many small lights' peaks: its mean was 2.8% darker than CELLS (lighting_p3_design.md "The bias")
@@ -88,8 +86,9 @@ void TemporalPass(ivec2 p)
     for (int x = -kNb; x <= kNb; ++x)
     {
         const int t = (l.y + y) * kTile + l.x + x;
-        if (s_Dist[t] < 0.0 || abs(s_Dist[t] - Dist) > 0.05 * Dist) continue;
-        const vec3 d = s_D[t], s = s_S[t];
+        const vec4 dd = s_D[t];
+        if (dd.w < 0.0 || abs(dd.w - Dist) > 0.05 * Dist) continue;
+        const vec3 d = dd.rgb, s = s_S[t].rgb;
         m1D += d; m2D += d * d; m1S += s; m2S += s * s; k += 1.0;
     }
     m1D /= k; m1S /= k;
