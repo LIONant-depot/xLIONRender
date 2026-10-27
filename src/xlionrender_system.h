@@ -290,8 +290,8 @@ namespace xlionrender
                 });
             }
             Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });
-            Each.template operator()<light_point>([&](std::uint64_t,   const light_point& C, const xmath::fmat4& L2W) { R.AddPoint(C, L2W * xmath::fvec3(0, 0, 0)); });
-            Each.template operator()<light_spot> ([&](std::uint64_t,   const light_spot& C,  const xmath::fmat4& L2W) { R.AddSpot(C, L2W); });
+            Each.template operator()<light_point>([&](std::uint64_t Id, const light_point& C, const xmath::fmat4& L2W) { R.AddPoint(C, L2W * xmath::fvec3(0, 0, 0), Id); });
+            Each.template operator()<light_spot> ([&](std::uint64_t Id, const light_spot& C,  const xmath::fmat4& L2W) { R.AddSpot(C, L2W, Id); });
             R.Render(Window, Camera, W, H, pOverlay, pUser);
         }
 

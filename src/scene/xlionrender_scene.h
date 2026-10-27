@@ -157,6 +157,8 @@ namespace xlionrender
         float           m_Intensity     = 4.0f;
         bool            m_bCastShadows  = true;
         bool            m_bGI           = true;                     // in the GI's lights (off: direct light only)
+        std::uint64_t   m_Handle        = 0;                        // the light's identity from frame to frame (its entity; lighting_strategy.md
+                                                                    // sec. 6.1): what follows it when it moves; 0: none (its index in the list)
     };
     constexpr int max_local_lights_v = 32;
 

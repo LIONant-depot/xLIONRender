@@ -147,6 +147,25 @@ int main()
         L[1].m_Position.m_X += 0.25f;               // (the spot moves too: each keeps its own slot)
         S.Update(L, {}, true, Fewer, 34);
         CHECK(S.Generation(S.SlotOfLight(0)) == Gen && S.m_Stats.m_RenderedPinned == 7, "two lights moving: pinned pages rendered %d (7)", S.m_Stats.m_RenderedPinned);
+
+        // Handles (lighting_strategy.md sec. 6.1): a light moves while another is put before it in the list - with a handle it is still
+        // the same light (its slot, generation and pages follow it); without one, its index changed: a new light
+        for (int bHandles = 1; bHandles >= 0; --bHandles)
+        {
+            auto H = L;
+            H[0].m_Handle = bHandles ? 11 : 0; H[1].m_Handle = bHandles ? 12 : 0;
+            S.Init({ .m_PoolTexels = 1024, .m_Budget = 100 });
+            S.Update(H, {}, true, {}, 40);
+            const int Slot = S.SlotOfLight(0);
+            const std::uint32_t G0 = S.Generation(Slot);
+            auto Moved = H;
+            Moved[0].m_Position.m_X += 0.3f;
+            Moved.insert(Moved.begin(), xlionrender::local_light{ .m_Position = { 9, 2, 9 }, .m_Radius = 3, .m_Handle = bHandles ? 13u : 0u });
+            S.Update(Moved, {}, true, {}, 41);
+            const bool bSame = S.SlotOfLight(1) == Slot && S.Generation(Slot) == G0;
+            CHECK(bSame == (bHandles != 0), "a moving light put after a new one: %s (handles %d)", bSame ? "the same light" : "a new light", bHandles);
+            CHECK(S.Validate(Table(S)), "handles: invariant 1");
+        }
         S.Init({ .m_PoolTexels = 512, .m_Budget = 100 });
 
         // A changed caster below the point (its -Y face) dirties that face's pages, not the +Y face's

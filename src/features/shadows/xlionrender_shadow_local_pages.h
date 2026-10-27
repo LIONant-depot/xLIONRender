@@ -150,7 +150,12 @@ namespace xlionrender::shadows
             {
                 auto& LS = m_Lights[s];
                 if (!LS.m_bUsed || LS.m_bSeen) continue;
-                const int i = LS.m_iLight;
+                int i = LS.m_iLight;                    // (by its handle when it has one - the list may have changed order -, else its index)
+                if (LS.m_Handle != 0)
+                {
+                    i = -1;
+                    for (int k = 0; k < nLights && i < 0; ++k) if (Lights[k].m_Handle == LS.m_Handle) i = k;
+                }
                 if (i >= 0 && i < nLights && m_SlotOf[i] < 0 && Lights[i].m_bCastShadows && Lights[i].m_Radius > 0 && ShapeKey(Lights[i]) == LS.m_Shape)
                 {
                     LS.m_Key = LightKey(Lights[i]);
@@ -168,7 +173,7 @@ namespace xlionrender::shadows
                     if (!m_Lights[s].m_bUsed)
                     {
                         auto& LS = m_Lights[s];
-                        LS = { LightKey(L), LS.m_Generation + 1, i, true, true, false, ShapeKey(L) };
+                        LS = { LightKey(L), LS.m_Generation + 1, i, true, true, false, ShapeKey(L), 0, L.m_Handle };
                         m_SlotOf[i] = s;
                         break;
                     }
@@ -360,6 +365,7 @@ namespace xlionrender::shadows
             bool            m_bMoved = false;           // this frame: the same light, moved or turned
             std::uint64_t   m_Shape = 0;                // its type, radius and cone (ShapeKey): what a move keeps
             std::uint64_t   m_MovedFrame = 0;           // the last frame it moved (0: never)
+            std::uint64_t   m_Handle = 0;               // the light's handle (local_light::m_Handle; 0: matched by its index)
         };
 
         int Find(const key& K) const noexcept { const auto It = m_Map.find(Entry(K)); return It == m_Map.end() ? -1 : It->second; }
