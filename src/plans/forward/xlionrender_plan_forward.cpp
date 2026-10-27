@@ -1,6 +1,7 @@
 // Plan A - forward. instance::Render lives here so each plan is one file to read.
 #include "xlionrender_instance.h"
 #include "plans/forward/xlionrender_plan_forward.h"
+#include <map>
 #include <chrono>
 #include <optional>
 
@@ -1360,20 +1361,31 @@ namespace xlionrender
             }
         }
 
-        // The sun's GPU page/caster pairs (P1c, features/shadows/xlionrender_shadow_pairs.h): the pages, the rigid opaque clusters of the casters
-        // that overlap a page of their kind (a candidate each, a run a geometry), paired on the GPU - outside the passes
-        struct pairs_run { const cluster_geom* m_pGeom; std::uint32_t m_First, m_Max; };
+        // The GPU page/caster pairs (P1c, features/shadows/xlionrender_shadow_pairs.h): the sun's pages and the local lights' pages, the
+        // rigid opaque clusters of the casters that overlap a page (the sun's: of their kind, light-space rects; the local lights': their
+        // light's sphere), a candidate each, a run a geometry and kind (the sun's and the local lights' draw in viewports of their own), paired
+        // on the GPU - outside the passes
+        struct pairs_run { const cluster_geom* m_pGeom; std::uint32_t m_First, m_Max; bool m_bLocal; };
         std::vector<pairs_run> PairRuns;
-        if( bPairs && !m_VSM.m_ToRender.empty() )
+        const int LocalW = m_LocalPages.getSetup().m_PoolTexels;
+        if( bPairs && (!m_VSM.m_ToRender.empty() || !m_LocalPages.m_ToRender.empty()) )
         {
             const float AW = float(sunAtlasWidth()), AH = float(shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize), T = float(shadows::vsm::page_texels_v);
             std::vector<shadow_pairs::page> Pages;
-            Pages.reserve(m_VSM.m_ToRender.size());
+            Pages.reserve(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
             bool bAny[2] = {};
             for( const auto& P : m_VSM.m_ToRender )
             {
                 Pages.push_back({ P.m_W2C, { T / AW, T / AH, (T + 2.0f * float(P.m_AtlasX)) / AW - 1.0f, (T + 2.0f * float(P.m_AtlasY)) / AH - 1.0f }, { P.m_MinX, P.m_MinY, P.m_Size, P.m_bMover ? 1.0f : 0.0f } });
                 bAny[P.m_bMover] = true;
+            }
+            // (the local pages: in their part's viewport - its own square, LocalW texels)
+            std::vector<int> Lit;
+            for( const auto& P : m_LocalPages.m_ToRender )
+            {
+                const float LW = float(LocalW), TL = float(shadows::local_pages::page_texels_v);
+                Pages.push_back({ P.m_W2C, { TL / LW, TL / LW, (TL + 2.0f * float(P.m_AtlasX)) / LW - 1.0f, (TL + 2.0f * float(P.m_AtlasY)) / LW - 1.0f }, { 0, 0, 0, 2.0f } });
+                if( std::find(Lit.begin(), Lit.end(), P.m_Light) == Lit.end() ) Lit.push_back(P.m_Light);
             }
             // ponytail: a caster against every page of its kind until one overlaps (the epoch's hundreds of static pages: a grid if it shows)
             const auto Touches = [&]( std::uint32_t i )
@@ -1382,32 +1394,28 @@ namespace xlionrender
                 for( const auto& P : m_VSM.m_ToRender ) if( P.m_bMover == Draws[i].m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size) ) return true;
                 return false;
             };
+            const auto TouchesLocal = [&]( std::uint32_t i )
+            {
+                for( int l : Lit ) if( shadows::Overlaps(Draws[i].m_World, Scene.m_LocalLights[std::size_t(l)].m_Position, Scene.m_LocalLights[std::size_t(l)].m_Radius) ) return true;
+                return false;
+            };
             std::vector<shadow_pairs::candidate>& Cands = m_PairCandidates;
             std::vector<xmath::fmat4>             L2L;
-            std::unordered_map<const cluster_geom*, std::uint32_t> RunOf;
+            std::map<std::pair<const cluster_geom*, bool>, std::uint32_t> RunOf;
             Cands.clear();
             xmath::fmat4 Rot = xmath::fmat4::fromZero();
             Rot(0, 0) = m_VSM.m_X.m_X; Rot(0, 1) = m_VSM.m_X.m_Y; Rot(0, 2) = m_VSM.m_X.m_Z;
             Rot(1, 0) = m_VSM.m_Y.m_X; Rot(1, 1) = m_VSM.m_Y.m_Y; Rot(1, 2) = m_VSM.m_Y.m_Z;
             Rot(2, 0) = m_VSM.m_Z.m_X; Rot(2, 1) = m_VSM.m_Z.m_Y; Rot(2, 2) = m_VSM.m_Z.m_Z;
             Rot(3, 3) = 1.0f;
-            for( std::uint32_t i = 0; i < Draws.size(); ++i )
+            const auto AddCandidates = [&]( std::uint32_t i, bool bLocal )
             {
-                if( !Draws[i].m_bGPU ) continue;
-                for( const auto& Sub : Draws[i].m_pMesh->m_Geom.m_Submeshes )        // (a masked material's cutout: the CPU path's material caster)
-                {
-                    const auto& Mats = Draws[i].m_pDraw->m_Materials;
-                    auto* pMat = Sub.m_iMaterial < Mats.size() ? findMaterial(Mats[Sub.m_iMaterial]) : nullptr;
-                    if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) { Draws[i].m_bGPU = false; break; }
-                }
-                if( !Draws[i].m_bGPU || !Touches(i) ) continue;
                 const auto& D    = *Draws[i].m_pDraw;
                 const auto& G    = Draws[i].m_pMesh->m_Geom;
-                const auto  Draw = std::uint32_t(L2L.size()) | (Draws[i].m_bMover ? shadow_pairs::mover_v : 0u);
-                const auto [It, bNew] = RunOf.try_emplace(&G, std::uint32_t(PairRuns.size()));
-                if( bNew ) PairRuns.push_back({ &G, 0, 0 });
-                auto& Run = PairRuns[It->second];
-                L2L.push_back(Rot * D.m_L2W);
+                const auto  Draw = std::uint32_t(L2L.size()) | (bLocal ? shadow_pairs::local_v : Draws[i].m_bMover ? shadow_pairs::mover_v : 0u);
+                const auto [It, bNew] = RunOf.try_emplace({ &G, bLocal }, std::uint32_t(PairRuns.size()));
+                if( bNew ) PairRuns.push_back({ &G, 0, 0, bLocal });
+                L2L.push_back(bLocal ? D.m_L2W : Rot * D.m_L2W);
                 for( const auto& Sub : G.m_Submeshes )
                 {
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
@@ -1420,9 +1428,22 @@ namespace xlionrender
                         const auto  Half = (C.m_BBox.m_Max - C.m_BBox.m_Min) * 0.5f;
                         Cands.push_back({ It->second, 0, c, Draws[i].m_Slot, C.m_nIndices, C.m_iIndex, std::int32_t(C.m_iVertex), Draw
                                         , { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, 0 }, { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
-                        ++Run.m_Max;
+                        ++PairRuns[It->second].m_Max;
                     }
                 }
+            };
+            for( std::uint32_t i = 0; i < Draws.size(); ++i )
+            {
+                if( !Draws[i].m_bGPU ) continue;
+                for( const auto& Sub : Draws[i].m_pMesh->m_Geom.m_Submeshes )        // (a masked material's cutout: the CPU path's material caster)
+                {
+                    const auto& Mats = Draws[i].m_pDraw->m_Materials;
+                    auto* pMat = Sub.m_iMaterial < Mats.size() ? findMaterial(Mats[Sub.m_iMaterial]) : nullptr;
+                    if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) { Draws[i].m_bGPU = false; break; }
+                }
+                if( !Draws[i].m_bGPU ) continue;
+                if( Touches(i) )                AddCandidates(i, false);
+                if( !Lit.empty() && TouchesLocal(i) ) AddCandidates(i, true);
             }
             if( shadow_pairs::Fits(Cands.size(), L2L.size(), Pages.size(), PairRuns.size()) )
             {
@@ -1438,6 +1459,24 @@ namespace xlionrender
         else bPairs = false;
         if( !m_VSM.m_ToRender.empty() )
             for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( !(bPairs && Draws[i].m_bGPU) ) AllCasters.push_back(i);
+
+        // A run of the pairs: its geometry, a draw for every page its candidates pair with (the viewport set)
+        const auto DrawPairs = [&]( xgpu::cmd_buffer& Cmd, bool bLocal )
+        {
+            auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();
+            ViewBlock.m_w2C         = xmath::fmat4::fromIdentity();
+            ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
+            for( std::uint32_t r = 0; r < std::uint32_t(PairRuns.size()); ++r )
+            {
+                const auto& Run = PairRuns[r];
+                if( Run.m_bLocal != bLocal ) continue;
+                std::array<xgpu::buffer*, 4> Buffers{ Run.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_pShadowPairs->m_Records, &m_pShadowPairs->m_Pages };
+                Cmd.setPipelineInstance(m_ShadowPairsInstance, std::span{ Buffers });
+                Cmd.setDynamicUBO(m_ShadowUBO, 0);
+                BindClusterStreams(Cmd, *Run.m_pGeom);
+                Cmd.DrawIndexedIndirectCount(m_pShadowPairs->m_Commands, int(Run.m_First), m_pShadowPairs->m_Counts, int(r), int(Run.m_Max));
+            }
+        };
 
         // Draws the casters that pass Keep with W2C into the current viewport
         // Draws the casters of Indices that pass Keep with W2C into the current viewport
@@ -1538,23 +1577,12 @@ namespace xlionrender
                 Cmd.Draw(3);
                 DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
             }
-            if( !PairRuns.empty() )         // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
+            if( !m_VSM.m_ToRender.empty() && bPairs )      // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
             {
                 const int AW = sunAtlasWidth(), AH = shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;
                 Cmd.setViewport(0.0f, 0.0f, float(AW), float(AH));
                 Cmd.setScissor(0, 0, AW, AH);
-                auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();
-                ViewBlock.m_w2C         = xmath::fmat4::fromIdentity();
-                ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
-                for( std::uint32_t r = 0; r < std::uint32_t(PairRuns.size()); ++r )
-                {
-                    const auto& Run = PairRuns[r];
-                    std::array<xgpu::buffer*, 4> Buffers{ Run.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_pShadowPairs->m_Records, &m_pShadowPairs->m_Pages };
-                    Cmd.setPipelineInstance(m_ShadowPairsInstance, std::span{ Buffers });
-                    Cmd.setDynamicUBO(m_ShadowUBO, 0);
-                    BindClusterStreams(Cmd, *Run.m_pGeom);
-                    Cmd.DrawIndexedIndirectCount(m_pShadowPairs->m_Commands, int(Run.m_First), m_pShadowPairs->m_Counts, int(r), int(Run.m_Max));
-                }
+                DrawPairs(Cmd, false);
             }
             if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 1);
 
@@ -1570,7 +1598,7 @@ namespace xlionrender
             if( !bLightCasters[std::size_t(P.m_Light)] )
             {
                 bLightCasters[std::size_t(P.m_Light)] = 1;
-                for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius) ) C.push_back(i);
+                for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( !(bPairs && Draws[i].m_bGPU) && shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius) ) C.push_back(i);
             }
             Viewport(Cmd, LocalX + P.m_AtlasX, P.m_AtlasY, shadows::local_pages::page_texels_v);
             Cmd.setPipelineInstance(m_ShadowClearInstance);
@@ -1579,6 +1607,12 @@ namespace xlionrender
             Cmd.Draw(3);
             const frustum Page = frustum::FromW2C(P.m_W2C);
             DrawCasters(Cmd, P.m_W2C, C, [&](std::uint32_t i) { return !m_bShadowFaceCull || Page.Overlaps(Draws[i].m_World, false); });
+        }
+        if( !m_LocalPages.m_ToRender.empty() && bPairs )      // the pairs' local runs: one viewport over the local part (each instance into its page)
+        {
+            Cmd.setViewport(float(LocalX), 0.0f, float(LocalW), float(LocalW));
+            Cmd.setScissor(LocalX, 0, LocalW, LocalW);
+            DrawPairs(Cmd, true);
         }
     }
 

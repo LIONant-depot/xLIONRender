@@ -172,6 +172,23 @@ int main()
     Renderer.m_bShadowGPUPairs = false;
     CHECK(Bench("50 movers", true), "the benchmark, 50 movers, the CPU path");
     Renderer.m_bShadowGPUPairs = true;
+
+    // A point light moving over the field (a torch): its pages render again every frame - the CPU's time for them, the pages a frame
+    {
+        Scene.m_LocalLights = { { .m_Position = { 0.0f, 2.0f, 4.0f }, .m_Radius = 7.0f, .m_Intensity = 6.0f } };
+        double Cpu = 0; int nPages = 0, n = 0;
+        for (int f = 0; f < 60 + 120; ++f)
+        {
+            Scene.m_LocalLights[0].m_Position = { 3.0f * std::cos(0.03f * float(f)), 2.0f, 4.0f + 3.0f * std::sin(0.03f * float(f)) };
+            CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateLocalPages(), "a moving point light %d", f);
+            if (f < 60) continue;
+            Cpu += Renderer.getCPUTimes().m_ShadowsMs; nPages += int(Renderer.getLocalPagesRendered().size()); ++n;
+        }
+        const auto& C = Renderer.getLocalReport().m_Counters;
+        std::printf("a moving point light (still movers): shadows CPU %.3f ms, local pages rendered a frame %.1f; its pixels by their level %u of %u\n", Cpu / n, double(nPages) / n, C[1], C[0]);
+        CHECK(Compare("a point light"), "compare, a point light's pages");     // (its pages through the pairs against the CPU path)
+        Scene.m_LocalLights.clear();
+    }
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");

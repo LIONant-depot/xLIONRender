@@ -34,12 +34,13 @@ namespace xlionrender
         };
         static_assert(sizeof(candidate) == 64);
         static constexpr std::uint32_t mover_v = 0x80000000u;
+        static constexpr std::uint32_t local_v = 0x40000000u;       // a local light's caster: its matrix is its local -> world
 
         struct page             // std430 (both shaders)
         {
             xmath::fmat4    m_W2C;
             float           m_Atlas[4];             // the page's scale and offset in the sun atlas's clip space
-            float           m_Rect[4];              // light space: min x, min y, size; 1: a mover page
+            float           m_Rect[4];              // the sun's: light space min x, min y, size; w: 0 a static page, 1 a mover page, 2 a local light's
         };
         static_assert(sizeof(page) == 96);
 
