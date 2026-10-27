@@ -32,14 +32,14 @@ const int kLocalLevel0Pages = 16;
 const int kLocalPageTexels  = 128;
 const int kLocalFaceEntries = 341;
 float g_LocalFoot  = 0.0;
-int   g_LocalTaps  = 1;                 // the filter's half width in taps: 1 the 3 x 3, 0 one tap (the resampling's estimate)
+int   g_LocalTaps  = 1;                 // 1 the filter (a 3 x 3 texel tent), 0 one tap (the resampling's estimate)
 vec3  g_LocalFaceN = vec3(0.0, 1.0, 0.0);
 
 // 1 lit .. 0 shadowed. Receiver: the surface minus the light's position. The face it is seen through (a point light's cube face, a
 // spot's frustum), the level whose texel fits the pixel's footprint (the request pass picks it alike: xlionrender_local_request_comp.glsl),
 // coarser while a tap's page is missing (the coarsest is pinned). Against acne the receiver moves along its triangle's normal by half
 // a texel, with the pages' slope-scaled depth bias (measured on the visibility reference: 1.5 texels and a texel nearer missed contact
-// shadows, 3.8% against 2.5% disagreement, no less acne). 3 x 3 taps, each through the table (a tap past the face's edge clamps to it)
+// shadows, 3.8% against 2.5% disagreement, no less acne). A 3 x 3 texel tent (4 x 4 taps, bilinear: the sun's filter), each tap through the table (a tap past the face's edge clamps to it)
 float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const vec3 N)
 {
     if (Ld.Shadow.z <= 0.0 || UBOLight.ShadowParams.x <= 0.0) return 1.0;
@@ -82,11 +82,16 @@ float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const v
         const int   NT  = (kLocalLevel0Pages >> l) * kLocalPageTexels, W = kLocalLevel0Pages >> l;
         uint LB = 0u;
         for (int k = 0; k < l; ++k) LB += uint((kLocalLevel0Pages >> k) * (kLocalLevel0Pages >> k));
-        const ivec2 T  = ivec2(floor((clamp(UV, vec2(-1.0), vec2(1.0)) * 0.5 + 0.5) * float(NT)));
+        // the 3 x 3 texel tent, bilinear (4 x 4 taps weighted by the point's place in its texel, as the sun's); one tap: the nearest texel
+        const vec2  U  = (clamp(UV, vec2(-1.0), vec2(1.0)) * 0.5 + 0.5) * float(NT) - 0.5;
+        const ivec2 T  = g_LocalTaps == 0 ? ivec2(floor(U + 0.5)) : ivec2(floor(U)) - 1;
+        const vec2  f  = U - floor(U);
+        const vec4  Wx = vec4(1.0 - f.x, 1.0, 1.0, f.x), Wy = vec4(1.0 - f.y, 1.0, 1.0, f.y);
+        const int   nT = g_LocalTaps == 0 ? 1 : 4;
         float Lit = 0.0;
         bool  bAll = true;
-        for (int y = -g_LocalTaps; y <= g_LocalTaps && bAll; ++y)
-        for (int x = -g_LocalTaps; x <= g_LocalTaps; ++x)
+        for (int y = 0; y < nT && bAll; ++y)
+        for (int x = 0; x < nT; ++x)
         {
             const ivec2 t = clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1));
             const ivec2 Pg = t / kLocalPageTexels;
@@ -95,9 +100,9 @@ float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const v
             if (E == 0u) { bAll = false; break; }
             const int   s  = int(E) - 1;
             const ivec2 At = ivec2(int(UBOLight.ShadowParams.x) + (s % Row) * kLocalPageTexels, (s / Row) * kLocalPageTexels) + (t - Pg * kLocalPageTexels);
-            Lit += (texelFetch(SamplerShadowMap, At, 0).r < Ref) ? 0.0 : 1.0;
+            Lit += ((texelFetch(SamplerShadowMap, At, 0).r < Ref) ? 0.0 : 1.0) * (nT == 1 ? 1.0 : Wx[x] * Wy[y]);
         }
-        if (bAll) return Lit / float((2 * g_LocalTaps + 1) * (2 * g_LocalTaps + 1));
+        if (bAll) return nT == 1 ? Lit : Lit / 9.0;
     }
     return 1.0;                                                                 // (no page yet: the light was never rendered)
 }
