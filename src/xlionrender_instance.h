@@ -188,6 +188,12 @@ namespace xlionrender
         // Invariant 1 on this frame's local table
                       bool                 validateLocalPages( void ) const                                     noexcept { std::vector<std::uint32_t> T; m_LocalPages.BuildTable(T); return m_LocalPages.Validate(T); }
         struct pairs_report { int m_nCandidates = 0, m_nRuns = 0, m_nPairs = 0, m_nDropped = 0; std::int64_t m_Triangles = 0; bool m_bGPU = false; };
+        // The screen tail's last frame (light_mode::SCREEN): its passes' GPU time (a ring late) and its targets' memory
+        struct tail_report { bool m_bOn = false; int m_Width = 0, m_Height = 0; double m_GBufferMs = 0, m_TailMs = 0, m_DenoiseMs = 0, m_MemoryMB = 0; int m_nGBufferDraws = 0; };
+                      const tail_report&   getTailReport( void ) const                                          noexcept { return m_TailReport; }
+        // A material's G-buffer variant (its fragment compiled with XLION_GBUFFER_OUTPUT): it is drawn into the screen tail's thin G-buffer
+        // (without one, a material shades its tail inline - the sampled path)
+        [[nodiscard]] xgpu::device::error* SetMaterialGBuffer( material_id Id, const xgpu::shader& FragmentGBuffer ) noexcept;
         // The sun's GPU page/caster pairs (P1c): this frame's candidates and runs, whether the GPU drew the pages; a ring late the pairs, those
         // dropped and the triangles
                       const pairs_report&  getPairsReport( void ) const                                         noexcept { return m_PairsReport; }
@@ -203,8 +209,12 @@ namespace xlionrender
         { EXACT                 // every light
         , CELLS                 // the world cell's list of the lights that reach it (the same image as EXACT)
         , SAMPLED               // the cell's head_v most important lights exactly + one tail light, sampled (unbiased, noisy)
+        , SCREEN                // the head exactly + the tail sampled at half size in screen space and denoised (documentation/lighting_p3_design.md
+                                // "The decision"); the main view only (the others: CELLS); a pixel the screen tail does not cover: the list exactly
+        , AUTO                  // CELLS below m_LightScreenThreshold lights, SCREEN from it
         };
-        light_mode                                 m_LightMode     = light_mode::CELLS;     // the default: the same image as EXACT, a fraction of the shading (research doc: lab)
+        light_mode                                 m_LightMode     = light_mode::AUTO;      // CELLS (exact) or, past the threshold, SCREEN (research doc: lab; lighting_p3_design.md)
+        int                                        m_LightScreenThreshold = 512;            // AUTO: the lights from which SCREEN is used (the night-market rig: CELLS costs less up to ~300)
         int                                        m_LightHead     = 4;
         int                                        m_LightTailSamples = 1;     // SAMPLED: stratified tail samples per pixel
         int                                        m_LightTailCandidates = 8;  // SAMPLED: > 1, the tail resampled (RIS) from this many candidates, one shaded (0: the plain samples)
@@ -323,6 +333,7 @@ namespace xlionrender
         static constexpr std::size_t capture_path_v = std::size_t(geom_kind::COUNT);      // the GI material capture's pipelines (getCaptureInstance)
         static constexpr std::size_t shadow_path_v  = capture_path_v + 1;                 // a masked material's shadow casters, per vertex path (getMaterialInstance bShadow)
         static constexpr std::size_t records_path_v = shadow_path_v + capture_path_v;     // the rigid path reading its draws' records (getRecordsInstance: GPU culling)
+        static constexpr std::size_t gbuffer_path_v = records_path_v + 1;                 // the screen tail's G-buffer, per vertex path (getGBufferInstance)
 
         struct material_slot
         {
@@ -333,7 +344,8 @@ namespace xlionrender
             std::vector<xgpu::texture*> TexturePointers() noexcept { std::vector<xgpu::texture*> P; for (auto& T : m_Textures) P.push_back(T.m_Private ? &T : nullptr); return P; }
             // Per vertex path (geom_kind), the GI capture, the shadow casters per vertex path, the records path: built on first use. Its own
             // textures; the pipeline is shared with every material of the same fragment and state (m_SharedPipelines)
-            std::array<xgpu::pipeline_instance, records_path_v + 1> m_Instance;
+            std::array<xgpu::pipeline_instance, gbuffer_path_v + capture_path_v> m_Instance;
+            xgpu::shader            m_GBufferFragment;              // SetMaterialGBuffer: its G-buffer variant (none: not in the thin G-buffer)
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
             material_state          m_State;                        // CreateMaterial: its pipelines' settings
@@ -368,6 +380,20 @@ namespace xlionrender
         static void                 ApplyState         ( xgpu::pipeline::setup& Setup, const material_state& S ) noexcept;
         xgpu::pipeline_instance*    getCaptureInstance ( material_slot& Material )                              noexcept;
         xgpu::pipeline_instance*    getRecordsInstance ( material_slot& Material )                              noexcept;     // RIGID, the draw's push constants from its record (binding 12)
+        xgpu::pipeline_instance*    getGBufferInstance ( material_slot& Material, geom_kind Kind )              noexcept;     // its G-buffer variant (nullptr: none)
+        // The screen tail (light_mode::SCREEN, the main view): the thin G-buffer, the tail pass and the denoiser, before the scene pass
+        xgpu::device::error*        createTailTargets  ( render_view& View )                                    noexcept;
+        void                        destroyTailTargets ( render_view& View )                                    noexcept;
+        void                        renderTail         ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept;
+        xgpu::pipeline              m_ForwardGBPipeline, m_StaticGeomGBPipeline, m_TailPipeline;     // the built-in materials' G-buffer variants; the tail pass
+        xgpu::pipeline_instance     m_ForwardGBInstance, m_StaticGeomGBInstance;
+        xgpu::shader                m_TailDenoiseShader;
+        xgpu::compute               m_TailDenoise;
+        xgpu::buffer                m_TailFrames;                   // the denoiser's frame (host visible, a slot a ring frame)
+        xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
+        tail_report                 m_TailReport;
+        xgpu::buffer*               m_pTailRecords = nullptr;       // binding 14 of the lit pipelines this render: the view's records (SCREEN), else none
+        xgpu::buffer*               TailBuffer( void ) noexcept     { return m_pTailRecords ? m_pTailRecords : &m_GIDummy; }
         // The materials' pipelines, shared by (fragment shader, the state the path uses, path): materials differ by their instances (textures)
         using pipeline_key = std::tuple<const void*, std::uint32_t, std::size_t>;
         struct shared_pipeline { xgpu::pipeline m_Pipeline; xgpu::pipeline_instance m_Globals; int m_nUsers = 0; };      // m_Globals: the texture-table materials' set 0 (the renderer's textures only)
@@ -376,7 +402,7 @@ namespace xlionrender
         // Material's instance k on the shared pipeline (made by Build when it is new); nullptr when either could not be created
         xgpu::pipeline_instance*    makeInstance       ( material_slot& Material, std::size_t k, bool bShadowAtlas, const std::function<xgpu::device::error*(xgpu::pipeline&)>& Build ) noexcept;
         void                        releaseInstances   ( material_slot& Material )                              noexcept;
-        xgpu::device::error*        buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& Material, geom_kind Kind, bool bShadow, bool bRecords = false ) noexcept;
+        xgpu::device::error*        buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& Material, geom_kind Kind, bool bShadow, bool bRecords = false, bool bGBuffer = false ) noexcept;
         std::uint8_t                TableSlots         ( const material_slot& Material ) const                  noexcept;
         xgpu::shader                m_StaticGeomGIVert, m_SkinGeomVert, m_GICaptureVert, m_StaticGeomGIRecordsVert;     // the material pipelines' vertex shaders
         void                        BindClusterStreams ( xgpu::cmd_buffer& Cmd, const cluster_geom& Geom )      noexcept;   // the core + optional streams (m_StaticGeomVD / m_SkinGeomVD)

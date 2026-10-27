@@ -117,11 +117,14 @@ int main(int argc, char** argv)
 
     // The modes: CELLS (exact), SAMPLED with the plain tail samples, resampled (8 candidates), resampled with their visibility (the default)
     struct variant { const char* Name; mode M; int Candidates; bool bVis; };
-    const variant Variants[] = { { "cells", mode::CELLS, 0, false }, { "plain", mode::SAMPLED, 0, false }, { "ris", mode::SAMPLED, 8, false }, { "ris+vis", mode::SAMPLED, 8, true } };
+    const variant Variants[] = { { "cells", mode::CELLS, 0, false }, { "plain", mode::SAMPLED, 0, false }, { "ris", mode::SAMPLED, 8, false }, { "ris+vis", mode::SAMPLED, 8, true }
+                               , { "screen", mode::SCREEN, 8, true } };
+    constexpr int nV = int(std::size(Variants));
     std::printf("many-light rig: %d warmed frames a measure; per mode the GPU scene pass ms (*: the cell buffer was full, the render fell back to EXACT), and SAMPLED's per-frame error against CELLS (mean |a - b| / mean b); the CPU cell build ms\n", nFrames);
     std::printf("%-10s %6s %9s %9s %9s %9s %9s %8s |", "view", "lights", "overflow", "cpu Build", "cpu part", "gpu cells", "gpu split", "ring MB");
     for (const auto& V : Variants) std::printf(" %8s ms", V.Name);
-    for (int v = 1; v < 4; ++v) std::printf(" %8s err", Variants[v].Name);
+    for (int v = 1; v < nV; ++v) std::printf(" %8s err", Variants[v].Name);
+    std::printf(" | screen: G-buffer, tail, denoiser ms, MB");
     std::printf("\n");
     for (const auto& Sz : Sizes)
     {
@@ -134,14 +137,14 @@ int main(int argc, char** argv)
         for (int n : Densities)
         {
             Scene.m_LocalLights = Lights(n);
-            double Gpu[4] = {}, Err[4] = {}, Build = 0, CpuPart = 0, GpuBuild[4] = {}, RingMB = 0; int Over = 0; bool bFell[4] = {};
+            double Gpu[nV] = {}, Err[nV] = {}, Build = 0, CpuPart = 0, GpuBuild[nV] = {}, RingMB = 0, Tail[4] = {}; int Over = 0; bool bFell[nV] = {};
             {   // the CPU's Build, for comparison (the GPU builds the cells by default)
                 Renderer.m_bLightCellsGPU = false; Renderer.m_LightMode = mode::CELLS;
                 for (int f = 0; f < 8; ++f) { if (!App.RenderFrame(Scene, View, Camera)) return 1; if (f >= 4) Build += Renderer.getLightBuildMs() / 4; }
                 Renderer.m_bLightCellsGPU = !bCPU;
             }
             std::vector<float> Ref, Fr;
-            for (int v = 0; v < 4; ++v)
+            for (int v = 0; v < nV; ++v)
             {
                 Renderer.m_LightMode = Variants[v].M;
                 Renderer.m_LightTailCandidates = Variants[v].Candidates;
@@ -155,6 +158,7 @@ int main(int argc, char** argv)
                     if (App.m_bGotTimes) { Gpu[v] += App.m_LastTimes.m_SceneMs; ++nGpu; }
                     if (v == 0) CpuPart += Renderer.getLightBuildMs() / nFrames;
                     GpuBuild[v] += Renderer.getLightBuildGpuMs() / nFrames;
+                    if (Variants[v].M == mode::SCREEN) { const auto& T = Renderer.getTailReport(); Tail[0] += T.m_GBufferMs / nFrames; Tail[1] += T.m_TailMs / nFrames; Tail[2] += T.m_DenoiseMs / nFrames; Tail[3] = T.m_MemoryMB; }
                     if (v > 0 && f < 4)            // (the error: a few frames' readbacks - 4.6 M pixels each at the big size)
                     {
                         if (!ReadHDR(Device, View, Fr)) return 1;
@@ -168,8 +172,9 @@ int main(int argc, char** argv)
                 if (v == 0) { Over = Renderer.getLightStats().m_nOverflowCells; RingMB = Renderer.getLightStats().m_CellRingMB; }
             }
             std::printf("%-10s %6d %9d %9.3f %9.3f %9.3f %9.3f %8.1f |", Sz.Name, n, Over, Build, CpuPart, GpuBuild[0], GpuBuild[2], RingMB);
-            for (int v = 0; v < 4; ++v) std::printf(" %10.3f%c", Gpu[v], bFell[v] ? '*' : ' ');
-            for (int v = 1; v < 4; ++v) std::printf(" %12.3f", Err[v]);
+            for (int v = 0; v < nV; ++v) std::printf(" %10.3f%c", Gpu[v], bFell[v] ? '*' : ' ');
+            for (int v = 1; v < nV; ++v) std::printf(" %12.3f", Err[v]);
+            std::printf(" | %.3f %.3f %.3f %.1f", Tail[0], Tail[1], Tail[2], Tail[3]);
             std::printf("\n");
             std::fflush(stdout);
         }

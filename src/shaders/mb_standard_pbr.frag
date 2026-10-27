@@ -62,7 +62,7 @@
 #ifndef XMAT_VARYING_IN
 layout(location = 0) in VaryingFull In;
 #endif
-#ifndef XLION_LDR_OUTPUT
+#if !defined(XLION_LDR_OUTPUT) && !defined(XLION_TAIL_SCREEN)
 layout(location = 9) in vec4 InGI;     // xLIONRender surfel GI: sum(w E), sum(w) from the vertex shader (0 without GI) - divided here, into g_GI
 #ifndef XLION_NO_GI_PIXEL
 layout(location = 10) in vec3 InGIPos;          // the per-pixel read: mesh space position, normal, { first surfel in GILight, GI level }
@@ -112,6 +112,9 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	mat4 VSMPrevW2Light;                 // the previous epoch (P1e): its world -> light, its levels, x: there is one, y: the current epoch's
 	vec4 VSMPrevLevels[12];              // weight (the cross-fade), z: its level 0 texel, w: its table's first uint
 	vec4 VSMPrevParams;
+	// the screen tail (lighting_p3_design.md "The decision": the half-size G-buffer, xlionrender_tail_screen_frag.glsl, the denoiser; appended)
+	vec4 TailParams;                     // x: 1 the material reads the denoised tail (LocalCount.y 3), y, z: the half-size targets' width, height, w: its first texel's record in TailScreen
+	mat4 TailC2W;                        // the tail pass: clip -> camera-centred world
 #endif
 } UBOLight;
 
@@ -243,6 +246,7 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 #define VSMDebugOr(Lit) (Lit)
 #endif
 
+#ifndef XLION_TAIL_SCREEN                // (the tail pass, xlionrender_tail_screen_frag.glsl: the lights and their shadows only, from here no material)
 #ifndef XLION_LDR_OUTPUT
 #ifndef XLION_NO_GI_PIXEL
 // The GI read at half resolution (xlionrender_gi_screen_frag.glsl's buffer, bound as GIMesh), upsampled to this pixel: its 4 half
@@ -359,6 +363,11 @@ vec3 PBRLighting
 
 	// Ambient baseline: Compute always�cheap; 2025 grazing approx for subtle IBL hack (neural-inspired, no cubemap).
 	vec3    N                   = TransformNotmalToWorld(inNormal);
+#ifdef XLION_GBUFFER_OUTPUT
+	// The material's G-buffer variant (the half-size thin G-buffer: lighting_p3_design.md "The decision"): its octahedral normal (x 0.5
+	// + 0.5) and roughness, as the material's color into the 10-10-10-2 target - no lighting compiled in
+	return vec3(OctEncode(N) * 0.5 + 0.5, max(inRoughness, MIN_ROUGHNESS));
+#endif
 	vec3	V					= normalize(UBOLight.wSpaceEyePos.xyz - In.wSpacePosition.xyz);
 	float	NdotV				= saturate(dot(N, V));
 	vec3	ambientDiffuse		= (1.0 - inMetalic) * inAlbedo * UBOLight.AmbientLightColor.rgb * inAO / PI;
@@ -445,3 +454,4 @@ vec3 PBRLighting
 
 	return VSMDebugOr(GIDebugOr(ambient + directLighting + Local + emissive));
 }
+#endif   // XLION_TAIL_SCREEN

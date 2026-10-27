@@ -866,6 +866,7 @@ namespace xlionrender
         m_LightRingUsed += std::max(nProbes, 0);
 
         auto Mode = m_LightMode;
+        if( Mode == light_mode::AUTO ) Mode = nLights >= m_LightScreenThreshold ? light_mode::SCREEN : light_mode::CELLS;
         int  CellBase = 0;
         m_LightBuildMs = 0;
         int  ProbeCells = -1;
@@ -893,7 +894,8 @@ namespace xlionrender
                 m_CellScratchUints = m_Device.Create(m_CellScratch, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = Size, .m_pData = const_cast<std::uint32_t*>(Zeros.data()) }) == nullptr ? Size : 0;
                 bGPU = m_CellScratchUints > 0;
             }
-            if( !bGPU ) m_LightCells.Build(m_CellLights, Eye, m_LightCellSize, Mode == light_mode::SAMPLED ? m_LightHead : 0);
+            const bool bHead = Mode == light_mode::SAMPLED || Mode == light_mode::SCREEN;      // (the head/tail split)
+            if( !bGPU ) m_LightCells.Build(m_CellLights, Eye, m_LightCellSize, bHead ? m_LightHead : 0);
             const int nLists = int(m_LightCells.m_Data.size());
             if( nProbes > 0 )
             {
@@ -923,7 +925,7 @@ namespace xlionrender
                     if( !m_bLightCellsTimed ) Window.WriteTimestamp(m_LightCellsTimes, 0);
                     const xgpu::buffer::copy In{ InputBase, nLists, nInput }, Out{ 0, CellBase, nLists };
                     Window.CopyBuffer(m_CellRing, m_CellScratch, std::span{ &In, 1 });
-                    const std::uint32_t Head = Mode == light_mode::SAMPLED ? std::uint32_t(std::max(m_LightHead, 0)) : 0u;
+                    const std::uint32_t Head = bHead ? std::uint32_t(std::max(m_LightHead, 0)) : 0u;
                     auto Buffers = std::array<xgpu::buffer*, 1>{ &m_CellScratch };
                     constexpr int Blocks = (light_cells::cells_v / 4) * (light_cells::cells_v / 4) * (light_cells::cells_v / 4);
                     for( std::uint32_t Pass = 0; Pass < 3; ++Pass )
@@ -1586,9 +1588,9 @@ namespace xlionrender
                                 m_LightUBO.allocEntry<details::ubo_lighting>().m_LightParams = xmath::fvec4(0, 0, 1, 1);
                                 bCutLight = true;
                             }
-                            std::array<xgpu::buffer*, 11> Buffers = bSkin ? std::array<xgpu::buffer*, 11>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams }
-                                                                          : std::array<xgpu::buffer*, 11>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, nullptr, nullptr };
-                            Cmd.setPipelineInstance(*pCut, std::span{ Buffers.data(), bSkin ? std::size_t{11} : std::size_t{9} });
+                            std::array<xgpu::buffer*, 12> Buffers = bSkin ? std::array<xgpu::buffer*, 12>{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams, TailBuffer() }
+                                                                          : std::array<xgpu::buffer*, 12>{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer(), nullptr, nullptr };
+                            Cmd.setPipelineInstance(*pCut, std::span{ Buffers.data(), bSkin ? std::size_t{12} : std::size_t{10} });
                             if( pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);
                             Cmd.setDynamicUBO(m_LightUBO, 1);
                         }
@@ -1679,14 +1681,154 @@ namespace xlionrender
 
     // The scene into View's HDR target (and depth), lit, from a camera-centered W2C at Eye: the main view, and the reflection
     // probes' capture faces (bMain false: no timestamps). Shadows, instances and cells of this frame are already up to date.
+    // The screen tail (light_mode::SCREEN, the main view; documentation/lighting_p3_design.md "The decision"), before the scene pass: the thin
+    // G-buffer at half size - the visible draws that are not blended, through their materials' G-buffer variants (a material without one is
+    // left out: its pixels find no texel of theirs and shade their tail inline) -, the tail pass over it (demodulated diffuse and specular),
+    // the denoiser (temporal, spatial) into the records the scene pass's materials read (binding 14). Sets the lighting block's mode 3 and
+    // the tail's parameters; anything missing: mode 2 (the inline sampled tail)
+    void instance::renderTail( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept
+    {
+        if( createTailTargets(View) ) { Light.m_LocalCount.m_Y = float(int(light_mode::CELLS)); return; }      // (no targets: the split lists exactly)
+        const int W = View.m_TailWidth, H = View.m_TailHeight;
+        if( std::vector<std::uint64_t> Ns; m_TailTimes.getResults(Ns) && Ns.size() >= 4 && Ns[1] >= Ns[0] && Ns[2] >= Ns[1] && Ns[3] >= Ns[2] && Ns[0] != ~0ull )
+        {
+            m_TailReport.m_GBufferMs = double(Ns[1] - Ns[0]) * 1e-6; m_TailReport.m_TailMs = double(Ns[2] - Ns[1]) * 1e-6; m_TailReport.m_DenoiseMs = double(Ns[3] - Ns[2]) * 1e-6;
+        }
+        m_TailReport.m_bOn = true; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
+        m_TailReport.m_MemoryMB = double(W) * double(H) * (4 + 4 + 4 + 4 + 2 * 16) / (1024.0 * 1024.0);     // (G-buffer, depth, the tail's two, the denoiser's two)
+
+        // A camera cut (a jump past 2 m, or the view turned past 45 degrees): no history (the GI screen pass's rule)
+        const xmath::fmat4 C2W = W2C.Inverse();
+        if( View.m_bTailPrev )
+        {
+            const xmath::fmat4 PrevW2C = View.m_TailPrevC2W.Inverse();
+            const auto Fwd = []( const xmath::fmat4& M ) { const float* p = reinterpret_cast<const float*>(&M); const xmath::fvec3 F{ p[3], p[7], p[11] }; return F / std::max(F.Length(), 1e-12f); };
+            const xmath::fvec3 Jump = Eye - View.m_TailPrevEye;
+            if( Jump.Dot(Jump) > 4.0f || Fwd(W2C).Dot(Fwd(PrevW2C)) < 0.7071f ) View.m_bTailPrev = false;
+        }
+
+        Light.m_TailParams = { 1.0f, float(W), float(H), 0.0f };
+        Light.m_TailC2W    = C2W;
+        Light.m_LocalCount.m_Y = float(int(light_mode::SCREEN));
+
+        Window.WriteTimestamp(m_TailTimes, 0);
+        {
+            const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
+            auto Cmd = Window.StartRenderPass(View.m_TailGPass);
+            const void* pBound = nullptr; const cluster_geom* pBoundGeom = nullptr;
+            int nDraws = 0;
+            for( const auto& Vis : m_Visible )
+            {
+                const std::size_t iDraw = Vis.m_iDraw;
+                const auto&       D     = Scene.m_Draws[iDraw];
+                const auto*       pMesh = Vis.m_pMesh;
+                if( pMesh->m_bCluster == false )
+                {
+                    std::array<xgpu::buffer*, 3> LightBuffers{ &m_LightRing, &m_CellRing, TailBuffer() };
+                    Cmd.setPipelineInstance(m_ForwardGBInstance, LightBuffers);
+                    Cmd.setDynamicUBO(m_LightUBO, 1);
+                    auto& Mat = m_MaterialUBO.allocEntry<details::ubo_material>();
+                    Mat.m_BaseColor = xmath::fvec4(D.m_Material.m_BaseColor, 1);
+                    Mat.m_Params    = { D.m_Material.m_Metallic, D.m_Material.m_Roughness, D.m_Material.m_AO, D.m_Material.m_F0 };
+                    Mat.m_Emissive  = xmath::fvec4(D.m_Material.m_Emissive, D.m_Material.m_bEditorGrid ? 1.0f : 0.0f);
+                    Cmd.setDynamicUBO(m_MaterialUBO, 2);
+                    Cmd.setPushConstants(details::push_forward{ ToEye * D.m_L2W, W2C });
+                    Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_VertexBuffer));
+                    Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_IndexBuffer));
+                    Cmd.Draw(pMesh->m_nIndices);
+                    pBound = nullptr; ++nDraws;
+                    continue;
+                }
+                const std::uint32_t Slot = m_DrawSlot[iDraw];
+                if( Slot == instance_slots::none_v || (bPlan && m_bBoxesOnly) ) continue;
+                const auto& G     = pMesh->m_Geom;
+                const bool  bSkin = G.m_Kind == geom_kind::SKIN;
+                const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
+                for( const auto& Sub : G.m_Submeshes )
+                {
+                    auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                    if( pMat && pMat->m_State.isBlended() ) continue;
+                    auto* pInstance = pMat ? getGBufferInstance(*pMat, G.m_Kind) : (bSkin ? nullptr : &m_StaticGeomGBInstance);
+                    if( pInstance == nullptr ) continue;
+                    if( pInstance->m_Private.get() != pBound || &G != pBoundGeom )
+                    {
+                        if( !bSkin )
+                        {
+                            std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+                            Cmd.setPipelineInstance(*pInstance, std::span{ Buffers });
+                        }
+                        else
+                        {
+                            std::array<xgpu::buffer*, 12> Buffers{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+                            Cmd.setPipelineInstance(*pInstance, std::span{ Buffers });
+                        }
+                        Cmd.setDynamicUBO(m_LightUBO, 1);
+                        Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                        BindClusterStreams(Cmd, G);
+                        pBound = pInstance->m_Private.get(); pBoundGeom = &G;
+                    }
+                    if( pMat && pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);
+                    const std::uint32_t MaterialBase = pMat ? pMat->m_ParamBase : 0u;
+                    for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                    {
+                        if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
+                        const auto& C = G.m_Clusters[c];
+                        if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, MaterialBase });
+                        else        Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, MaterialBase });
+                        Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
+                        ++nDraws;
+                    }
+                }
+            }
+            m_TailReport.m_nGBufferDraws = nDraws;
+        }
+        Window.WriteTimestamp(m_TailTimes, 1);
+        {
+            auto Cmd = Window.StartRenderPass(View.m_TailPass);
+            std::array<xgpu::buffer*, 2> Buffers{ &m_LightRing, &m_CellRing };
+            Cmd.setPipelineInstance(View.m_TailInstance, Buffers);
+            Cmd.setDynamicUBO(m_LightUBO, 1);
+            Cmd.setBuffer(m_FullscreenVB);
+            Cmd.setBuffer(m_FullscreenIB);
+            Cmd.Draw(3);
+        }
+        Window.WriteTimestamp(m_TailTimes, 2);
+        {
+            // the denoiser's frame (shaders/xlionrender_tail_denoise_comp.glsl frame_t): this frame's clip -> world, this frame's clip -> last
+            // frame's (the eye's move between), the eye's move, the size, whether last frame's is there, the frame's number
+            const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+            const xmath::fvec3 Move = Eye - View.m_TailPrevEye;
+            const xmath::fmat4 Reproject = View.m_bTailPrev ? View.m_TailPrevC2W.Inverse() * xmath::fmat4::fromTranslation(Move) * C2W : xmath::fmat4::fromIdentity();
+            const xmath::fvec4 MoveV(Move, 0.0f), Params{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
+            (void)m_TailFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
+            {
+                auto* pB = static_cast<std::byte*>(p);
+                std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &Reproject, 64); std::memcpy(pB + 128, &MoveV, 16); std::memcpy(pB + 144, &Params, 16);
+            });
+            auto Buffers  = std::array<xgpu::buffer*, 3>{ &m_TailFrames, &View.m_TailResult, &View.m_TailTemporal };
+            auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_TailDiffuse, &View.m_TailSpecular, &View.m_TailGColor, &View.m_TailGDepth };
+            for( std::uint32_t Pass = 0; Pass < 2; ++Pass )
+            {
+                const std::uint32_t Push[8] = { Pass, std::uint32_t(Slot), 0u, 0u, 0u, 0u, 0u, 0u };
+                Window.Dispatch(m_TailDenoise, Buffers, Textures, Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
+            }
+        }
+        Window.WriteTimestamp(m_TailTimes, 3);
+        View.m_TailPrevC2W = C2W; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
+        m_pTailRecords = &View.m_TailResult;
+    }
+
     void instance::renderScenePass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept
     {
+        m_pTailRecords = nullptr;
+        details::ubo_lighting* pLight = nullptr;       // (this render's lighting block: the screen tail sets its part, renderTail)
         const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
         // Scene -> HDR
         {
             {
                 const auto& L     = Scene.m_Sun;
                 auto&       Light = m_LightUBO.allocEntry<details::ubo_lighting>();
+                pLight = &Light;
                 Light.m_LightColor        = xmath::fvec4(L.m_Color * L.m_Intensity, 1);
                 Light.m_AmbientLightColor = xmath::fvec4(Scene.m_Ambient, 0);
                 Light.m_wSpaceLightPos    = xmath::fvec4(-L.m_Direction.NormalizeCopy(), 0);
@@ -1729,6 +1871,7 @@ namespace xlionrender
                 Light.m_VSMPrevParams = { bVSM && m_VSM.HasPrevious() ? 1.0f : 0.0f, m_VSM.Fade(), m_VSM.m_PrevLevel0Texel, float(vsmTableBase() + VS.TableUints()) };
 
                 writeLocalLights(Window, Scene, Eye, Light);
+                if( m_LightModeUsed == light_mode::SCREEN && !bMain ) Light.m_LocalCount.m_Y = float(int(light_mode::CELLS));     // (the screen tail is the main view's: the others' every light of the list)
                 Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, 0, 0 };
 
             }
@@ -2078,6 +2221,10 @@ namespace xlionrender
                 return m_CullSubBase[iDraw] != ~0u && m_CullSub[m_CullSubBase[iDraw] + std::size_t(&Sub - G.m_Submeshes.data())] != 0;
             };
 
+            // The screen tail (light_mode::SCREEN): the thin G-buffer, the tail pass and the denoiser, before the scene pass reads them
+            if( bMain && pLight && m_LightModeUsed == light_mode::SCREEN ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);
+            else if( bMain ) m_TailReport.m_bOn = false;
+
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
             CmdPass.emplace(Window.StartRenderPass(View.m_ScenePass));
             auto& Cmd = *CmdPass;
@@ -2153,13 +2300,13 @@ namespace xlionrender
                     struct bind_lap { std::chrono::steady_clock::time_point t; ~bind_lap() { g_BindMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count(); } } BindLap{ TB };
                     if( !bSkin )
                     {
-                        std::array<xgpu::buffer*, 9> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
-                                                              , pGIBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
+                        std::array<xgpu::buffer*, 10> GIBuffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing
+                                                              , pGIBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
                         Cmd.setPipelineInstance(*pInstance, std::span{ GIBuffers });     // every rigid pipeline reads the GI
                     }
                     else
                     {
-                        std::array<xgpu::buffer*, 11> Static{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, SkinGI, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams };
+                        std::array<xgpu::buffer*, 12> Static{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, SkinGI, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams, TailBuffer() };
                         Cmd.setPipelineInstance(*pInstance, std::span{ Static });      // SKIN: the GI bindings of the material fragment (no surfels: the probe grid), the BoneMap, the parameters
                     }
                     if( pMat && pMat->m_bTable && pInstance != &m_StaticGeomInstance ) Cmd.setTextureTable(pMat->m_Table);
@@ -2283,7 +2430,7 @@ namespace xlionrender
                 if( pMesh->m_bCluster == false )
                 {
                     pBound = nullptr;
-                    std::array<xgpu::buffer*, 2> LightBuffers{ &m_LightRing, &m_CellRing };
+                    std::array<xgpu::buffer*, 3> LightBuffers{ &m_LightRing, &m_CellRing, TailBuffer() };
                     BindStandard(m_ForwardInstance, LightBuffers);
                     Cmd.setPushConstants(details::push_forward{ L2w, W2C });
                     Cmd.setBuffer(const_cast<xgpu::buffer&>(pMesh->m_VertexBuffer));
@@ -2321,7 +2468,7 @@ namespace xlionrender
                     const auto& G = *R.m_pGeom;
                     if( R.m_pInstance->m_Private.get() != pRunBound || &G != pRunGeom || R.m_pGI != pRunGI )
                     {
-                        std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, R.m_pGI, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &m_pCull->m_Records };
+                        std::array<xgpu::buffer*, 11> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, R.m_pGI, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &m_pCull->m_Records, TailBuffer() };
                         Cmd.setPipelineInstance(*R.m_pInstance, std::span{ Buffers });
                         if( R.m_pMat->m_bTable ) Cmd.setTextureTable(R.m_pMat->m_Table);
                         Cmd.setDynamicUBO(m_LightUBO, 1);
@@ -2590,7 +2737,7 @@ namespace xlionrender
             // GIMesh: the empty one. The capture's GI reference is not gi_none (its debug bits say "capture"), so the material shader still runs
             // its GI fallback (SurfelGILocalMean at the capture's position 0) before the capture output replaces it: with the mesh's read grid
             // that walked every list of the cell at the mesh's origin for every capture pixel (the Golem: about 4 s of GPU a batch, 31 batches)
-            std::array<xgpu::buffer*, 9> Buffers{ &J.m_Data, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
+            std::array<xgpu::buffer*, 10> Buffers{ &J.m_Data, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
             for( int a = 0; a < n; )
             {
                 const std::uint32_t Slot = Mats[J.m_Order[a]].m_iMaterial;
@@ -2786,6 +2933,7 @@ namespace xlionrender
     void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& CameraIn, const overlay_fn& Overlay ) noexcept
     {
         assert(m_bReady && View.m_Width > 0);
+        m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
         static const bool s_bNoBudget = std::getenv("XLION_NO_FRAME_BUDGET") != nullptr;    // measurement only (GI review): every cluster drawn, whatever the host's budget
         if( s_bNoBudget ) m_FrameBudgetMs = 0;
 

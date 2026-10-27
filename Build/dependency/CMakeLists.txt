@@ -39,7 +39,7 @@ endforeach()
 # shaders include the shared library in src/shaders, hence -I.
 set(XLIONRENDER_LIB_SHADERS)
 foreach(STAGE_PAIR "vert:xlionrender_forward_vert" "frag:xlionrender_forward_standard_frag" "vert:xlionrender_fullscreen_vert"
-                   "frag:xlionrender_tonemap_frag" "frag:xlionrender_blit_frag" "frag:xlionrender_default_material_frag" "frag:xlionrender_depth_frag" "vert:xlionrender_clear_depth_vert" "frag:xlionrender_geom_standard_frag" "frag:xlionrender_env_sky_frag" "frag:xlionrender_env_prefilter_frag" "frag:xlionrender_env_dfg_frag" "frag:xlionrender_env_downsample_frag" "frag:xlionrender_env_cube_to_oct_frag" "frag:xlionrender_env_cubemap_frag" "frag:xlionrender_sky_background_frag" "frag:xlionrender_outline_mask_frag" "frag:xlionrender_outline_composite_frag" "vert:xlionrender_static_geom_vert" "vert:xlionrender_static_geom_gi_vert" "vert:xlionrender_static_geom_gi_records_vert" "vert:xlionrender_skin_geom_vert" "vert:xlionrender_gi_capture_vert" "comp:xlionrender_gi_surfel_pass_comp" "comp:xlionrender_gi_scatter_comp" "comp:xlionrender_gi_commit_comp" "comp:xlionrender_gi_ops_comp" "comp:xlionrender_gi_filter_comp" "comp:xlionrender_gi_expand_comp" "comp:xlionrender_gi_means_comp" "comp:xlionrender_gi_cube_comp" "comp:xlionrender_gi_migrate_comp" "comp:xlionrender_gi_readback_comp" "comp:xlionrender_cull_comp" "comp:xlionrender_hiz_comp" "comp:xlionrender_vsm_request_comp" "comp:xlionrender_shadow_pairs_comp" "comp:xlionrender_local_request_comp" "comp:xlionrender_light_cells_comp" "vert:xlionrender_shadow_pairs_vert" "comp:xlionrender_gi_links_comp" "comp:xlionrender_gi_solve_comp" "comp:xlionrender_gi_ghosts_comp" "comp:xlionrender_gi_probes_comp" "frag:xlionrender_gi_screen_frag")
+                   "frag:xlionrender_tonemap_frag" "frag:xlionrender_blit_frag" "frag:xlionrender_default_material_frag" "frag:xlionrender_depth_frag" "vert:xlionrender_clear_depth_vert" "frag:xlionrender_geom_standard_frag" "frag:xlionrender_env_sky_frag" "frag:xlionrender_env_prefilter_frag" "frag:xlionrender_env_dfg_frag" "frag:xlionrender_env_downsample_frag" "frag:xlionrender_env_cube_to_oct_frag" "frag:xlionrender_env_cubemap_frag" "frag:xlionrender_sky_background_frag" "frag:xlionrender_outline_mask_frag" "frag:xlionrender_outline_composite_frag" "vert:xlionrender_static_geom_vert" "vert:xlionrender_static_geom_gi_vert" "vert:xlionrender_static_geom_gi_records_vert" "vert:xlionrender_skin_geom_vert" "vert:xlionrender_gi_capture_vert" "comp:xlionrender_gi_surfel_pass_comp" "comp:xlionrender_gi_scatter_comp" "comp:xlionrender_gi_commit_comp" "comp:xlionrender_gi_ops_comp" "comp:xlionrender_gi_filter_comp" "comp:xlionrender_gi_expand_comp" "comp:xlionrender_gi_means_comp" "comp:xlionrender_gi_cube_comp" "comp:xlionrender_gi_migrate_comp" "comp:xlionrender_gi_readback_comp" "comp:xlionrender_cull_comp" "comp:xlionrender_hiz_comp" "comp:xlionrender_vsm_request_comp" "comp:xlionrender_shadow_pairs_comp" "comp:xlionrender_local_request_comp" "comp:xlionrender_light_cells_comp" "frag:xlionrender_tail_screen_frag" "comp:xlionrender_tail_denoise_comp" "vert:xlionrender_shadow_pairs_vert" "comp:xlionrender_gi_links_comp" "comp:xlionrender_gi_solve_comp" "comp:xlionrender_gi_ghosts_comp" "comp:xlionrender_gi_probes_comp" "frag:xlionrender_gi_screen_frag")
   string(REPLACE ":" ";" STAGE_PAIR_LIST ${STAGE_PAIR})
   list(GET STAGE_PAIR_LIST 0 STAGE)
   list(GET STAGE_PAIR_LIST 1 NAME)
@@ -50,6 +50,19 @@ foreach(STAGE_PAIR "vert:xlionrender_forward_vert" "frag:xlionrender_forward_sta
     COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=${STAGE} --target-env=vulkan1.2 -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
     DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
     COMMENT "Compiling xLIONRender ${STAGE} shader ${NAME}"
+  )
+  list(APPEND XLIONRENDER_LIB_SHADERS ${SHADER_OUT})
+endforeach()
+# The built-in lit fragment shaders' G-buffer variants (XLION_GBUFFER_OUTPUT: the half-size thin G-buffer of the screen tail,
+# documentation/lighting_p3_design.md "The decision"): <name>_gbuffer.h
+foreach(NAME xlionrender_forward_standard_frag xlionrender_geom_standard_frag xlionrender_default_material_frag)
+  set(SHADER_OUT "${CMAKE_BINARY_DIR}/sprv_shaders_h/${NAME}_gbuffer.h")
+  file(GLOB XLIONRENDER_SHADER_LIBRARY CONFIGURE_DEPENDS "${XLIONRENDER_SHADER_DIR}/*")
+  add_custom_command(
+    OUTPUT ${SHADER_OUT}
+    COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=frag --target-env=vulkan1.2 -DXLION_GBUFFER_OUTPUT -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
+    DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
+    COMMENT "Compiling xLIONRender G-buffer variant ${NAME}"
   )
   list(APPEND XLIONRENDER_LIB_SHADERS ${SHADER_OUT})
 endforeach()

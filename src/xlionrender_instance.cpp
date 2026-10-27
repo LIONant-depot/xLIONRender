@@ -95,6 +95,18 @@ namespace xlionrender
         constexpr std::uint32_t s_LightCellsComp[] = {
             #include "xlionrender_light_cells_comp.h"
         };
+        constexpr std::uint32_t s_TailScreenFrag[] = {
+            #include "xlionrender_tail_screen_frag.h"
+        };
+        constexpr std::uint32_t s_TailDenoiseComp[] = {
+            #include "xlionrender_tail_denoise_comp.h"
+        };
+        constexpr std::uint32_t s_ForwardStandardGBFrag[] = {
+            #include "xlionrender_forward_standard_frag_gbuffer.h"
+        };
+        constexpr std::uint32_t s_GeomStandardGBFrag[] = {
+            #include "xlionrender_geom_standard_frag_gbuffer.h"
+        };
         constexpr std::uint32_t s_ClearDepthVert[] = {
             #include "xlionrender_clear_depth_vert.h"
         };
@@ -352,12 +364,21 @@ namespace xlionrender
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 2, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 3, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // lights
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 4, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // light cells
+            , xgpu::pipeline::uniform_binds{ .m_BindIndex = 14, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }  // the denoised screen tail
             };
             if( auto Err = Device.Create(m_ForwardPipeline, { .m_VertexDescriptor = m_MeshVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_forward)
                                                             , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
 
             auto Bindings = LitBindings({});
             if( auto Err = Device.Create(m_ForwardInstance, { .m_PipeLine = m_ForwardPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+
+            // its G-buffer variant (the screen tail's thin G-buffer: the normal and roughness as its color)
+            xgpu::shader GBFrag;
+            if( auto Err = Device.Create(GBFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_ForwardStandardGBFrag) }); Err ) return Err;
+            auto GBShaders = std::array<const xgpu::shader*, 2>{ &GBFrag, &Vert };
+            if( auto Err = Device.Create(m_ForwardGBPipeline, { .m_VertexDescriptor = m_MeshVD, .m_Shaders = GBShaders, .m_PushConstantsSize = sizeof(details::push_forward)
+                                                              , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
+            if( auto Err = Device.Create(m_ForwardGBInstance, { .m_PipeLine = m_ForwardGBPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
         }
 
         // xgeom_static pipeline: the static geom editor's vertex decode + the same standard material fragment
@@ -427,11 +448,39 @@ namespace xlionrender
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 9, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // MaterialParams (not read: the materials' layout)
             , xgpu::pipeline::uniform_binds{ .m_BindIndex = 10, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }  // EntityParams (not read)
             };
+            std::vector<xgpu::pipeline::uniform_binds> LitBinds(UniformBinds.begin(), UniformBinds.end());     // + the denoised screen tail
+            LitBinds.push_back({ .m_BindIndex = 14, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC });
             if( auto Err = Device.Create(m_StaticGeomPipeline, { .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
-                                                               , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers }); Err ) return Err;
+                                                               , .m_UniformBinds = LitBinds, .m_Samplers = Samplers }); Err ) return Err;
 
             auto Bindings = LitBindings({});
             if( auto Err = Device.Create(m_StaticGeomInstance, { .m_PipeLine = m_StaticGeomPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+            {
+                xgpu::shader GBFrag;
+                if( auto Err = Device.Create(GBFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GeomStandardGBFrag) }); Err ) return Err;
+                auto GBShaders = std::array<const xgpu::shader*, 2>{ &GBFrag, &Vert };
+                if( auto Err = Device.Create(m_StaticGeomGBPipeline, { .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = GBShaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
+                                                                     , .m_UniformBinds = LitBinds, .m_Samplers = Samplers }); Err ) return Err;
+                if( auto Err = Device.Create(m_StaticGeomGBInstance, { .m_PipeLine = m_StaticGeomGBPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+            }
+            // the screen tail's pass (a full-screen pass at half size over the thin G-buffer: the materials' layout, the G-buffer in slots 1, 2;
+            // two targets, no blend). Its instances bind a view's G-buffer: createTailTargets
+            {
+                xgpu::shader TailFrag, FullVert;
+                if( auto Err = Device.Create(TailFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_TailScreenFrag) }); Err ) return Err;
+                if( auto Err = Device.Create(FullVert, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
+                auto TailShaders = std::array<const xgpu::shader*, 2>{ &TailFrag, &FullVert };
+                auto TailBinds = std::array
+                { xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 3, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // lights
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 4, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // light cells
+                };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = TailShaders, .m_UniformBinds = TailBinds, .m_Samplers = Samplers };
+                Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_bDepthTestEnable  = false;
+                Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+                if( auto Err = Device.Create(m_TailPipeline, Setup); Err ) return Err;
+            }
 
             // the depth prepass: the same vertex shader and layout, depth only (no color written)
             {
@@ -483,7 +532,7 @@ namespace xlionrender
             if( auto Err = Device.Create(CaptureVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
             auto CaptureShaders = std::array<const xgpu::shader*, 2>{ &Frag, &CaptureVert };
             xgpu::pipeline::setup CaptureSetup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = CaptureShaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
-                                              , .m_UniformBinds = UniformBinds, .m_Samplers = Samplers };
+                                              , .m_UniformBinds = LitBinds, .m_Samplers = Samplers };      // (+ 14: the fragment's)
             CaptureSetup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
             if( auto Err = Device.Create(m_GIConstCapturePipeline, CaptureSetup); Err ) return Err;
             if( auto Err = Device.Create(m_GIConstCaptureInstance, { .m_PipeLine = m_GIConstCapturePipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
@@ -551,6 +600,11 @@ namespace xlionrender
             if( auto Err = Device.Create(m_LightCellsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LightCellsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_LightCellsCompute, { .m_pShader = &m_LightCellsShader, .m_nBuffers = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_LightCellsTimes, { .m_Count = 2 }); Err ) return Err;
+            // the screen tail's denoiser (shaders/xlionrender_tail_denoise_comp.glsl): its frame a ring slot each (3 mat4 + a vec4)
+            if( auto Err = Device.Create(m_TailDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TailDenoiseComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 4, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_TailFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * 64 + 2 * 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
+            if( auto Err = Device.Create(m_TailTimes, { .m_Count = 4 }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data() }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nLocal }); Err ) return Err;
@@ -1082,13 +1136,21 @@ namespace xlionrender
         return makeInstance(M, k, !bShadow, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, Kind, bShadow); });
     }
 
+    xgpu::pipeline_instance* instance::getGBufferInstance( material_slot& M, geom_kind Kind ) noexcept
+    {
+        if( M.m_GBufferFragment.m_Private == nullptr || M.m_State.isBlended() ) return nullptr;
+        const auto k = gbuffer_path_v + static_cast<std::size_t>(Kind);
+        if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
+        return makeInstance(M, k, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, Kind, false, false, true); });
+    }
+
     xgpu::pipeline_instance* instance::getRecordsInstance( material_slot& M ) noexcept
     {
         if( M.m_Instance[records_path_v].m_Private ) return &M.m_Instance[records_path_v];
         return makeInstance(M, records_path_v, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, geom_kind::RIGID, false, true); });
     }
 
-    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow, bool bRecords ) noexcept
+    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow, bool bRecords, bool bGBuffer ) noexcept
     {
         const bool bSkin = Kind == geom_kind::SKIN;
 
@@ -1097,7 +1159,7 @@ namespace xlionrender
         assert(M.m_bTable || M.m_Textures.size() <= 8);       // slots 8, 9: the environment
         const auto Samplers = LitSamplers();
 
-        auto Shaders      = std::array<const xgpu::shader*, 2>{ &M.m_Fragment, bSkin ? &m_SkinGeomVert : bRecords ? &m_StaticGeomGIRecordsVert : &m_StaticGeomGIVert };
+        auto Shaders      = std::array<const xgpu::shader*, 2>{ bGBuffer ? &M.m_GBufferFragment : &M.m_Fragment, bSkin ? &m_SkinGeomVert : bRecords ? &m_StaticGeomGIRecordsVert : &m_StaticGeomGIVert };
         using ub = xgpu::pipeline::uniform_binds;
         const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
         const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
@@ -1118,6 +1180,7 @@ namespace xlionrender
         UniformBinds.push_back(FragmentSSBO(9));                // MaterialParams (every material declares it, read or not)
         UniformBinds.push_back(FragmentSSBO(10));               // EntityParams
         if( bRecords ) UniformBinds.push_back(VertexSSBO(12)); // the draws' records (GPU culling)
+        UniformBinds.push_back(FragmentSSBO(14));               // the denoised screen tail (light_mode::SCREEN)
         const auto Binds = std::span{ UniformBinds };
         xgpu::pipeline::setup Setup{ .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                    , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
@@ -1131,6 +1194,13 @@ namespace xlionrender
             Setup.m_DepthStencil.m_bDepthClampEnable        = true;
         }
         else ApplyState(Setup, M.m_State);
+        if( bGBuffer )      // the thin G-buffer: opaque, its depth laid and tested (a masked one discards in its own code)
+        {
+            Setup.m_Blend = xgpu::pipeline::blend{};
+            Setup.m_Primitive.m_Raster = xgpu::pipeline::primitive::raster::FILL;
+            Setup.m_DepthStencil.m_bDepthTestEnable  = true;
+            Setup.m_DepthStencil.m_bDepthWriteEnable = true;
+        }
         return m_Device.Create(Pipeline, Setup);
     }
 
@@ -1147,6 +1217,7 @@ namespace xlionrender
             State = (S.isBlended() ? 1u + std::uint32_t(S.m_Blend) : 0u) | (S.m_bDoubleSided ? 1u << 4 : 0u) | (S.m_bWireframe ? 1u << 5 : 0u)
                   | (S.m_bDepthTest ? 1u << 6 : 0u) | (S.m_bDepthWrite ? 1u << 7 : 0u);
         }
+        if( k >= gbuffer_path_v ) return { M.m_GBufferFragment.m_Private.get(), M.m_State.m_bDoubleSided ? 1u << 4 : 0u, k };
         return { M.m_Fragment.m_Private.get(), State, k };
     }
 
@@ -1225,7 +1296,7 @@ namespace xlionrender
             auto Binds = std::array
             { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
             , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
-            , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7), FragmentSSBO(9), FragmentSSBO(10)
+            , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7), FragmentSSBO(9), FragmentSSBO(10), FragmentSSBO(14)
             };
             xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                        , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers, .m_nTextureSlots = TableSlots(M) };
@@ -1235,6 +1306,15 @@ namespace xlionrender
     }
 
     //------------------------------------------------------------------------------------------------
+
+    xgpu::device::error* instance::SetMaterialGBuffer( material_id Id, const xgpu::shader& FragmentGBuffer ) noexcept
+    {
+        auto* pM = findMaterial(Id);
+        if( pM == nullptr ) return nullptr;
+        releaseInstances(*pM);                  // (its pipelines are keyed by their fragments: made again on use)
+        pM->m_GBufferFragment = FragmentGBuffer;
+        return nullptr;
+    }
 
     void instance::DestroyMaterial( material_id Id ) noexcept
     {
@@ -1250,6 +1330,7 @@ namespace xlionrender
         }
         pM->m_Textures.clear();
         pM->m_Fragment = {};
+        pM->m_GBufferFragment = {};
         if( pM->m_bTable ) { m_Device.Destroy(std::move(pM->m_Table)); pM->m_Table.m_Private.reset(); pM->m_bTable = false; }
         pM->m_bAlive = false;
     }
@@ -1447,10 +1528,52 @@ namespace xlionrender
         View.m_GIScreenWidth = View.m_GIScreenHeight = 0;
     }
 
+    // The screen tail's targets (render_view: m_TailGColor ...), at half the view's size; the tail pass's instances sample each G-buffer
+    xgpu::device::error* instance::createTailTargets( render_view& View ) noexcept
+    {
+        const int W = (View.m_Width + 1) / 2, H = (View.m_Height + 1) / 2;
+        if( View.m_TailPass.m_Private && View.m_TailWidth == W && View.m_TailHeight == H ) return nullptr;
+        destroyTailTargets(View);
+        using fmt = xgpu::texture::format;
+        if( auto Err = m_Device.Create(View.m_TailGColor, { .m_Format = fmt::A2B10G10R10_UNORM, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailGDepth, { .m_Format = fmt::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        {
+            auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_TailGColor }, xgpu::renderpass::attachment{ View.m_TailGDepth } };
+            if( auto Err = m_Device.Create(View.m_TailGPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
+        }
+        if( auto Err = m_Device.Create(View.m_TailDiffuse,  { .m_Format = fmt::B10G11R11_UFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailSpecular, { .m_Format = fmt::B10G11R11_UFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        {
+            auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_TailDiffuse }, xgpu::renderpass::attachment{ View.m_TailSpecular } };
+            if( auto Err = m_Device.Create(View.m_TailPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
+        }
+        {
+            auto Textures = std::array<xgpu::texture*, 3>{ nullptr, &View.m_TailGColor, &View.m_TailGDepth };       // (slot 0: the shadow atlas)
+            auto Bindings = LitBindings(Textures);
+            if( auto Err = m_Device.Create(View.m_TailInstance, { .m_PipeLine = m_TailPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+        }
+        const std::vector<std::array<std::uint32_t, 4>> Zeros(std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
+        for( auto* pB : { &View.m_TailResult, &View.m_TailTemporal } )
+            if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = W * H, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()) }); Err ) return Err;
+        View.m_TailWidth = W; View.m_TailHeight = H;
+        View.m_bTailPrev = false;
+        return nullptr;
+    }
+
+    void instance::destroyTailTargets( render_view& View ) noexcept
+    {
+        const auto Kill = [&](auto& Obj) { if( Obj.m_Private ) m_Device.Destroy(std::move(Obj)); Obj.m_Private.reset(); };
+        Kill(View.m_TailInstance); Kill(View.m_TailGPass); Kill(View.m_TailGColor); Kill(View.m_TailGDepth);
+        Kill(View.m_TailPass); Kill(View.m_TailDiffuse); Kill(View.m_TailSpecular); Kill(View.m_TailResult); Kill(View.m_TailTemporal);
+        View.m_TailWidth = View.m_TailHeight = 0;
+        View.m_bTailPrev = false;
+    }
+
     void instance::DestroyView( render_view& View ) noexcept
     {
         destroyOutlineTargets(View);
         destroyGIScreenTargets(View);
+        destroyTailTargets(View);
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));

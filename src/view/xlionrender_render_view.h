@@ -63,6 +63,23 @@ namespace xlionrender
         // the Hi-Z), and the Hi-Z pyramid (gpu_cull::HiZFloats floats)
         xgpu::renderpass        m_ScenePassLoad;
         xgpu::buffer            m_HiZ;
+        // The screen tail (instance::renderTail, the main view in light_mode::SCREEN; documentation/lighting_p3_design.md "The decision"),
+        // made the first time: the thin G-buffer at half size - the octahedral normal and roughness (10-10-10-2; the materials' G-buffer
+        // variants draw into it) and its depth -, its pass; the tail pass's two targets (demodulated diffuse and specular, 11-11-10 floats),
+        // its pass and pipeline instance (it samples the G-buffer); the denoiser's records (a uvec4 a texel: xlionrender_tail_denoise_comp.glsl):
+        // the result - what the materials read (binding 14) and next frame's history - and the temporal pass's
+        xgpu::texture           m_TailGColor, m_TailGDepth;
+        xgpu::renderpass        m_TailGPass;
+        xgpu::texture           m_TailDiffuse, m_TailSpecular;
+        xgpu::renderpass        m_TailPass;
+        xgpu::pipeline_instance m_TailInstance;
+        xgpu::buffer            m_TailResult, m_TailTemporal;
+        xmath::fmat4            m_TailPrevC2W = xmath::fmat4::fromIdentity();
+        xmath::fvec3            m_TailPrevEye{ 0, 0, 0 };
+        bool                    m_bTailPrev      = false;     // m_TailResult holds last frame's (of this size)
+        std::uint32_t           m_TailFrame      = 0;
+        int                     m_TailWidth      = 0;
+        int                     m_TailHeight     = 0;
         int                     m_GIScreenWidth  = 0;
         int                     m_GIScreenHeight = 0;
         int                     m_MaskWidth  = 0;

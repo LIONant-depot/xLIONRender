@@ -17,11 +17,30 @@ vec3 PBRDirect(in const vec3 N, in const vec3 V, in const float NdotV, in const 
     return (Diff + Spec) * NdotL;
 }
 
+// The same direct term demodulated (the screen tail: xlionrender_tail_screen_frag.glsl): the diffuse with albedo 1 and no Fresnel, the
+// specular with F = 1 - the material multiplies its own terms back (LocalTailScreen: nothing is divided)
+void PBRDirectDemod(in const vec3 N, in const vec3 V, in const float NdotV, in const float PerceptualRoughness, in const vec3 L, out vec3 Diff, out vec3 Spec)
+{
+    Diff = vec3(0.0); Spec = vec3(0.0);
+    const float NdotL = saturate(dot(N, L));
+    if (NdotL < 1e-4) return;
+    const vec3  H     = normalize(V + L);
+    const float alpha = PerceptualRoughness * PerceptualRoughness;
+    Spec = vec3(DistributionGGX(saturate(dot(N, H)), alpha) * VisibilitySmithCorrelated(NdotV, NdotL, alpha) * NdotL);
+    Diff = DiffuseEON(vec3(1.0), PerceptualRoughness, NdotL, NdotV, dot(L, V) - NdotL * NdotV) * NdotL;
+}
+
 #include "xlionrender_octahedral.glsl"
 #include "xlionrender_light_eval.glsl"
 
 layout(std430, set = 1, binding = 3) readonly buffer LocalLightBuffer { LocalLightData LocalLightList[]; };
 layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint LightCells[]; };
+#ifndef XLION_TAIL_SCREEN
+// The denoised screen tail (instance: the tail pass and the denoiser, xlionrender_tail_denoise_comp.glsl): a record a half-size texel - x:
+// the diffuse's rg, y: its b and the specular's r, z: the specular's gb (halves, demodulated), w: the surface's distance to the eye (half,
+// bits 0-15; 0: no surface), its octahedral normal (4 + 4 bits from 16), its frames - from record UBOLight.TailParams.w
+layout(std430, set = 1, binding = 14) readonly buffer TailScreenBuffer { uvec4 TailScreen[]; };
+#endif
 
 // The local lights' shadow pages (features/shadows/xlionrender_shadow_local_pages.h): a face a virtual map of kLocalLevel0Pages^2
 // pages in kLocalLevels levels, its entries in the page table (LightCells at UBOLight.ShadowParams.y: 16 bits, slot + 1); the slots
@@ -260,8 +279,125 @@ uint LocalTailFind(in const uint EntryBase, in const uint First, in const uint L
     return a;
 }
 
+// One light's demodulated contribution without its shadow (PBRDirectDemod x its color and falloff; false: none)
+bool LocalLightDemod(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const float PerceptualRoughness, out vec3 Diff, out vec3 Spec)
+{
+    Diff = vec3(0.0); Spec = vec3(0.0);
+    const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];
+    const vec3  ToLight = Ld.PosRadius.xyz - In.wSpacePosition.xyz;
+    const float Dist    = length(ToLight);
+    const float s       = Dist / Ld.PosRadius.w;
+    if (s >= 1.0 || Dist < 1e-6) return false;
+    float Att = LightDistanceFalloff(s, 1.0);
+    const vec3 L = ToLight / Dist;
+    if (Ld.DirCosOuter.w > -1.5) Att *= LightSpotCone(dot(-L, Ld.DirCosOuter.xyz), Ld.DirCosOuter.w, Ld.Color.w);
+    if (Att < 1e-4) return false;
+    PBRDirectDemod(N, V, NdotV, PerceptualRoughness, L, Diff, Spec);
+    Diff *= Ld.Color.rgb * Att; Spec *= Ld.Color.rgb * Att;
+    return any(greaterThan(Diff + Spec, vec3(0.0)));
+}
+
+// The screen tail's sample (xlionrender_tail_screen_frag.glsl): the cell's tail resampled as LocalLights' mode 2 does (M candidates, their
+// weights with their one-tap visibility), the target the demodulated term's luminance; the picked light's demodulated diffuse and specular
+// with its filtered shadow, weighted f / p. False: no tail at the point (no cell, or its list fits in the head)
+bool LocalTailDemod(in const vec3 N, in const vec3 V, in const float NdotV, in const float PerceptualRoughness, out vec3 Diff, out vec3 Spec)
+{
+    Diff = vec3(0.0); Spec = vec3(0.0);
+    if (UBOLight.LocalCount.x < 0.5) return false;
+    const int Cell = LocalLightCell(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
+    if (Cell < 0) return false;
+    const uint Base      = uint(UBOLight.LocalBase.y);
+    const uint Header    = LightCells[Base + 2u * uint(Cell) + 1u];
+    const uint EntryBase = Base + uint(2 * kCellLevels * kLevelCells);
+    const uint First     = LightCells[Base + 2u * uint(Cell)], Count = Header & 0xFFFFFFu, Head = Header >> 24;
+    if (Count <= Head) return false;
+    const int   M  = max(int(abs(UBOLight.LocalCount.w)), 1);
+    const bool  bVis = UBOLight.LocalCount.w < 0.0;
+    const float u0 = LocalRandom(0u);
+    float       u1 = LocalRandom(1u);
+    int   k = 0, Pick = -1;
+    float WSum = 0.0, PickP = 1.0;
+    vec3  PickD = vec3(0.0), PickS = vec3(0.0);
+    uint  e = Head;
+    while (k < M)
+    {
+        e = LocalTailFind(EntryBase, First, e, Count, (float(k) + u0) / float(M));
+        const float Cdf  = LocalTailCdf(EntryBase, First, e);
+        const float Prev = e > Head ? LocalTailCdf(EntryBase, First, e - 1u) : 0.0;
+        int nHits = 1;
+        ++k;
+        while (k < M && ((float(k) + u0) / float(M) < Cdf || e + 1u == Count)) { ++nHits; ++k; }
+        const int l = int(LightCells[EntryBase + 2u * (First + e)]);
+        vec3 D, Sp;
+        if (LocalLightDemod(l, N, V, NdotV, PerceptualRoughness, D, Sp))
+        {
+            float Sh = 1.0;
+            if (bVis) { g_LocalTaps = 0; Sh = max(LocalLightShadow(l, N), 0.1); g_LocalTaps = 1; }
+            const float P = dot(D + Sp, vec3(0.2126, 0.7152, 0.0722)) * Sh;
+            const float W = float(nHits) * P / (Cdf - Prev);
+            WSum += W;
+            if (W > 0.0)
+            {
+                const float a = W / WSum;
+                if (u1 < a) { Pick = l; PickD = D; PickS = Sp; PickP = P; u1 = u1 / a; }
+                else        u1 = (u1 - a) / (1.0 - a);
+            }
+        }
+        ++e;
+    }
+    if (Pick < 0) return true;                                                  // (a tail, all of it dark here: 0)
+    const float Wt = LocalLightShadow(Pick, N) * (WSum / (float(M) * PickP));
+    Diff = PickD * Wt; Spec = PickS * Wt;
+    return true;
+}
+
+#ifndef XLION_TAIL_SCREEN
+// The material's tail from the denoised screen tail: the 4 half-size texels around the pixel, bilinear, each weighed by how close its
+// distance to the eye is to this pixel's and how much its normal agrees (SurfelGIScreen's weights), times the material's own terms -
+// the diffuse x albedo x (1 - F0) x (1 - metallic), the specular x the Fresnel the lobe averages (F0 A + B over A + B: Karis's analytic
+// environment BRDF). False: none of the 4 is this surface (a silhouette, a blended surface in front, a material without a G-buffer
+// variant): the caller shades its tail exactly
+bool LocalTailScreen(in const vec3 N, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic, out vec3 T)
+{
+    T = vec3(0.0);
+    const int  W = int(UBOLight.TailParams.y), H = int(UBOLight.TailParams.z);
+    const uint R0 = uint(UBOLight.TailParams.w);
+    if (W <= 0 || R0 + uint(W * H) > uint(TailScreen.length())) return false;     // (a pass without the screen tail: its dummy bound)
+    const vec2 hp = gl_FragCoord.xy * 0.5 - 0.5;
+    const vec2 i0 = floor(hp), f = hp - i0;
+    const float Dist = length(In.wSpacePosition.xyz);
+    vec3  Sd = vec3(0.0), Ss = vec3(0.0);
+    float Sw = 0.0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1, H - 1));
+        const uvec4 Q = TailScreen[R0 + uint(P.y * W + P.x)];
+        const float d = unpackHalf2x16(Q.w & 0xFFFFu).x;
+        if (d <= 0.0) continue;
+        const vec3  n  = OctDecode(vec2(float((Q.w >> 16) & 15u), float((Q.w >> 20) & 15u)) / 15.0 * 2.0 - 1.0);
+        const float wd = max(0.0, 1.0 - abs(d - Dist) / max(0.05 * Dist, 1e-3)), wn = pow(max(dot(n, N), 0.0), 8.0);
+        const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
+        const float w  = wb * wd * wd * wn;
+        Sd += w * vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
+        Ss += w * vec3(unpackHalf2x16(Q.y).y, unpackHalf2x16(Q.z));
+        Sw += w;
+    }
+    if (Sw < 1e-4) return false;
+    const vec4  c0 = vec4(-1.0, -0.0275, -0.572, 0.022), c1 = vec4(1.0, 0.0425, 1.04, -0.04);      // (Karis, "Physically based shading on mobile")
+    const vec4  r  = PerceptualRoughness * c0 + c1;
+    const float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    const vec2  AB = vec2(-1.04, 1.04) * a004 + r.zw;
+    const vec3  SpecR = (F0 * AB.x + AB.y) / max(AB.x + AB.y, 1e-4);
+    const vec3  DiffR = Albedo * (vec3(1.0) - F0) * (1.0 - Metallic);
+    T = Sd / Sw * DiffR + Ss / Sw * SpecR;
+    return true;
+}
+#endif
+
 // Modes: 0 every light; 1 the cell's list (the same result: the list holds every light that reaches the cell); 2 the cell's
-// head exactly + tail lights J drawn with probability p(J) (LocalBase.w stratified samples), each weighted 1 / (p(J) samples). Outside the cells: every light.
+// head exactly + tail lights J drawn with probability p(J) (LocalBase.w stratified samples), each weighted 1 / (p(J) samples); 3 the head
+// exactly + the denoised screen tail (LocalTailScreen; where it does not match the surface, the rest of the list exactly: no noise). Outside
+// the cells: every light.
 vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
 {
     vec3 Sum = vec3(0.0);
@@ -279,7 +415,15 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     const uint Header    = LightCells[Base + 2u * uint(Cell) + 1u];      // the header: the first entry; the count (bits 0-23), the head count (24-31)
     const uint EntryBase = Base + uint(2 * kCellLevels * kLevelCells);
     const uint First     = LightCells[Base + 2u * uint(Cell)], Count = Header & 0xFFFFFFu, Head = Header >> 24;
-    const uint nExact    = Mode == 1 ? Count : Head;
+    uint nExact = Mode == 1 ? Count : Head;
+#ifndef XLION_TAIL_SCREEN
+    if (Mode == 3)
+    {
+        vec3 T;
+        if (Count <= Head || !LocalTailScreen(N, NdotV, Albedo, F0, PerceptualRoughness, Metallic, T)) nExact = Count;    // (exact where no screen tail)
+        else Sum = T;
+    }
+#endif
     for (uint k = 0u; k < nExact; ++k) Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + k)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
 
     if (Mode == 2 && Count > Head && abs(UBOLight.LocalCount.w) > 1.5)
