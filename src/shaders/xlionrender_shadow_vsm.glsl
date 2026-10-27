@@ -44,11 +44,27 @@ bool VSMInWindow(in const vec4 Lv, in const ivec2 Page)
     return all(greaterThanEqual(Rel, ivec2(0))) && all(lessThan(Rel, ivec2(int(UBOLight.VSMParams2.x))));
 }
 
-// A tap's depth: its page's, or the nearer of it and the movers' page there (P1b: the movers drawn apart; MoverBase 0: none)
-float VSMDepth(in const ivec2 At, in const ivec2 MoverAt, in const bool bMover)
+// The 2 x 2 texels from At in one gather (the values texelFetch reads: the atlas is sampled unfiltered): x (0, 1), y (1, 1), z (1, 0), w (0, 0)
+vec4 VSMGather(in const ivec2 At)
 {
-    const float d = texelFetch(SamplerShadowMap, At, 0).r;
-    return bMover ? min(d, texelFetch(SamplerShadowMap, MoverAt, 0).r) : d;
+    return textureGather(SamplerShadowMap, (vec2(At) + 1.0) / vec2(textureSize(SamplerShadowMap, 0)));
+}
+
+// A page's 4 x 4 texels from Lo (and the movers' page's, the nearer: bMover) in 4 gathers; VSMTap4x4 picks tap (x, y) - the sums keep their
+// row order: bit for bit the 16 fetches' result
+void VSMGather4x4(in const ivec2 Lo, in const ivec2 Base, in const ivec2 MBase, in const bool bMover, out vec4 G[4])
+{
+    for (int b = 0; b < 4; ++b)
+    {
+        const ivec2 At = Lo + ivec2((b & 1) * 2, (b >> 1) * 2);
+        G[b] = VSMGather(Base + At);
+        if (bMover) G[b] = min(G[b], VSMGather(MBase + At));
+    }
+}
+float VSMTap4x4(in const vec4 G[4], in const int x, in const int y)
+{
+    const vec4 B = G[(y >> 1) * 2 + (x >> 1)];
+    return (y & 1) != 0 ? ((x & 1) != 0 ? B.y : B.x) : ((x & 1) != 0 ? B.z : B.w);
 }
 
 // The mover page's origin for a page (the atlas texel of its page-space 0, as Base), or false when the movers have none there
@@ -89,9 +105,11 @@ float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, i
         const ivec2 Base = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - PLo * kVSMPageTexels;
         ivec2 MBase;
         const bool bM = VSMMoverBase(Level, PLo, MoverBase, MBase);
+        vec4 G[4];                                                                     // (the 16 taps in 4 gathers - were 16 fetches)
+        VSMGather4x4(Lo, Base, MBase, bM, G);
         for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x)
-            Lit += Wx[x] * Wy[y] * ((VSMDepth(Base + Lo + ivec2(x, y), MBase + Lo + ivec2(x, y), bM) < Depth - Bias - min(2.0 * max(0.0, dot(SlopeT, vec2(Lo + ivec2(x, y)) - U)), MaxB)) ? 0.0 : 1.0);
+            Lit += Wx[x] * Wy[y] * ((VSMTap4x4(G, x, y) < Depth - Bias - min(2.0 * max(0.0, dot(SlopeT, vec2(Lo + ivec2(x, y)) - U)), MaxB)) ? 0.0 : 1.0);
         return Lit / 9.0;
     }
     // Across a page border: the footprint (4 texels) touches at most 2 x 2 pages - their entries once, each tap picks its page by which side
@@ -153,6 +171,23 @@ float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint Move
     if (!VSMInWindow(Lv, PLo) || !VSMInWindow(Lv, PHi)) return -2.0;
     const float Row = UBOLight.VSMParams2.z;
     float Sum = 0.0, n = 0.0;
+    if (PLo == PHi)                                                                    // (inside one page: the 16 taps in 4 gathers)
+    {
+        const uint E = VSMEntry(Level, PLo, uint(UBOLight.VSMParams.w));
+        if (E == 0u) return -2.0;
+        const ivec2 Base = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - PLo * kVSMPageTexels;
+        ivec2 MBase;
+        const bool bM = VSMMoverBase(Level, PLo, MoverBase, MBase);
+        vec4 G[4];
+        VSMGather4x4(Lo, Base, MBase, bM, G);
+        for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+        {
+            const float d = VSMTap4x4(G, x, y);
+            if (d < Depth - Bias) { Sum += d; n += 1.0; }
+        }
+        return n > 0.0 ? (Depth - Sum / n) * 2.0 * Half : -1.0;
+    }
     // the 2 x 2 pages the footprint can touch: their entries once (one when it is inside a page), each tap picks its side of the border
     ivec2 Base[4];
     for (int j = 0; j < 4; ++j)

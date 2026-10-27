@@ -5,10 +5,10 @@
 // fits it (as the shading's ShadowVSM picks: shaders/xlionrender_shadow_vsm.glsl), and a bit for every page its filter's taps fall in
 // (the dilation). Then what the shading will find in this frame's table (the same walk to coarser levels): counters for the report.
 // The CPU reads both a ring late (instance::renderShadows).
-// Two dispatches (m_Pad1): the full-resolution pass (m_Pad0 0) asks for each pixel's own level and counts; the coarse pass at a quarter
-// of the pixels (a thread a 2 x 2 quad, its first pixel; m_Pad0 the contact-hardening's coarser levels) asks only for those levels'
-// pages - a page of which covers thousands of pixels, the request's dilation (3 to 4 texels) covers the quad. In one pass they cost
-// 0.23 of 0.54 ms on Bistro at 3093 x 1493: a wave's lanes run in lock-step, so skipping 3 of 4 pixels in it saved nothing
+// The contact-hardening's coarser levels (m_Pad0 of them) shared by each 2 x 2 quad's lanes: a lane asks for one of them from its own
+// pixel - a page of those covers thousands of pixels, the request's dilation (3 to 4 texels) covers the quad. (They were a second
+// dispatch at a quarter of the pixels, each rebuilding its 4 neighbours' positions: 0.14 of Bistro's 0.42 ms at 3093 x 1493; in one
+// pass with every lane asking for every level, 0.23: a wave's lanes run in lock-step)
 layout(local_size_x = 8, local_size_y = 8) in;
 
 const int kMaxLevels   = 12;
@@ -30,7 +30,7 @@ layout(std430, set = 0, binding = 0) readonly buffer frame_b { frame_t F[]; };
 layout(std430, set = 0, binding = 1) coherent buffer req_b  { uint Req[]; };
 layout(std430, set = 0, binding = 2) readonly buffer cell_b { uint Cells[]; };     // the cell ring: this frame's page table at TableBase
 layout(set = 1, binding = 0) uniform sampler2D Depth;
-layout(push_constant) uniform push_t { uint m_Frame, m_ReqBase, m_TableBase, m_W, m_H, m_BitUints, m_Pad0, m_Pad1; } Push;     // m_Pad0: coarser levels, m_Pad1: 1 the coarse pass
+layout(push_constant) uniform push_t { uint m_Frame, m_ReqBase, m_TableBase, m_W, m_H, m_BitUints, m_Pad0, m_Pad1; } Push;     // m_Pad0: coarser levels
 
 shared uint s_Count[kCounters];
 
@@ -46,11 +46,13 @@ bool World(ivec2 p, out vec3 L)
     return true;
 }
 
-float AxisFootprint(ivec2 p, ivec2 Step, vec3 L)
+// The light-space positions, the workgroup's 8 x 8 pixels and one more around (w 0: none - the sky, off the view):
+// a pixel's and its 4 neighbours' read once for the group (each pixel rebuilt 5 of them: 0.14 of Bistro's 0.44 ms)
+shared vec4 s_L[10 * 10];
+float TileFootprint(ivec2 l, ivec2 Step, vec3 L)
 {
-    vec3 A, B;
-    const bool bA = World(p + Step, A), bB = World(p - Step, B);
-    const float a = bA ? length(A.xy - L.xy) : 1e30, b = bB ? length(L.xy - B.xy) : 1e30;
+    const vec4 A = s_L[(l.y + Step.y) * 10 + l.x + Step.x], B = s_L[(l.y - Step.y) * 10 + l.x - Step.x];
+    const float a = A.w != 0.0 ? length(A.xy - L.xy) : 1e30, b = B.w != 0.0 ? length(L.xy - B.xy) : 1e30;
     return min(a, b);
 }
 
@@ -85,24 +87,27 @@ void Request(int Level, ivec2 Page, uint Z, uint InvZ)
 void main()
 {
     if (gl_LocalInvocationIndex < kCounters) s_Count[gl_LocalInvocationIndex] = 0u;
+    for (uint t = gl_LocalInvocationIndex; t < 100u; t += 64u)
+    {
+        vec3 Lt;
+        const bool b = World(ivec2(gl_WorkGroupID.xy) * 8 - 1 + ivec2(int(t) % 10, int(t) / 10), Lt);
+        s_L[t] = vec4(Lt, b ? 1.0 : 0.0);
+    }
     barrier();
 
-    const bool  bCoarse = Push.m_Pad1 != 0u;
-    const ivec2 p = ivec2(gl_GlobalInvocationID.xy) * (bCoarse ? 2 : 1);
-    vec3 L;
-    if (World(p, L))
+    const ivec2 l = ivec2(gl_LocalInvocationID.xy) + 1;
+    const vec3  L = s_L[l.y * 10 + l.x].xyz;
+    const int   q = int(gl_LocalInvocationID.x & 1u) + 2 * int(gl_LocalInvocationID.y & 1u);     // (the lane in its 2 x 2 quad)
+    if (s_L[l.y * 10 + l.x].w != 0.0)
     {
         const float t0 = F[Push.m_Frame].P0.x;
         const int   nLevels = int(F[Push.m_Frame].P0.y);
-        const float fx = AxisFootprint(p, ivec2(1, 0), L), fy = AxisFootprint(p, ivec2(0, 1), L);
+        const float fx = TileFootprint(l, ivec2(1, 0), L), fy = TileFootprint(l, ivec2(0, 1), L);
         float Foot = max(fx < 1e29 ? fx : 0.0, fy < 1e29 ? fy : 0.0);         // the shading's max(|dFdx|, |dFdy|) of the light-space xy
         if (Foot <= 0.0) Foot = t0;                                             // (an isolated pixel: no neighbour to measure with)
         int Level = clamp(int(floor(log2(Foot / t0) + F[Push.m_Frame].P0.w)), 0, nLevels - 1);
-        if (!bCoarse)
-        {
-            atomicAdd(s_Count[0], 1u);
-            atomicAdd(s_Count[17 + clamp(int(floor(log2(Foot / (t0 * float(1 << Level))))) + 4, 0, 7)], 1u);
-        }
+        atomicAdd(s_Count[0], 1u);
+        atomicAdd(s_Count[17 + clamp(int(floor(log2(Foot / (t0 * float(1 << Level))))) + 4, 0, 7)], 1u);
 
         // The level the shading starts at, its taps' pages requested (the filter: 4 x 4 texels around the point, xlionrender_shadow_vsm.glsl)
         int  First = -1, Found = -1;
@@ -116,7 +121,7 @@ void main()
             if (First < 0)
             {
                 First = l;
-                if (!bCoarse) atomicAdd(s_Count[5 + min(l, 11)], 1u);
+                atomicAdd(s_Count[5 + min(l, 11)], 1u);
                 bCross = any(notEqual(PLo, PHi));
                 {   // (the request also covers the shading's normal offset: 2 texels more around the taps)
             const ivec2 RLo = ivec2(floor(vec2(Lo - 2) / float(kPageTexels))), RHi = ivec2(floor(vec2(Hi + 2) / float(kPageTexels)));
@@ -125,10 +130,10 @@ void main()
             const float z   = clamp((L.z - (Lv.w - Half)) / (2.0 * Half), 0.0, 1.0);
             // (rounded up to 1/256: still conservative, and after a few pixels most find the page's range holding theirs: no atomic)
             const uint  Z = floatBitsToUint(max(ceil(z * 256.0) / 256.0, 1e-7)), InvZ = floatBitsToUint(max(ceil((1.0 - z) * 256.0) / 256.0, 1e-7));
-            if (!bCoarse) for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y), Z, InvZ);
+            for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y), Z, InvZ);
             // Contact-hardening (a sun with a disc, xlionrender_shadow_vsm.glsl): the blocker search and the wide penumbrae read the coarser
-            // levels' taps too
-            for (int k = 1; k <= int(Push.m_Pad0) && l + k < nLevels; ++k)
+            // levels' taps too (the quad's lanes share them)
+            for (int k = q + 1; k <= int(Push.m_Pad0) && l + k < nLevels; k += 4)
             {
                 const int   lk  = l + k;
                 const float Tk  = t0 * float(1 << lk);
@@ -142,14 +147,13 @@ void main()
             }
         }
             }
-            if (bCoarse) break;
             // What the shading finds this frame: every tap's page in the table, or a coarser level
             bool bAll = true;
             for (int y = PLo.y; y <= PHi.y; ++y) for (int x = PLo.x; x <= PHi.x; ++x) bAll = bAll && Entry(l, ivec2(x, y)) != 0u;
             if (bAll) { Found = l; break; }
         }
-        if (First >= 0 && !bCoarse) atomicAdd(s_Count[Found < 0 ? 3 : Found == First ? 1 : 2], 1u);    // (past every window: lit, beyond the shadows' reach)
-        if (bCross && !bCoarse) atomicAdd(s_Count[4], 1u);
+        if (First >= 0) atomicAdd(s_Count[Found < 0 ? 3 : Found == First ? 1 : 2], 1u);    // (past every window: lit, beyond the shadows' reach)
+        if (bCross) atomicAdd(s_Count[4], 1u);
     }
 
     barrier();
