@@ -304,6 +304,7 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
 // lanes return before the read; a derivative after that is undefined)
 bool g_bGIFaceD = false;
 vec3 g_GIFaceD  = vec3(0.0);
+float g_CapRoughness = 1.0, g_CapF0 = 0.04;     // (the material's, for the capture's specular passes: GIPixelGI's caller sets them)
 void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in const vec3 inAlbedo, in const float inMetalic, in const vec3 inEmissiveColor)
 {
 #ifndef XLION_NO_GI_PIXEL
@@ -345,7 +346,8 @@ void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in cons
 	const uint GIDebug = GIDebugCode(GIRef.y);
 	if (GIDebug == 1u) { const uint Sd = SurfelGIDominant(InGIPos, GFace); g_GIDebug = vec4(Sd == 0xFFFFFFFFu ? vec3(0.0) : SurfelDebugColor(Sd), 1.0); }
 	if (GIDebug == 2u) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0);
-	if (GIDebug == 3u) g_GIDebug = vec4((GIRef.y & gi_capture_emission_v) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);
+	if (GIDebug == 3u) g_GIDebug = vec4((GIRef.y & gi_capture_specular_v) != 0u ? ((GIRef.y & gi_capture_emission_v) != 0u ? vec3(g_CapRoughness, inMetalic, 0.0) : mix(vec3(g_CapF0), inAlbedo, inMetalic))
+	                                                                         : (GIRef.y & gi_capture_emission_v) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic), 1.0);
 	if (GIDebug == 5u) g_GIDebug = vec4(g_GISource == 2u ? (SurfelGIIsPatch(SurfelGIDominant(InGIPos, GFace)) ? vec3(1.0, 0.85, 0.0) : vec3(0.0, 0.6, 0.0)) : g_GISource == 1u ? vec3(0.0, 0.0, 0.8) : (GIRef.y & gi_per_pixel_v) != 0u ? SurfelGIWhyUnsupported(InGIPos, GFace, GIRef.x, GIRef.y & 0xFFu) : vec3(1.0, 0.0, 1.0), 1.0);     // yellow: a patch surfel (PatchDefects: a defect of the model); unsupported: why (SurfelGIWhyUnsupported)     // COVERAGE: green the pixel read, blue the vertex read, magenta unsupported (the mean light)
 	if (GIDebug == 4u) g_GIDebug = vec4(SurfelGITriangleColor(GIRef.x, uint(gl_PrimitiveID)), 1.0);        // the pixel's triangle's captured color     // the GI's material capture (xlionrender_gi_capture_vert.glsl)
 #endif
@@ -387,6 +389,7 @@ vec3 PBRLighting
 	vec3	ambientSpec			= F_grazing * UBOLight.AmbientLightColor.rgb * inAO * (1.0 - inRoughness) * 0.04;
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 #ifndef XLION_LDR_OUTPUT
+	g_CapRoughness = inRoughness; g_CapF0 = inF0;
 	GIPixelGI(inNormal, N, V, inAlbedo, inMetalic, inEmissiveColor);
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
 #endif

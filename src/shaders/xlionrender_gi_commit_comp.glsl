@@ -17,7 +17,7 @@ layout(std430, set = 0, binding = 4) readonly  buffer count_b   { uint     GICou
 
 layout(push_constant) uniform push_t { int m_nItems, m_First, m_Count, m_Pad; } Push;
 
-const uint  gi_inst_v  = 48u;        // gi::world::gpu_inst_v
+const uint  gi_inst_v  = 49u;        // gi::world::gpu_inst_v
 const uint  gi_none_v  = 0xFFFFFFFFu;
 const uint  gi_est_v   = 24u;        // gi::world::gpu_est_v (PackEst)
 const float gi_pi_v    = 3.14159265;

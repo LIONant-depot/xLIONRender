@@ -69,6 +69,11 @@ namespace xlionrender
         // its pass and pipeline instance (it samples the G-buffer); the denoiser's records (a uvec4 a texel: xlionrender_tail_denoise_comp.glsl):
         // the result - what the materials read (binding 14) and next frame's history - and the temporal pass's
         xgpu::texture           m_TailGColor, m_TailGDepth;
+        // Reflections' sharp receivers (instance::renderTail): the same G-buffer at the view's full size (the materials' G-buffer variants
+        // drawn again), their rays a pixel each; their records after the tail's and the reflections' half-size ones, 2 pixels a record
+        xgpu::texture           m_SharpGColor, m_SharpGMotion, m_SharpGDepth;
+        xgpu::renderpass        m_SharpGPass;
+        int                     m_SharpWidth = 0, m_SharpHeight = 0;
         xgpu::texture           m_TailGMotion;          // last frame's screen position (ndc xy), clip w, 1 (0: no motion: the camera's reprojection)
         xgpu::renderpass        m_TailGPass;
         xgpu::texture           m_TailDiffuse, m_TailSpecular;

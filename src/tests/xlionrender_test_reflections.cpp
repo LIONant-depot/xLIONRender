@@ -482,12 +482,25 @@ int main()
         for (int f = 0; f < 240; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "settle the GI");
         CHECK(ReadRGB(Device, View, Today), "read today (GI on, no traced reflections)");
         Scene.m_ReflectionMaxRoughness = 0.3f;
-        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "render the traced reflections");
-        CHECK(ReadRGB(Device, View, Traced), "read the traced reflections");
+        // (the traced reflections are one ray a texel, a new one each frame: the mean of 16 frames is the estimator's expectation - its
+        // bias, what B gates; the noise is the reconstruction's, milestone D)
+        const auto Mean = [&](int Frames, rgb_image& Out) -> bool
+        {
+            for (int f = 0; f < 4; ++f) if (!App.RenderFrame(Scene, View, Camera)) return false;
+            rgb_image One;
+            Out.clear();
+            for (int f = 0; f < Frames; ++f)
+            {
+                if (!App.RenderFrame(Scene, View, Camera) || !ReadRGB(Device, View, One)) return false;
+                if (Out.empty()) Out.assign(One.size(), 0.0f);
+                for (std::size_t k = 0; k < One.size(); ++k) Out[k] += One[k] / float(Frames);
+            }
+            return true;
+        };
+        CHECK(Mean(16, Traced), "render the traced reflections");
         rgb_image Planar;
         Scene.m_ReflectionPlane = { 0, 1, 0, 0 };          // (the floor's top: y = 0)
-        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "render the planar view");
-        CHECK(ReadRGB(Device, View, Planar), "read the planar reflections");
+        CHECK(Mean(16, Planar), "render the planar view");
         Scene.m_ReflectionPlane = { 0, 0, 0, 0 };
 
         rgb_image Ref(Today.size(), 0.0f);
@@ -537,8 +550,7 @@ int main()
             {
                 Scene.m_ReflectionMaxRoughness = MaxRough;
                 Scene.m_ReflectionPlane = bPlane ? xmath::fvec4{ 0, 1, 0, 0 } : xmath::fvec4{ 0, 0, 0, 0 };
-                for (int f = 0; f < 6; ++f) if (!App.RenderFrame(Scene, View, Camera)) return false;
-                return ReadRGB(Device, View, Out);
+                return Mean(16, Out);
             };
             CHECK(Shot(0, false, RToday) && Shot(0.5f, false, RTraced) && Shot(0.5f, true, RPlanar), "render the rough floor");
             Scene.m_ReflectionPlane = { 0, 0, 0, 0 };

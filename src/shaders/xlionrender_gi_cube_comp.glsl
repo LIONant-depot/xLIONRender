@@ -6,7 +6,7 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 0)          buffer data_b  { uint GD[]; };
 layout(std430, set = 0, binding = 1) readonly buffer cubes_b { int  GICubes[]; };      // per cube 8: instance, count, up to 6 surfels
 
-const uint gi_inst_v = 48u;
+const uint gi_inst_v = 49u;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
 vec3  GV(uint i) { return vec3(uintBitsToFloat(GD[i]), uintBitsToFloat(GD[i + 1u]), uintBitsToFloat(GD[i + 2u])); }

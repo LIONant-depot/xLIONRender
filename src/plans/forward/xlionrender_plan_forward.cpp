@@ -1824,10 +1824,14 @@ namespace xlionrender
         Light.m_TailBvh    = { Bvh.m_bEmpty ? 0.0f : 1.0f, std::bit_cast<float>(Bvh.m_TlasRoot), std::bit_cast<float>(Bvh.m_PrimOffset), 0.0f };
         if( bLights ) Light.m_LocalCount.m_Y = float(int(light_mode::SCREEN));
 
+        // Reflections' sharp receivers: the G-buffer at full size too (createSharpTargets: made when first needed; its rays a pixel each)
+        const bool bSharp = m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && createSharpTargets(View) == nullptr;
+        Light.m_TailParams.m_X = bSharp ? float(View.m_SharpWidth) : 0.0f;      // (the materials: the full-size records' row, 0: none)
         Window.WriteTimestamp(m_TailTimes, 0);
+        const auto DrawGBuffer = [&]( xgpu::renderpass& Pass )
         {
             const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
-            auto Cmd = Window.StartRenderPass(View.m_TailGPass);
+            auto Cmd = Window.StartRenderPass(Pass);
             const void* pBound = nullptr; const cluster_geom* pBoundGeom = nullptr;
             int nDraws = 0, nNoVariant = 0;
             for( const auto& Vis : m_Visible )
@@ -1894,7 +1898,9 @@ namespace xlionrender
                 }
             }
             m_TailReport.m_nGBufferDraws = nDraws; m_TailReport.m_nNoVariant = nNoVariant;
-        }
+        };
+        DrawGBuffer(View.m_TailGPass);
+        if( bSharp ) DrawGBuffer(View.m_SharpGPass);
         Window.WriteTimestamp(m_TailTimes, 1);
         if( bLights )
         {
@@ -1973,14 +1979,21 @@ namespace xlionrender
             const float MaxRough = m_ReflTraceBench > 0 ? 0.0f : Scene.m_ReflectionMaxRoughness;
             const bool  bPlanar  = m_bPlanarOn && m_PlanarView.m_Width == W && m_PlanarView.m_Height == H;
             const auto& Pl = m_PlanarPlane;
-            const struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_Pad1; float m_Plane[4]; } Push
-                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, 0
-                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f } };
+            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; } Push
+                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
+                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, 0 } };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
             auto Buffers  = std::array<xgpu::buffer*, 10>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams };
             auto Textures = std::array<const xgpu::texture*, 5>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth };
             Window.WriteTimestamp(m_ReflTimes, 0);
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
+            if( bSharp )        // the sharp receivers at full size (their records after the half-size ones, 2 pixels a record)
+            {
+                auto P2 = Push;
+                P2.m_Full[0] = View.m_SharpWidth; P2.m_Full[1] = View.m_SharpHeight; P2.m_Full[2] = 2 * W * H; P2.m_SharpMax = m_ReflSharpMax;
+                auto T2 = std::array<const xgpu::texture*, 5>{ &View.m_SharpGColor, &View.m_SharpGDepth, &m_EnvAtlas, Textures[3], Textures[4] };
+                Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
+            }
             Window.WriteTimestamp(m_ReflTimes, 1);
             Light.m_EnvParams.m_W = MaxRough;
         }
@@ -2981,13 +2994,13 @@ namespace xlionrender
             if( m_Device.Create(J.m_Data, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = 2 * n, .m_pData = Data.data() }) )
             { m_GICaptures.pop_front(); return; }
 
-            (void)m_GICaptureVB.MemoryMap(0, 8 * std::size_t(n), [&](void* p)
+            (void)m_GICaptureVB.MemoryMap(0, 4 * gi_capture_passes_v * std::size_t(n), [&](void* p)
             {
                 auto* V = static_cast<float*>(p);
-                for( int Pass = 0; Pass < 2; ++Pass )
+                for( int Pass = 0; Pass < gi_capture_passes_v; ++Pass )
                     for( int i = 0; i < n; ++i )
                     {
-                        const float x0 = float(2 * (i % (gi_capture_w_v / 2))), y0 = float(2 * (i / (gi_capture_w_v / 2)) + Pass * gi_capture_h_v / 2);
+                        const float x0 = float(2 * (i % (gi_capture_w_v / 2))), y0 = float(2 * (i / (gi_capture_w_v / 2)) + Pass * gi_capture_h_v / gi_capture_passes_v);
                         const float X[4] = { x0, x0 + 2, x0 + 2, x0 }, Y[4] = { y0, y0, y0 + 2, y0 + 2 };
                         for( int c = 0; c < 4; ++c )
                         {
@@ -3021,9 +3034,9 @@ namespace xlionrender
                 Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                 Cmd.setBuffer(m_GICaptureVB);
                 Cmd.setBuffer(m_GICaptureIB);
-                for( int Pass = 0; Pass < 2; ++Pass )
+                for( int Pass = 0; Pass < gi_capture_passes_v; ++Pass )      // (xlionrender_surfel_gi.glsl: 0x800 emission, 0x2000 the specular passes)
                 {
-                    Cmd.setPushConstants(details::push_static_geom{ Pass ? std::uint32_t(-n) : 0u, J.m_Slot, 0u, (3u << 9) | (Pass ? 0x800u : 0u), pInst == &m_GIConstCaptureInstance ? 0u : pMat->m_ParamBase });
+                    Cmd.setPushConstants(details::push_static_geom{ std::uint32_t(-Pass * n), J.m_Slot, 0u, (3u << 9) | ((Pass & 1) ? 0x800u : 0u) | (Pass >= 2 ? 0x2000u : 0u), pInst == &m_GIConstCaptureInstance ? 0u : pMat->m_ParamBase });
                     Cmd.Draw(6 * (b - a), 6 * a, Pass * 4 * n);
                 }
                 a = b;
@@ -3050,12 +3063,15 @@ namespace xlionrender
             const auto* P = reinterpret_cast<const std::uint16_t*>(Raw.data());
             const auto Texel = [&](int x, int y) { const auto* t = P + 4 * (std::size_t(y) * W + x); return xmath::fvec3(Half(t[0]), Half(t[1]), Half(t[2])); };
             std::vector<xmath::fvec3> Albedo(n), Emission(n);
+            std::vector<std::array<float, 4>> Specular(n);       // (F0's color, roughness: reflections' secondary hits)
             for( int i = 0; i < n; ++i )
             {
                 const int x0 = 2 * (i % (W / 2)), y0 = 2 * (i / (W / 2));
                 const auto Block = [&](int y) { return (Texel(x0, y) + Texel(x0 + 1, y) + Texel(x0, y + 1) + Texel(x0 + 1, y + 1)) * 0.25f; };
                 Albedo[J.m_Order[i]]   = Block(y0);
-                Emission[J.m_Order[i]] = Block(y0 + H / 2);                           // as captured (the world scales it: scene::gi_settings::m_EmissiveScale)
+                Emission[J.m_Order[i]] = Block(y0 + H / gi_capture_passes_v);         // as captured (the world scales it: scene::gi_settings::m_EmissiveScale)
+                const auto F0 = Block(y0 + 2 * H / gi_capture_passes_v), RM = Block(y0 + 3 * H / gi_capture_passes_v);
+                Specular[J.m_Order[i]] = { F0.m_X, F0.m_Y, F0.m_Z, RM.m_X };
             }
             CapLap(1);
             // Captured from materials the instance no longer has (they were made again while this was in flight): not published - its new capture is queued
@@ -3066,6 +3082,7 @@ namespace xlionrender
                 m_pGIWorld->SetTriangleAlbedo(J.m_GIId, J.m_First, Albedo);
                 CapLap(2);
                 m_pGIWorld->SetTriangleEmission(J.m_GIId, J.m_First, Emission);
+                m_pGIWorld->SetTriangleSpecular(J.m_GIId, J.m_First, Specular);
                 CapLap(3);
                 if( J.m_Section < 0 && J.m_First + std::size_t(n) >= G.m_Tris.size() )      // its last batch: the SURFACE_COLOR view's table (the mesh's first instance)
                 {

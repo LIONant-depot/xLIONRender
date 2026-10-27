@@ -9,7 +9,7 @@ layout(std430, set = 0, binding = 0)          buffer data_b   { uint  GD[]; };
 layout(std430, set = 0, binding = 1) readonly buffer ghosts_b { uvec4 GIGhosts[]; };
 layout(push_constant) uniform push_t { int m_nGhosts, m_Pad0, m_Pad1, m_Pad2; } Push;
 
-const uint gi_inst_v = 48u;
+const uint gi_inst_v = 49u;
 
 void main()
 {

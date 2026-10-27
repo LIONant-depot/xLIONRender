@@ -22,7 +22,7 @@ layout(std430, set = 0, binding = 4) readonly  buffer data_b      { uint       G
 
 
 const uint  gi_none_v = 0xFFFFFFFFu;
-const uint  gi_inst_v = 48u;                 // gi::world::gpu_inst_v
+const uint  gi_inst_v = 49u;                 // gi::world::gpu_inst_v
 const float gi_pi_v   = 3.14159265;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }

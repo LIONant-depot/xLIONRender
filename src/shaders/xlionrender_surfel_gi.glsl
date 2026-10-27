@@ -26,6 +26,7 @@ const uint gi_debug_shift_v = 9u;        // 2 bits (scene::gi_debug): 1 the surf
                                          // 3 the material capture (0x800: its emission pass); then 0x1000 the captured color of each pixel's triangle (what a
                                          // ray hitting it bounces). Kept apart: materials compiled before it still capture right
 const uint gi_capture_emission_v = 0x800u;
+const uint gi_capture_specular_v = 0x2000u;     // the capture's specular passes (reflections' secondary hits): F0's color; with 0x800 roughness, metallic
 const uint gi_no_moments_v       = 0x4000u;     // the reads skip the depth-moment test (scene::gi_settings::m_bMoments off)
 bool       g_GIMoments           = true;        // GIVisibility's moment test (the caller sets it from its GI reference)
 // The most list entries the per-pixel read walks, the nearest first (surfel_mesh::SortReadLists): the far ones weigh little (a dense mesh

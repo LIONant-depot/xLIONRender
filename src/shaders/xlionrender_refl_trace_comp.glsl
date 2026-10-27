@@ -4,7 +4,8 @@
 // and the radiance toward the receiver: D(y) = L_e + albedo / pi (E_direct + E_indirect) fresh at the hit with the GI's own model
 // (xlionrender_gi_pass_common.glsl: Direct - the sun and the lights, a BVH shadow ray each -, Indirect - the surfels' read -, SurfaceAt -
 // the capture's albedo and emission -, Unsupported - its fallback); a miss: the sky (the environment atlas at the receiver's roughness).
-// S(y, -w), the hit's own specular, is not evaluated yet (T0 without its probe term, labelled: metals at a hit are their diffuse capture).
+// S(y, -w), the hit's own specular: T1 restricted - each light's GGX highlight toward the receiver with the light's own shadow ray (the
+// capture's F0 and roughness per triangle); its indirect specular is not evaluated (labelled: a metal at a hit shows its highlights only).
 // Writes U = the lobe-mean radiance (one sample: L itself; w = G2/G1 kept for the reconstruction) into the records' second region
 // (instance::reflection records: uvec4 a half-size texel - x: U.rg, y: U.b and conf, z: the hit distance and w, w: the view depth (half,
 // bits 0-15), the octahedral normal (4 + 4 bits), the hit class (bits 24-27)). Push.m_Mode 1..3: the benchmark only (mirror, roughness
@@ -28,11 +29,14 @@ layout(set = 1, binding = 2) uniform sampler2D EnvAtlas;   // the sky's prefilte
 layout(set = 1, binding = 3) uniform sampler2D Planar;     // the planar view (instance::renderPlanar), this size, x mirrored; alpha: drawn (m_bPlanar)
 layout(set = 1, binding = 4) uniform sampler2D PlanarDepth;
 
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_Pad1; vec4 m_Plane; } Push;
+// m_SharpMax: the receivers sharper than this are traced at full size (0: none); m_Full: this dispatch is that one - the full size, its
+// records' first (x, y, z; x 0: the half-size dispatch)
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; } Push;
 
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
 shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough;
+shared uvec2 s_Pair[64];       // (the full-size dispatch: two pixels a record)
 
 // Heitz 2018: a visible normal of an isotropic GGX (alpha a) for the view Ve (local frame, z the normal)
 vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
@@ -48,6 +52,49 @@ vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
     return normalize(vec3(a * Nh.xy, max(1e-6, Nh.z)));
 }
 float Lambda(float c, float a) { c = max(c, 1e-6); return 0.5 * (sqrt(1.0 + a * a * (1.0 - c * c) / (c * c)) - 1.0); }
+
+// The GI's Direct (xlionrender_gi_pass_common.glsl: the sun and its lights, a shadow ray each) with each light's GGX highlight toward V
+// (mb_standard_pbr.frag's: D, correlated Smith, Schlick) for a surface of F0 and roughness Rough: E the irradiance, S the radiance
+void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec, out vec3 E, out vec3 S)
+{
+    const uint Lt = GD[2];
+    E = vec3(0.0); S = vec3(0.0);
+    const vec3  O  = P + N * 1e-3;
+    const float a  = max(Rough, 0.045) * max(Rough, 0.045), a2 = a * a;
+    const float NdotV = max(dot(N, V), 1e-4);
+    const vec3 SunD = GV(Lt), SunC = GV(Lt + 3u);
+    for (int k = -1; k < int(GD[3]); ++k)
+    {
+        vec3 L, C; float d = 1e30;
+        if (k < 0)
+        {
+            if ((SunC.x + SunC.y + SunC.z) <= 0.0) continue;
+            L = -SunD; C = SunC;
+        }
+        else
+        {
+            const uint b = Lt + 57u + 12u * uint(k);
+            const vec3 Dv = GV(b) - P;
+            d = length(Dv);
+            const float s = d / GF(b + 6u);
+            if (s >= 1.0 || d < 1e-6) continue;
+            L = Dv / d;
+            const float Co = GF(b + 10u);
+            const float Cone = Co > -1.5 ? smoothstep(Co, max(GF(b + 11u), Co + 1e-6), dot(-L, GV(b + 7u))) : 1.0;
+            if (Cone <= 0.0) continue;
+            C = GV(b + 3u) * ((1.0 - s * s * s * s) / (1.0 + 2.0 * s * s) * Cone);
+        }
+        const float c = dot(N, L);
+        if (c <= 0.0 || Occluded(O, L, k < 0 ? 1e30 : d - 2e-3)) continue;
+        E += C * c;
+        if (!bSpec) continue;
+        const vec3  H  = normalize(L + V);
+        const float NdotH = max(dot(N, H), 0.0), Dd = NdotH * NdotH * (a2 - 1.0) + 1.0;
+        const float Vis = 0.5 / max(c * sqrt(NdotV * NdotV * (1.0 - a2) + a2) + NdotV * sqrt(c * c * (1.0 - a2) + a2), 1e-6);
+        const vec3  F  = F0 + (1.0 - F0) * pow(clamp(1.0 - dot(L, H), 0.0, 1.0), 5.0);
+        S += C * c * F * (a2 / (gi_pi_v * Dd * Dd) * Vis);
+    }
+}
 
 // The planar view's pyramid at uv (0..1, the planar view's), level L (0: the view itself), bilinear: rgb, the coverage
 vec4 PlanarLevel(int L, vec2 uv)
@@ -81,7 +128,8 @@ void main()
 {
     if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; }
     barrier();
-    const ivec2 Size = ivec2(F[Push.m_Slot].Params.xy);
+    const bool  bFull = Push.m_Full.x > 0;
+    const ivec2 Size = bFull ? Push.m_Full.xy : ivec2(F[Push.m_Slot].Params.xy);
     const ivec2 p    = ivec2(gl_GlobalInvocationID.xy);
     const bool  bIn  = p.x < Size.x && p.y < Size.y;
     const uint  i    = uint(Size.x * Size.y) + uint(p.y * Size.x + p.x);
@@ -100,7 +148,11 @@ void main()
         const vec2  OctN = OctEncode(N) * 0.5 + 0.5;
         Rec.w = packHalf2x16(vec2(Pc.w > 0.0 ? 1.0 / Pc.w : 0.0, 0.0)) | (uint(OctN.x * 15.0 + 0.5) << 16) | (uint(OctN.y * 15.0 + 0.5) << 20);    // (the view depth: clip w, as the tail's)
         const float PlaneDist = dot(Push.m_Plane.xyz, P + Push.m_Eye) + Push.m_Plane.w;
-        if (Push.m_Mode == 0u && Push.m_bPlanar > 0.5 && Rough < Push.m_MaxRough && abs(PlaneDist) < 0.01 + 0.002 * length(P) && dot(N, Push.m_Plane.xyz) > 0.95)
+        const bool  bPlanarHere = Push.m_Mode == 0u && Push.m_bPlanar > 0.5 && Rough < Push.m_MaxRough && abs(PlaneDist) < 0.01 + 0.002 * length(P) && dot(N, Push.m_Plane.xyz) > 0.95;
+        const bool  bSharpHere  = Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpMax;      // (traced at full size)
+        if (bFull && !bSharpHere) { }      // (the full-size dispatch: the sharp ones only; the rest: none - the half-size records serve them)
+        else if (!bFull && bSharpHere) { }  // (the half-size dispatch leaves the sharp ones to the full-size one)
+        else if (bPlanarHere)
         {
             // a planar receiver: the planar view at the mirrored texel (a point of the plane lands there). Rough: its pyramid at the level
             // of the lobe's footprint - the reflected distance t (the planar depth) times alpha, in the view's pixels at the receiver's
@@ -161,9 +213,12 @@ void main()
                         SurfaceAt(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Albedo, Emission);
                         vec3 Ei;
                         if (!Indirect(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Ei)) Ei = Unsupported(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V);
-                        vec3 Ed = Direct(Py, Ny);
+                        const bool bSpec = (GD[R + 47u] & 128u) != 0u;      // (its triangles' specular: world::SetTriangleSpecular)
+                        const uint Sb = bSpec ? GD[R + 48u] + 4u * uint(Hit.m_Tri) : 0u;
+                        vec3 Ed, Sy;
+                        DirectAndSpecular(Py, Ny, -L, bSpec ? GV(Sb) : vec3(0.04), bSpec ? GF(Sb + 3u) : 1.0, bSpec, Ed, Sy);
                         if (EmitterDirectExternal()) Ed += EmitterIrradianceAt(Py, Ny, h);
-                        Lr = Emission / max(GF(5u), 1e-6) + Albedo * (1.0 / gi_pi_v) * (Ed + Ei);     // (the emission as the surface shows it: SurfaceAt's carries the GI's emissive scale)
+                        Lr = Emission / max(GF(5u), 1e-6) + Albedo * (1.0 / gi_pi_v) * (Ed + Ei) + Sy;     // (the emission as the surface shows it: SurfaceAt's carries the GI's emissive scale)
                         Class = refl_hit_v; Dist = Hit.m_T;
                     }
                     else
@@ -181,8 +236,20 @@ void main()
             }
         }
     }
-    if (bIn && Push.m_Mode == 0u) Records[i] = Rec;
+    if (!bFull && bIn && Push.m_Mode == 0u) Records[i] = Rec;
+    if (bFull)          // two pixels a record: rgb and, its sign the confidence, the view depth (the materials match it)
+    {
+        const float Depth = unpackHalf2x16(Rec.w & 0xFFFFu).x;
+        const float Conf  = unpackHalf2x16(Rec.y).y;
+        s_Pair[gl_LocalInvocationIndex] = Conf > 0.0 ? uvec2(Rec.x, packHalf2x16(vec2(unpackHalf2x16(Rec.y).x, Depth))) : uvec2(0u);
+    }
     barrier();
+    if (bFull && bIn && Push.m_Mode == 0u && (p.x & 1) == 0)
+    {
+        const uint  k = uint(p.y * ((Size.x + 1) & ~1) + p.x);     // (rows padded to even: a record never spans two)
+        const uvec2 b = p.x + 1 < Size.x ? s_Pair[gl_LocalInvocationIndex + 1u] : uvec2(0u);
+        Records[uint(Push.m_Full.z) + k / 2u] = uvec4(s_Pair[gl_LocalInvocationIndex], b);
+    }
     if (gl_LocalInvocationIndex == 0u)
     {
         atomicAdd(Stats[Push.m_Slot * 8u + 0u], s_Rays);

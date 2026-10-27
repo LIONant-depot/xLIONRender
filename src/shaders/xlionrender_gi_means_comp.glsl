@@ -7,7 +7,7 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 0) readonly  buffer data_b  { uint  GD[]; };
 layout(std430, set = 0, binding = 1) writeonly buffer means_b { float GIMeans[]; };     // per instance: sum E V 3, sum V, bad
 
-const uint gi_inst_v = 48u;
+const uint gi_inst_v = 49u;
 
 shared vec4  s_Sum[64];
 shared float s_Bad[64];

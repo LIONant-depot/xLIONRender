@@ -72,6 +72,21 @@ vec4 ReflScreen(in const vec3 N)
     const int  W = int(UBOLight.TailParams.y), H = int(UBOLight.TailParams.z);
     const uint R0 = uint(UBOLight.TailParams.w) + uint(W * H);
     if (W <= 0 || R0 + uint(W * H) > uint(TailScreen.length())) return vec4(0.0);
+    const int Wf = int(UBOLight.TailParams.x);      // the sharp receivers' full-size records (2 pixels a record), this pixel's when it is this surface
+    if (Wf > 0)
+    {
+        const ivec2 q  = ivec2(gl_FragCoord.xy);
+        const uint  k  = uint(q.y * ((Wf + 1) & ~1) + q.x);
+        const uint  Rf = R0 + uint(W * H) + k / 2u;
+        if (Rf < uint(TailScreen.length()))
+        {
+            const uvec4 Q = TailScreen[Rf];
+            const uvec2 r = (k & 1u) != 0u ? Q.zw : Q.xy;
+            const vec2  bd = unpackHalf2x16(r.y);
+            const float Dist = 1.0 / gl_FragCoord.w;
+            if (bd.y > 0.0 && abs(bd.y - Dist) < 0.05 * Dist) return vec4(unpackHalf2x16(r.x), bd.x, 1.0);
+        }
+    }
     const vec2  hp = gl_FragCoord.xy * 0.5 - 0.5;
     const vec2  i0 = floor(hp), f = hp - i0;
     const float Dist = 1.0 / gl_FragCoord.w;

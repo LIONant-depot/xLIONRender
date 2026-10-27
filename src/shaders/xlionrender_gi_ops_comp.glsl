@@ -10,7 +10,7 @@ layout(std430, set = 0, binding = 1) readonly buffer ops_b  { ivec4 GIOps[]; }; 
 
 layout(push_constant) uniform push_t { int m_nOps, m_Pad0, m_Pad1, m_Pad2; } Push;
 
-const uint gi_inst_v = 48u;          // gi::world::gpu_inst_v
+const uint gi_inst_v = 49u;          // gi::world::gpu_inst_v
 const uint gi_est_v  = 24u;
 
 void main()

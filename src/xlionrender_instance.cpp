@@ -352,7 +352,7 @@ namespace xlionrender
             auto A = std::array{ xgpu::renderpass::attachment{ m_GICaptureTex } };
             if( auto Err = Device.Create(m_GICapturePass, { .m_Attachments = A, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
-        if( auto Err = Device.Create(m_GICaptureVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 8 * gi_capture_max_v }); Err ) return Err;
+        if( auto Err = Device.Create(m_GICaptureVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 4 * gi_capture_passes_v * gi_capture_max_v }); Err ) return Err;
         if( auto Err = Device.Create(m_GICaptureIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6 * gi_capture_max_v }); Err ) return Err;
         (void)m_GICaptureIB.MemoryMap(0, 6 * gi_capture_max_v, [](void* p)
         {
@@ -622,7 +622,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 10, .m_nTextures = 5, .m_PushConstantsSize = 64 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 10, .m_nTextures = 5, .m_PushConstantsSize = 80 }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMipsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflPlanarMipsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMips, { .m_pShader = &m_PlanarMipsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 16 + 8 * 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
@@ -1588,9 +1588,38 @@ namespace xlionrender
         return nullptr;
     }
 
+    // Reflections' sharp receivers: the G-buffer at the view's full size (the tail's formats: its pipelines draw into it) and the records
+    // with the full-size region (xlionrender_refl_trace_comp.glsl: 2 pixels a record), made when they are first needed
+    xgpu::device::error* instance::createSharpTargets( render_view& View ) noexcept
+    {
+        const int nNeed = 2 * View.m_TailWidth * View.m_TailHeight + ((View.m_Width + 1) & ~1) * View.m_Height / 2;
+        if( View.m_SharpGPass.m_Private && View.m_SharpWidth == View.m_Width && View.m_SharpHeight == View.m_Height && View.m_TailResult.getEntryCount() >= nNeed ) return nullptr;
+        const auto Kill = [&](auto& Obj) { if( Obj.m_Private ) m_Device.Destroy(std::move(Obj)); Obj.m_Private.reset(); };
+        Kill(View.m_SharpGPass); Kill(View.m_SharpGColor); Kill(View.m_SharpGMotion); Kill(View.m_SharpGDepth);
+        using fmt = xgpu::texture::format;
+        const int W = View.m_Width, H = View.m_Height;
+        if( auto Err = m_Device.Create(View.m_SharpGColor,  { .m_Format = fmt::A2B10G10R10_UNORM, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_SharpGDepth,  { .m_Format = fmt::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_SharpGMotion, { .m_Format = fmt::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        {
+            auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_SharpGColor }, xgpu::renderpass::attachment{ View.m_SharpGMotion }, xgpu::renderpass::attachment{ View.m_SharpGDepth } };
+            if( auto Err = m_Device.Create(View.m_SharpGPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
+        }
+        const int Wh = View.m_TailWidth, Hh = View.m_TailHeight;
+        const int nRecords = 2 * Wh * Hh + ((W + 1) & ~1) * H / 2;     // (rows padded to even)
+        const std::vector<std::array<std::uint32_t, 4>> Zeros(std::size_t(nRecords), std::array<std::uint32_t, 4>{});
+        Kill(View.m_TailResult);
+        if( auto Err = m_Device.Create(View.m_TailResult, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = nRecords, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()) }); Err ) return Err;
+        View.m_bTailPrev = false;
+        View.m_SharpWidth = W; View.m_SharpHeight = H;
+        return nullptr;
+    }
+
     void instance::destroyTailTargets( render_view& View ) noexcept
     {
         const auto Kill = [&](auto& Obj) { if( Obj.m_Private ) m_Device.Destroy(std::move(Obj)); Obj.m_Private.reset(); };
+        Kill(View.m_SharpGPass); Kill(View.m_SharpGColor); Kill(View.m_SharpGMotion); Kill(View.m_SharpGDepth);
+        View.m_SharpWidth = View.m_SharpHeight = 0;
         Kill(View.m_TailInstance); Kill(View.m_TailGPass); Kill(View.m_TailGColor); Kill(View.m_TailGDepth); Kill(View.m_TailGMotion);
         Kill(View.m_TailPass); Kill(View.m_TailDiffuse); Kill(View.m_TailSpecular); Kill(View.m_TailResult); Kill(View.m_TailTemporal);
         View.m_TailWidth = View.m_TailHeight = 0;

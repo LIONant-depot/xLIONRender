@@ -222,6 +222,7 @@ namespace xlionrender
         float                                      m_TailTraceLength = 1.0f;                // SCREEN: the tail's unshadowed lights' screen trace (contact shadows), world units (0: none)
         int                                        m_TailTraceSteps  = 12;
         bool                                       m_bTailTraceBvh   = true;                // SCREEN: those lights' shadow ray also through the GI's BVH (P4; the opaque rigid GI meshes, off screen too)
+        float                                      m_ReflSharpMax    = 0.1f;                // reflections: the receivers sharper than this trace at the view's full size (their own G-buffer); 0: all at half size
         int                                        m_ReflTraceBench  = 0;                   // (measurement) SCREEN, the GI on: a reflection ray a thin G-buffer texel through the GI's BVH (shaders/xlionrender_refl_trace_comp.glsl): 1 mirror, 2 roughness 0.5, 3 the materials'; 0 off. Init: XLION_REFL_BENCH
         // Emissive surfaces as lights (documentation/lighting_gi_interface_notice.md): the GI's emitter view (gi::world::ForEachEmitter) as
         // lights without shadow pages. Off by default: the GI's bounce already holds the emitters' light on the surfaces around them - with
@@ -399,6 +400,7 @@ namespace xlionrender
         xgpu::pipeline_instance*    getGBufferInstance ( material_slot& Material, geom_kind Kind )              noexcept;     // its G-buffer variant (nullptr: none)
         // The screen tail (light_mode::SCREEN, the main view): the thin G-buffer, the tail pass and the denoiser, before the scene pass
         xgpu::device::error*        createTailTargets  ( render_view& View )                                    noexcept;
+        xgpu::device::error*        createSharpTargets ( render_view& View )                                    noexcept;     // (the records grow by the full-size region)
         void                        destroyTailTargets ( render_view& View )                                    noexcept;
         void                        renderTail         ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept;
         xgpu::pipeline              m_ForwardGBPipeline, m_StaticGeomGBPipeline, m_TailPipeline;     // the built-in materials' G-buffer variants; the tail pass
@@ -452,7 +454,8 @@ namespace xlionrender
         };
         xgpu::device::error*        buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept;
         xgpu::device::error*        createMeshGI( mesh_slot& M, std::span<const std::uint32_t> Data ) noexcept;      // the GPU buffer of PackMeshGI's data     // M.m_GIBuffer from M.m_pGI (+ its triangles' colors)
-        static constexpr int        gi_capture_w_v = 1024, gi_capture_h_v = 512, gi_capture_max_v = (gi_capture_w_v / 2) * (gi_capture_h_v / 4);   // 65536 surfels
+        static constexpr int        gi_capture_passes_v = 4;       // albedo, emission, F0's color, roughness + metallic (the last two: reflections' secondary hits)
+        static constexpr int        gi_capture_w_v = 1024, gi_capture_h_v = 1024, gi_capture_max_v = (gi_capture_w_v / 2) * (gi_capture_h_v / (2 * gi_capture_passes_v));   // 65536 surfels
         std::deque<gi_capture_job>  m_GICaptures;
         int                         m_GICapturesQuiet = 0;      // frames since the captures were last pending (updateGI: XLION_GI_HOLD_CAPTURES)
         xgpu::texture               m_GICaptureTex;

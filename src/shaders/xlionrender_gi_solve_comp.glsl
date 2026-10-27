@@ -15,7 +15,7 @@ layout(std430, set = 0, binding = 5)          buffer next_b  { vec4   GINext[]; 
 layout(std430, set = 0, binding = 6) readonly buffer dir_b   { vec4   GIDir[]; };       // per item its first bounce of the lights, F (the links' mode 1)
 layout(push_constant) uniform push_t { int m_nItems, m_Mode, m_nInst, m_Links; } Push;
 
-const uint gi_inst_v  = 48u;
+const uint gi_inst_v  = 49u;
 const uint gi_empty_v = 0xFFFFFFFFu;
 
 uint InstRec(uint i) { return GD[0] + i * gi_inst_v; }

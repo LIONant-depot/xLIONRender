@@ -16,7 +16,7 @@ layout(std430, set = 0, binding = 5)          buffer moment_b  { uint  GIMoment[
 
 layout(push_constant) uniform push_t { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push;
 
-const uint gi_inst_v = 48u;          // gi::world::gpu_inst_v
+const uint gi_inst_v = 49u;          // gi::world::gpu_inst_v
 const uint gi_none_v = 0xFFFFFFFFu;
 
 // gi::PackRGB9E5, step for step (the same bits)

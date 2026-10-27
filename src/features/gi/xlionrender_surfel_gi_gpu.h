@@ -921,10 +921,10 @@ namespace xlionrender::gi
                 if (W.MatGen(i) != m_MatGen[std::size_t(i)])            // its material (world::GPUMaterial: the same sizes, in place)
                 {
                     m_MatGen[std::size_t(i)] = W.MatGen(i);
-                    std::vector<std::uint32_t> A[5];
+                    std::vector<std::uint32_t> A[world::gpu_mat_arrays_v];
                     PutU(R + 47, W.GPUMaterial(i, A));
-                    const std::uint32_t Word[5] = { 11, 12, 13, 14, 45 };
-                    for (int k = 0; k < 5; ++k)
+                    const auto& Word = world::gpu_mat_words_v;
+                    for (int k = 0; k < world::gpu_mat_arrays_v; ++k)
                     {
                         m_RunJobs.push_back({ 0, int(m_RunStage.size()), int(D[R + Word[k]]), int(A[k].size()) });
                         std::copy(A[k].begin(), A[k].end(), m_Data.begin() + D[R + Word[k]]);

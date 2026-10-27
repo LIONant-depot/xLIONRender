@@ -15,7 +15,7 @@ layout(std430, set = 0, binding = 3)           buffer count_b  { uint    GICount
 
 layout(push_constant) uniform push_t { int m_RangeFirst, m_nRanges, m_nThreads, m_StartBase; vec4 m_Eye; } Push;
 
-const uint  gi_inst_v = 48u;
+const uint  gi_inst_v = 49u;
 const int   gi_range_urgent_v = 1, gi_range_settled_v = 2;
 const uint  gi_est_v  = 24u;
 

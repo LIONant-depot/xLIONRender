@@ -2254,6 +2254,17 @@ namespace xlionrender::gi
             AffectNear(I.m_Lo, I.m_Hi, Id);
         }
         const std::vector<v3>& TriangleAlbedo( int Id ) const noexcept { return m_Instances[Id].m_TriAlbedo; }
+
+        // An instance's triangles' specular (the material capture, triangle First on: F0's color, roughness), for reflections' secondary
+        // hits (shaders/xlionrender_refl_trace_comp.glsl: their highlights). The GI's own light does not read it
+        void SetTriangleSpecular(int Id, std::size_t First, const std::vector<std::array<float, 4>>& Spec) noexcept
+        {
+            ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
+            auto& I = m_Instances[Id];
+            const std::size_t n = I.m_pMesh->m_Tris.size();
+            if (I.m_TriSpec.size() != n) I.m_TriSpec.assign(n, std::array<float, 4>{ 0.04f, 0.04f, 0.04f, 1.0f });
+            for (std::size_t k = 0; k < Spec.size() && First + k < n; ++k) I.m_TriSpec[First + k] = Spec[k];
+        }
         const std::vector<v3>& SurfaceEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }       // per fine surfel (tests)
         v3          EmissionUnassigned( int Id ) const noexcept { return m_Instances[Id].m_EmitUnassigned; }      // (tests) the triangles' power no surfel represents
         std::size_t EmissionResolveWork( int Id ) const noexcept { return m_Instances[Id].m_EmitResolveWork; }    // (tests) AccumulateTriangleEmission's candidates examined
@@ -2841,15 +2852,17 @@ namespace xlionrender::gi
         //             13 surfEmission 14 see-through bits 15 meanScale 16..27 L2W rows 28..39 W2L rows 40 alive   (~0u: none)
         //             G4 (the commit on the GPU): 41 fractions (9 per surfel) 42 estimators (gpu_est_v: PackEst) 43 moment counts (16)
         //             44 emitted light from the links (9, zeros: none) 45 transparent surfels' bits (level 0; none) 46 its first surfel
-        //             in the shown light's global order (gpu_trace writes it) 47 its material's flags (GPUMaterial: 11..14 and 45 are
-        //             always there, the flags say which hold its material)
+        //             in the shown light's global order (gpu_trace writes it) 47 its material's flags (GPUMaterial: 11..14, 45 and 48 are
+        //             always there, the flags say which hold its material) 48 its triangles' specular (4 a triangle: F0's color, roughness)
         //   header:   0 instances 1 nInstances 2 lights 3 nPoints 4 sky oct (0/1) 5 emissive scale 6 spread origins 7 no emitters
         //             8 the warm-up's least blend (m_MinBlend) 9 warmup_passes_v 10 rays per surfel 11 flags (1 adaptive rays, 2 tiers)
         //             12 the rays' uncertainty factor 13 light sampling (G5: 1, 0) 14 the emitter table (GPUEmitters) 15 its count
         //             (5, 7, 8, 10..13: PackGPUSetup)
         //   lights:   sun direction 3, sun color 3, sky 3, sky oct 48, then per point position 3, color 3, radius
         // ponytail: the whole scene every call (G3 keeps it resident and uploads changes)
-        static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 48, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 24;
+        static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 49, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 24;
+        static constexpr int gpu_mat_arrays_v = 6;                                                      // GPUMaterial's arrays and their record words
+        static constexpr std::uint32_t gpu_mat_words_v[gpu_mat_arrays_v] = { 11, 12, 13, 14, 45, 48 };
         static constexpr int gpu_lanes_v = 8, gpu_group_v = 64;    // the pass: invocations per item, per group (a dispatch: GPUGroups)
         static constexpr int GPUGroups(std::size_t nItems) noexcept { return int((nItems * gpu_lanes_v + gpu_group_v - 1) / gpu_group_v); }
         struct gpu_item { int m_Inst = 0, m_Surf = 0, m_Level = 0, m_Rays = 0; float m_Off1 = 0, m_Off2 = 0; int m_Shift = 0, m_Pad = 0; };
@@ -2951,10 +2964,9 @@ namespace xlionrender::gi
                 R[5] = F(I.m_MeanE.m_X); R[6] = F(I.m_MeanE.m_Y); R[7] = F(I.m_MeanE.m_Z);
                 R[8] = F(I.m_Albedo.m_X); R[9] = F(I.m_Albedo.m_Y); R[10] = F(I.m_Albedo.m_Z);
                 {   // its material, always there (changed in place: GPUMaterial)
-                    std::vector<std::uint32_t> A[5];
+                    std::vector<std::uint32_t> A[gpu_mat_arrays_v];
                     R[47] = GPUMaterial(int(i), A);
-                    const std::uint32_t Word[5] = { 11, 12, 13, 14, 45 };
-                    for (int k = 0; k < 5; ++k) R[Word[k]] = Words(A[k].data(), A[k].size());
+                    for (int k = 0; k < gpu_mat_arrays_v; ++k) R[gpu_mat_words_v[k]] = Words(A[k].data(), A[k].size());
                 }
                 R[15] = F(I.m_MeanScale);
                 {
@@ -3013,7 +3025,7 @@ namespace xlionrender::gi
         // G4c: an instance's material as the GPU has it (record words 11 triangle albedo 3 a triangle, 12 surfel albedo 3 a fine surfel, 13 surfel
         // emission, 14 the triangles' see-through bits, 45 the fine surfels'): always their full size (zeros: none), the flags (bits 0..4)
         // which hold its material, bit 5 whether it has links (m_EmitB)
-        std::uint32_t GPUMaterial(int Id, std::vector<std::uint32_t> (&A)[5]) const noexcept
+        std::uint32_t GPUMaterial(int Id, std::vector<std::uint32_t> (&A)[gpu_mat_arrays_v]) const noexcept
         {
             const auto& I = m_Instances[std::size_t(Id)];
             const std::size_t nT = I.m_pMesh->m_Tris.size(), nF = I.m_pMesh->m_Levels[0].size();
@@ -3022,10 +3034,12 @@ namespace xlionrender::gi
             const auto B = [&](std::vector<std::uint32_t>& Out, const std::vector<std::uint8_t>& In, std::size_t n) { Out.assign((n + 31) / 32, 0u); std::uint32_t* o = Out.data(); const std::uint8_t* p = In.data(); for (std::size_t k = 0; k < In.size() && k < n; ++k) if (p[k]) o[k / 32] |= 1u << (k % 32); };
             V(A[0], I.m_TriAlbedo, nT); V(A[1], I.m_SurfAlbedo, nF); V(A[2], I.m_SurfEmission, nF);
             B(A[3], I.m_SeeThrough, nT); B(A[4], I.m_SurfSeeThrough, nF);
+            A[5].assign(4 * nT, 0u); for (std::size_t k = 0; k < I.m_TriSpec.size() && k < nT; ++k) std::memcpy(A[5].data() + 4 * k, I.m_TriSpec[k].data(), 16);
             for (auto& a : A) if (a.empty()) a.push_back(0u);
             return (I.m_TriAlbedo.empty() ? 0u : 1u) | (I.m_SurfAlbedo.empty() ? 0u : 2u) | (I.m_SurfEmission.empty() ? 0u : 4u) | (I.m_SeeThrough.empty() ? 0u : 8u) | (I.m_SurfSeeThrough.empty() ? 0u : 16u)
                  | (I.m_EmitB.empty() ? 0u : 32u)      // (32: it has links: its rays' hits leave the emission out, the links bring it)
-                 | (I.m_bProvisional ? 64u : 0u);      // (64: 7a, not captured yet: its hits bring nothing)
+                 | (I.m_bProvisional ? 64u : 0u)       // (64: 7a, not captured yet: its hits bring nothing)
+                 | (I.m_TriSpec.empty() ? 0u : 128u);  // (128: its triangles' specular, word 48: reflections' secondary hits)
         }
         std::uint32_t MatGen(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_MatGen; }
         const xmath::fmat4& InstanceL2W(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_L2W; }            // (gpu_trace: the links' local rebuild)
@@ -4378,6 +4392,7 @@ namespace xlionrender::gi
             std::vector<moments>    m_Moments;                  // per surfel of the active level (MomentTexel)
             std::vector<v3>         m_SurfAlbedo, m_SurfEmission;     // per fine surfel (SetSurfelMaterial; empty: m_Albedo, none)
             std::vector<v3>         m_TriAlbedo;                      // per triangle (SetTriangleAlbedo; empty: the surfels')
+            std::vector<std::array<float, 4>> m_TriSpec;              // per triangle: F0's color, roughness (SetTriangleSpecular; empty: none - reflections' hits see no highlight)
             std::vector<v3>         m_SurfEmitPower, m_SurfEmissionPoint; // per fine surfel: the power its triangles emit (SetTriangleEmission, batch by batch), and its emission sampled at its center (SetSurfelMaterial)
             v3                      m_EmitUnassigned{ 0, 0, 0 };      // the emitted power of triangles no surfel represents (none of their vertices' surfels faces their way)
             int                     m_nEmitUnassigned = 0;
