@@ -1167,21 +1167,13 @@ namespace xlionrender
             const std::uint32_t Slot = m_DrawSlot[iDraw];
             if( pMesh->m_bCluster && Slot == instance_slots::none_v ) continue;
 
-            // The editor's view of huge meshes. Boxes only: a cluster mesh casts no shadow (gone from the casters, its tiles re-render, and again when it is back).
-            // A budget: the clusters the last scene pass drew as their boxes cast none either (the same draw: m_ClusterPlanKey); BoxedHash is part of the caster's
-            // state, so the tiles under it re-render when they change, and when the budget is turned on or off
+            // The editor's view of huge meshes. Boxes only: a cluster mesh casts no shadow (gone from the casters, its pages re-render, and again when it is back).
+            // A frame budget's boxes are the main view's only: every cluster casts. (They were part of the caster's state: the boxed set changes from frame to
+            // frame, so every page under the caster rendered again - and the caster became a mover -, and a slower frame boxed more: in the Debug editor on
+            // Bistro, 64 pages a frame that never settled and 85 ms of CPU a frame. The pages are cached: the budget's cost is the main view's.)
             if( pMesh->m_bCluster && m_bBoxesOnly ) { m_DrawWorld[iDraw] = WorldOf(*pMesh, D); continue; }
-            std::uint32_t BoxedBase = ~0u;
-            std::uint64_t BoxedHash = 0;
-            if( pMesh->m_bCluster && m_FrameBudgetMs > 0 && iDraw < m_ClusterBase.size() && m_ClusterBase[iDraw] != ~0u && m_ClusterPlanKey[iDraw] == ClusterPlanKey(D)
-             && std::size_t(m_ClusterBase[iDraw]) + pMesh->m_Geom.m_Clusters.size() <= m_ClusterSkip.size() )
-            {
-                const std::uint32_t Base = m_ClusterBase[iDraw];
-                std::uint64_t H = 1469598103934665603ull;
-                for( std::uint32_t c = 0, n = std::uint32_t(pMesh->m_Geom.m_Clusters.size()); c < n; ++c )
-                    if( m_ClusterSkip[Base + c] == cluster_boxed_v ) { H = Hash(H, &c, sizeof(c)); BoxedBase = Base; }
-                if( BoxedBase != ~0u ) BoxedHash = H;
-            }
+            constexpr std::uint32_t BoxedBase = ~0u;
+            constexpr std::uint64_t BoxedHash = 0;
 
             const bool   bSkin = pMesh->m_bCluster && pMesh->m_Geom.m_Kind == geom_kind::SKIN;
             xmath::fbbox World;

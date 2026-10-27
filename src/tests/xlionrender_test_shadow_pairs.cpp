@@ -189,6 +189,22 @@ int main()
         CHECK(Compare("a point light"), "compare, a point light's pages");     // (its pages through the pairs against the CPU path)
         Scene.m_LocalLights.clear();
     }
+
+    // The editor's frame budget draws clusters as boxes (the main view's cost) - a tight one changes the boxed set from frame to frame:
+    // the shadows do not follow it (it re-rendered every page under a caster each frame, and made it a mover: a feedback loop in the
+    // Debug editor). A still scene under a budget settles and stays settled
+    {
+        Renderer.m_FrameBudgetMs = 0.01f;
+        int nLate = 0, nMover = 0;
+        for (int f = 0; f < 40; ++f)
+        {
+            CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateVSM(), "a frame budget %d", f);
+            if (f >= 20) { nLate += Renderer.getVSMReport().m_Pages.m_Rendered; nMover += Renderer.getVSMReport().m_Pages.m_RenderedMover; }
+        }
+        Renderer.m_FrameBudgetMs = 0;
+        std::printf("a tight frame budget: %d static and %d mover pages rendered in 20 settled frames (%d clusters boxed)\n", nLate, nMover, int(Renderer.getBudgetStats().m_nClusters - Renderer.getBudgetStats().m_nDrawn));
+        CHECK(nLate == 0 && nMover == 0, "a frame budget re-renders the shadow pages: %d static, %d mover pages in 20 still frames", nLate, nMover);
+    }
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");
