@@ -6,6 +6,7 @@
 //  - dense overlap: SAMPLED averaged over frames converges to EXACT (unbiased), and is noisy per frame (it does sample)
 //  - prints, per mode: GPU scene time and the CPU cell build
 #include "xlionrender_test_common.h"
+#include <bit>
 #include <random>
 
 using namespace xlionrender::test;
@@ -550,6 +551,51 @@ int main()
         }
         Renderer.m_LightMode = mode::EXACT;
         Renderer.DestroyView(Big);
+    }
+
+    // The GPU build (shaders/xlionrender_light_cells_comp.glsl) against the CPU's Build, the same frame's lists read back from the cell
+    // ring: 256 lights of radius 3-7, 30% spots, in CELLS (no head) and SAMPLED (head 4). The same counts, heads and light order per
+    // cell; the tail's cumulative probabilities within 5e-5 (measured 7.6e-6: the GPU's sqrt and division are not the CPU's correctly rounded ones). A
+    // spot's cone test (acos, asin) may disagree at a cone's edge: at most 0.1% of the listed cells (a light listed or not where it is 0).
+    // Last: its frames move SAMPLED's per-frame seed, which the saved images of the tests above depend on
+    {
+        Scene.m_LocalLights = MakeLights(256, 3.0f, 7.0f, 5);
+        for (int Head : { 0, 4 })
+        {
+            const mode M = Head ? mode::SAMPLED : mode::CELLS;
+            std::vector<std::uint32_t> Gpu, Cpu;
+            std::vector<float>         ImgGpu, ImgCpu;
+            Renderer.m_bLightCellsGPU = false;
+            CHECK(RenderMode(M, ImgCpu) && Renderer.readLightCells(Cpu), "Render the CPU cells (head %d)", Head);
+            Renderer.m_bLightCellsGPU = true;
+            CHECK(RenderMode(M, ImgGpu) && Renderer.readLightCells(Gpu), "Render the GPU cells (head %d)", Head);
+            constexpr int nCells = xlionrender::light_cells::levels_v * xlionrender::light_cells::level_cells_v;
+            constexpr std::uint32_t E = xlionrender::light_cells::entry_base_v;
+            int nListed = 0, nCountDiff = 0, nHeadDiff = 0, nOrderDiff = 0; double MaxCdf = 0; std::size_t nEntries = 0;
+            for (int c = 0; c < nCells && Gpu.size() >= E && Cpu.size() >= E; ++c)
+            {
+                const std::uint32_t nG = Gpu[2 * c + 1] & 0xFFFFFF, nC = Cpu[2 * c + 1] & 0xFFFFFF;
+                nListed += nC > 0;
+                if (nG != nC) { ++nCountDiff; continue; }
+                if ((Gpu[2 * c + 1] >> 24) != (Cpu[2 * c + 1] >> 24)) { ++nHeadDiff; continue; }
+                bool bOrder = true;
+                for (std::uint32_t k = 0; k < nC; ++k)
+                {
+                    const std::size_t g = E + 2 * std::size_t(Gpu[2 * c] + k), h = E + 2 * std::size_t(Cpu[2 * c] + k);
+                    if (g + 1 >= Gpu.size() || h + 1 >= Cpu.size() || Gpu[g] != Cpu[h]) { bOrder = false; break; }
+                    MaxCdf = std::max(MaxCdf, double(std::abs(std::bit_cast<float>(Gpu[g + 1]) - std::bit_cast<float>(Cpu[h + 1]))));
+                }
+                nOrderDiff += !bOrder;
+                nEntries += nC;
+            }
+            const auto I = Compare(ImgGpu, ImgCpu);
+            std::printf("gpu build (head %d): %d listed cells, %zu entries; cells whose count differs %d, head %d, lights %d; tail cdf max diff %.2e; image %.2e (max %.2e); build cpu %.3f ms, gpu %.3f ms\n"
+                       , Head, nListed, nEntries, nCountDiff, nHeadDiff, nOrderDiff, MaxCdf, I.m_MeanRel, I.m_Max, Renderer.getLightBuildMs(), Renderer.getLightBuildGpuMs());
+            CHECK(nListed > 500, "The GPU build's comparison saw only %d listed cells", nListed);
+            CHECK(nCountDiff + nHeadDiff + nOrderDiff <= nListed / 1000, "The GPU build's lists differ from the CPU's in %d cells (count %d, head %d, lights %d)", nCountDiff + nHeadDiff + nOrderDiff, nCountDiff, nHeadDiff, nOrderDiff);
+            CHECK(MaxCdf < 5e-5, "The GPU build's tail probabilities differ by %e", MaxCdf);
+            if (!Head) CHECK(I.m_Max < 1e-4, "CELLS from the GPU's lists differs from the CPU's (max %e)", I.m_Max);
+        }
     }
 
     Renderer.DestroyView(View);

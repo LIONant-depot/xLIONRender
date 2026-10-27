@@ -13,8 +13,9 @@
 // first entry, then the count (bits 0-23) and the head count (24-31) - then the entries { light index, floatBitsToUint(tail cumulative
 // probability) }. (A header was 1 uint: a count of 255 or more, or entries past 20 bits, made the cell "overflow" - shaded with every
 // light of the scene: 4096 lights a pixel at the dense rig's 4096.)
-// ponytail: rebuilt from scratch every render on the CPU (the lab measures that cost); dirty cells, the visibility term and
-// a compute builder come after the lab says the cells earn their place.
+// Built from scratch every render: on the GPU by default (shaders/xlionrender_light_cells_comp.glsl: Reserve and GPUInput here are its
+// CPU part), Build is the CPU builder - the reference the GPU's lists are compared with (tests/xlionrender_test_light_lab.cpp).
+// ponytail: no dirty cells (a static light's lists are rebuilt every frame); add when the GPU build shows in a frame's time.
 
 #include "dependencies/xmath/source/xmath.h"
 #include "shaders/xlionrender_light_eval.glsl"
@@ -50,12 +51,7 @@ namespace xlionrender
         // Cells of level 0 are CellSize wide. HeadCount: the exact head of mode SAMPLED (0: no split - mode CELLS).
         void Build(const std::vector<light>& Lights, const xmath::fvec3& Eye, float CellSize, int HeadCount) noexcept
         {
-            m_CellSize = CellSize;
-            for (int L = 0; L < levels_v; ++L)
-            {
-                const float S = CellSize * float(1 << L);
-                for (int a = 0; a < 3; ++a) m_Origin[L][a] = int(std::floor(Eye[a] / S)) - cells_v / 2;
-            }
+            SetWindow(Eye, CellSize);
 
             // Pass 1: count per cell, pass 2: fill (light order kept)
             constexpr int nCells = levels_v * level_cells_v;
@@ -80,6 +76,7 @@ namespace xlionrender
                     {
                         // the sphere against the cell's box (a light listed only where it can reach)
                         const int   C[3] = { x, y, z };
+                        if (Hidden(L, C)) continue;
                         float D2 = 0;
                         for (int a = 0; a < 3; ++a)
                         {
@@ -165,6 +162,49 @@ namespace xlionrender
             return Base;
         }
 
+        // The GPU build's CPU part: the windows, and m_Data sized for the headers and an upper bound of the entries (each light's cell
+        // ranges, before the sphere and cone tests) - its contents are not written (the GPU writes the lists; AddBoxes appends after
+        // them). Returns the bound (entries)
+        std::uint32_t Reserve(const std::vector<light>& Lights, const xmath::fvec3& Eye, float CellSize) noexcept
+        {
+            SetWindow(Eye, CellSize);
+            std::uint64_t Bound = 0;
+            for (const auto& Lt : Lights)
+                for (int L = 0; L < levels_v; ++L)
+                {
+                    // the light's range in the level's window, less its part in the hidden cells (the finer window's)
+                    const float S = CellSize * float(1 << L);
+                    const bool  bHide = m_bSkipHidden && L > 0;
+                    std::uint64_t n = 1, h = bHide ? 1 : 0;
+                    for (int a = 0; a < 3; ++a)
+                    {
+                        const int Lo = std::max(int(std::floor((Lt.m_Position[a] - Lt.m_Radius) / S)), m_Origin[L][a]);
+                        const int Hi = std::min(int(std::floor((Lt.m_Position[a] + Lt.m_Radius) / S)), m_Origin[L][a] + cells_v - 1);
+                        n *= std::uint64_t(std::max(Hi - Lo + 1, 0));
+                        if (bHide) h *= std::uint64_t(std::max(std::min(Hi, (m_Origin[L - 1][a] + cells_v - 2) >> 1) - std::max(Lo, (m_Origin[L - 1][a] + 1) >> 1) + 1, 0));
+                    }
+                    Bound += n - h;
+                }
+            m_First.clear(); m_Count.clear(); m_Head.clear();
+            m_Data.resize(entry_base_v + 2 * std::size_t(Bound));
+            return std::uint32_t(Bound);
+        }
+
+        // The GPU build's input (shaders/xlionrender_light_cells_comp.glsl): the windows' origins and the cell size, 16 uints, then 12 a light
+        void GPUInput(const std::vector<light>& Lights, std::vector<std::uint32_t>& Out) const noexcept
+        {
+            Out.assign(16 + 12 * Lights.size(), 0u);
+            for (int L = 0; L < levels_v; ++L) for (int a = 0; a < 3; ++a) Out[3 * L + a] = std::uint32_t(m_Origin[L][a]);
+            Out[15] = std::bit_cast<std::uint32_t>(m_CellSize);
+
+            for (std::size_t i = 0; i < Lights.size(); ++i)
+            {
+                const auto& Lt = Lights[i];
+                const float F[9] = { Lt.m_Position.m_X, Lt.m_Position.m_Y, Lt.m_Position.m_Z, Lt.m_Radius, Lt.m_Direction.m_X, Lt.m_Direction.m_Y, Lt.m_Direction.m_Z, Lt.m_OuterAngle, Lt.m_Power };
+                for (int k = 0; k < 9; ++k) Out[16 + 12 * i + k] = std::bit_cast<std::uint32_t>(F[k]);
+            }
+        }
+
         // A cell's unpacked header (the CPU side: tests, diagnostics)
         std::uint32_t First(int Cell) const noexcept { return m_First[Cell]; }
         std::uint32_t Count(int Cell) const noexcept { return m_Count[Cell]; }
@@ -182,6 +222,17 @@ namespace xlionrender
             return Angle - std::asin(rc / d) > Lt.m_OuterAngle;
         }
 
+        // A cell no lookup reaches: the shader shades a point with the finest level whose window holds it (LocalLightCell), so a cell of
+        // level L >= 1 that the window of level L - 1 covers (both its halves on each axis) is never read - left empty (the cells near
+        // the camera, at the coarse levels: there every light reaches them). Only for a power of two cell size: the levels' floor(P / S)
+        // then nest exactly (floor(P / 2S) = floor(floor(P / S) / 2))
+        bool Hidden(int L, const int C[3]) const noexcept
+        {
+            if (!m_bSkipHidden || L == 0) return false;
+            for (int a = 0; a < 3; ++a) if (2 * C[a] < m_Origin[L - 1][a] || 2 * C[a] + 1 > m_Origin[L - 1][a] + cells_v - 1) return false;
+            return true;
+        }
+
         int Slot(int x, int y, int z) const noexcept
         {
             const auto M = [](int v) { return ((v % cells_v) + cells_v) % cells_v; };
@@ -192,8 +243,22 @@ namespace xlionrender
         std::vector<std::uint32_t>              m_First, m_Count, m_Head;   // the headers unpacked
         std::array<std::array<int, 3>, levels_v> m_Origin{};        // per level: the window's first cell index
         float                                   m_CellSize = 1;
+        bool                                    m_bSkipHidden = true;       // the hidden cells left empty (a power of two cell size)
 
     private:
+        // The windows: per level, camera-centred cells_v^3 cells of CellSize x 2^L
+        void SetWindow(const xmath::fvec3& Eye, float CellSize) noexcept
+        {
+            int Exp;
+            m_CellSize    = CellSize;
+            m_bSkipHidden = std::frexp(CellSize, &Exp) == 0.5f;
+            for (int L = 0; L < levels_v; ++L)
+            {
+                const float S = CellSize * float(1 << L);
+                for (int a = 0; a < 3; ++a) m_Origin[L][a] = int(std::floor(Eye[a] / S)) - cells_v / 2;
+            }
+        }
+
         // Head: the HeadCount most important, back in light order; tail: the rest, with cumulative probabilities (floored)
         void SplitCell(int Cell, int HeadCount, const std::vector<float>& Importance) noexcept
         {

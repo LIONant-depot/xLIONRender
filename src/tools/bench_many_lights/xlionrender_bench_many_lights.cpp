@@ -3,10 +3,11 @@
 // string lights (most of them: small, dim, unshadowed), neon (medium, coloured, unshadowed) and torches (bright, shadowed: up to 32).
 // Per density, mode (CELLS: exact, SAMPLED: the head + the resampled tail) and view size (1920 x 1080, 3093 x 1493: Tomas's Bistro
 // view): the GPU scene pass (mean of 60 warmed frames) per mode - CELLS, and SAMPLED with plain tail samples, resampled, resampled with
-// visibility (the default) -, the CPU's cell build, the cells whose list overflowed (shaded with every light), and SAMPLED's per-frame
-// error against CELLS' image (mean |a - b| / mean b).
+// visibility (the default) -, the cell build (on the GPU: CELLS' and SAMPLED's, its head/tail split; the CPU's part; the CPU's Build
+// for comparison), the cells whose list overflowed (shaded with every light), and SAMPLED's per-frame error against CELLS' image
+// (mean |a - b| / mean b).
 //
-//   xlionrender_bench_many_lights [--densities 64,256,1024,2048,4096] [--frames N] [--big 0|1]
+//   xlionrender_bench_many_lights [--densities 64,256,1024,2048,4096] [--frames N] [--big 0|1] [--cpu 1: the modes measured with the CPU's Build]
 #include "tests/xlionrender_test_common.h"
 #include <random>
 #include <sstream>
@@ -75,12 +76,14 @@ int main(int argc, char** argv)
     std::vector<int> Densities{ 64, 256, 1024, 2048, 4096 };
     int  nFrames = 60;
     bool bBig    = true;
+    bool bCPU    = false;
     for (int i = 1; i < argc; ++i)
     {
         const std::string A = argv[i];
         if (A == "--densities" && i + 1 < argc) { Densities.clear(); std::stringstream S(argv[++i]); std::string T; while (std::getline(S, T, ',')) Densities.push_back(std::atoi(T.c_str())); }
         else if (A == "--frames" && i + 1 < argc) nFrames = std::max(1, std::atoi(argv[++i]));
         else if (A == "--big" && i + 1 < argc) bBig = std::atoi(argv[++i]) != 0;
+        else if (A == "--cpu" && i + 1 < argc) bCPU = std::atoi(argv[++i]) != 0;
     }
 
     app App;
@@ -116,7 +119,7 @@ int main(int argc, char** argv)
     struct variant { const char* Name; mode M; int Candidates; bool bVis; };
     const variant Variants[] = { { "cells", mode::CELLS, 0, false }, { "plain", mode::SAMPLED, 0, false }, { "ris", mode::SAMPLED, 8, false }, { "ris+vis", mode::SAMPLED, 8, true } };
     std::printf("many-light rig: %d warmed frames a measure; per mode the GPU scene pass ms (*: the cell buffer was full, the render fell back to EXACT), and SAMPLED's per-frame error against CELLS (mean |a - b| / mean b); the CPU cell build ms\n", nFrames);
-    std::printf("%-10s %6s %9s %9s %8s |", "view", "lights", "overflow", "build ms", "ring MB");
+    std::printf("%-10s %6s %9s %9s %9s %9s %9s %8s |", "view", "lights", "overflow", "cpu Build", "cpu part", "gpu cells", "gpu split", "ring MB");
     for (const auto& V : Variants) std::printf(" %8s ms", V.Name);
     for (int v = 1; v < 4; ++v) std::printf(" %8s err", Variants[v].Name);
     std::printf("\n");
@@ -131,7 +134,12 @@ int main(int argc, char** argv)
         for (int n : Densities)
         {
             Scene.m_LocalLights = Lights(n);
-            double Gpu[4] = {}, Err[4] = {}, Build = 0, RingMB = 0; int Over = 0; bool bFell[4] = {};
+            double Gpu[4] = {}, Err[4] = {}, Build = 0, CpuPart = 0, GpuBuild[4] = {}, RingMB = 0; int Over = 0; bool bFell[4] = {};
+            {   // the CPU's Build, for comparison (the GPU builds the cells by default)
+                Renderer.m_bLightCellsGPU = false; Renderer.m_LightMode = mode::CELLS;
+                for (int f = 0; f < 8; ++f) { if (!App.RenderFrame(Scene, View, Camera)) return 1; if (f >= 4) Build += Renderer.getLightBuildMs() / 4; }
+                Renderer.m_bLightCellsGPU = !bCPU;
+            }
             std::vector<float> Ref, Fr;
             for (int v = 0; v < 4; ++v)
             {
@@ -145,7 +153,8 @@ int main(int argc, char** argv)
                 {
                     if (!App.RenderFrame(Scene, View, Camera)) return 1;
                     if (App.m_bGotTimes) { Gpu[v] += App.m_LastTimes.m_SceneMs; ++nGpu; }
-                    if (v == 0) Build += Renderer.getLightBuildMs() / nFrames;
+                    if (v == 0) CpuPart += Renderer.getLightBuildMs() / nFrames;
+                    GpuBuild[v] += Renderer.getLightBuildGpuMs() / nFrames;
                     if (v > 0 && f < 4)            // (the error: a few frames' readbacks - 4.6 M pixels each at the big size)
                     {
                         if (!ReadHDR(Device, View, Fr)) return 1;
@@ -158,7 +167,7 @@ int main(int argc, char** argv)
                 bFell[v] = Renderer.getLightModeUsed() != Variants[v].M;       // (the cell buffer full: the whole render EXACT)
                 if (v == 0) { Over = Renderer.getLightStats().m_nOverflowCells; RingMB = Renderer.getLightStats().m_CellRingMB; }
             }
-            std::printf("%-10s %6d %9d %9.3f %8.1f |", Sz.Name, n, Over, Build, RingMB);
+            std::printf("%-10s %6d %9d %9.3f %9.3f %9.3f %9.3f %8.1f |", Sz.Name, n, Over, Build, CpuPart, GpuBuild[0], GpuBuild[2], RingMB);
             for (int v = 0; v < 4; ++v) std::printf(" %10.3f%c", Gpu[v], bFell[v] ? '*' : ' ');
             for (int v = 1; v < 4; ++v) std::printf(" %12.3f", Err[v]);
             std::printf("\n");

@@ -92,6 +92,9 @@ namespace xlionrender
         constexpr std::uint32_t s_LocalRequestComp[] = {
             #include "xlionrender_local_request_comp.h"
         };
+        constexpr std::uint32_t s_LightCellsComp[] = {
+            #include "xlionrender_light_cells_comp.h"
+        };
         constexpr std::uint32_t s_ClearDepthVert[] = {
             #include "xlionrender_clear_depth_vert.h"
         };
@@ -224,6 +227,7 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_GIConstCapturePipeline));
         for( auto& T : m_EnvSource ) m_Device.Destroy(std::move(T));
         ReleaseBuffer(m_CellRing);
+        ReleaseBuffer(m_CellScratch);
         ReleaseBuffer(m_MaterialUBO);
         ReleaseBuffer(m_FullscreenVB);
         ReleaseBuffer(m_FullscreenIB);
@@ -544,6 +548,9 @@ namespace xlionrender
             const int nLocal = localBitUints() + 32;
             if( auto Err = Device.Create(m_LocalRequestShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LocalRequestComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalRequest, { .m_pShader = &m_LocalRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_LightCellsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LightCellsComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_LightCellsCompute, { .m_pShader = &m_LightCellsShader, .m_nBuffers = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_LightCellsTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data() }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nLocal }); Err ) return Err;

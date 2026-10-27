@@ -210,8 +210,12 @@ namespace xlionrender
         int                                        m_LightTailCandidates = 8;  // SAMPLED: > 1, the tail resampled (RIS) from this many candidates, one shaded (0: the plain samples)
         bool                                       m_bLightTailVisibility = true;  // SAMPLED, resampled: a candidate's weight holds its shadow too (one tap)
         float                                      m_LightCellSize = 2.0f;     // level 0 cells, world units
-        // CPU time of the last render's cell build (ms)
+        bool                                       m_bLightCellsGPU = true;    // the cells built on the GPU (shaders/xlionrender_light_cells_comp.glsl); off: the CPU's Build
+        // CPU time of the last render's cell build (ms; with the GPU build its CPU part only), and a frame's GPU build (ms, a ring late)
                       double               getLightBuildMs( void ) const                                        noexcept { return m_LightBuildMs; }
+                      double               getLightBuildGpuMs( void ) const                                     noexcept { return m_LightBuildGpuMs; }
+        // The last render's cell lists as the shader reads them (headers, then entries: light_cells::m_Data's layout); waits for its frame
+                      bool                 readLightCells( std::vector<std::uint32_t>& Out ) noexcept;
         // The last render's cell data (uints; 0 when the mode was EXACT or fell back to it) and the mode it used
                       int                  getLightCellUints( void ) const                                      noexcept { return m_LightCellUints; }
                       light_mode           getLightModeUsed( void ) const                                       noexcept { return m_LightModeUsed; }
@@ -346,7 +350,7 @@ namespace xlionrender
         material_slot*              findMaterial    ( material_id Id )                                          noexcept;
         void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
         void                        updateInstances ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
-        void                        writeLocalLights( const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept;
+        void                        writeLocalLights( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept;
         void                        updateEnvironment( xgpu::window& Window, const scene& Scene )               noexcept;
         void                        renderScenePass ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept;
         // The selection's outline (Scene.m_SelectedUser's draw): its triangles into the view's mask, then the outline over m_Output (before the overlays)
@@ -732,6 +736,15 @@ namespace xlionrender
         std::uint64_t               m_LightFrame            = ~0ull;
         std::uint32_t               m_LightSeed             = 0;
         double                      m_LightBuildMs          = 0;
+        double                      m_LightBuildGpuMs       = 0;
+        int                         m_LightCellBase         = 0;                   // the last render's cells in the cell ring
+        std::vector<std::uint32_t>  m_CellInput;                                   // the GPU build's input (light_cells::GPUInput)
+        xgpu::buffer                m_CellScratch;                                 // the GPU build's lists and input (device-local; grows)
+        int                         m_CellScratchUints      = 0;
+        xgpu::shader                m_LightCellsShader;
+        xgpu::compute               m_LightCellsCompute;
+        xgpu::timestamps            m_LightCellsTimes;
+        bool                        m_bLightCellsTimed      = false;
         int                         m_LightCellUints        = 0;
         light_mode                  m_LightModeUsed         = light_mode::EXACT;
         light_stats                 m_LightStats;
