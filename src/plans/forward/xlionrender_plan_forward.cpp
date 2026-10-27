@@ -1951,18 +1951,18 @@ namespace xlionrender
                     std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &Identity, 64); std::memcpy(pB + 128, &Params, 16);
                 });
             }
-            std::uint32_t Got[4] = {};
-            (void)m_ReflStats.MemoryMap(Slot * 4, 4, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
+            std::uint32_t Got[8] = {};
+            (void)m_ReflStats.MemoryMap(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
             {
-                m_ReflSum[0] += double(Ns[1] - Ns[0]) * 1e-6; m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2]; m_ReflPlanarSum += Got[3];
+                m_ReflSum[0] += double(Ns[1] - Ns[0]) * 1e-6; m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2]; m_ReflPlanarSum += Got[3]; if( Got[3] ) m_ReflPlanarRough = double(Got[4]) * 0.01 / double(Got[3]);
                 if( ++m_ReflSumN == 120 )
                 {
                     const double n = m_ReflSumN;
                     m_ReflReport = { m_ReflTraceBench, m_ReflSum[0] / n, m_ReflSum[1] / n, m_ReflSum[2] / std::max(m_ReflSum[1], 1.0), m_ReflSum[3] / std::max(m_ReflSum[1], 1.0), m_ReflSumN };
                     static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
-                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray, %.0f planar texels (planar view %s, plane %.3f %.3f %.3f %.3f)\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
-                        , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay, m_ReflPlanarSum / n
+                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray, %.0f planar texels of roughness %.2f (planar view %s, plane %.3f %.3f %.3f %.3f)\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
+                        , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay, m_ReflPlanarSum / n, m_ReflPlanarRough
                         , m_bPlanarOn ? "on" : m_PlanarWhy == 4 ? "off: no floor under the eye" : m_PlanarWhy == 5 ? "off: oblique" : m_PlanarWhy == 2 ? "off: view" : "off", m_PlanarPlane.m_X, m_PlanarPlane.m_Y, m_PlanarPlane.m_Z, m_PlanarPlane.m_W);
                     std::fflush(stdout);
                     m_ReflSumN = 0; m_ReflPlanarSum = 0; for( auto& v : m_ReflSum ) v = 0;

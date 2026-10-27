@@ -17,7 +17,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 struct frame_t { mat4 C2W; mat4 Reproject; vec4 Params; };          // (xlionrender_tail_denoise_comp.glsl's: C2W to the camera-centred world)
 layout(std430, set = 0, binding = 5) readonly buffer frame_b   { frame_t F[]; };
-layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 4 per ring slot: rays, hits, visits, the planar texels
+layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 8 per ring slot: rays, hits, visits, the planar texels, their roughness x 100
 layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records[]; };    // the view's records: the tail's W x H, then these
 layout(std430, set = 0, binding = 8) readonly buffer mips_b    { uvec2   PlanarMips[]; }; // the planar view's pyramid (xlionrender_refl_planar_mips_comp.glsl)
 struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; };                                  // the planar view's clip -> its eye's centred world; x: the half view's pixels a unit at distance 1, y: the pyramid's levels; per level: its base, w, h
@@ -32,7 +32,7 @@ layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_Pr
 
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
-shared uint s_Rays, s_Hits, s_Visits, s_Planar;
+shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough;
 
 // Heitz 2018: a visible normal of an isotropic GGX (alpha a) for the view Ve (local frame, z the normal)
 vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
@@ -79,7 +79,7 @@ vec4 PlanarAt(vec2 uv, float Lod)
 
 void main()
 {
-    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; }
+    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; }
     barrier();
     const ivec2 Size = ivec2(F[Push.m_Slot].Params.xy);
     const ivec2 p    = ivec2(gl_GlobalInvocationID.xy);
@@ -123,6 +123,7 @@ void main()
             Rec.z = packHalf2x16(vec2(t, 1.0));
             Rec.w |= refl_planar_v << 24;
             atomicAdd(s_Planar, 1u);
+            atomicAdd(s_PlanarRough, uint(Rough * 100.0 + 0.5));
         }
         else if (Push.m_Mode != 0u || Rough < Push.m_MaxRough)
         {
@@ -184,9 +185,10 @@ void main()
     barrier();
     if (gl_LocalInvocationIndex == 0u)
     {
-        atomicAdd(Stats[Push.m_Slot * 4u + 0u], s_Rays);
-        atomicAdd(Stats[Push.m_Slot * 4u + 1u], s_Hits);
-        atomicAdd(Stats[Push.m_Slot * 4u + 2u], s_Visits);
-        atomicAdd(Stats[Push.m_Slot * 4u + 3u], s_Planar);
+        atomicAdd(Stats[Push.m_Slot * 8u + 0u], s_Rays);
+        atomicAdd(Stats[Push.m_Slot * 8u + 1u], s_Hits);
+        atomicAdd(Stats[Push.m_Slot * 8u + 2u], s_Visits);
+        atomicAdd(Stats[Push.m_Slot * 8u + 3u], s_Planar);
+        atomicAdd(Stats[Push.m_Slot * 8u + 4u], s_PlanarRough);
     }
 }

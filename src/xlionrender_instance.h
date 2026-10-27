@@ -414,7 +414,7 @@ namespace xlionrender
         refl_report                 m_ReflReport;
         double                      m_ReflSum[4] = {};              // (the report's running sums: ms, rays, hits, visits)
         int                         m_ReflSumN = 0;
-        double                      m_ReflPlanarSum = 0;
+        double                      m_ReflPlanarSum = 0, m_ReflPlanarRough = 0;
         bool                        m_bReflTraceCycle = false;      // (XLION_REFL_BENCH=9: each report the next mode)
         tail_report                 m_TailReport;
         xgpu::buffer*               m_pTailRecords = nullptr;       // binding 14 of the lit pipelines this render: the view's records (SCREEN), else none
