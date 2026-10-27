@@ -1,11 +1,12 @@
 #version 450
 // The screen tail's denoiser (documentation/lighting_p3_design.md "The decision" 3; MegaLights' shape, our code): at half size, over the
 // tail pass's demodulated diffuse and specular (xlionrender_tail_screen_frag.glsl) and the thin G-buffer. Two buffers of a record a
-// texel (uvec4: x the diffuse's rg, y its b and the specular's r, z the specular's gb - halves -, w the surface's distance to the eye (half;
+// texel (uvec4: x the diffuse's rg, y its b and the specular's r, z the specular's gb - halves -, w the surface's view depth (clip w, half;
 // 0: no surface), its octahedral normal (4 + 4 bits), the diffuse's and the specular's frames (4 + 4 bits)):
-//   pass 0, temporal: Result (last frame's) -> Temporal. Last frame's records reprojected by the camera (the texel's world position into
-//            last frame's clip space), its 2 x 2 texels kept where they were this surface (distance to last frame's eye within 3%, normals
-//            within ~35 degrees), clamped to this frame's 3 x 3 neighbourhood (mean +- 1.25 standard deviations), accumulated up to 12
+//   pass 0, temporal: Result (last frame's) -> Temporal. Last frame's records reprojected - by the G-buffer's motion where it has some (a
+//            mover: last frame's screen position and depth), else by the camera (the texel's world position into last frame's clip
+//            space) -, its 2 x 2 texels kept where they were this surface (view depth within 3%, normals
+//            within ~35 degrees), clamped to this frame's 7 x 7 neighbourhood (mean +- 1.25 standard deviations), accumulated up to 12
 //            frames (the specular fewer on glossy surfaces: its lobe moves with the view).
 //   pass 1, spatial: Temporal -> Result. The texel and 4 neighbours a few texels away (wider where the history is short - a disocclusion),
 //            weighed by distance, normal and, for the specular, roughness. Result is what the materials read (binding 14:
@@ -18,7 +19,6 @@ struct frame_t
 {
     mat4 C2W;               // this frame's clip -> camera-centred world
     mat4 Reproject;         // this frame's clip -> last frame's clip (the eye's move between)
-    vec4 Move;              // xyz: this frame's eye - last frame's (a point's distance to last frame's eye: length(P + Move))
     vec4 Params;            // x, y: size; z: 1 there is a last frame; w: the frame's number (the spatial taps' rotation)
 };
 layout(std430, set = 0, binding = 0) readonly buffer frame_b   { frame_t F[]; };
@@ -28,15 +28,16 @@ layout(set = 1, binding = 0) uniform sampler2D TailDiffuse;
 layout(set = 1, binding = 1) uniform sampler2D TailSpecular;
 layout(set = 1, binding = 2) uniform sampler2D GColor;          // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 3) uniform sampler2D GDepth;
+layout(set = 1, binding = 4) uniform sampler2D GMotion;         // last frame's ndc xy, clip w, 1 (0: the camera's reprojection)
 layout(push_constant) uniform push_t { uint m_Pass, m_Slot, m_Pad0, m_Pad1, m_Pad2, m_Pad3, m_Pad4, m_Pad5; } Push;
 
 const float kMaxFrames = 12.0;
 
 ivec2 Size() { return ivec2(F[Push.m_Slot].Params.xy); }
-vec3  WorldAt(ivec2 p, float z) { const vec2 Ndc = (vec2(p) + 0.5) / vec2(Size()) * 2.0 - 1.0; const vec4 W = F[Push.m_Slot].C2W * vec4(Ndc, z, 1.0); return W.xyz / W.w; }
+float DepthAt(ivec2 p, float z) { const vec2 Ndc = (vec2(p) + 0.5) / vec2(Size()) * 2.0 - 1.0; return 1.0 / (F[Push.m_Slot].C2W * vec4(Ndc, z, 1.0)).w; }     // (clip w)
 vec3  Nrm(vec4 G) { return OctDecode(G.xy * 2.0 - 1.0); }
 
-// The record's last word: the distance, the normal at 4 + 4 bits, the frames
+// The record's last word: the view depth, the normal at 4 + 4 bits, the frames
 uint  Meta(float Dist, vec3 N, float nD, float nS)
 {
     const uvec2 o = uvec2(clamp(OctEncode(N) * 0.5 + 0.5, 0.0, 1.0) * 15.0 + 0.5);
@@ -48,6 +49,26 @@ vec3  RecD(uvec4 R) { return vec3(unpackHalf2x16(R.x), unpackHalf2x16(R.y).x); }
 vec3  RecS(uvec4 R) { return vec3(unpackHalf2x16(R.y).y, unpackHalf2x16(R.z)); }
 uvec4 Rec(vec3 D, vec3 S, uint w) { return uvec4(packHalf2x16(D.rg), packHalf2x16(vec2(D.b, S.r)), packHalf2x16(S.gb), w); }
 
+// This frame's tail around the workgroup (its 8 x 8 texels and kNb more each side): the samples and their distances, read once
+const int kNb   = 3;                        // the neighbourhood: 7 x 7 texels
+const int kTile = 8 + 2 * kNb;
+shared vec3  s_D[kTile * kTile], s_S[kTile * kTile];
+shared float s_Dist[kTile * kTile];
+
+void LoadTile()
+{
+    const ivec2 Org = ivec2(gl_WorkGroupID.xy) * 8 - kNb;
+    for (uint t = gl_LocalInvocationIndex; t < uint(kTile * kTile); t += 64u)
+    {
+        const ivec2 q  = clamp(Org + ivec2(int(t) % kTile, int(t) / kTile), ivec2(0), Size() - 1);
+        const float zq = texelFetch(GDepth, q, 0).r;
+        s_D[t]    = texelFetch(TailDiffuse, q, 0).rgb;
+        s_S[t]    = texelFetch(TailSpecular, q, 0).rgb;
+        s_Dist[t] = zq >= 1.0 ? -1.0 : DepthAt(q, zq);
+    }
+    barrier();
+}
+
 void TemporalPass(ivec2 p)
 {
     const uint  i = uint(p.y * Size().x + p.x);
@@ -55,20 +76,20 @@ void TemporalPass(ivec2 p)
     if (z >= 1.0) { Temporal[i] = uvec4(0u); return; }
     const vec4  G    = texelFetch(GColor, p, 0);
     const vec3  N    = Nrm(G);
-    const vec3  P    = WorldAt(p, z);
-    const float Dist = length(P);
-    const vec3  D = texelFetch(TailDiffuse, p, 0).rgb, S = texelFetch(TailSpecular, p, 0).rgb;
+    const float Dist = DepthAt(p, z);
+    const ivec2 l    = ivec2(gl_LocalInvocationID.xy) + kNb;
+    const vec3  D = s_D[l.y * kTile + l.x], S = s_S[l.y * kTile + l.x];
 
-    // this frame's neighbourhood (the same surface's texels): mean and deviation, the history's clamp
+    // this frame's neighbourhood (the same surface's texels, 7 x 7): mean and deviation, the history's clamp. A 3 x 3 window shaved the
+    // many small lights' peaks: its mean was 2.8% darker than CELLS (lighting_p3_design.md "The bias")
     vec3 m1D = vec3(0.0), m2D = vec3(0.0), m1S = vec3(0.0), m2S = vec3(0.0);
     float k = 0.0;
-    for (int y = -1; y <= 1; ++y)
-    for (int x = -1; x <= 1; ++x)
+    for (int y = -kNb; y <= kNb; ++y)
+    for (int x = -kNb; x <= kNb; ++x)
     {
-        const ivec2 q = clamp(p + ivec2(x, y), ivec2(0), Size() - 1);
-        const float zq = texelFetch(GDepth, q, 0).r;
-        if (zq >= 1.0 || abs(length(WorldAt(q, zq)) - Dist) > 0.05 * Dist) continue;
-        const vec3 d = texelFetch(TailDiffuse, q, 0).rgb, s = texelFetch(TailSpecular, q, 0).rgb;
+        const int t = (l.y + y) * kTile + l.x + x;
+        if (s_Dist[t] < 0.0 || abs(s_Dist[t] - Dist) > 0.05 * Dist) continue;
+        const vec3 d = s_D[t], s = s_S[t];
         m1D += d; m2D += d * d; m1S += s; m2S += s * s; k += 1.0;
     }
     m1D /= k; m1S /= k;
@@ -79,11 +100,14 @@ void TemporalPass(ivec2 p)
     float nD = 0.0, nS = 0.0;
     if (F[Push.m_Slot].Params.z > 0.5)
     {
+        // where the point was last frame and its depth there: the G-buffer's motion (a mover), else the camera's
+        const vec4  Mo  = texelFetch(GMotion, p, 0);
         const vec2  Ndc = (vec2(p) + 0.5) / vec2(Size()) * 2.0 - 1.0;
         const vec4  C   = F[Push.m_Slot].Reproject * vec4(Ndc, z, 1.0);
-        const vec2  hp  = (C.xy / C.w * 0.5 + 0.5) * vec2(Size()) - 0.5;
+        const vec2  Pn  = Mo.w > 0.5 ? Mo.xy : C.xy / C.w;
+        const float dP  = Mo.w > 0.5 ? Mo.z : C.w * Dist;                        // (C is last frame's clip / this frame's w)
+        const vec2  hp  = (Pn * 0.5 + 0.5) * vec2(Size()) - 0.5;
         const vec2  i0  = floor(hp), f = hp - i0;
-        const float dP  = length(P + F[Push.m_Slot].Move.xyz);                   // (this point's distance to last frame's eye)
         float Wsum = 0.0, Nd = 0.0, Ns = 0.0;
         for (int t = 0; t < 4; ++t)
         {
@@ -100,6 +124,10 @@ void TemporalPass(ivec2 p)
         }
         if (Wsum > 0.25) { HD /= Wsum; HS /= Wsum; nD = Nd / Wsum; nS = Ns / Wsum; }
     }
+    // far out of the window (an abrupt change: a light went off, a surface uncovered without its depth changing): a short history too;
+    // then the clamp (+- 1.25 standard deviations)
+    if (any(greaterThan(abs(HD - m1D), 2.0 * sdD + 1e-6))) nD = min(nD, 2.0);
+    if (any(greaterThan(abs(HS - m1S), 2.0 * sdS + 1e-6))) nS = min(nS, 2.0);
     HD = clamp(HD, m1D - 1.25 * sdD, m1D + 1.25 * sdD);
     HS = clamp(HS, m1S - 1.25 * sdS, m1S + 1.25 * sdS);
     const float MaxS = mix(4.0, kMaxFrames, clamp(G.z * 2.0, 0.0, 1.0));      // (glossy: a shorter specular history)
@@ -143,6 +171,7 @@ void SpatialPass(ivec2 p)
 void main()
 {
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (Push.m_Pass == 0u) LoadTile();                                          // (every invocation: the tile's barrier)
     if (any(greaterThanEqual(p, Size()))) return;
     if (Push.m_Pass == 0u) TemporalPass(p); else SpatialPass(p);
 }

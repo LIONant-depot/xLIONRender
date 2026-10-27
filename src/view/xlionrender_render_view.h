@@ -69,12 +69,14 @@ namespace xlionrender
         // its pass and pipeline instance (it samples the G-buffer); the denoiser's records (a uvec4 a texel: xlionrender_tail_denoise_comp.glsl):
         // the result - what the materials read (binding 14) and next frame's history - and the temporal pass's
         xgpu::texture           m_TailGColor, m_TailGDepth;
+        xgpu::texture           m_TailGMotion;          // last frame's screen position (ndc xy), clip w, 1 (0: no motion: the camera's reprojection)
         xgpu::renderpass        m_TailGPass;
         xgpu::texture           m_TailDiffuse, m_TailSpecular;
         xgpu::renderpass        m_TailPass;
         xgpu::pipeline_instance m_TailInstance;
         xgpu::buffer            m_TailResult, m_TailTemporal;
         xmath::fmat4            m_TailPrevC2W = xmath::fmat4::fromIdentity();
+        xmath::fmat4            m_TailPrevW2C = xmath::fmat4::fromIdentity();
         xmath::fvec3            m_TailPrevEye{ 0, 0, 0 };
         bool                    m_bTailPrev      = false;     // m_TailResult holds last frame's (of this size)
         std::uint32_t           m_TailFrame      = 0;

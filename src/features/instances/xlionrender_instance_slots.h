@@ -47,6 +47,10 @@ namespace xlionrender
                 const bool bMoved   = std::memcmp(&S.m_L2W, &L2W, sizeof(L2W)) != 0;
                 const bool bMatEdit = std::memcmp(&S.m_Material, &Mat, sizeof(Mat)) != 0;
                 const bool bEntEdit = std::memcmp(&S.m_Entity, &Ent, sizeof(Ent)) != 0;
+                // last frame's transform (the screen tail's motion): the one it had before it moved this frame; once it stopped, written
+                // again as this frame's (else it would keep moving in the shaders)
+                if (bMoved && S.m_MovedFrame != Frame) { S.m_PrevL2W = S.m_L2W; S.m_MovedFrame = Frame; }
+                else if (!bMoved && S.m_MovedFrame != Frame && std::memcmp(&S.m_PrevL2W, &S.m_L2W, sizeof(L2W)) != 0) { S.m_PrevL2W = S.m_L2W; MarkPending(It->second); }
                 if (bMoved || bMatEdit || bEntEdit) { S.m_L2W = L2W; S.m_Material = Mat; S.m_Entity = Ent; MarkPending(It->second); }
                 if (pChanged) *pChanged = bMoved || bMatEdit;
                 return It->second;
@@ -55,7 +59,7 @@ namespace xlionrender
             if (m_Free.empty() && !Evict(Frame)) return none_v;
             const std::uint32_t Index = m_Free.back();
             m_Free.pop_back();
-            m_Slots[Index] = { L2W, Mat, Ent, Frame, ID, false, true };
+            m_Slots[Index] = { L2W, Mat, Ent, Frame, ID, false, true, L2W, Frame };
             m_ByID.emplace(ID, Index);
             MarkPending(Index);
             return Index;
@@ -64,8 +68,8 @@ namespace xlionrender
         // Every live slot pending (the world origin moved: the stored rows are relative to it)
         void MarkAllPending() noexcept { for (std::uint32_t i = 0; i < m_Slots.size(); ++i) if (m_Slots[i].m_bLive) MarkPending(i); }
 
-        // Writes up to Max pending slots: Write(slot index, const fmat4& L2W, const material&, const entity_params&). The rest stay
-        // pending. Returns how many.
+        // Writes up to Max pending slots: Write(slot index, const fmat4& L2W, const fmat4& PrevL2W (last frame's), const material&,
+        // const entity_params&). The rest stay pending. Returns how many.
         template<typename T_WRITE>
         int Flush(int Max, T_WRITE&& Write) noexcept
         {
@@ -75,7 +79,7 @@ namespace xlionrender
             {
                 auto& S = m_Slots[m_Pending[i]];
                 S.m_bPending = false;
-                if (S.m_bLive) { Write(m_Pending[i], S.m_L2W, S.m_Material, S.m_Entity); ++n; }
+                if (S.m_bLive) { Write(m_Pending[i], S.m_L2W, S.m_PrevL2W, S.m_Material, S.m_Entity); ++n; }
             }
             m_Pending.erase(m_Pending.begin(), m_Pending.begin() + i);
             return n;
@@ -94,6 +98,8 @@ namespace xlionrender
             std::uint32_t   m_ID        = 0;
             bool            m_bPending  = false;
             bool            m_bLive     = false;
+            xmath::fmat4    m_PrevL2W;                      // last frame's (Acquire)
+            std::uint64_t   m_MovedFrame = 0;               // the last frame it moved in
         };
 
         void MarkPending(std::uint32_t i) noexcept

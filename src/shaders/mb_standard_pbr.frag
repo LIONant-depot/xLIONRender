@@ -62,6 +62,10 @@
 #ifndef XMAT_VARYING_IN
 layout(location = 0) in VaryingFull In;
 #endif
+#ifdef XLION_GBUFFER_OUTPUT
+layout(location = 14) in vec4 InPrevClip;      // the G-buffer variant: last frame's clip position (the vertex shaders'; w 0: none)
+layout(location = 1) out vec4 OutGMotion;      // its second target: last frame's ndc xy, clip w, 1 (0: the camera's reprojection)
+#endif
 #if !defined(XLION_LDR_OUTPUT) && !defined(XLION_TAIL_SCREEN)
 layout(location = 9) in vec4 InGI;     // xLIONRender surfel GI: sum(w E), sum(w) from the vertex shader (0 without GI) - divided here, into g_GI
 #ifndef XLION_NO_GI_PIXEL
@@ -366,6 +370,7 @@ vec3 PBRLighting
 #ifdef XLION_GBUFFER_OUTPUT
 	// The material's G-buffer variant (the half-size thin G-buffer: lighting_p3_design.md "The decision"): its octahedral normal (x 0.5
 	// + 0.5) and roughness, as the material's color into the 10-10-10-2 target - no lighting compiled in
+	OutGMotion = InPrevClip.w > 1e-6 ? vec4(InPrevClip.xy / InPrevClip.w, InPrevClip.w, 1.0) : vec4(0.0);
 	return vec3(OctEncode(N) * 0.5 + 0.5, max(inRoughness, MIN_ROUGHNESS));
 #endif
 	vec3	V					= normalize(UBOLight.wSpaceEyePos.xyz - In.wSpacePosition.xyz);

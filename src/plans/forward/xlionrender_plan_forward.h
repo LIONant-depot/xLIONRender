@@ -28,6 +28,10 @@ namespace xlionrender::details
     {
         xmath::fmat4                    m_w2C;          // world (camera-centered for views, absolute for shadow tiles) -> clip
         xmath::fvec4                    m_WorldOffset;  // xyz: the instance buffer's origin in that world
+        // last frame's (the screen tail's motion: instance::renderTail): its camera-centred world -> clip, the instance buffer's origin
+        // in that world (w: 1 there is a last frame; 0: no motion is written)
+        xmath::fmat4                    m_PrevW2C       = xmath::fmat4::fromIdentity();
+        xmath::fvec4                    m_PrevWorldOffset{ 0, 0, 0, 0 };
     };
 
     // The instance buffer's entry (std430 InstanceData)
@@ -35,16 +39,18 @@ namespace xlionrender::details
     {
         std::array<xmath::fvec4, 3>     m_L2wRows;      // local -> the instance buffer's origin: the affine matrix's rows
         std::array<xmath::fvec4, 3>     m_Material;     // the constant material: base rgb + metallic, emissive rgb + roughness, AO, F0
+        std::array<xmath::fvec4, 3>     m_PrevL2wRows;  // last frame's transform (instance_slots: the same as this frame's once it stopped)
 
-        void set(const xmath::fmat4& M, const xmath::fvec3& Origin, const material& Mat) noexcept
+        void set(const xmath::fmat4& M, const xmath::fmat4& Prev, const xmath::fvec3& Origin, const material& Mat) noexcept
         {
-            for (int r = 0; r < 3; ++r) m_L2wRows[r] = { M(r, 0), M(r, 1), M(r, 2), M(r, 3) - Origin[r] };
+            for (int r = 0; r < 3; ++r) m_L2wRows[r]     = { M(r, 0), M(r, 1), M(r, 2), M(r, 3) - Origin[r] };
+            for (int r = 0; r < 3; ++r) m_PrevL2wRows[r] = { Prev(r, 0), Prev(r, 1), Prev(r, 2), Prev(r, 3) - Origin[r] };
             m_Material[0] = xmath::fvec4(Mat.m_BaseColor, Mat.m_Metallic);
             m_Material[1] = xmath::fvec4(Mat.m_Emissive,  Mat.m_Roughness);
             m_Material[2] = { Mat.m_AO, Mat.m_F0, 0, 0 };
         }
     };
-    static_assert(sizeof(instance_data) == 96);
+    static_assert(sizeof(instance_data) == 144);
 
     // A float into an IEEE half (round to nearest; overflow to inf, tiny to 0): the GI depth moments' upload (GLSL unpackHalf2x16)
     inline std::uint16_t Half(float f) noexcept

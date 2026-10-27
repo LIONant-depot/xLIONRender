@@ -8,6 +8,7 @@ struct InstanceData
 {
     vec4   Rows[3];        // local -> the instance buffer's origin (the vertex shader's)
     vec4   Material[3];    // [0] base color rgb, metallic; [1] emissive rgb, roughness; [2] x AO, y F0
+    vec4   PrevRows[3];    // last frame's transform (the vertex shader's)
 };
 layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 {

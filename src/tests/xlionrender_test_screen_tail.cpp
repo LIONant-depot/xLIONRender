@@ -57,8 +57,10 @@ int main()
     auto& Device   = App.m_Device;
     using mode = xlionrender::instance::light_mode;
 
-    xlionrender::mesh_id Box;
+    xlionrender::mesh_id Box, ClusterBox;
     CHECK(MakeMesh(Renderer, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), Box), "box");
+    cluster_buffers ClusterBuffers;                                             // (a mover: a cluster mesh with an instance id - its transform kept)
+    CHECK(MakeStaticBuffers(Device, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), 0.5f, ClusterBuffers) && !Renderer.CreateClusterGeom(ClusterBox, ClusterBuffers.Geom()), "cluster box");
 
     xlionrender::scene Scene;
     const auto At = [](float X, float Y, float Z, float SX, float SY, float SZ) { return xmath::fmat4::fromTranslation({ X, Y, Z }) * xmath::fmat4::fromScale({ SX, SY, SZ }); };
@@ -131,6 +133,7 @@ int main()
     CHECK(Screen.m_Err >= 0 && Screen.m_Err < 0.5 * Inline.m_Err, "the screen tail's per-frame error %.3f is not under half the inline tail's %.3f", Screen.m_Err, Inline.m_Err);
     CHECK(Screen.m_Flicker < 0.25 * Inline.m_Flicker, "the screen tail flickers %.3f (inline %.3f)", Screen.m_Flicker, Inline.m_Flicker);
     CHECK(Screen.m_MeanErr < 0.1, "the screen tail's mean is %.3f off CELLS (its bias)", Screen.m_MeanErr);
+    CHECK(std::abs(Screen.m_Ratio - 1.0) < 0.005, "the screen tail's mean is %.2f%% brighter than CELLS' (its bias: under 0.5%%)", (Screen.m_Ratio - 1.0) * 100.0);
 
     // Motion: the camera moving (1.5 cm a frame, swaying), the lights moving (a few cm a frame), a box crossing the street (5 cm a frame: what
     // it uncovers has no history). Each: the mean per-frame error over 24 frames, the screen tail's against the inline tail's
@@ -163,6 +166,55 @@ int main()
         CHECK(ES >= 0 && ES < EI, "%s: the screen tail's error %.3f is not under the inline tail's %.3f", Names[What], ES, EI);
     }
 
+    // An abrupt change: half the lights off at once - the history must not keep them (the clamp to this frame's neighbourhood drops
+    // it). The error against CELLS 1, 2, 4 and 8 frames after, the screen tail's against the inline tail's 8 frames after
+    {
+        const auto Switch = [&](mode M, double* pErr) -> bool
+        {
+            Scene.m_LocalLights = Base;
+            for (int f = 0; f < 24; ++f) if (!Frame(M, false)) return false;
+            for (std::size_t i = 0; i < Scene.m_LocalLights.size(); i += 2) Scene.m_LocalLights[i].m_Intensity = 0;
+            for (int f = 1; f <= 8; ++f)
+            {
+                if (!Frame(M, true)) return false;
+                if (f == 1 || f == 2 || f == 4 || f == 8) *pErr++ = RelErr(Img, Exact);
+            }
+            Scene.m_LocalLights = Base;
+            return true;
+        };
+        double EI[4], ES[4];
+        CHECK(Switch(mode::SAMPLED, EI) && Switch(mode::SCREEN, ES), "Render the switch");
+        std::printf("half the lights off: error 1 / 2 / 4 / 8 frames after, inline %.3f %.3f %.3f %.3f, screen %.3f %.3f %.3f %.3f\n", EI[0], EI[1], EI[2], EI[3], ES[0], ES[1], ES[2], ES[3]);
+        CHECK(ES[3] < EI[3], "8 frames after half the lights went off the screen tail's error %.3f is not under the inline tail's %.3f", ES[3], EI[3]);
+    }
+
+    // A mover (motion vectors): a box crossing the street fast (12 cm a frame), a cluster mesh with an instance id - its last transform kept,
+    // the G-buffer's motion reprojects its texels - against the same box without an id (no motion of its own: the camera's reprojection,
+    // its tail drags behind it until the clamp drops it). The error over the 24 frames of its crossing
+    {
+        const auto Cross = [&](mode M, std::uint64_t Instance) -> double
+        {
+            Look(0);
+            Scene.m_LocalLights = Base;
+            const auto Draws = Scene.m_Draws;
+            const auto Pose  = [&](int f) { return At(-3.0f + 0.12f * float(f), 1.2f, -8.0f, 1.5f, 2.4f, 1.5f); };
+            Scene.m_Draws.push_back({ .m_Mesh = ClusterBox, .m_L2W = Pose(0), .m_Material = { .m_Roughness = 0.4f }, .m_Instance = Instance });
+            for (int f = 0; f < 20; ++f) if (!Frame(M, false)) return -1;
+            double E = 0;
+            for (int f = 0; f < 24; ++f)
+            {
+                Scene.m_Draws.back().m_L2W = Pose(f + 1);
+                if (!Frame(M, true)) return -1;
+                E += RelErr(Img, Exact) / 24;
+            }
+            Scene.m_Draws = Draws;
+            return E;
+        };
+        const double EI = Cross(mode::SAMPLED, 77), EStatic = Cross(mode::SCREEN, 0), EMoving = Cross(mode::SCREEN, 77);
+        std::printf("a mover crossing: per-frame error inline %.3f, screen without its motion %.3f, with it %.3f\n", EI, EStatic, EMoving);
+        CHECK(EMoving < EStatic && EMoving < EI, "the mover's motion does not help: %.3f with it, %.3f without (inline %.3f)", EMoving, EStatic, EI);
+    }
+
     // The memory at Tomas's Bistro view (3093 x 1493): the targets at half size
     {
         xlionrender::render_view Big;
@@ -173,7 +225,7 @@ int main()
         for (int f = 0; f < 6; ++f) CHECK(App.RenderFrame(Scene, Big, BigCam), "Render big");
         const auto& T = Renderer.getTailReport();
         std::printf("3093x1493: screen tail %dx%d, %.1f MB; G-buffer %.3f ms, tail %.3f ms, denoiser %.3f ms\n", T.m_Width, T.m_Height, T.m_MemoryMB, T.m_GBufferMs, T.m_TailMs, T.m_DenoiseMs);
-        CHECK(T.m_MemoryMB < 80.0, "the screen tail's targets take %.1f MB at 3093x1493", T.m_MemoryMB);
+        CHECK(T.m_MemoryMB < 64.0, "the screen tail's targets take %.1f MB at 3093x1493", T.m_MemoryMB);
         Renderer.DestroyView(Big);
     }
 

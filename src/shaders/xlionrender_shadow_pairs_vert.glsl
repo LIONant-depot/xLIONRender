@@ -16,6 +16,7 @@ struct InstanceData
 {
     vec4   Rows[3];
     vec4   Material[3];
+    vec4   PrevRows[3];
 };
 layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 {

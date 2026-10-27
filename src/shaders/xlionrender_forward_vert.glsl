@@ -17,12 +17,14 @@ layout(push_constant) uniform Push
 layout(location = 0) out VaryingFull Out;
 layout(location = 6) out vec2 OutUV1;           // no second UVs on this path: UV0
 layout(location = 9) out vec4 OutGI;            // surfel GI (mb_standard_pbr.frag): none on this path
+layout(location = 14) out vec4 OutPrevClip;     // last frame's clip position (the screen tail's motion): none on this path (the camera's reprojection)
 
 void main()
 {
     const vec4 wPos    = push.L2W * vec4(in_Pos, 1.0);
     Out.wSpacePosition = wPos;
     gl_Position        = push.W2C * wPos;
+    OutPrevClip        = vec4(0.0);
 
     const mat3 RotMat  = mat3(push.L2W);    // ponytail: no inverse-transpose, fine for uniform scale
     Out.Normal         = normalize(RotMat * in_Normal);

@@ -100,9 +100,9 @@ namespace xlionrender
         {
             auto* pRing    = static_cast<details::instance_data*>(pMemory);
             auto* pEntRing = static_cast<entity_params*>(pEntityMemory);
-            const auto Put = [&](std::uint32_t Slot, const xmath::fmat4& L2W, const material& Mat, const entity_params& Ent)
+            const auto Put = [&](std::uint32_t Slot, const xmath::fmat4& L2W, const xmath::fmat4& Prev, const material& Mat, const entity_params& Ent)
             {
-                pRing[m_RingUsed].set(L2W, m_Origin, Mat);
+                pRing[m_RingUsed].set(L2W, Prev, m_Origin, Mat);
                 pEntRing[m_RingUsed] = Ent;
                 const int Src = Base + m_RingUsed++;
                 if( !Regions.empty() && Regions.back().m_SrcEntry + Regions.back().m_Count == Src && Regions.back().m_DstEntry + Regions.back().m_Count == int(Slot) ) ++Regions.back().m_Count;
@@ -122,7 +122,7 @@ namespace xlionrender
                 {
                     if( m_TransientCount >= max_transient_v || m_RingUsed >= region_v ) { m_DrawSlot[i] = instance_slots::none_v; continue; }     // ponytail: dropped
                     Slot = std::uint32_t(max_instances_v + m_TransientCount++);
-                    Put(Slot, D.m_L2W, D.m_Material, D.m_EntityParams);
+                    Put(Slot, D.m_L2W, D.m_L2W, D.m_Material, D.m_EntityParams);       // (a transient slot: no motion of its own)
                 }
                 m_DrawSlot[i] = Slot;
             }
@@ -1695,7 +1695,7 @@ namespace xlionrender
             m_TailReport.m_GBufferMs = double(Ns[1] - Ns[0]) * 1e-6; m_TailReport.m_TailMs = double(Ns[2] - Ns[1]) * 1e-6; m_TailReport.m_DenoiseMs = double(Ns[3] - Ns[2]) * 1e-6;
         }
         m_TailReport.m_bOn = true; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
-        m_TailReport.m_MemoryMB = double(W) * double(H) * (4 + 4 + 4 + 4 + 2 * 16) / (1024.0 * 1024.0);     // (G-buffer, depth, the tail's two, the denoiser's two)
+        m_TailReport.m_MemoryMB = double(W) * double(H) * (4 + 8 + 4 + 4 + 4 + 2 * 16) / (1024.0 * 1024.0);     // (G-buffer, motion, depth, the tail's two, the denoiser's two)
 
         // A camera cut (a jump past 2 m, or the view turned past 45 degrees): no history (the GI screen pass's rule)
         const xmath::fmat4 C2W = W2C.Inverse();
@@ -1795,18 +1795,18 @@ namespace xlionrender
         Window.WriteTimestamp(m_TailTimes, 2);
         {
             // the denoiser's frame (shaders/xlionrender_tail_denoise_comp.glsl frame_t): this frame's clip -> world, this frame's clip -> last
-            // frame's (the eye's move between), the eye's move, the size, whether last frame's is there, the frame's number
+            // frame's (the eye's move between: the camera's reprojection, where the G-buffer has no motion), the size, whether last frame's
+            // is there, the frame's number
             const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
-            const xmath::fvec3 Move = Eye - View.m_TailPrevEye;
-            const xmath::fmat4 Reproject = View.m_bTailPrev ? View.m_TailPrevC2W.Inverse() * xmath::fmat4::fromTranslation(Move) * C2W : xmath::fmat4::fromIdentity();
-            const xmath::fvec4 MoveV(Move, 0.0f), Params{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
+            const xmath::fmat4 Reproject = View.m_bTailPrev ? View.m_TailPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) * C2W : xmath::fmat4::fromIdentity();
+            const xmath::fvec4 Params{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
             (void)m_TailFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
             {
                 auto* pB = static_cast<std::byte*>(p);
-                std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &Reproject, 64); std::memcpy(pB + 128, &MoveV, 16); std::memcpy(pB + 144, &Params, 16);
+                std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &Reproject, 64); std::memcpy(pB + 128, &Params, 16);
             });
             auto Buffers  = std::array<xgpu::buffer*, 3>{ &m_TailFrames, &View.m_TailResult, &View.m_TailTemporal };
-            auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_TailDiffuse, &View.m_TailSpecular, &View.m_TailGColor, &View.m_TailGDepth };
+            auto Textures = std::array<const xgpu::texture*, 5>{ &View.m_TailDiffuse, &View.m_TailSpecular, &View.m_TailGColor, &View.m_TailGDepth, &View.m_TailGMotion };
             for( std::uint32_t Pass = 0; Pass < 2; ++Pass )
             {
                 const std::uint32_t Push[8] = { Pass, std::uint32_t(Slot), 0u, 0u, 0u, 0u, 0u, 0u };
@@ -1814,7 +1814,7 @@ namespace xlionrender
             }
         }
         Window.WriteTimestamp(m_TailTimes, 3);
-        View.m_TailPrevC2W = C2W; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
+        View.m_TailPrevC2W = C2W; View.m_TailPrevW2C = W2C; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
         m_pTailRecords = &View.m_TailResult;
     }
 
@@ -1879,6 +1879,11 @@ namespace xlionrender
             auto& ViewBlock = m_StaticGeomUBO.allocEntry<details::ubo_geom_view>();      // camera-centered
             ViewBlock.m_w2C         = W2C;
             ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin - Eye, 0);
+            if( bMain && View.m_bTailPrev )     // (the screen tail's motion: last frame's camera)
+            {
+                ViewBlock.m_PrevW2C         = View.m_TailPrevW2C;
+                ViewBlock.m_PrevWorldOffset = xmath::fvec4(m_Origin - View.m_TailPrevEye, 1);
+            }
 
             // Frustum culling in the camera-centered world (the bounds move by -Eye)
             const frustum Frustum = frustum::FromW2C(W2C);

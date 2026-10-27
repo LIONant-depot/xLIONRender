@@ -602,8 +602,8 @@ namespace xlionrender
             if( auto Err = Device.Create(m_LightCellsTimes, { .m_Count = 2 }); Err ) return Err;
             // the screen tail's denoiser (shaders/xlionrender_tail_denoise_comp.glsl): its frame a ring slot each (3 mat4 + a vec4)
             if( auto Err = Device.Create(m_TailDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TailDenoiseComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 4, .m_PushConstantsSize = 32 }); Err ) return Err;
-            if( auto Err = Device.Create(m_TailFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * 64 + 2 * 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
+            if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_TailFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * 64 + 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 4 }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data() }); Err ) return Err;
@@ -1537,8 +1537,9 @@ namespace xlionrender
         using fmt = xgpu::texture::format;
         if( auto Err = m_Device.Create(View.m_TailGColor, { .m_Format = fmt::A2B10G10R10_UNORM, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_TailGDepth, { .m_Format = fmt::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailGMotion, { .m_Format = fmt::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
         {
-            auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_TailGColor }, xgpu::renderpass::attachment{ View.m_TailGDepth } };
+            auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_TailGColor }, xgpu::renderpass::attachment{ View.m_TailGMotion }, xgpu::renderpass::attachment{ View.m_TailGDepth } };
             if( auto Err = m_Device.Create(View.m_TailGPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
         if( auto Err = m_Device.Create(View.m_TailDiffuse,  { .m_Format = fmt::B10G11R11_UFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
@@ -1563,7 +1564,7 @@ namespace xlionrender
     void instance::destroyTailTargets( render_view& View ) noexcept
     {
         const auto Kill = [&](auto& Obj) { if( Obj.m_Private ) m_Device.Destroy(std::move(Obj)); Obj.m_Private.reset(); };
-        Kill(View.m_TailInstance); Kill(View.m_TailGPass); Kill(View.m_TailGColor); Kill(View.m_TailGDepth);
+        Kill(View.m_TailInstance); Kill(View.m_TailGPass); Kill(View.m_TailGColor); Kill(View.m_TailGDepth); Kill(View.m_TailGMotion);
         Kill(View.m_TailPass); Kill(View.m_TailDiffuse); Kill(View.m_TailSpecular); Kill(View.m_TailResult); Kill(View.m_TailTemporal);
         View.m_TailWidth = View.m_TailHeight = 0;
         View.m_bTailPrev = false;

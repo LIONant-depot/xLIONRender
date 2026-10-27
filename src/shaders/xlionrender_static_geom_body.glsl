@@ -10,6 +10,8 @@ layout(set=2, binding = 0) uniform MeshUniforms
 {
     mat4   w2C;            // Small world -> clip space (projection * view)
     vec4   WorldOffset;    // xyz: the instance buffer's origin in that small world
+    mat4   PrevW2C;        // last frame's (the screen tail's motion: details::ubo_geom_view), its origin's offset (w: 1 there is one)
+    vec4   PrevWorldOffset;
 } mesh;
 
 // Per instance (features/instances/xlionrender_instance_slots.h): persistent, indexed by push.instanceIndex
@@ -17,6 +19,7 @@ struct InstanceData
 {
     vec4   Rows[3];        // Local space -> the instance buffer's origin: the affine matrix's 3 rows
     vec4   Material[3];    // the constant material (xlionrender_geom_standard_frag.glsl reads it)
+    vec4   PrevRows[3];    // last frame's transform (the screen tail's motion: instance_slots)
 };
 layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer
 {
@@ -34,6 +37,7 @@ layout(location = 10) out vec3 OutGIPos;            // the per-pixel read (mb_st
 layout(location = 11) out vec3 OutGINormal;         //   normal,
 layout(location = 12) flat out uvec2 OutGIRef;      //   the first surfel in GILight, the GI level (xlionrender_surfel_gi.glsl gi_none_v: none)
 layout(location = 13) out vec4 OutGITangent;        //   and the tangent (w: the binormal's sign): the normal-mapped normal in mesh space
+layout(location = 14) out vec4 OutPrevClip;         // last frame's clip position (the screen tail's motion: the G-buffer variants read it; w 0: none)
 
 #ifdef XLION_GI
 #include "xlionrender_surfel_gi.glsl"
@@ -89,6 +93,7 @@ void main()
     const InstanceData I    = instances.Instances[push.instanceIndex];
     const mat3x4 L2wRows    = mat3x4(I.Rows[0], I.Rows[1], I.Rows[2]);
     Out.wSpacePosition      = vec4(VertData.LocalPos * L2wRows + mesh.WorldOffset.xyz, 1.0);
+    OutPrevClip             = mesh.PrevWorldOffset.w > 0.5 ? mesh.PrevW2C * vec4(VertData.LocalPos * mat3x4(I.PrevRows[0], I.PrevRows[1], I.PrevRows[2]) + mesh.PrevWorldOffset.xyz, 1.0) : vec4(0.0);
     Out.ShadowPosition      = vec4(0.5, 0.5, 2.0, 1.0);                 // the editors' single shadow map (LDR materials) only
     gl_Position             = mesh.w2C * Out.wSpacePosition;
 

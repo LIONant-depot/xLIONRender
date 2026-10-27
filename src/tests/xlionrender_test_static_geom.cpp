@@ -534,7 +534,7 @@ int main()
         const auto s1 = S.Acquire(1, M1, 1), s2 = S.Acquire(2, M2, 1);
         CHECK(s1 != s2 && s1 != S.none_v && s2 != S.none_v, "Two slots");
         int nWritten = 0;
-        const auto Count = [&](std::uint32_t, const xmath::fmat4&, const xlionrender::material&, const xlionrender::entity_params&) { ++nWritten; };
+        const auto Count = [&](std::uint32_t, const xmath::fmat4&, const xmath::fmat4&, const xlionrender::material&, const xlionrender::entity_params&) { ++nWritten; };
         CHECK(S.Flush(1, Count) == 1 && S.getPendingCount() == 1, "A budget of 1 writes 1, the other stays pending");
         CHECK(S.Flush(16, Count) == 1 && nWritten == 2, "Then the rest");
         CHECK(S.Acquire(2, M2, 2) == s2 && S.Flush(16, Count) == 0, "An unchanged id keeps its slot, nothing to write");
@@ -546,6 +546,25 @@ int main()
              , "An entity-parameter edit is written once, and is not a change for the shadow casters");
         CHECK(S.Acquire(3, M1, 2) == s1, "Full: the least recently seen slot (id 1) is evicted");
         CHECK(S.Acquire(1, M1, 2) == S.none_v, "Full and every slot seen this frame: no slot");
+    }
+    // Last frame's transform (the screen tail's motion): a moved slot writes its old transform as last frame's; standing still the next
+    // frame it is written again, last frame's equal to this frame's (else it would keep moving in the shaders); then nothing
+    {
+        xlionrender::instance_slots S;
+        S.Init(1);
+        const auto A = xmath::fmat4::fromTranslation({ 1, 0, 0 }), B = xmath::fmat4::fromTranslation({ 2, 0, 0 });
+        xmath::fmat4 Cur, Prev;
+        int n = 0;
+        const auto Get = [&](std::uint32_t, const xmath::fmat4& L, const xmath::fmat4& P, const xlionrender::material&, const xlionrender::entity_params&) { Cur = L; Prev = P; ++n; };
+        const auto Same = [](const xmath::fmat4& X, const xmath::fmat4& Y) { return std::memcmp(&X, &Y, sizeof(X)) == 0; };
+        S.Acquire(7, A, 1);
+        CHECK(S.Flush(16, Get) == 1 && Same(Cur, A) && Same(Prev, A), "A new slot: last frame's transform is its own");
+        S.Acquire(7, B, 2);
+        CHECK(S.Flush(16, Get) == 1 && Same(Cur, B) && Same(Prev, A), "Moved: last frame's transform is the old one");
+        S.Acquire(7, B, 3);
+        CHECK(S.Flush(16, Get) == 1 && Same(Cur, B) && Same(Prev, B), "Stopped: written again, last frame's equal to this frame's");
+        S.Acquire(7, B, 4);
+        CHECK(S.Flush(16, Get) == 0 && n == 3, "Still: nothing to write");
     }
     {
         std::vector<float> Transient, Persistent;

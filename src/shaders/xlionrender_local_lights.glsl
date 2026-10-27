@@ -37,7 +37,7 @@ layout(std430, set = 1, binding = 3) readonly buffer LocalLightBuffer { LocalLig
 layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint LightCells[]; };
 #ifndef XLION_TAIL_SCREEN
 // The denoised screen tail (instance: the tail pass and the denoiser, xlionrender_tail_denoise_comp.glsl): a record a half-size texel - x:
-// the diffuse's rg, y: its b and the specular's r, z: the specular's gb (halves, demodulated), w: the surface's distance to the eye (half,
+// the diffuse's rg, y: its b and the specular's r, z: the specular's gb (halves, demodulated), w: the surface's view depth (clip w; half,
 // bits 0-15; 0: no surface), its octahedral normal (4 + 4 bits from 16), its frames - from record UBOLight.TailParams.w
 layout(std430, set = 1, binding = 14) readonly buffer TailScreenBuffer { uvec4 TailScreen[]; };
 #endif
@@ -365,7 +365,7 @@ bool LocalTailScreen(in const vec3 N, in const float NdotV, in const vec3 Albedo
     if (W <= 0 || R0 + uint(W * H) > uint(TailScreen.length())) return false;     // (a pass without the screen tail: its dummy bound)
     const vec2 hp = gl_FragCoord.xy * 0.5 - 0.5;
     const vec2 i0 = floor(hp), f = hp - i0;
-    const float Dist = length(In.wSpacePosition.xyz);
+    const float Dist = 1.0 / gl_FragCoord.w;                                    // (the view depth: clip w, as the records')
     vec3  Sd = vec3(0.0), Ss = vec3(0.0);
     float Sw = 0.0;
     for (int k = 0; k < 4; ++k)
