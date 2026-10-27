@@ -2820,6 +2820,10 @@ namespace xlionrender
                            , Scene.m_Sun.m_bCastShadows ? "on" : "off", m_VSMReport.m_RequestGpuMs, m_VSMReport.m_Pages.m_Rendered, m_VSMReport.m_Pages.m_RenderedPinned, m_VSMReport.m_Pages.m_Rejected, m_VSMReport.m_Pages.m_ResidentFine, m_VSMReport.m_Pages.m_ResidentPinned, m_VSM.getSetup().Slots(), m_VSMReport.m_Pages.m_PoolLoad, m_VSMReport.m_Pages.m_DynamicBias
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[1] / m_VSMReport.m_Counters[0] : 0.0, m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[2] / m_VSMReport.m_Counters[0] : 0.0
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[3] / m_VSMReport.m_Counters[0] : 0.0);
+                const auto& LP = m_LocalReport;          // the local lights' pages (P1d)
+                std::printf("LEDGER local pages: lights %d, requested %d, rendered %d + pinned %d, rejected %d, resident %d + pinned %d, stale %d; pixel-light pairs by their level %.1f%% / coarser %.1f%% / none %.1f%%\n"
+                           , LP.m_Pages.m_Lights, LP.m_Pages.m_Requested, LP.m_Pages.m_Rendered, LP.m_Pages.m_RenderedPinned, LP.m_Pages.m_Rejected, LP.m_Pages.m_Resident, LP.m_Pages.m_ResidentPinned, LP.m_Pages.m_Stale
+                           , LP.m_Counters[0] ? 100.0 * LP.m_Counters[1] / LP.m_Counters[0] : 0.0, LP.m_Counters[0] ? 100.0 * LP.m_Counters[2] / LP.m_Counters[0] : 0.0, LP.m_Counters[0] ? 100.0 * LP.m_Counters[3] / LP.m_Counters[0] : 0.0);
                 std::fflush(stdout);
             }
         }

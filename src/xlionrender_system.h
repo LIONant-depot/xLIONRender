@@ -332,7 +332,17 @@ namespace xlionrender
                               , L.m_nLights, L.m_nDropped, L.m_nShadowed, L.m_nShadowFallback, L.m_nShadowStale, L.m_nOverflowCells)
                  + std::format("\nSunPages={}\nSunPagesRendered={}\nSunPagesNet={}\nSunPagesRejected={}\nSunPagesResident={}\nSunPoolLoad={:.2f}\nSunDynamicBias={:.2f}\nSunPixels={}\nSunPixelsOwnLevel={}\nSunPixelsCoarser={}\nSunPixelsNone={}\nSunRequestMs={:.3f}"
                               , 1, V.m_Pages.m_Rendered, V.m_Pages.m_RenderedPinned, V.m_Pages.m_Rejected, V.m_Pages.m_ResidentFine + V.m_Pages.m_ResidentPinned, V.m_Pages.m_PoolLoad, V.m_Pages.m_DynamicBias
-                              , V.m_Counters[0], V.m_Counters[1], V.m_Counters[2], V.m_Counters[3], V.m_RequestGpuMs);
+                              , V.m_Counters[0], V.m_Counters[1], V.m_Counters[2], V.m_Counters[3], V.m_RequestGpuMs)
+                 + LocalPages();
+        }
+
+        // The local lights' shadow pages (P1d): this frame's, and a ring late the request pass's pixel-light pairs by how they were shaded
+        std::string LocalPages() const noexcept
+        {
+            const auto& P = m_pScene->m_Renderer.getLocalReport();
+            return std::format("\nLocalPagesLights={}\nLocalPagesRequested={}\nLocalPagesRendered={}\nLocalPagesPinnedRendered={}\nLocalPagesRejected={}\nLocalPagesResident={}\nLocalPagesPinned={}\nLocalPagesStale={}\nLocalPixels={}\nLocalPixelsOwnLevel={}\nLocalPixelsCoarser={}\nLocalPixelsNone={}"
+                              , P.m_Pages.m_Lights, P.m_Pages.m_Requested, P.m_Pages.m_Rendered, P.m_Pages.m_RenderedPinned, P.m_Pages.m_Rejected, P.m_Pages.m_Resident, P.m_Pages.m_ResidentPinned
+                              , P.m_Pages.m_Stale, P.m_Counters[0], P.m_Counters[1], P.m_Counters[2], P.m_Counters[3]);
         }
 
         // The GI's main-thread time in the last RenderScene, all of it (the update and the upload: what the host's shared allowance is charged)
