@@ -149,6 +149,24 @@ int main()
     CHECK(Compare("still"), "compare, still");
 
     CHECK(Bench("still", false), "the benchmark, still");
+    {   // The sun's shadow in the scene pass (the pages' lookups, the contact-hardening's search and filters): its GPU time with and without
+        const auto ScenePass = [&]()
+        {
+            double Sum = 0; int n = 0;
+            for (int f = 0; f < 60 + 120; ++f)
+            {
+                if (!App.RenderFrame(Scene, View, Camera)) return -1.0;
+                if (f >= 60 && App.m_bGotTimes) { Sum += App.m_LastTimes.m_SceneMs; ++n; }
+            }
+            return n ? Sum / n : -1.0;
+        };
+        const double With = ScenePass();
+        Scene.m_Sun.m_bCastShadows = false;
+        const double Without = ScenePass();
+        Scene.m_Sun.m_bCastShadows = true;
+        std::printf("scene pass (%dx%d): %.3f ms with the sun's shadow, %.3f without (the shadow %.3f ms)\n", width_v, height_v, With, Without, With - Without);
+        CHECK(With > 0 && Without > 0 && ScenePass() > 0, "the scene pass with and without the shadow");
+    }
     CHECK(Bench("50 movers", true), "the benchmark, 50 movers");
     CHECK(Compare("50 movers"), "compare, 50 movers");
     Renderer.m_bShadowGPUPairs = false;
