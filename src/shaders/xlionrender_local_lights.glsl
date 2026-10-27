@@ -211,6 +211,17 @@ const int kCellLevels = 5;
 const int kCells      = 16;
 const int kLevelCells = kCells * kCells * kCells;
 
+// An emitter light (DirCosOuter.w -3: the GI's emitting surfel, instance::refreshEmitterLights): a one-sided disc of area A (Shadow.w)
+// facing DirCosOuter.xyz, its radiance the color - irradiance radiance x A cos / (d^2 + A), the GI's own form factor (its link weight),
+// windowed to 0 at the light's reach
+float LocalEmitterAtt(in const LocalLightData Ld, in const vec3 L, in const float Dist, in const float s)
+{
+    const float A = Ld.Shadow.w;
+    return A * max(dot(-L, Ld.DirCosOuter.xyz), 0.0) / (Dist * Dist + A) * (1.0 - s * s * s * s);
+}
+// What the cut-off (1e-4 of the color) weighs: an emitter's color is a radiance (its attenuation is the small one), the others' an intensity
+float LocalAttScale(in const LocalLightData Ld) { return Ld.DirCosOuter.w < -2.5 ? dot(Ld.Color.rgb, vec3(0.2126, 0.7152, 0.0722)) : 1.0; }
+
 // One light's contribution at the surface without its shadow (0 outside its radius)
 vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
 {
@@ -222,7 +233,8 @@ vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in c
     float Att = LightDistanceFalloff(s, 1.0);
     const vec3 L = ToLight / Dist;
     if (Ld.DirCosOuter.w > -1.5) Att *= LightSpotCone(dot(-L, Ld.DirCosOuter.xyz), Ld.DirCosOuter.w, Ld.Color.w);
-    if (Att < 1e-4) return vec3(0.0);
+    else if (Ld.DirCosOuter.w < -2.5) Att = LocalEmitterAtt(Ld, L, Dist, s);
+    if (Att * LocalAttScale(Ld) < 1e-4) return vec3(0.0);
     return PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att;
 }
 
@@ -291,7 +303,8 @@ bool LocalLightDemod(in const int i, in const vec3 N, in const vec3 V, in const 
     float Att = LightDistanceFalloff(s, 1.0);
     const vec3 L = ToLight / Dist;
     if (Ld.DirCosOuter.w > -1.5) Att *= LightSpotCone(dot(-L, Ld.DirCosOuter.xyz), Ld.DirCosOuter.w, Ld.Color.w);
-    if (Att < 1e-4) return false;
+    else if (Ld.DirCosOuter.w < -2.5) Att = LocalEmitterAtt(Ld, L, Dist, s);
+    if (Att * LocalAttScale(Ld) < 1e-4) return false;
     PBRDirectDemod(N, V, NdotV, PerceptualRoughness, L, Diff, Spec);
     Diff *= Ld.Color.rgb * Att; Spec *= Ld.Color.rgb * Att;
     return any(greaterThan(Diff + Spec, vec3(0.0)));
@@ -300,6 +313,8 @@ bool LocalLightDemod(in const int i, in const vec3 N, in const vec3 V, in const 
 #ifdef XLION_TAIL_SCREEN
 // The tail pass's screen trace (xlionrender_tail_screen_frag.glsl): 1 the way to the light is clear in the half-size depth .. 0 blocked
 float TailContactShadow(in const vec3 P, in const vec3 ToLight);
+// P4: 1 the way to the light is clear through the GI's BVH (the opaque rigid GI meshes, off screen too) .. 0 blocked
+float TailBvhShadow(in const vec3 P, in const vec3 ToLight);
 #endif
 
 // The screen tail's sample (xlionrender_tail_screen_frag.glsl): the cell's tail resampled as LocalLights' mode 2 does (M candidates, their
@@ -355,7 +370,10 @@ bool LocalTailDemod(in const vec3 N, in const vec3 V, in const float NdotV, in c
 #ifdef XLION_TAIL_SCREEN
     // a light without shadow pages: contact-shadowed by the screen trace (the picked light only - unbiased: its contribution x its visibility)
     const LocalLightData Lp = LocalLightList[int(UBOLight.LocalBase.x) + Pick];
+    // and through the GI's BVH (P4: off screen, behind the first surface - what the screen does not see); what the BVH does not hold (skinned,
+    // masked, meshes without GI) is the screen trace's alone
     if (Lp.Shadow.z <= 0.0 && UBOLight.TailTrace.x > 0.0) Wt *= TailContactShadow(In.wSpacePosition.xyz, Lp.PosRadius.xyz - In.wSpacePosition.xyz);
+    if (Lp.Shadow.z <= 0.0 && UBOLight.TailBvh.x > 0.0 && Wt > 0.0) Wt *= TailBvhShadow(In.wSpacePosition.xyz, Lp.PosRadius.xyz - In.wSpacePosition.xyz);
 #endif
     Diff = PickD * Wt; Spec = PickS * Wt;
     return true;

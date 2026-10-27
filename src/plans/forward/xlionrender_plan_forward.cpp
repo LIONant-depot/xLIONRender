@@ -814,18 +814,61 @@ namespace xlionrender
         return m_CellRing.MemoryMap(m_LightCellBase, m_LightCellUints, [&](void* p) { std::memcpy(Out.data(), p, Out.size() * sizeof(std::uint32_t)); }) == nullptr;
     }
 
+    // The GI's emitters as lights (m_bEmitterLights; lighting_gi_interface_notice.md "emissive surfaces as lights"): each emitting surfel a
+    // one-sided disc of its area - the GI's own form factor, A cos / (d^2 + A) (shaders/xlionrender_local_lights.glsl LocalEmitterAtt) -, its
+    // radiance the GI's (its emissive scale in), no shadow pages; the strongest m_EmitterLightsMax by power, the rest left out. Made again
+    // only when the view's generation changes (an emitter added, moved, its emission or the scale changed)
+    void instance::refreshEmitterLights( void ) noexcept
+    {
+        const auto* pW = m_pGIWorld.get();
+        if( !m_bEmitterLights || pW == nullptr ) { m_EmitterLights.clear(); m_EmitterLightsGen = 0; m_nEmittersLeftOut = 0; return; }
+        const std::uint64_t Gen = pW->EmittersGen();
+        if( Gen == m_EmitterLightsGen ) return;
+        m_EmitterLightsGen = Gen;
+        m_EmitterLights.clear();
+        const auto Lum = []( const xmath::fvec3& c ) { return 0.2126f * c.m_X + 0.7152f * c.m_Y + 0.0722f * c.m_Z; };
+        pW->ForEachEmitter([&]( const auto& E )
+        {
+            const float L = Lum(E.m_Radiance);
+            if( L <= 0 || E.m_Area <= 0 ) return;
+            const float R = std::clamp(std::sqrt(E.m_Area * L / m_EmitterCutoff), std::sqrt(E.m_Area), 50.0f);     // (A / (d^2 + A) x L = cutoff)
+            m_EmitterLights.push_back({ E.m_Pos, E.m_Normal, E.m_Radiance, E.m_Area, R });
+        });
+        const std::size_t Max = std::size_t(std::max(m_EmitterLightsMax, 0));
+        m_nEmittersLeftOut = int(m_EmitterLights.size() > Max ? m_EmitterLights.size() - Max : 0);
+        if( m_EmitterLights.size() > Max )      // ponytail: the weak ones dropped, not folded into their neighbours (their flux lost) - fold them when a level shows it
+        {
+            std::nth_element(m_EmitterLights.begin(), m_EmitterLights.begin() + std::ptrdiff_t(Max), m_EmitterLights.end()
+                            , [&]( const emitter_light& a, const emitter_light& b ) { return Lum(a.m_Radiance) * a.m_Area > Lum(b.m_Radiance) * b.m_Area; });
+            m_EmitterLights.resize(Max);
+        }
+    }
+
     void instance::writeLocalLights( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept
     {
         const std::uint64_t Frame = m_Device.getFrameIndex();
         beginCellFrame(Frame);
+        refreshEmitterLights();
 
-        const int nLights = std::min({ int(Scene.m_LocalLights.size()), max_lights_v, light_region_v - m_LightRingUsed });
+        // the scene's lights, then the emitters' (after them: no shadow pages - the local pages index the scene's)
+        const int nScene  = std::min({ int(Scene.m_LocalLights.size()), max_lights_v, light_region_v - m_LightRingUsed });
+        const int nEm     = std::max(0, std::min({ int(m_EmitterLights.size()), max_lights_v - nScene, light_region_v - m_LightRingUsed - nScene }));
+        const int nLights = nScene + nEm;
         const int LightBase = int(Frame % ring_frames_v) * light_region_v + m_LightRingUsed;
         if( nLights > 0 )
             (void)m_LightRing.MemoryMap(LightBase, nLights, [&](void* pMemory)
             {
                 auto* pOut = static_cast<details::local_light_data*>(pMemory);
-                for( int i = 0; i < nLights; ++i )
+                for( int k = 0; k < nEm; ++k )      // (an emitter: DirCosOuter w -3, its normal; Shadow w its area, no pages)
+                {
+                    const auto& E = m_EmitterLights[std::size_t(k)];
+                    auto& Out = pOut[nScene + k];
+                    Out.m_PosRadius   = xmath::fvec4(E.m_Pos - Eye, E.m_Radius);
+                    Out.m_Color       = xmath::fvec4(E.m_Radiance, 1.0f);
+                    Out.m_DirCosOuter = xmath::fvec4(E.m_Normal, -3.0f);
+                    Out.m_Shadow      = { 0.0f, 0.0f, 0.0f, E.m_Area };
+                }
+                for( int i = 0; i < nScene; ++i )
                 {
                     const auto& LL    = Scene.m_LocalLights[i];
                     const bool  bSpot = LL.m_Type == local_light::type::SPOT;
@@ -877,7 +920,12 @@ namespace xlionrender
         {
             const auto T0 = std::chrono::steady_clock::now();
             m_CellLights.resize(std::max(nLights, 0));
-            for( int i = 0; i < nLights; ++i )
+            for( int k = 0; k < nEm; ++k )
+            {
+                const auto& E = m_EmitterLights[std::size_t(k)];
+                m_CellLights[std::size_t(nScene + k)] = { E.m_Pos, E.m_Radius, std::max((0.2126f * E.m_Radiance.m_X + 0.7152f * E.m_Radiance.m_Y + 0.0722f * E.m_Radiance.m_Z) * E.m_Area, 1e-6f), E.m_Normal, -1.0f };
+            }
+            for( int i = 0; i < nScene; ++i )
             {
                 const auto& LL = Scene.m_LocalLights[i];
                 const float Lum = 0.2126f * LL.m_Color.m_X + 0.7152f * LL.m_Color.m_Y + 0.0722f * LL.m_Color.m_Z;
@@ -958,7 +1006,9 @@ namespace xlionrender
         m_LightCellBase  = CellBase;
         m_LightCellUints = Mode == light_mode::EXACT ? 0 : int(m_LightCells.m_Data.size());
         m_LightStats.m_nLights        = nLights;
-        m_LightStats.m_nDropped       = int(Scene.m_LocalLights.size()) - nLights;
+        m_LightStats.m_nDropped       = int(Scene.m_LocalLights.size()) - nScene;
+        m_LightStats.m_nEmitters      = nEm;
+        m_LightStats.m_nEmittersLeftOut = m_nEmittersLeftOut + int(m_EmitterLights.size()) - nEm;
         m_LightStats.m_nOverflowCells = 0;           // (a cell's list never overflows: 2-uint headers)
         m_LightStats.m_CellRingMB     = double(ring_frames_v) * double(m_CellStride) * 4.0 / (1024.0 * 1024.0);
         Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_bLightTailVisibility ? -m_LightTailCandidates : m_LightTailCandidates) };
@@ -1725,6 +1775,10 @@ namespace xlionrender
         Light.m_TailC2W    = C2W;
         Light.m_TailW2C    = W2C;
         Light.m_TailTrace  = { m_TailTraceLength, float(m_TailTraceSteps), 0.05f, 0.0f };
+        // P4: the GI's BVH (gi::gpu_trace::getBvh, after this frame's updateGI), never walked when it is a placeholder (bEmpty: its root walks
+        // off the buffers and loses the device); without it the GI dummy is bound and the screen trace alone shadows those lights
+        const auto Bvh = m_pGITrace && m_bTailTraceBvh ? m_pGITrace->getBvh() : gi::gpu_trace::bvh_view{ nullptr, nullptr, nullptr, nullptr, 0, 0, true };
+        Light.m_TailBvh    = { Bvh.m_bEmpty ? 0.0f : 1.0f, std::bit_cast<float>(Bvh.m_TlasRoot), std::bit_cast<float>(Bvh.m_PrimOffset), 0.0f };
         Light.m_LocalCount.m_Y = float(int(light_mode::SCREEN));
 
         Window.WriteTimestamp(m_TailTimes, 0);
@@ -1801,7 +1855,8 @@ namespace xlionrender
         Window.WriteTimestamp(m_TailTimes, 1);
         {
             auto Cmd = Window.StartRenderPass(View.m_TailPass);
-            std::array<xgpu::buffer*, 2> Buffers{ &m_LightRing, &m_CellRing };
+            const auto B = [&](const xgpu::buffer* p) { return Bvh.m_bEmpty ? &m_GIDummy : const_cast<xgpu::buffer*>(p); };
+            std::array<xgpu::buffer*, 6> Buffers{ &m_LightRing, &m_CellRing, B(Bvh.m_pNodes), B(Bvh.m_pTri4), B(Bvh.m_pInstances), B(Bvh.m_pTlas) };
             Cmd.setPipelineInstance(View.m_TailInstance, Buffers);
             Cmd.setDynamicUBO(m_LightUBO, 1);
             Cmd.setBuffer(m_FullscreenVB);

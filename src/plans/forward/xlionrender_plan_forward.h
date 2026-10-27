@@ -142,6 +142,7 @@ namespace xlionrender::details
         xmath::fmat4                            m_TailC2W;
         xmath::fmat4                            m_TailW2C;          // the tail pass's camera-centred world -> clip (its screen trace)
         xmath::fvec4                            m_TailTrace;        // the screen trace: x its length (world units; 0: none), y steps, z the depth's thickness (fraction of the view depth)
+        xmath::fvec4                            m_TailBvh;          // P4, the traced visibility through the GI's BVH: x 1 on, y its TLAS root, z its primitives' offset (ints as float bits)
     };
 
     // The sun's virtual pages: the request pass's frame data (shaders/xlionrender_vsm_request_comp.glsl frame_t, std430)

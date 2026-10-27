@@ -60,6 +60,7 @@ int main()
     xlionrender::mesh_id Box, ClusterBox;
     CHECK(MakeMesh(Renderer, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), Box), "box");
     cluster_buffers ClusterBuffers;                                             // (a mover: a cluster mesh with an instance id - its transform kept)
+    cluster_buffers WallBuffers, PanelBuffers;                                  // (P4's wall and the glowing panel: GI meshes - rigid cluster meshes)
     CHECK(MakeStaticBuffers(Device, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), 0.5f, ClusterBuffers) && !Renderer.CreateClusterGeom(ClusterBox, ClusterBuffers.Geom()), "cluster box");
 
     xlionrender::scene Scene;
@@ -81,6 +82,9 @@ int main()
     constexpr int W = 640, H = 360;
     xlionrender::render_view View, Ref;
     CHECK(!Renderer.CreateView(View, { .m_Width = W, .m_Height = H }) && !Renderer.CreateView(Ref, { .m_Width = W, .m_Height = H }), "CreateView");
+    constexpr int GW = 320, GH = 180;                                           // (P4's off-screen wall and the glowing panel: views of their own)
+    xlionrender::render_view GView, GRef;
+    CHECK(!Renderer.CreateView(GView, { .m_Width = GW, .m_Height = GH }) && !Renderer.CreateView(GRef, { .m_Width = GW, .m_Height = GH }), "CreateView (GI)");
     xgpu::tools::view Camera;
     Camera.setFov(xmath::radian{ 1.0f });
     Camera.setViewport({ 0, 0, W, H });
@@ -257,6 +261,112 @@ int main()
         CHECK(bOk, "Render the wall");
         std::printf("a wall, 32 unshadowed lights against their shadowed reference: SCREEN without the screen trace %.3f, with it %.3f\n", ENo, ETrace);
         CHECK(ETrace < 0.85 * ENo, "the screen trace does not shadow the tail through the wall: %.3f with it, %.3f without", ETrace, ENo);
+    }
+
+    // P4, the traced visibility: the wall again, off screen now (the camera looks down at the floor on the far side of it), 32 unshadowed
+    // lights behind it. The screen trace cannot see it; the shadow ray through the GI's BVH (gi::gpu_trace::getBvh: the wall has GI) does.
+    // The reference: the lights shadowed by their pages (CELLS)
+    {
+        xlionrender::mesh_id GIBox;
+        const auto WallPrim = xprim_geom::cube::Generate(15, 15, 15, 15, xprim_geom::float3{ 0.3f, 2.5f, 14.0f });
+        CHECK(MakeStaticBuffers(Device, WallPrim, 2.2f, WallBuffers) && !Renderer.CreateClusterGeom(GIBox, WallBuffers.Geom()) && !Renderer.SetMeshGI(GIBox, MakeSurfels(WallPrim, 0.3f, 0.9f)), "the wall's GI mesh");
+        xlionrender::scene Off;
+        Off.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = At(0, -0.05f, 0, 30, 0.1f, 30), .m_Material = { .m_Roughness = 0.7f } });
+        Off.m_Draws.push_back({ .m_Mesh = GIBox, .m_L2W = xmath::fmat4::fromTranslation({ 0, 1.25f, 0 }), .m_Material = { .m_Roughness = 0.7f }, .m_Instance = 1 });
+        Off.m_Sun     = { .m_Intensity = 0.0f, .m_bCastShadows = false };
+        Off.m_Ambient = { 0.01f, 0.01f, 0.012f };
+        Off.m_GI      = { .m_bEnable = true };
+        std::mt19937 Rng(5);
+        std::uniform_real_distribution<float> U(0, 1);
+        for (int i = 0; i < 32; ++i)
+            Off.m_LocalLights.push_back({ .m_Position = { -0.6f - 1.8f * U(Rng), 0.4f + 1.4f * U(Rng), -6.0f + 12.0f * U(Rng) }, .m_Radius = 5.0f, .m_Color = { 1.0f, 0.85f, 0.6f }, .m_Intensity = 0.8f, .m_bCastShadows = true, .m_bGI = false });
+        xgpu::tools::view OffCam;
+        OffCam.setFov(xmath::radian{ 0.8f });
+        OffCam.setViewport({ 0, 0, GW, GH });
+        OffCam.LookAt(xmath::fvec3{ 4.0f, 6.0f, 0.0f }, xmath::fvec3{ 3.0f, 0.0f, 0.0f });
+        std::vector<float> Shadowed, Img2;
+        Renderer.m_LightMode = mode::CELLS;
+        bool bOk = true;
+        for (int f = 0; f < 40 && bOk; ++f) bOk = App.RenderFrame(Off, GRef, OffCam);
+        bOk = bOk && ReadHDR(Device, GRef, Shadowed);
+        for (auto& L : Off.m_LocalLights) L.m_bCastShadows = false;
+        const auto Screen = [&](float Trace, bool bBvh) -> double
+        {
+            Renderer.m_LightMode = mode::SCREEN;
+            Renderer.m_TailTraceLength = Trace;
+            Renderer.m_bTailTraceBvh = bBvh;
+            double E = 0;
+            for (int f = 0; f < 24 && bOk; ++f)
+            {
+                bOk = App.RenderFrame(Off, GView, OffCam);
+                if (f >= 16) { bOk = bOk && ReadHDR(Device, GView, Img2) && Img2.size() == Shadowed.size(); if (bOk) E += RelErr(Img2, Shadowed) / 8; }
+            }
+            return E;
+        };
+        const double ENo = Screen(0.0f, false), ETrace = Screen(1.0f, false), EBvh = Screen(1.0f, true);
+        Renderer.m_TailTraceLength = 1.0f; Renderer.m_bTailTraceBvh = true;
+        CHECK(bOk, "Render the off-screen wall");
+        std::printf("the wall off screen, 32 unshadowed lights against their shadowed reference: SCREEN untraced %.3f, the screen trace %.3f, + the GI's BVH %.3f\n", ENo, ETrace, EBvh);
+        CHECK(EBvh < 0.85 * ENo && EBvh < 0.85 * ETrace, "the BVH does not shadow the tail through the off-screen wall: %.3f with it, %.3f screen trace, %.3f untraced", EBvh, ETrace, ENo);
+    }
+
+    // Emissive surfaces as lights (instance::m_bEmitterLights; the GI's emitter view, gi::world::ForEachEmitter): a glowing panel (1 x 1 m,
+    // 2 cm thick, 2 m over the floor) with GI. The same energy: the view's flux (radiance x area) is the panel's (its emission x the GI's
+    // scale x its surface), and its discs' irradiance at the floor under it (the form factor the shading uses, A cos cos / (d^2 + A)) is
+    // the panel's own (its integral) - within 5% each. Then the floor under it lit by them (CELLS: exact)
+    {
+        xlionrender::mesh_id GIPanel;
+        const auto PanelPrim = xprim_geom::cube::Generate(15, 15, 15, 15, xprim_geom::float3{ 1.0f, 0.02f, 1.0f });
+        CHECK(MakeStaticBuffers(Device, PanelPrim, 2.2f, PanelBuffers) && !Renderer.CreateClusterGeom(GIPanel, PanelBuffers.Geom()) && !Renderer.SetMeshGI(GIPanel, MakeSurfels(PanelPrim, 0.1f, 0.3f)), "the panel's GI mesh");
+        xlionrender::scene Glow;
+        Glow.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = At(0, -0.05f, 0, 30, 0.1f, 30), .m_Material = { .m_Roughness = 0.9f } });
+        Glow.m_Draws.push_back({ .m_Mesh = GIPanel, .m_L2W = xmath::fmat4::fromTranslation({ 0, 2.0f, 0 }), .m_Material = { .m_Emissive = { 0.02f, 0.02f, 0.02f } }, .m_Instance = 7 });
+        Glow.m_Sun     = { .m_Intensity = 0.0f, .m_bCastShadows = false };
+        Glow.m_Ambient = { 0.0f, 0.0f, 0.0f };
+        Glow.m_GI      = { .m_bEnable = true, .m_bProbes = false };
+        xgpu::tools::view GlowCam;
+        GlowCam.setFov(xmath::radian{ 0.5f });
+        GlowCam.setViewport({ 0, 0, GW, GH });
+        GlowCam.LookAt(xmath::fvec3{ 0.0f, 1.0f, 0.01f }, xmath::fvec3{ 0.0f, 0.0f, 0.0f });
+        Renderer.m_LightMode = mode::CELLS;
+        bool bOk = true;
+        for (int f = 0; f < 2000 && bOk && (f < 3 || Renderer.isGICapturing()); ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
+        std::vector<float> Off, On;
+        for (int f = 0; f < 4 && bOk; ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
+        bOk = bOk && ReadHDR(Device, GView, Off);
+        Renderer.m_bEmitterLights = true;
+        for (int f = 0; f < 4 && bOk; ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
+        bOk = bOk && ReadHDR(Device, GView, On) && On.size() == Off.size() && On.size() == std::size_t(GW) * GH;
+        const auto Stats = Renderer.getLightStats();
+        Renderer.m_bEmitterLights = false;
+        CHECK(bOk && Renderer.getGIWorld() != nullptr, "Render the glowing panel (images %zu / %zu values, the GI %s, capturing %d)", Off.size(), On.size(), Renderer.getGIWorld() ? "there" : "none", int(Renderer.isGICapturing()));
+        if (!bOk) return 1;
+
+        // the view against the panel: its flux, and its discs' irradiance at the floor under it (y 0) against the panel's integral
+        const float Le = 0.02f * Glow.m_GI.m_EmissiveScale;
+        double Flux = 0, E = 0; int n = 0;
+        Renderer.getGIWorld()->ForEachEmitter([&](const auto& V)
+        {
+            ++n; Flux += double(V.m_Radiance.m_X) * V.m_Area;
+            const xmath::fvec3 D = xmath::fvec3{ 0, 0, 0 } - V.m_Pos;
+            const float d2 = D.Dot(D), d = std::sqrt(d2);
+            const float ce = std::max(D.Dot(V.m_Normal) / d, 0.0f), cr = std::max(-D.m_Y / d, 0.0f);
+            E += double(V.m_Radiance.m_X) * V.m_Area * ce * cr / (d2 + V.m_Area);
+        });
+        double EPanel = 0;                                                          // (the panel's underside at y 1.99: radiance x the integral of cos cos / d^2)
+        for (int j = 0; j < 200; ++j) for (int i = 0; i < 200; ++i)
+        {
+            const double x = -0.5 + (i + 0.5) / 200.0, z = -0.5 + (j + 0.5) / 200.0, h = 1.99, d2 = x * x + z * z + h * h;
+            EPanel += Le * h * h / (d2 * d2) * (1.0 / 40000.0);
+        }
+        const double FluxPanel = Le * (2.0 * 1.0 + 4.0 * 0.02);
+        const std::size_t c = std::size_t(GH / 2) * std::size_t(GW) + std::size_t(GW / 2);       // (ReadHDR: the red channel)
+        std::printf("a glowing panel: %d emitter surfels (%d lights, %d left out); flux %.3f against the panel's %.3f, irradiance under it %.4f against %.4f; the floor there %.4f without the emitter lights, %.4f with them\n"
+                   , n, Stats.m_nEmitters, Stats.m_nEmittersLeftOut, Flux, FluxPanel, E, EPanel, Off[c], On[c]);
+        CHECK(n > 0 && Stats.m_nEmitters == n, "the emitter lights: %d of the view's %d", Stats.m_nEmitters, n);
+        CHECK(std::abs(Flux / FluxPanel - 1.0) < 0.05, "the emitter view's flux %.3f, the panel's %.3f", Flux, FluxPanel);
+        CHECK(std::abs(E / EPanel - 1.0) < 0.05, "the emitter discs' irradiance %.4f, the panel's %.4f", E, EPanel);
+        CHECK(On[c] > Off[c] + 0.1f * float(EPanel), "the emitter lights do not light the floor: %.4f with, %.4f without", On[c], Off[c]);
     }
 
     // The memory at Tomas's Bistro view (3093 x 1493): the targets at half size

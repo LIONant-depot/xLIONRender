@@ -15,6 +15,16 @@ VaryingFull In;                                     // (wSpacePosition: the texe
 layout(binding = 1) uniform sampler2D GBufferColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: the roughness (the materials' G-buffer variants)
 layout(binding = 2) uniform sampler2D GBufferDepth;
 
+// P4: the GI's BVH (gi::gpu_trace::getBvh; shaders/xlionrender_gi_bvh.glsl's layouts), absolute world space; the GI dummy where it has none
+struct GINode     { vec4 m_B[6]; ivec4 m_Child; };
+struct GITri4     { vec4 m_V0[3]; vec4 m_E1[3]; vec4 m_E2[3]; ivec4 m_Tri; };
+struct GIInstance { vec4 m_W2L[3]; ivec4 m_Info; };
+layout(std430, set = 1, binding = 15) readonly buffer nodes_b     { GINode     GIBvhNodes[]; };
+layout(std430, set = 1, binding = 16) readonly buffer tri4_b      { GITri4     GIBvhTri4[]; };
+layout(std430, set = 1, binding = 17) readonly buffer instances_b { GIInstance GIBvhInstances[]; };
+layout(std430, set = 1, binding = 18) readonly buffer tlas_b      { int        GIBvhTlasLeaves[]; };
+#include "xlionrender_gi_bvh.glsl"
+
 layout(location = 0) out vec4 OutDiffuse;
 layout(location = 1) out vec4 OutSpecular;
 
@@ -47,6 +57,19 @@ float TailContactShadow(in const vec3 P, in const vec3 ToLight)
         if (dRay - dScene > 0.002 * dRay && dRay - dScene < UBOLight.TailTrace.z * dRay) return 0.0;
     }
     return 1.0;
+}
+
+// The shadow ray through the GI's BVH: any hit before the light (stopped short of it: the fixture around a light is not its blocker), see-
+// through triangles blocking as gi::world::Occluded does
+float TailBvhShadow(in const vec3 P, in const vec3 ToLight)
+{
+    const float Len = length(ToLight);
+    const float TMax = Len * 0.95 - 0.02;
+    if (TMax <= 0.0) return 1.0;
+    g_GIBvhTlasRoot = floatBitsToInt(UBOLight.TailBvh.y); g_GIBvhPrimOffset = floatBitsToInt(UBOLight.TailBvh.z);
+    g_GIBvhAnyHit = true; g_GIBvhSeeThrough = false;
+    const vec3 O = P + UBOLight.CameraPos.xyz + g_LocalFaceN * (0.02 + 0.01 * length(P));      // (off the surface: as the screen trace)
+    return GICast(O, ToLight / Len, TMax).m_Inst >= 0 ? 0.0 : 1.0;
 }
 
 void main()

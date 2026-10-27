@@ -474,6 +474,10 @@ namespace xlionrender
                 { xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
                 , xgpu::pipeline::uniform_binds{ .m_BindIndex = 3, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // lights
                 , xgpu::pipeline::uniform_binds{ .m_BindIndex = 4, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // light cells
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 15, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }  // the GI's BVH (P4): nodes
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 16, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }  //  its triangle rows
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 17, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }  //  its instances
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 18, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }  //  its TLAS leaves
                 };
                 xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = TailShaders, .m_UniformBinds = TailBinds, .m_Samplers = Samplers };
                 Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;

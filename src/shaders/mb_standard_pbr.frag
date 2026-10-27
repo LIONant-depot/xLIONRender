@@ -121,6 +121,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	mat4 TailC2W;                        // the tail pass: clip -> camera-centred world
 	mat4 TailW2C;                        // its camera-centred world -> clip (the screen trace)
 	vec4 TailTrace;                      // the screen trace: x its length (world units; 0: none), y steps, z the depth's thickness (fraction of the view depth)
+	vec4 TailBvh;                        // P4: the GI's BVH for the tail's shadow rays - x 1 on, y its TLAS root, z its primitives' offset (ints as float bits)
 #endif
 } UBOLight;
 

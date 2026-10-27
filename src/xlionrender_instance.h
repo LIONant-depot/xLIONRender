@@ -217,6 +217,13 @@ namespace xlionrender
         int                                        m_LightScreenThreshold = 512;            // AUTO: the lights from which SCREEN is used (the night-market rig: CELLS costs less up to ~300)
         float                                      m_TailTraceLength = 1.0f;                // SCREEN: the tail's unshadowed lights' screen trace (contact shadows), world units (0: none)
         int                                        m_TailTraceSteps  = 12;
+        bool                                       m_bTailTraceBvh   = true;                // SCREEN: those lights' shadow ray also through the GI's BVH (P4; the opaque rigid GI meshes, off screen too)
+        // Emissive surfaces as lights (documentation/lighting_gi_interface_notice.md): the GI's emitter view (gi::world::ForEachEmitter) as
+        // lights without shadow pages. Off by default: the GI's bounce already holds the emitters' light on the surfaces around them - with
+        // both, it counts twice, until the GI leaves that term to lighting (Tomas's decision)
+        bool                                       m_bEmitterLights   = false;
+        int                                        m_EmitterLightsMax = 2048;               // the strongest by power (luminance x area); the rest left out (getLightStats)
+        float                                      m_EmitterCutoff    = 0.002f;             // an emitter light's reach: where its luminance x A / (d^2 + A) falls under this
         int                                        m_LightHead     = 4;
         int                                        m_LightTailSamples = 1;     // SAMPLED: stratified tail samples per pixel
         int                                        m_LightTailCandidates = 8;  // SAMPLED: > 1, the tail resampled (RIS) from this many candidates, one shaded (0: the plain samples)
@@ -234,7 +241,7 @@ namespace xlionrender
         // The last render's local lights and what it could not shade as asked (documentation/lighting_strategy.md sec. 3, 9): lights past
         // the buffer (not shaded at all), shadowed lights shaded unshadowed (no map yet: the declared fallback), maps sampled while waiting
         // for a redraw (stale: what P1a removes), cells whose list overflowed (shaded with every light: exact, slower)
-        struct light_stats { int m_nLights = 0; int m_nDropped = 0; int m_nShadowed = 0; int m_nShadowFallback = 0; int m_nShadowStale = 0; int m_nOverflowCells = 0; double m_CellRingMB = 0; };     // (m_CellRingMB: the light cell ring's memory)
+        struct light_stats { int m_nLights = 0; int m_nDropped = 0; int m_nShadowed = 0; int m_nShadowFallback = 0; int m_nShadowStale = 0; int m_nOverflowCells = 0; double m_CellRingMB = 0; int m_nEmitters = 0; int m_nEmittersLeftOut = 0; };     // (m_nEmitters: emitter lights among m_nLights)     // (m_CellRingMB: the light cell ring's memory)
                       light_stats          getLightStats( void ) const                                          noexcept { return m_LightStats; }
         // How many clipmap tiles + local light maps the last Render drew (a static scene: 0 after its first frame)
                       int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
@@ -759,6 +766,11 @@ namespace xlionrender
         xgpu::buffer                m_CellRing;
         light_cells                 m_LightCells;
         std::vector<light_cells::light> m_CellLights;
+        struct emitter_light { xmath::fvec3 m_Pos, m_Normal, m_Radiance; float m_Area, m_Radius; };
+        std::vector<emitter_light>      m_EmitterLights;                    // the GI's emitters as lights (m_bEmitterLights), made again when its generation changes
+        std::uint64_t                   m_EmitterLightsGen  = 0;
+        int                             m_nEmittersLeftOut  = 0;
+        void                            refreshEmitterLights( void ) noexcept;
         int                         m_LightRingUsed         = 0;
         int                         m_CellRingUsed          = 0;
         std::uint64_t               m_LightFrame            = ~0ull;
