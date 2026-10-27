@@ -1961,23 +1961,50 @@ namespace xlionrender
             (void)m_ReflStats.MemoryMap(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
             {
-                m_ReflSum[0] += double(Ns[1] - Ns[0]) * 1e-6; m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2]; m_ReflPlanarSum += Got[3]; if( Got[3] ) m_ReflPlanarRough = double(Got[4]) * 0.01 / double(Got[3]);
+                m_ReflSum[0] += double(Ns[1] - Ns[0]) * 1e-6; m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2]; m_ReflPlanarSum += Got[3]; m_ReflIncompleteSum += Got[5]; if( Got[3] ) m_ReflPlanarRough = double(Got[4]) * 0.01 / double(Got[3]);
                 if( ++m_ReflSumN == 120 )
                 {
                     const double n = m_ReflSumN;
                     m_ReflReport = { m_ReflTraceBench, m_ReflSum[0] / n, m_ReflSum[1] / n, m_ReflSum[2] / std::max(m_ReflSum[1], 1.0), m_ReflSum[3] / std::max(m_ReflSum[1], 1.0), m_ReflSumN };
                     static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
-                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray, %.0f planar texels of roughness %.2f (planar view %s, plane %.3f %.3f %.3f %.3f)\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
-                        , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay, m_ReflPlanarSum / n, m_ReflPlanarRough
+                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray, %.0f planar texels of roughness %.2f, %.0f rays PREFIX_INCOMPLETE (planar view %s, plane %.3f %.3f %.3f %.3f)\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
+                        , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay, m_ReflPlanarSum / n, m_ReflPlanarRough, m_ReflIncompleteSum / n
                         , m_bPlanarOn ? "on" : m_PlanarWhy == 4 ? "off: no floor under the eye" : m_PlanarWhy == 5 ? "off: oblique" : m_PlanarWhy == 2 ? "off: view" : "off", m_PlanarPlane.m_X, m_PlanarPlane.m_Y, m_PlanarPlane.m_Z, m_PlanarPlane.m_W);
                     std::fflush(stdout);
-                    m_ReflSumN = 0; m_ReflPlanarSum = 0; for( auto& v : m_ReflSum ) v = 0;
+                    m_ReflSumN = 0; m_ReflPlanarSum = 0; m_ReflIncompleteSum = 0; for( auto& v : m_ReflSum ) v = 0;
                     if( m_bReflTraceCycle ) m_ReflTraceBench = m_ReflTraceBench % 3 + 1;      // (XLION_REFL_BENCH=9: the three modes in turn)
                 }
             }
             const xmath::fvec3 E = Eye;
             const float MaxRough = m_ReflTraceBench > 0 ? 0.0f : Scene.m_ReflectionMaxRoughness;
             const bool  bPlanar  = m_bPlanarOn && m_PlanarView.m_Width == W && m_PlanarView.m_Height == H;
+            // the boxes of the drawn things the GI's BVH does not hold (skinned, without GI; world space): a ray's prefix crossing one is
+            // PREFIX_INCOMPLETE (documentation/reflections_strategy.md sec. 4: a label - its confidence, not its light)
+            {
+                std::vector<xmath::fvec4> Boxes;
+                for( const auto& D : Scene.m_Draws )
+                {
+                    if( int(Boxes.size()) >= 2 * refl_boxes_v ) break;
+                    if( D.m_Instance != 0 && getGIId(D.m_Instance) >= 0 ) continue;
+                    const auto* pM = findMesh(D.m_Mesh);
+                    if( pM == nullptr ) continue;
+                    const auto& B = pM->m_bCluster ? pM->m_Geom.m_BBox : pM->m_BBox;
+                    xmath::fvec3 Lo{ 1e30f, 1e30f, 1e30f }, Hi{ -1e30f, -1e30f, -1e30f };
+                    for( int c = 0; c < 8; ++c )
+                    {
+                        const xmath::fvec3 P = D.m_L2W * xmath::fvec3{ (c & 1) ? B.m_Max.m_X : B.m_Min.m_X, (c & 2) ? B.m_Max.m_Y : B.m_Min.m_Y, (c & 4) ? B.m_Max.m_Z : B.m_Min.m_Z };
+                        Lo = xmath::fvec3::Min(Lo, P); Hi = xmath::fvec3::Max(Hi, P);
+                    }
+                    Boxes.push_back(xmath::fvec4(Lo, 0)); Boxes.push_back(xmath::fvec4(Hi, 0));
+                }
+                (void)m_PlanarParams.MemoryMapFrameRegion(Slot, 1, [&](void* p)
+                {
+                    auto* pB = static_cast<std::byte*>(p) + 64 + 16 + 8 * 16;
+                    const std::uint32_t n[4] = { std::uint32_t(Boxes.size() / 2), 0, 0, 0 };
+                    std::memcpy(pB, n, 16);
+                    if( !Boxes.empty() ) std::memcpy(pB + 16, Boxes.data(), Boxes.size() * 16);
+                });
+            }
             const auto& Pl = m_PlanarPlane;
             struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f

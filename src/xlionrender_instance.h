@@ -416,7 +416,7 @@ namespace xlionrender
         refl_report                 m_ReflReport;
         double                      m_ReflSum[4] = {};              // (the report's running sums: ms, rays, hits, visits)
         int                         m_ReflSumN = 0;
-        double                      m_ReflPlanarSum = 0, m_ReflPlanarRough = 0;
+        double                      m_ReflPlanarSum = 0, m_ReflPlanarRough = 0, m_ReflIncompleteSum = 0;
         bool                        m_bReflTraceCycle = false;      // (XLION_REFL_BENCH=9: each report the next mode)
         tail_report                 m_TailReport;
         xgpu::buffer*               m_pTailRecords = nullptr;       // binding 14 of the lit pipelines this render: the view's records (SCREEN), else none
@@ -756,6 +756,7 @@ namespace xlionrender
         xgpu::compute               m_PlanarMips;
         xgpu::buffer                m_PlanarMipsBuffer, m_PlanarParams;
         int                         m_PlanarLevels = 0;
+        static constexpr int        refl_boxes_v = 64;              // the reflection pass's parameters: the boxes of the drawn things the GI's BVH does not hold (a ray crossing one: PREFIX_INCOMPLETE)
         bool                        m_bPlanarOn = false;            // (this frame's: the reflection pass resolves its records from it)
         int                         m_PlanarWhy = 1;                // (diagnostics: 0 on, 1 off, 2 its view, 3 no GI world, 4 no floor under the eye, 5 the oblique plane)
         xmath::fvec4                m_PlanarPlane { 0, 0, 0, 0 };   // (its plane this frame, unit normal: the scene's or the floor found under the eye)

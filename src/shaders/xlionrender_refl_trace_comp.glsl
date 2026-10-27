@@ -21,7 +21,7 @@ layout(std430, set = 0, binding = 5) readonly buffer frame_b   { frame_t F[]; };
 layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 8 per ring slot: rays, hits, visits, the planar texels, their roughness x 100
 layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records[]; };    // the view's records: the tail's W x H, then these
 layout(std430, set = 0, binding = 8) readonly buffer mips_b    { uvec2   PlanarMips[]; }; // the planar view's pyramid (xlionrender_refl_planar_mips_comp.glsl)
-struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; };                                  // the planar view's clip -> its eye's centred world; x: the half view's pixels a unit at distance 1, y: the pyramid's levels; per level: its base, w, h
+struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; uvec4 nBoxes; vec4 Box[128]; };      // (Box: the unrepresented drawn things' world boxes, lo / hi: instance::refl_boxes_v)                                  // the planar view's clip -> its eye's centred world; x: the half view's pixels a unit at distance 1, y: the pyramid's levels; per level: its base, w, h
 layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; };        // (a ring slot each)
 layout(set = 1, binding = 0) uniform sampler2D GColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 1) uniform sampler2D GDepth;
@@ -35,7 +35,7 @@ layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_Pr
 
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
-shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough;
+shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete;
 shared uvec2 s_Pair[64];       // (the full-size dispatch: two pixels a record)
 
 // Heitz 2018: a visible normal of an isotropic GGX (alpha a) for the view Ve (local frame, z the normal)
@@ -52,6 +52,21 @@ vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
     return normalize(vec3(a * Nh.xy, max(1e-6, Nh.z)));
 }
 float Lambda(float c, float a) { c = max(c, 1e-6); return 0.5 * (sqrt(1.0 + a * a * (1.0 - c * c) / (c * c)) - 1.0); }
+
+// Does the ray's prefix (O, D, up to TMax) cross a drawn thing the GI's BVH does not hold (its box)? PREFIX_INCOMPLETE: a one-sided
+// certificate - a box is conservative for what it holds, so a ray that crosses none of them has seen all there is
+bool PrefixIncomplete(vec3 O, vec3 D, float TMax)
+{
+    const vec3 Inv = 1.0 / mix(D, vec3(1e-12), lessThan(abs(D), vec3(1e-12)));
+    for (uint b = 0u; b < PL[Push.m_Slot].nBoxes.x; ++b)
+    {
+        const vec3 t0 = (PL[Push.m_Slot].Box[2u * b].xyz - O) * Inv, t1 = (PL[Push.m_Slot].Box[2u * b + 1u].xyz - O) * Inv;
+        const vec3 tn = min(t0, t1), tf = max(t0, t1);
+        const float a = max(max(tn.x, tn.y), max(tn.z, 0.0)), z = min(min(tf.x, tf.y), min(tf.z, TMax));
+        if (a <= z) return true;
+    }
+    return false;
+}
 
 // The GI's Direct (xlionrender_gi_pass_common.glsl: the sun and its lights, a shadow ray each) with each light's GGX highlight toward V
 // (mb_standard_pbr.frag's: D, correlated Smith, Schlick) for a surface of F0 and roughness Rough: E the irradiance, S the radiance
@@ -126,7 +141,7 @@ vec4 PlanarAt(vec2 uv, float Lod)
 
 void main()
 {
-    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; }
+    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; }
     barrier();
     const bool  bFull = Push.m_Full.x > 0;
     const ivec2 Size = bFull ? Push.m_Full.xy : ivec2(F[Push.m_Slot].Params.xy);
@@ -223,7 +238,7 @@ void main()
                     }
                     else
                     {
-                        Lr = AtlasSample(EnvAtlas, vec2(0.0), kEnvAtlas, L, Rough) * Push.m_EnvIntensity;
+                        Lr = AtlasSample(EnvAtlas, vec2(0.0), kEnvAtlas, L, 0.0) * Push.m_EnvIntensity;      // (the sky along the sampled direction: the lobe is the sampling's, not the atlas')
                         Class = refl_miss_v;
                     }
                     const float Conf = 1.0 - smoothstep(0.5 * Push.m_MaxRough, Push.m_MaxRough, Rough);     // (B: sharp receivers; glossy ones fade to the probes until the reconstruction)
@@ -231,6 +246,7 @@ void main()
                     Rec.y = packHalf2x16(vec2(Lr.b, Conf));
                     Rec.z = packHalf2x16(vec2(Dist, w));
                     Rec.w |= Class << 24;
+                    if (PrefixIncomplete(O, L, Hit.m_Inst >= 0 ? Hit.m_T : 1e30)) { Rec.w |= 1u << 28; atomicAdd(s_Incomplete, 1u); }     // (bit 28: PREFIX_INCOMPLETE)
                 }
                 else if (Hit.m_Inst >= 0) atomicAdd(s_Hits, 1u);
             }
@@ -257,5 +273,6 @@ void main()
         atomicAdd(Stats[Push.m_Slot * 8u + 2u], s_Visits);
         atomicAdd(Stats[Push.m_Slot * 8u + 3u], s_Planar);
         atomicAdd(Stats[Push.m_Slot * 8u + 4u], s_PlanarRough);
+        atomicAdd(Stats[Push.m_Slot * 8u + 5u], s_Incomplete);
     }
 }
