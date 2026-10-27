@@ -189,7 +189,7 @@ namespace xlionrender
                       bool                 validateLocalPages( void ) const                                     noexcept { std::vector<std::uint32_t> T; m_LocalPages.BuildTable(T); return m_LocalPages.Validate(T); }
         struct pairs_report { int m_nCandidates = 0, m_nRuns = 0, m_nPairs = 0, m_nDropped = 0; std::int64_t m_Triangles = 0; bool m_bGPU = false; };
         // The screen tail's last frame (light_mode::SCREEN): its passes' GPU time (a ring late) and its targets' memory
-        struct tail_report { bool m_bOn = false; int m_Width = 0, m_Height = 0; double m_GBufferMs = 0, m_TailMs = 0, m_DenoiseMs = 0, m_MemoryMB = 0; int m_nGBufferDraws = 0; };
+        struct tail_report { bool m_bOn = false; int m_Width = 0, m_Height = 0; double m_GBufferMs = 0, m_TailMs = 0, m_DenoiseMs = 0, m_MemoryMB = 0; int m_nGBufferDraws = 0, m_nNoVariant = 0; };     // (m_nNoVariant: lit submeshes left out, their material without a G-buffer variant)
                       const tail_report&   getTailReport( void ) const                                          noexcept { return m_TailReport; }
         // A material's G-buffer variant (its fragment compiled with XLION_GBUFFER_OUTPUT): it is drawn into the screen tail's thin G-buffer
         // (without one, a material shades its tail inline - the sampled path)

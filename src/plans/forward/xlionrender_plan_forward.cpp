@@ -866,6 +866,14 @@ namespace xlionrender
         m_LightRingUsed += std::max(nProbes, 0);
 
         auto Mode = m_LightMode;
+        static const int s_ForcedMode = []                  // measurement only (XLION_LIGHT_MODE): the editor's mode forced
+        {
+            const char* p = std::getenv("XLION_LIGHT_MODE");
+            if( p == nullptr ) return -1;
+            const std::string_view M(p);
+            return M == "exact" ? int(light_mode::EXACT) : M == "cells" ? int(light_mode::CELLS) : M == "sampled" ? int(light_mode::SAMPLED) : M == "screen" ? int(light_mode::SCREEN) : M == "auto" ? int(light_mode::AUTO) : -1;
+        }();
+        if( s_ForcedMode >= 0 ) Mode = light_mode(s_ForcedMode);
         if( Mode == light_mode::AUTO ) Mode = nLights >= m_LightScreenThreshold ? light_mode::SCREEN : light_mode::CELLS;
         int  CellBase = 0;
         m_LightBuildMs = 0;
@@ -1716,7 +1724,7 @@ namespace xlionrender
             const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
             auto Cmd = Window.StartRenderPass(View.m_TailGPass);
             const void* pBound = nullptr; const cluster_geom* pBoundGeom = nullptr;
-            int nDraws = 0;
+            int nDraws = 0, nNoVariant = 0;
             for( const auto& Vis : m_Visible )
             {
                 const std::size_t iDraw = Vis.m_iDraw;
@@ -1749,7 +1757,7 @@ namespace xlionrender
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                     if( pMat && pMat->m_State.isBlended() ) continue;
                     auto* pInstance = pMat ? getGBufferInstance(*pMat, G.m_Kind) : (bSkin ? nullptr : &m_StaticGeomGBInstance);
-                    if( pInstance == nullptr ) continue;
+                    if( pInstance == nullptr ) { ++nNoVariant; continue; }
                     if( pInstance->m_Private.get() != pBound || &G != pBoundGeom )
                     {
                         if( !bSkin )
@@ -1780,7 +1788,7 @@ namespace xlionrender
                     }
                 }
             }
-            m_TailReport.m_nGBufferDraws = nDraws;
+            m_TailReport.m_nGBufferDraws = nDraws; m_TailReport.m_nNoVariant = nNoVariant;
         }
         Window.WriteTimestamp(m_TailTimes, 1);
         {
@@ -3065,6 +3073,10 @@ namespace xlionrender
                            , Scene.m_Sun.m_bCastShadows ? "on" : "off", m_VSMReport.m_RequestGpuMs, m_VSMReport.m_Pages.m_Rendered, m_VSMReport.m_Pages.m_RenderedPinned, m_VSMReport.m_Pages.m_Rejected, m_VSMReport.m_Pages.m_ResidentFine, m_VSMReport.m_Pages.m_ResidentPinned, m_VSM.getSetup().Slots(), m_VSMReport.m_Pages.m_PoolLoad, m_VSMReport.m_Pages.m_DynamicBias
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[1] / m_VSMReport.m_Counters[0] : 0.0, m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[2] / m_VSMReport.m_Counters[0] : 0.0
                            , m_VSMReport.m_Counters[0] ? 100.0 * m_VSMReport.m_Counters[3] / m_VSMReport.m_Counters[0] : 0.0);
+                static const char* s_ModeNames[] = { "EXACT", "CELLS", "SAMPLED", "SCREEN", "AUTO" };
+                const auto& TR = m_TailReport;           // the screen tail (P3: lighting_p3_design.md)
+                std::printf("LEDGER screen tail: mode %s, %s %dx%d, G-buffer draws %d (left out, no variant: %d), G-buffer %.3f + tail %.3f + denoiser %.3f ms, %.1f MB\n"
+                           , s_ModeNames[int(m_LightModeUsed)], TR.m_bOn ? "on" : "off", TR.m_Width, TR.m_Height, TR.m_nGBufferDraws, TR.m_nNoVariant, TR.m_GBufferMs, TR.m_TailMs, TR.m_DenoiseMs, TR.m_MemoryMB);
                 const auto& LP = m_LocalReport;          // the local lights' pages (P1d)
                 std::printf("LEDGER local pages: lights %d, requested %d, rendered %d + pinned %d, rejected %d, resident %d + pinned %d, stale %d; pixel-light pairs by their level %.1f%% / coarser %.1f%% / none %.1f%%\n"
                            , LP.m_Pages.m_Lights, LP.m_Pages.m_Requested, LP.m_Pages.m_Rendered, LP.m_Pages.m_RenderedPinned, LP.m_Pages.m_Rejected, LP.m_Pages.m_Resident, LP.m_Pages.m_ResidentPinned, LP.m_Pages.m_Stale
