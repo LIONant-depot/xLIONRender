@@ -769,6 +769,9 @@ namespace xlionrender
         std::vector<std::uint32_t>  m_CellInput;                                   // the GPU build's input (light_cells::GPUInput)
         xgpu::buffer                m_CellScratch;                                 // the GPU build's lists and input (device-local; grows)
         int                         m_CellScratchUints      = 0;
+        std::uint64_t               m_CellScratchKey        = 0;                   // what the scratch's lists were built from (light_cells::Key; 0: nothing)
+        std::uint32_t               m_CellScratchBound      = 0;
+        int                         m_nCellBuilds           = 0;                   // GPU builds run (a render with the same lights and windows reuses the last)
         xgpu::shader                m_LightCellsShader;
         xgpu::compute               m_LightCellsCompute;
         xgpu::timestamps            m_LightCellsTimes;

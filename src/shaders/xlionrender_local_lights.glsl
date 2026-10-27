@@ -365,19 +365,24 @@ bool LocalTailDemod(in const vec3 N, in const vec3 V, in const float NdotV, in c
 // The material's tail from the denoised screen tail: the 4 half-size texels around the pixel, bilinear, each weighed by how close its
 // distance to the eye is to this pixel's and how much its normal agrees (SurfelGIScreen's weights), times the material's own terms -
 // the diffuse x albedo x (1 - F0) x (1 - metallic), the specular x the Fresnel the lobe averages (F0 A + B over A + B: Karis's analytic
-// environment BRDF). False: none of the 4 is this surface (a silhouette, a blended surface in front, a material without a G-buffer
-// variant): the caller shades its tail exactly
-bool LocalTailScreen(in const vec3 N, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic, out vec3 T)
+// environment BRDF); none weighed: the most alike of the 4 (its view depth within 25%, its normal on the same side: a silhouette, a
+// thin object - the GI's screen read does the same). 1: T is the tail; 2: hidden - the texel nearest the pixel holds a surface nearer than
+// this fragment (overdraw where no depth prepass ran: this fragment is drawn over); 0: none of the 4 is this surface (a silhouette, a blended surface in front, a material without a
+// G-buffer variant): the caller shades its tail exactly
+int LocalTailScreen(in const vec3 N, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic, out vec3 T)
 {
     T = vec3(0.0);
     const int  W = int(UBOLight.TailParams.y), H = int(UBOLight.TailParams.z);
     const uint R0 = uint(UBOLight.TailParams.w);
-    if (W <= 0 || R0 + uint(W * H) > uint(TailScreen.length())) return false;     // (a pass without the screen tail: its dummy bound)
+    if (W <= 0 || R0 + uint(W * H) > uint(TailScreen.length())) return 0;         // (a pass without the screen tail: its dummy bound)
     const vec2 hp = gl_FragCoord.xy * 0.5 - 0.5;
     const vec2 i0 = floor(hp), f = hp - i0;
     const float Dist = 1.0 / gl_FragCoord.w;                                    // (the view depth: clip w, as the records')
     vec3  Sd = vec3(0.0), Ss = vec3(0.0);
     float Sw = 0.0;
+    float NearestW = -1.0, NearestD = 0.0;                                      // (the texel nearest the pixel: what is drawn there)
+    float Best = 0.0;                                                           // (none alike within the weights: the most alike, if close enough)
+    vec3  BestD = vec3(0.0), BestS = vec3(0.0);
     for (int k = 0; k < 4; ++k)
     {
         const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1, H - 1));
@@ -387,12 +392,19 @@ bool LocalTailScreen(in const vec3 N, in const float NdotV, in const vec3 Albedo
         const vec3  n  = OctDecode(vec2(float((Q.w >> 16) & 15u), float((Q.w >> 20) & 15u)) / 15.0 * 2.0 - 1.0);
         const float wd = max(0.0, 1.0 - abs(d - Dist) / max(0.05 * Dist, 1e-3)), wn = pow(max(dot(n, N), 0.0), 8.0);
         const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
+        if (wb > NearestW) { NearestW = wb; NearestD = d; }
         const float w  = wb * wd * wd * wn;
+        const float a  = max(0.0, 1.0 - abs(d - Dist) / (0.25 * Dist)) * max(dot(n, N), 0.0);
+        if (a > Best) { Best = a; BestD = vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x); BestS = vec3(unpackHalf2x16(Q.y).y, unpackHalf2x16(Q.z)); }
         Sd += w * vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
         Ss += w * vec3(unpackHalf2x16(Q.y).y, unpackHalf2x16(Q.z));
         Sw += w;
     }
-    if (Sw < 1e-4) return false;
+    if (Sw < 1e-4)
+    {
+        if (Best < 0.25) return NearestW >= 0.0 && NearestD < Dist * 0.95 ? 2 : 0;     // (nothing like it: hidden where its own texel holds a nearer surface, else exact)
+        Sd = BestD; Ss = BestS; Sw = 1.0;                                       // (a silhouette, a thin object: its most alike texel)
+    }
     const vec4  c0 = vec4(-1.0, -0.0275, -0.572, 0.022), c1 = vec4(1.0, 0.0425, 1.04, -0.04);      // (Karis, "Physically based shading on mobile")
     const vec4  r  = PerceptualRoughness * c0 + c1;
     const float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
@@ -400,14 +412,13 @@ bool LocalTailScreen(in const vec3 N, in const float NdotV, in const vec3 Albedo
     const vec3  SpecR = (F0 * AB.x + AB.y) / max(AB.x + AB.y, 1e-4);
     const vec3  DiffR = Albedo * (vec3(1.0) - F0) * (1.0 - Metallic);
     T = Sd / Sw * DiffR + Ss / Sw * SpecR;
-    return true;
+    return 1;
 }
 #endif
 
 // Modes: 0 every light; 1 the cell's list (the same result: the list holds every light that reaches the cell); 2 the cell's
 // head exactly + tail lights J drawn with probability p(J) (LocalBase.w stratified samples), each weighted 1 / (p(J) samples); 3 the head
-// exactly + the denoised screen tail (LocalTailScreen; where it does not match the surface, the rest of the list exactly: no noise). Outside
-// the cells: every light.
+// exactly + the denoised screen tail (LocalTailScreen; where it does not apply, mode 2's tail). Outside the cells: every light.
 vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
 {
     vec3 Sum = vec3(0.0);
@@ -425,18 +436,23 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     const uint Header    = LightCells[Base + 2u * uint(Cell) + 1u];      // the header: the first entry; the count (bits 0-23), the head count (24-31)
     const uint EntryBase = Base + uint(2 * kCellLevels * kLevelCells);
     const uint First     = LightCells[Base + 2u * uint(Cell)], Count = Header & 0xFFFFFFu, Head = Header >> 24;
-    uint nExact = Mode == 1 ? Count : Head;
+    const uint nExact = Mode == 1 ? Count : Head;
+    bool bInlineTail = Mode == 2;
 #ifndef XLION_TAIL_SCREEN
-    if (Mode == 3)
+    if (Mode == 3 && Count > Head)
     {
+        // the screen tail; where it does not apply - a silhouette it has no texel for, a blended surface, a material without a G-buffer
+        // variant - the inline resampled tail (unbiased, noisy); a hidden fragment (drawn over where no depth prepass ran) or a helper
+        // invocation: none. (The whole list instead cost 3.4 ms against 0.25 at the rig's 4096 lights: the overdraw's hidden fragments)
         vec3 T;
-        if (Count <= Head || !LocalTailScreen(N, NdotV, Albedo, F0, PerceptualRoughness, Metallic, T)) nExact = Count;    // (exact where no screen tail)
-        else Sum = T;
+        const int Screen = LocalTailScreen(N, NdotV, Albedo, F0, PerceptualRoughness, Metallic, T);
+        if (Screen == 1) Sum = T;
+        bInlineTail = Screen == 0 && !gl_HelperInvocation;
     }
 #endif
     for (uint k = 0u; k < nExact; ++k) Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + k)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
 
-    if (Mode == 2 && Count > Head && abs(UBOLight.LocalCount.w) > 1.5)
+    if (bInlineTail && Count > Head && abs(UBOLight.LocalCount.w) > 1.5)
     {
         // Resampled (RIS, P3's first step): M stratified candidates from the cell's tail distribution q, each weighted by the light's
         // unshadowed contribution at this pixel p (its luminance) over q, one of them picked in proportion to its weight and shaded with its
@@ -481,7 +497,7 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         }
         if (Pick >= 0) Sum += PickC * LocalLightShadow(Pick, N) * (WSum / (float(M) * PickP));
     }
-    else if (Mode == 2 && Count > Head)
+    else if (bInlineTail && Count > Head)
     {
         // Samples stratified tail samples (u_k = (k + u) / Samples), each found by a binary search from the last one on
         const int   Samples = max(int(UBOLight.LocalBase.w), 1);

@@ -891,9 +891,15 @@ namespace xlionrender
             }
             // the GPU build: the windows and a bound of the entries here, the lists by shaders/xlionrender_light_cells_comp.glsl (below)
             // (it runs in a device-local scratch - the cell ring is host memory, slow for the build's reads - copied into the ring after)
+            // (the same lights and windows as the scratch's last build - a still camera over static lights -: its lists again, no build)
             bool                bGPU  = m_bLightCellsGPU && nLights > 0;
-            const std::uint32_t Bound = bGPU ? m_LightCells.Reserve(m_CellLights, Eye, m_LightCellSize) : 0u;
-            if( bGPU ) m_LightCells.GPUInput(m_CellLights, m_CellInput);
+            const bool          bHead = Mode == light_mode::SAMPLED || Mode == light_mode::SCREEN;      // (the head/tail split)
+            const std::uint64_t Key   = bGPU ? light_cells::Key(m_CellLights, Eye, m_LightCellSize, bHead ? m_LightHead : 0) : 0u;
+            const bool          bSame = bGPU && Key == m_CellScratchKey && m_CellScratchUints > 0;
+            if( bSame ) m_LightCells.Reuse(Eye, m_LightCellSize, m_CellScratchBound);
+            const std::uint32_t Bound = bSame ? m_CellScratchBound : bGPU ? m_LightCells.Reserve(m_CellLights, Eye, m_LightCellSize) : 0u;
+            if( bGPU && !bSame ) m_LightCells.GPUInput(m_CellLights, m_CellInput);
+            if( bSame ) m_CellInput.clear();
             if( bGPU && int(m_LightCells.m_Data.size() + m_CellInput.size()) > m_CellScratchUints )
             {
                 const int Need = int(m_LightCells.m_Data.size() + m_CellInput.size()), Size = ((Need + Need / 4) + 65535) / 65536 * 65536;
@@ -901,8 +907,8 @@ namespace xlionrender
                 m_Device.Destroy(std::move(m_CellScratch));
                 m_CellScratchUints = m_Device.Create(m_CellScratch, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = Size, .m_pData = const_cast<std::uint32_t*>(Zeros.data()) }) == nullptr ? Size : 0;
                 bGPU = m_CellScratchUints > 0;
+                m_CellScratchKey = 0;
             }
-            const bool bHead = Mode == light_mode::SAMPLED || Mode == light_mode::SCREEN;      // (the head/tail split)
             if( !bGPU ) m_LightCells.Build(m_CellLights, Eye, m_LightCellSize, bHead ? m_LightHead : 0);
             const int nLists = int(m_LightCells.m_Data.size());
             if( nProbes > 0 )
@@ -929,17 +935,21 @@ namespace xlionrender
                     // the input into the ring, then the scratch (the lists at 0, the input after them); count, scan, fill (+ the head/tail
                     // split) - a workgroup a 4^3 block of a level's window -, the lists back into the ring
                     const int InputBase = CellBase + int(m_LightCells.m_Data.size()), nInput = int(m_CellInput.size());
-                    (void)m_CellRing.MemoryMapFrameRegion(InputBase, nInput, [&](void* pMemory) { std::memcpy(pMemory, m_CellInput.data(), std::size_t(nInput) * sizeof(std::uint32_t)); });
                     if( !m_bLightCellsTimed ) Window.WriteTimestamp(m_LightCellsTimes, 0);
                     const xgpu::buffer::copy In{ InputBase, nLists, nInput }, Out{ 0, CellBase, nLists };
-                    Window.CopyBuffer(m_CellRing, m_CellScratch, std::span{ &In, 1 });
-                    const std::uint32_t Head = bHead ? std::uint32_t(std::max(m_LightHead, 0)) : 0u;
-                    auto Buffers = std::array<xgpu::buffer*, 1>{ &m_CellScratch };
-                    constexpr int Blocks = (light_cells::cells_v / 4) * (light_cells::cells_v / 4) * (light_cells::cells_v / 4);
-                    for( std::uint32_t Pass = 0; Pass < 3; ++Pass )
+                    if( !bSame )
                     {
-                        const std::uint32_t Push[8] = { Pass, std::uint32_t(nLists), std::uint32_t(nLights), 0u, Head, Bound, m_LightCells.m_bSkipHidden ? 1u : 0u, 0u };
-                        Window.Dispatch(m_LightCellsCompute, Buffers, Push, sizeof(Push), Pass == 1 ? 1 : Blocks, Pass == 1 ? 1 : light_cells::levels_v);
+                        (void)m_CellRing.MemoryMapFrameRegion(InputBase, nInput, [&](void* pMemory) { std::memcpy(pMemory, m_CellInput.data(), std::size_t(nInput) * sizeof(std::uint32_t)); });
+                        Window.CopyBuffer(m_CellRing, m_CellScratch, std::span{ &In, 1 });
+                        const std::uint32_t Head = bHead ? std::uint32_t(std::max(m_LightHead, 0)) : 0u;
+                        auto Buffers = std::array<xgpu::buffer*, 1>{ &m_CellScratch };
+                        constexpr int Blocks = (light_cells::cells_v / 4) * (light_cells::cells_v / 4) * (light_cells::cells_v / 4);
+                        for( std::uint32_t Pass = 0; Pass < 3; ++Pass )
+                        {
+                            const std::uint32_t Push[8] = { Pass, std::uint32_t(nLists), std::uint32_t(nLights), 0u, Head, Bound, m_LightCells.m_bSkipHidden ? 1u : 0u, 0u };
+                            Window.Dispatch(m_LightCellsCompute, Buffers, Push, sizeof(Push), Pass == 1 ? 1 : Blocks, Pass == 1 ? 1 : light_cells::levels_v);
+                        }
+                        m_CellScratchKey = Key; m_CellScratchBound = Bound; ++m_nCellBuilds;
                     }
                     Window.CopyBuffer(m_CellScratch, m_CellRing, std::span{ &Out, 1 });
                     if( !m_bLightCellsTimed ) { Window.WriteTimestamp(m_LightCellsTimes, 1); m_bLightCellsTimed = true; }      // (the frame's first build: the view's)

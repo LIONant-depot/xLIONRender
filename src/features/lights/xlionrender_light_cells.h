@@ -190,6 +190,33 @@ namespace xlionrender
             return std::uint32_t(Bound);
         }
 
+        // Reserve again with a known bound (the GPU build's lists kept from the last render: the same lights and windows)
+        void Reuse(const xmath::fvec3& Eye, float CellSize, std::uint32_t Bound) noexcept
+        {
+            SetWindow(Eye, CellSize);
+            m_First.clear(); m_Count.clear(); m_Head.clear();
+            m_Data.resize(entry_base_v + 2 * std::size_t(Bound));
+        }
+
+        // What the GPU build's lists depend on (its key): the lights, the windows (the eye's cells at every level), the cell size, the head
+        static std::uint64_t Key(const std::vector<light>& Lights, const xmath::fvec3& Eye, float CellSize, int HeadCount) noexcept
+        {
+            std::uint64_t h = 1469598103934665603ull;
+            const auto Mix = [&](const void* p, std::size_t n) { const auto* b = static_cast<const unsigned char*>(p); for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; } };
+            for (const auto& Lt : Lights)          // (field by field: no padding bytes)
+            {
+                const float F[9] = { Lt.m_Position.m_X, Lt.m_Position.m_Y, Lt.m_Position.m_Z, Lt.m_Radius, Lt.m_Power, Lt.m_Direction.m_X, Lt.m_Direction.m_Y, Lt.m_Direction.m_Z, Lt.m_OuterAngle };
+                Mix(F, sizeof(F));
+            }
+            for (int L = 0; L < levels_v; ++L)
+            {
+                const float S = CellSize * float(1 << L);
+                for (int a = 0; a < 3; ++a) { const int o = int(std::floor(Eye[a] / S)); Mix(&o, sizeof(o)); }
+            }
+            Mix(&CellSize, sizeof(CellSize)); Mix(&HeadCount, sizeof(HeadCount));
+            return h;
+        }
+
         // The GPU build's input (shaders/xlionrender_light_cells_comp.glsl): the windows' origins and the cell size, 16 uints, then 12 a light
         void GPUInput(const std::vector<light>& Lights, std::vector<std::uint32_t>& Out) const noexcept
         {
