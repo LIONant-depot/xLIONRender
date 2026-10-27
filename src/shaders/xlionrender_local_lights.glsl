@@ -168,6 +168,20 @@ float LocalRandom(in const uint Stream)
 }
 float LocalRandom() { return LocalRandom(0u); }
 
+// The tail entry a sample u falls in: the first from Lo with a cumulative probability above u (the last at worst) - a binary search,
+// O(log n) reads (the cell's whole list walked before: the tail cost as much as CELLS' loop)
+float LocalTailCdf(in const uint EntryBase, in const uint First, in const uint e) { return uintBitsToFloat(LightCells[EntryBase + 2u * (First + e) + 1u]); }
+uint LocalTailFind(in const uint EntryBase, in const uint First, in const uint Lo, in const uint Count, in const float u)
+{
+    uint a = Lo, b = Count - 1u;
+    while (a < b)
+    {
+        const uint m = (a + b) >> 1;
+        if (u < LocalTailCdf(EntryBase, First, m)) b = m; else a = m + 1u;
+    }
+    return a;
+}
+
 // Modes: 0 every light; 1 the cell's list (the same result: the list holds every light that reaches the cell); 2 the cell's
 // head exactly + tail lights J drawn with probability p(J) (LocalBase.w stratified samples), each weighted 1 / (p(J) samples). Outside the cells: every light.
 vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
@@ -204,14 +218,18 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         const float u0 = LocalRandom(0u);
         float       u1 = LocalRandom(1u);
         int   k    = 0, Pick = -1;
-        float Prev = 0.0, WSum = 0.0, PickP = 1.0;
+        float WSum = 0.0, PickP = 1.0;
         vec3  PickC = vec3(0.0);
-        for (uint e = Head; e < Count && k < M; ++e)
+        uint  e    = Head;
+        while (k < M)
         {
-            const float Cdf = uintBitsToFloat(LightCells[EntryBase + 2u * (First + e) + 1u]);
-            int nHits = 0;
+            // the next candidate's entry (the samples grow: from the last one on), and the samples after it that fall in it too
+            e = LocalTailFind(EntryBase, First, e, Count, (float(k) + u0) / float(M));
+            const float Cdf  = LocalTailCdf(EntryBase, First, e);
+            const float Prev = e > Head ? LocalTailCdf(EntryBase, First, e - 1u) : 0.0;
+            int nHits = 1;
+            ++k;
             while (k < M && ((float(k) + u0) / float(M) < Cdf || e + 1u == Count)) { ++nHits; ++k; }
-            if (nHits > 0)
             {
                 const int   l = int(LightCells[EntryBase + 2u * (First + e)]);
                 const vec3  C = LocalLightUnshadowed(l, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
@@ -227,24 +245,27 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
                     else        u1 = (u1 - a) / (1.0 - a);
                 }
             }
-            Prev = Cdf;
+            ++e;
         }
         if (Pick >= 0) Sum += PickC * LocalLightShadow(Pick, N) * (WSum / (float(M) * PickP));
     }
     else if (Mode == 2 && Count > Head)
     {
-        // Samples stratified tail samples (u_k = (k + u) / Samples): one pass, the cumulative probabilities only grow
+        // Samples stratified tail samples (u_k = (k + u) / Samples), each found by a binary search from the last one on
         const int   Samples = max(int(UBOLight.LocalBase.w), 1);
         const float u0      = LocalRandom();
         int   k    = 0;
-        float Prev = 0.0;
-        for (uint e = Head; e < Count && k < Samples; ++e)
+        uint  e    = Head;
+        while (k < Samples)
         {
-            const float Cdf = uintBitsToFloat(LightCells[EntryBase + 2u * (First + e) + 1u]);
-            int nHits = 0;
+            e = LocalTailFind(EntryBase, First, e, Count, (float(k) + u0) / float(Samples));
+            const float Cdf  = LocalTailCdf(EntryBase, First, e);
+            const float Prev = e > Head ? LocalTailCdf(EntryBase, First, e - 1u) : 0.0;
+            int nHits = 1;
+            ++k;
             while (k < Samples && ((float(k) + u0) / float(Samples) < Cdf || e + 1u == Count)) { ++nHits; ++k; }
-            if (nHits > 0) Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + e)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic) * (float(nHits) / (float(Samples) * (Cdf - Prev)));
-            Prev = Cdf;
+            Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + e)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic) * (float(nHits) / (float(Samples) * (Cdf - Prev)));
+            ++e;
         }
     }
     return Sum;
