@@ -736,7 +736,8 @@ namespace xlionrender
             const bool  bSpot = L.m_Type == local_light::type::SPOT;
             F.m_Lights[n].m_PosRadius = xmath::fvec4(L.m_Position, L.m_Radius);
             F.m_Lights[n].m_DirTan    = bSpot ? xmath::fvec4(L.m_Direction.NormalizeCopy(), shadows::SpotTanHalf(L)) : xmath::fvec4(0, 0, 0, 0);
-            F.m_Lights[n].m_Info      = { float(LS * shadows::local_pages::faces_per_light_v * shadows::local_pages::face_entries_v), shadows::LocalNear(L.m_Radius), m_LocalPages.MovingBias(LS), 0 };
+            F.m_Lights[n].m_Info      = { float(LS * shadows::local_pages::faces_per_light_v * shadows::local_pages::face_entries_v), shadows::LocalNear(L.m_Radius), m_LocalPages.MovingBias(LS)
+                                        , L.m_SourceRadius > 0.0f ? 2.0f : 0.0f };     // w: the levels coarser its contact-hardening reads (kLocalSoftLevels)
             ++n;
         }
         for( int ls = 0; ls < max_local_lights_v; ++ls ) m_LocalReqGen[Slot][std::size_t(ls)] = m_LocalPages.Generation(ls);
@@ -838,7 +839,7 @@ namespace xlionrender
                     Out.m_PosRadius   = xmath::fvec4(LL.m_Position - Eye, LL.m_Radius);
                     Out.m_Color       = xmath::fvec4(LL.m_Color * LL.m_Intensity, std::cos(LL.m_InnerAngle));
                     Out.m_DirCosOuter = bSpot ? xmath::fvec4(LL.m_Direction.NormalizeCopy(), std::cos(LL.m_OuterAngle)) : xmath::fvec4(0, 0, 0, -2);
-                    Out.m_Shadow      = { float(std::max(LSlot, 0) * shadows::local_pages::faces_per_light_v * shadows::local_pages::face_entries_v), 0.0f, LSlot >= 0 ? 1.0f : 0.0f, bSpot ? shadows::SpotTanHalf(LL) : 1.0f };
+                    Out.m_Shadow      = { float(std::max(LSlot, 0) * shadows::local_pages::faces_per_light_v * shadows::local_pages::face_entries_v), std::max(LL.m_SourceRadius, 0.0f), LSlot >= 0 ? 1.0f : 0.0f, bSpot ? shadows::SpotTanHalf(LL) : 1.0f };     // (y: its source radius - contact-hardening)
                 }
             });
         m_LightRingUsed += std::max(nLights, 0);
@@ -1895,9 +1896,33 @@ namespace xlionrender
                 m_GIStats.m_nScreenCalls = int(m_ScreenRuns.size());
 
                 auto SCmd = Window.StartRenderPass(View.m_GIScreenPass);
+                // Measurement only (XLION_GPU_TIMES): the pass split - its start, its first GI-read run (phase 0, the half-size depth, before), its
+                // end (SCREENSPLIT)
+                static const bool s_bScreenSplit = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static std::unordered_map<const void*, xgpu::timestamps> s_ScreenSplit;      // ponytail: per renderer, never erased (a measurement hook)
+                xgpu::timestamps* pScreenSplit = nullptr;
+                if( s_bScreenSplit )
+                {
+                    auto [It, bNew] = s_ScreenSplit.try_emplace(this);
+                    if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_ScreenSplit.erase(It);
+                    else pScreenSplit = &It->second;
+                }
+                if( pScreenSplit )
+                {
+                    static std::vector<std::uint64_t> s_Ns;
+                    static double s_Depth = 0, s_Read = 0; static int s_n = 0;
+                    if( pScreenSplit->getResults(s_Ns) && s_Ns.size() >= 3 && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
+                    {
+                        s_Depth += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Read += double(s_Ns[2] - s_Ns[1]) * 1e-6;
+                        if( ++s_n == 120 ) { std::printf("SCREENSPLIT half-size depth %.3f, GI read %.3f ms\n", s_Depth / s_n, s_Read / s_n); std::fflush(stdout); s_n = 0; s_Depth = s_Read = 0; }
+                    }
+                    SCmd.WriteTimestamp(*pScreenSplit, 0);
+                }
+                bool bReadStamped = false;
                 for( const auto& Run : m_ScreenRuns )
                 {
                     const auto& G = *Run.m_pGeom;
+                    if( pScreenSplit && Run.m_Phase == 1 && !bReadStamped ) { SCmd.WriteTimestamp(*pScreenSplit, 1); bReadStamped = true; }
                     if( Run.m_Phase == 0 )
                     {
                         std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenRecords };
@@ -1913,6 +1938,7 @@ namespace xlionrender
                     BindClusterStreams(SCmd, G);
                     SCmd.DrawIndexedIndirect(View.m_GIScreenCommands, Base + Run.m_First, Run.m_Count);
                 }
+                if( pScreenSplit ) { if( !bReadStamped ) SCmd.WriteTimestamp(*pScreenSplit, 1); SCmd.WriteTimestamp(*pScreenSplit, 2); }
                 SCmd.Release();         // (the pass ends: a copy goes outside it)
                 {   // (its counters into this frame's slot: read a ring later, above)
                     const xgpu::buffer::copy C{ 6, CSlot, 1 };

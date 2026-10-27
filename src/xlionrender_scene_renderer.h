@@ -318,21 +318,21 @@ namespace xlionrender
         void AddSun(const light_sun& L, const xmath::fmat4& L2W) noexcept
         {
             if (m_Stats.m_bSun++) return;               // one sun: the first
-            m_Scene.m_Sun = { .m_Direction = DownOf(L2W), .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_ShadowTileSize = std::max(L.m_ShadowTileSize, 0.01f), .m_bGI = L.m_bGI };
+            m_Scene.m_Sun = { .m_Direction = DownOf(L2W), .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_ShadowTileSize = std::max(L.m_ShadowTileSize, 0.01f), .m_bGI = L.m_bGI, .m_SourceAngle = std::max(L.m_SourceAngle, 0.0f) };
         }
 
         // (Handle: the light's entity - its identity across frames)
         void AddPoint(const light_point& L, const xmath::fvec3& Pos, std::uint64_t Handle = 0) noexcept
         {
             ++m_Stats.m_Lights;
-            m_Scene.m_LocalLights.push_back({ .m_Type = local_light::type::POINT, .m_Position = Pos, .m_Radius = L.m_Radius, .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_bGI = L.m_bGI, .m_Handle = Handle });
+            m_Scene.m_LocalLights.push_back({ .m_Type = local_light::type::POINT, .m_Position = Pos, .m_Radius = L.m_Radius, .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_bGI = L.m_bGI, .m_SourceRadius = std::max(L.m_SourceRadius, 0.0f), .m_Handle = Handle });
         }
 
         void AddSpot(const light_spot& L, const xmath::fmat4& L2W, std::uint64_t Handle = 0) noexcept
         {
             ++m_Stats.m_Lights;
             m_Scene.m_LocalLights.push_back({ .m_Type = local_light::type::SPOT, .m_Position = L2W * xmath::fvec3(0, 0, 0), .m_Direction = DownOf(L2W), .m_Radius = L.m_Radius
-                                            , .m_InnerAngle = L.m_InnerAngle, .m_OuterAngle = std::max(L.m_OuterAngle, L.m_InnerAngle), .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_bGI = L.m_bGI, .m_Handle = Handle });
+                                            , .m_InnerAngle = L.m_InnerAngle, .m_OuterAngle = std::max(L.m_OuterAngle, L.m_InnerAngle), .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_bGI = L.m_bGI, .m_SourceRadius = std::max(L.m_SourceRadius, 0.0f), .m_Handle = Handle });
         }
 
         void SetEnvironment(const environment& E) noexcept

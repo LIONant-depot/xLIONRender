@@ -157,6 +157,8 @@ namespace xlionrender
         float           m_Intensity     = 4.0f;
         bool            m_bCastShadows  = true;
         bool            m_bGI           = true;                     // in the GI's lights (off: direct light only)
+        float           m_SourceRadius  = 0.0f;                     // the emitter's radius (world units): contact-hardening shadows, sharp at the
+                                                                    // contact and wider with the distance to the caster; 0: hard
         std::uint64_t   m_Handle        = 0;                        // the light's identity from frame to frame (its entity; lighting_strategy.md
                                                                     // sec. 6.1): what follows it when it moves; 0: none (its index in the list)
     };

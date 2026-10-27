@@ -82,7 +82,7 @@ struct LocalLightData                  // xLIONRender: a point or spot light (sh
 	vec4 PosRadius;                    // camera-centered position, radius
 	vec4 Color;                        // rgb: color * intensity, w: cos of the spot's inner angle
 	vec4 DirCosOuter;                  // spot: direction, w cos of the outer angle; point: w = -2
-	vec4 Shadow;                       // x: its first face's entry in the local pages' table, z: 1 shadowed, w: spot tan of the half field of view
+	vec4 Shadow;                       // x: its first face's entry in the local pages' table, y: its source radius (0: hard shadows), z: 1 shadowed, w: spot tan of the half field of view
 };
 #endif
 

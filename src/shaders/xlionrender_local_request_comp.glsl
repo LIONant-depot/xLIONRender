@@ -17,7 +17,8 @@ struct light_t
 {
     vec4 PosRadius;                 // world position, radius
     vec4 DirTan;                    // spot: direction, tan of the half field of view; point: w 0
-    vec4 Info;                      // x: the first face's table entry, y: near, z: its resolution bias (1: moving - local_pages::MovingBias)
+    vec4 Info;                      // x: the first face's table entry, y: near, z: its resolution bias (1: moving - local_pages::MovingBias), w: the
+                                    // levels coarser its contact-hardening reads (a source radius: kLocalSoftLevels; 0: hard)
 };
 struct frame_t
 {
@@ -113,7 +114,7 @@ void main()
                 const ivec2 Lo = clamp(T - 3, ivec2(0), ivec2(N - 1)) / kPageTexels, Hi = clamp(T + 3, ivec2(0), ivec2(N - 1)) / kPageTexels;
                 const uint  B  = FaceBase + LevelBase(l);
                 const int   W  = kLevel0Pages >> l;
-                if (l == Level)
+                if (l >= Level && l <= Level + int(Lt.Info.w))
                     for (int y = Lo.y; y <= Hi.y; ++y) for (int x = Lo.x; x <= Hi.x; ++x)
                     {
                         const uint i = B + uint(y * W + x), w = Push.m_ReqBase + (i >> 5), b = 1u << (i & 31u);

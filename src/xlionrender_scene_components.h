@@ -600,6 +600,7 @@ namespace xlionrender
         bool            m_bCastShadows  = true;
         float           m_ShadowTileSize = 4.0f;           // world size of a level-0 shadow tile; the clipmap levels double it
         bool            m_bGI           = true;             // in the GI's lights (its bounce); off: direct light only
+        float           m_SourceAngle   = 0.5357f;          // the sun's disc, degrees across (scene's sun_light::m_SourceAngle): contact-hardening
 
         XPROPERTY_DEF
         ( "LightSun", light_sun
@@ -608,6 +609,7 @@ namespace xlionrender
         , obj_member<"CastShadows",    &light_sun::m_bCastShadows>
         , obj_member<"ShadowTileSize", &light_sun::m_ShadowTileSize, member_help<"World size of the finest shadow tile: smaller is sharper near the camera">>
         , obj_member<"GI",             &light_sun::m_bGI, member_help<"Bounce light (global illumination). Off: direct light only, no bounce and no GI cost - for short-lived or fast lights such as bullets">>
+        , obj_member<"SourceAngle",    &light_sun::m_SourceAngle, member_ui<float>::scroll_bar<0.0f, 10.0f>, member_help<"The sun's disc, degrees across (the real sun: about 0.53). Shadows are sharp where the caster touches the ground and soften with the distance to it; 0: hard shadows">>
         )
     };
 
@@ -621,6 +623,7 @@ namespace xlionrender
         float           m_Radius        = 8.0f;
         bool            m_bCastShadows  = true;
         bool            m_bGI           = true;             // in the GI's lights (its bounce); off: direct light only
+        float           m_SourceRadius  = 0.0f;             // the emitter's size (world units): contact-hardening shadows; 0: hard
 
         XPROPERTY_DEF
         ( "LightPoint", light_point
@@ -629,6 +632,7 @@ namespace xlionrender
         , obj_member<"Radius",      &light_point::m_Radius, member_help<"No light at and beyond this distance">>
         , obj_member<"CastShadows", &light_point::m_bCastShadows>
         , obj_member<"GI",          &light_point::m_bGI, member_help<"Bounce light (global illumination). Off: direct light only, no bounce and no GI cost - for short-lived or fast lights such as bullets">>
+        , obj_member<"SourceRadius", &light_point::m_SourceRadius, member_ui<float>::scroll_bar<0.0f, 1.0f>, member_help<"The size of the emitter (a bulb, a flame), in world units. Shadows are sharp where the caster touches the surface and soften with the distance to it; 0: hard shadows">>
         )
     };
 
@@ -644,6 +648,7 @@ namespace xlionrender
         float           m_OuterAngle    = 0.6f;            // radians: no light outside (shadowed up to about 1.45)
         bool            m_bCastShadows  = true;
         bool            m_bGI           = true;             // in the GI's lights (its bounce); off: direct light only
+        float           m_SourceRadius  = 0.0f;             // the emitter's size (world units): contact-hardening shadows; 0: hard
 
         XPROPERTY_DEF
         ( "LightSpot", light_spot
@@ -654,6 +659,7 @@ namespace xlionrender
         , obj_member<"OuterAngle",  &light_spot::m_OuterAngle, member_help<"Radians from the axis beyond which there is no light (its shadow reaches up to about 1.45)">>
         , obj_member<"CastShadows", &light_spot::m_bCastShadows>
         , obj_member<"GI",          &light_spot::m_bGI, member_help<"Bounce light (global illumination). Off: direct light only, no bounce and no GI cost - for short-lived or fast lights such as bullets">>
+        , obj_member<"SourceRadius", &light_spot::m_SourceRadius, member_ui<float>::scroll_bar<0.0f, 1.0f>, member_help<"The size of the emitter (a bulb, a lens), in world units. Shadows are sharp where the caster touches the surface and soften with the distance to it; 0: hard shadows">>
         )
     };
 

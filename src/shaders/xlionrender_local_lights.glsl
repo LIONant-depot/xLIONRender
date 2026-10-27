@@ -35,74 +35,152 @@ float g_LocalFoot  = 0.0;
 int   g_LocalTaps  = 1;                 // 1 the filter (a 3 x 3 texel tent), 0 one tap (the resampling's estimate)
 vec3  g_LocalFaceN = vec3(0.0, 1.0, 0.0);
 
+// A shadowed light's face for a receiver (LocalShadow): its basis, projection and table entries
+struct local_face
+{
+    vec3  Axis, R, U;
+    float TanHalf, Near, A, B, Texel0;
+    uint  FaceBase;
+    bool  bPoint;
+};
+const int kLocalSoftLevels = 2;         // a light with a source radius: its blocker search and filter up to this many levels coarser
+
+// A tap's depth through the table at level l (texel t of the level's NT^2): -1 when its page is not there
+float LocalTexel(in const local_face F, in const int l, in const ivec2 t)
+{
+    const int   W  = kLocalLevel0Pages >> l;
+    uint LB = 0u;
+    for (int k = 0; k < l; ++k) LB += uint((kLocalLevel0Pages >> k) * (kLocalLevel0Pages >> k));
+    const ivec2 Pg = t / kLocalPageTexels;
+    const uint  i  = F.FaceBase + LB + uint(Pg.y * W + Pg.x);
+    const uint  E  = (LightCells[uint(UBOLight.ShadowParams.y) + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
+    if (E == 0u) return -1.0;
+    const int   s   = int(E) - 1, Row = int(UBOLight.ShadowParams.z);
+    const ivec2 At  = ivec2(int(UBOLight.ShadowParams.x) + (s % Row) * kLocalPageTexels, (s / Row) * kLocalPageTexels) + (t - Pg * kLocalPageTexels);
+    return texelFetch(SamplerShadowMap, At, 0).r;
+}
+
+// The receiver at level l: moved along its triangle's normal by half the level's texel; its face coordinates (UV, -1..1), depth along
+// the axis and stored depth to compare with. False: nearer than the near plane or outside the spot's frustum (lit)
+bool LocalAt(in const local_face F, in const vec3 Receiver, in const int l, out vec2 UV, out float d, out float Ref)
+{
+    const float TexelW = F.Texel0 * float(1 << l);
+    const vec3  P  = Receiver + g_LocalFaceN * (0.5 * TexelW);
+    d   = dot(P, F.Axis);
+    UV  = vec2(0.0); Ref = 0.0;
+    if (d <= F.Near) return false;
+    UV  = vec2(dot(P, F.R), dot(P, F.U)) / (d * F.TanHalf);
+    if (!F.bPoint && any(greaterThan(abs(UV), vec2(1.0)))) return false;      // outside the spot's frustum
+    Ref = F.A + F.B / d;
+    return true;
+}
+
+// Level l's filtered visibility: the 3 x 3 texel tent, bilinear (4 x 4 taps weighted by the point's place in its texel, as the sun's);
+// one tap (g_LocalTaps 0): the nearest texel. -1: a tap's page is not there; -2: lit (LocalAt)
+float LocalShadowAt(in const local_face F, in const vec3 Receiver, in const int l)
+{
+    vec2 UV; float d, Ref;
+    if (!LocalAt(F, Receiver, l, UV, d, Ref)) return -2.0;
+    const int   NT = (kLocalLevel0Pages >> l) * kLocalPageTexels;
+    const vec2  U  = (clamp(UV, vec2(-1.0), vec2(1.0)) * 0.5 + 0.5) * float(NT) - 0.5;
+    const ivec2 T  = g_LocalTaps == 0 ? ivec2(floor(U + 0.5)) : ivec2(floor(U)) - 1;
+    const vec2  f  = U - floor(U);
+    const vec4  Wx = vec4(1.0 - f.x, 1.0, 1.0, f.x), Wy = vec4(1.0 - f.y, 1.0, 1.0, f.y);
+    const int   nT = g_LocalTaps == 0 ? 1 : 4;
+    float Lit = 0.0;
+    for (int y = 0; y < nT; ++y)
+    for (int x = 0; x < nT; ++x)
+    {
+        const float z = LocalTexel(F, l, clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1)));
+        if (z < 0.0) return -1.0;
+        Lit += (z < Ref ? 0.0 : 1.0) * (nT == 1 ? 1.0 : Wx[x] * Wy[y]);
+    }
+    return nT == 1 ? Lit : Lit / 9.0;
+}
+
+// Contact-hardening's blocker search at level l: the 4 x 4 texels around the point, the mean distance along the axis of those nearer the
+// light than the receiver, and the receiver's. Returns that blocker distance; -1 no blocker, -2 a page is not there or the point is lit
+float LocalBlocker(in const local_face F, in const vec3 Receiver, in const int l, out float dR)
+{
+    vec2 UV; float Ref;
+    dR = 0.0;
+    if (!LocalAt(F, Receiver, l, UV, dR, Ref)) return -2.0;
+    const int   NT = (kLocalLevel0Pages >> l) * kLocalPageTexels;
+    const ivec2 T  = ivec2(floor((clamp(UV, vec2(-1.0), vec2(1.0)) * 0.5 + 0.5) * float(NT) - 0.5)) - 1;
+    float Sum = 0.0, n = 0.0;
+    for (int y = 0; y < 4; ++y)
+    for (int x = 0; x < 4; ++x)
+    {
+        const float z = LocalTexel(F, l, clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1)));
+        if (z < 0.0) return -2.0;
+        if (z < Ref) { Sum += F.B / (z - F.A); n += 1.0; }                          // (the stored depth A + B / d, back to d)
+    }
+    return n > 0.0 ? Sum / n : -1.0;
+}
+
 // 1 lit .. 0 shadowed. Receiver: the surface minus the light's position. The face it is seen through (a point light's cube face, a
 // spot's frustum), the level whose texel fits the pixel's footprint (the request pass picks it alike: xlionrender_local_request_comp.glsl),
 // coarser while a tap's page is missing (the coarsest is pinned). Against acne the receiver moves along its triangle's normal by half
 // a texel, with the pages' slope-scaled depth bias (measured on the visibility reference: 1.5 texels and a texel nearer missed contact
-// shadows, 3.8% against 2.5% disagreement, no less acne). A 3 x 3 texel tent (4 x 4 taps, bilinear: the sun's filter), each tap through the table (a tap past the face's edge clamps to it)
+// shadows, 3.8% against 2.5% disagreement, no less acne). A 3 x 3 texel tent (4 x 4 taps, bilinear: the sun's filter), each tap through the table (a tap past the face's edge clamps to it).
+// A light with a source radius (Ld.Shadow.y, world units; 0: hard) hardens at the contact as the sun does: a blocker search (the coarsest of
+// kLocalSoftLevels levels up, then finer), the penumbra's half-width at the receiver - radius x (receiver - blocker) / blocker, similar
+// triangles - and the filter at the level whose taps span it (two levels blended)
 float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const vec3 N)
 {
     if (Ld.Shadow.z <= 0.0 || UBOLight.ShadowParams.x <= 0.0) return 1.0;
 
-    const bool  bPoint  = Ld.DirCosOuter.w < -1.5;
-    const float TanHalf = bPoint ? 1.0 : Ld.Shadow.w;
+    local_face F;
+    F.bPoint  = Ld.DirCosOuter.w < -1.5;
+    F.TanHalf = F.bPoint ? 1.0 : Ld.Shadow.w;
     const float Radius  = Ld.PosRadius.w;
-    const float Near    = max(Radius * 0.01, 0.005);                           // shadows::LocalNear
-    vec3 Axis;
-    int  Face = 0;
-    if (bPoint)
+    F.Near    = max(Radius * 0.01, 0.005);                                     // shadows::LocalNear
+    int Face = 0;
+    if (F.bPoint)
     {
         const vec3 A = abs(Receiver);
-        if (A.x >= A.y && A.x >= A.z) { Face = Receiver.x >= 0.0 ? 0 : 1; Axis = vec3(Receiver.x >= 0.0 ? 1.0 : -1.0, 0.0, 0.0); }
-        else if (A.y >= A.z)          { Face = Receiver.y >= 0.0 ? 2 : 3; Axis = vec3(0.0, Receiver.y >= 0.0 ? 1.0 : -1.0, 0.0); }
-        else                          { Face = Receiver.z >= 0.0 ? 4 : 5; Axis = vec3(0.0, 0.0, Receiver.z >= 0.0 ? 1.0 : -1.0); }
+        if (A.x >= A.y && A.x >= A.z) { Face = Receiver.x >= 0.0 ? 0 : 1; F.Axis = vec3(Receiver.x >= 0.0 ? 1.0 : -1.0, 0.0, 0.0); }
+        else if (A.y >= A.z)          { Face = Receiver.y >= 0.0 ? 2 : 3; F.Axis = vec3(0.0, Receiver.y >= 0.0 ? 1.0 : -1.0, 0.0); }
+        else                          { Face = Receiver.z >= 0.0 ? 4 : 5; F.Axis = vec3(0.0, 0.0, Receiver.z >= 0.0 ? 1.0 : -1.0); }
     }
-    else Axis = Ld.DirCosOuter.xyz;
-    const vec3 Up = abs(Axis.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    const vec3 R  = normalize(cross(Up, Axis));
-    const vec3 U  = cross(Axis, R);
-    const float d0 = dot(Receiver, Axis);
-    if (d0 <= Near) return 1.0;
-    const float Texel0 = 2.0 * d0 * TanHalf / float(kLocalLevel0Pages * kLocalPageTexels);
-    const int   Level  = clamp(int(floor(log2(max(g_LocalFoot, 1e-9) / Texel0) + UBOLight.ShadowParams.w)), 0, kLocalLevels - 1);
-    const uint  FaceBase = uint(Ld.Shadow.x) + uint(Face * kLocalFaceEntries);
-    const uint  TableBase = uint(UBOLight.ShadowParams.y);
-    const int   Row = int(UBOLight.ShadowParams.z);
-    const float A = Radius / (Radius - Near), B = -Radius * Near / (Radius - Near);     // shadows::FaceW2C's depth
+    else F.Axis = Ld.DirCosOuter.xyz;
+    const vec3 Up = abs(F.Axis.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    F.R = normalize(cross(Up, F.Axis));
+    F.U = cross(F.Axis, F.R);
+    const float d0 = dot(Receiver, F.Axis);
+    if (d0 <= F.Near) return 1.0;
+    F.Texel0   = 2.0 * d0 * F.TanHalf / float(kLocalLevel0Pages * kLocalPageTexels);
+    const int Level = clamp(int(floor(log2(max(g_LocalFoot, 1e-9) / F.Texel0) + UBOLight.ShadowParams.w)), 0, kLocalLevels - 1);
+    F.FaceBase = uint(Ld.Shadow.x) + uint(Face * kLocalFaceEntries);
+    F.A = Radius / (Radius - F.Near); F.B = -Radius * F.Near / (Radius - F.Near);     // shadows::FaceW2C's depth
 
-    for (int l = Level; l < kLocalLevels; ++l)
+    float Lf = float(Level);
+    if (Ld.Shadow.y > 0.0 && g_LocalTaps != 0)
     {
-        const float TexelW = Texel0 * float(1 << l);
-        const vec3  P  = Receiver + g_LocalFaceN * (0.5 * TexelW);
-        const float d  = dot(P, Axis);
-        if (d <= Near) return 1.0;
-        const vec2  UV = vec2(dot(P, R), dot(P, U)) / (d * TanHalf);
-        if (!bPoint && any(greaterThan(abs(UV), vec2(1.0)))) return 1.0;      // outside the spot's frustum
-        const float Ref = A + B / d;
-        const int   NT  = (kLocalLevel0Pages >> l) * kLocalPageTexels, W = kLocalLevel0Pages >> l;
-        uint LB = 0u;
-        for (int k = 0; k < l; ++k) LB += uint((kLocalLevel0Pages >> k) * (kLocalLevel0Pages >> k));
-        // the 3 x 3 texel tent, bilinear (4 x 4 taps weighted by the point's place in its texel, as the sun's); one tap: the nearest texel
-        const vec2  U  = (clamp(UV, vec2(-1.0), vec2(1.0)) * 0.5 + 0.5) * float(NT) - 0.5;
-        const ivec2 T  = g_LocalTaps == 0 ? ivec2(floor(U + 0.5)) : ivec2(floor(U)) - 1;
-        const vec2  f  = U - floor(U);
-        const vec4  Wx = vec4(1.0 - f.x, 1.0, 1.0, f.x), Wy = vec4(1.0 - f.y, 1.0, 1.0, f.y);
-        const int   nT = g_LocalTaps == 0 ? 1 : 4;
-        float Lit = 0.0;
-        bool  bAll = true;
-        for (int y = 0; y < nT && bAll; ++y)
-        for (int x = 0; x < nT; ++x)
+        const int Top = min(Level + kLocalSoftLevels, kLocalLevels - 1);
+        for (int ls = Top; ls >= Level; ls -= 2)                                   // (the coarsest, then finer: a thin caster lost in a coarse level)
         {
-            const ivec2 t = clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1));
-            const ivec2 Pg = t / kLocalPageTexels;
-            const uint  i  = FaceBase + LB + uint(Pg.y * W + Pg.x);
-            const uint  E  = (LightCells[TableBase + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
-            if (E == 0u) { bAll = false; break; }
-            const int   s  = int(E) - 1;
-            const ivec2 At = ivec2(int(UBOLight.ShadowParams.x) + (s % Row) * kLocalPageTexels, (s / Row) * kLocalPageTexels) + (t - Pg * kLocalPageTexels);
-            Lit += ((texelFetch(SamplerShadowMap, At, 0).r < Ref) ? 0.0 : 1.0) * (nT == 1 ? 1.0 : Wx[x] * Wy[y]);
+            float dR;
+            const float dB = LocalBlocker(F, Receiver, ls, dR);
+            if (dB < 0.0) continue;
+            const float Penumbra = Ld.Shadow.y * max(dR - dB, 0.0) / max(dB, 1e-6);  // world units, half the width
+            Lf = clamp(float(Level) + log2(max(Penumbra, 1e-9) / (1.5 * F.Texel0 * float(1 << Level))), float(Level), float(Top));
+            break;
         }
-        if (bAll) return nT == 1 ? Lit : Lit / 9.0;
+    }
+    const int   L0 = int(floor(Lf));
+    const float t  = Lf - float(L0);
+    for (int l = L0; l < kLocalLevels; ++l)
+    {
+        float S = LocalShadowAt(F, Receiver, l);
+        if (S == -2.0) return 1.0;
+        if (S < 0.0) continue;
+        if (t > 0.0 && l == L0 && l + 1 < kLocalLevels)
+        {
+            const float S1 = LocalShadowAt(F, Receiver, l + 1);
+            if (S1 >= 0.0) S = mix(S, S1, t);
+        }
+        return S;
     }
     return 1.0;                                                                 // (no page yet: the light was never rendered)
 }

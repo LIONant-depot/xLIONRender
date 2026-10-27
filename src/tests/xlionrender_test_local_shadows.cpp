@@ -390,6 +390,42 @@ int main()
     Renderer.m_ShadowUpdatesPerFrame = 64;
     for (std::size_t i = 0; i < Full.size(); ++i) CHECK(Budgeted[i] == Full[i], "Budgeted and rebuilt differ at %d", int(i));
 
+    // Contact-hardening (local_light::m_SourceRadius): a light above a box resting on the ground and the same box 0.6 m up. The
+    // penumbra - texels between 10% and 90% of their unshadowed light - widens with a source radius, and more for the raised box (its
+    // shadow is farther from its caster) than for the resting one (its edges start at the contact: sharp there). Radius 0: the hard shadow, unchanged (the other
+    // tests' images; the baselines bitwise)
+    {
+        const xlionrender::local_light Top{ .m_Position = { 0.3f, 2.4f, 0.2f }, .m_Radius = 8.0f, .m_Intensity = 10.0f };
+        const auto Penumbra = [&](float Y, float SourceRadius) -> int
+        {
+            Scene.m_Draws = { { .m_Mesh = Box, .m_L2W = Ground }, { .m_Mesh = Box, .m_L2W = xmath::fmat4::fromTranslation({ 0, Y, 0 }) * xmath::fmat4::fromScale({ 0.6f, 0.6f, 0.6f }) } };
+            Scene.m_LocalLights = { Top };
+            Scene.m_LocalLights[0].m_bCastShadows = false;
+            std::vector<float> Unlit, Lit, Sh;
+            Scene.m_LocalLights[0].m_Intensity = 0;
+            if (!App.RenderFrame(Scene, View, Camera) || !ReadHDR(Device, View, Unlit)) return -1;
+            Scene.m_LocalLights[0].m_Intensity = Top.m_Intensity;
+            if (!App.RenderFrame(Scene, View, Camera) || !ReadHDR(Device, View, Lit)) return -1;
+            Scene.m_LocalLights[0].m_bCastShadows = true;
+            Scene.m_LocalLights[0].m_SourceRadius = SourceRadius;
+            if (!Settle(12) || !ReadHDR(Device, View, Sh)) return -1;
+            int n = 0;
+            for (std::size_t i = 0; i < Sh.size(); ++i)
+            {
+                const float L = Lit[i] - Unlit[i];
+                if (L < 0.02f) continue;
+                const float v = (Sh[i] - Unlit[i]) / L;
+                n += v > 0.1f && v < 0.9f;
+            }
+            return n;
+        };
+        const int LowHard = Penumbra(-0.2f, 0.0f), LowSoft = Penumbra(-0.2f, 0.25f), HighHard = Penumbra(0.4f, 0.0f), HighSoft = Penumbra(0.4f, 0.25f);
+        std::printf("contact-hardening: penumbra texels resting %d -> %d, raised %d -> %d (hard -> source radius 0.25)\n", LowHard, LowSoft, HighHard, HighSoft);
+        CHECK(LowHard > 0 && HighHard > 0, "contact-hardening: no hard penumbra measured (%d, %d)", LowHard, HighHard);
+        CHECK(HighSoft * 10 > HighHard * 13, "contact-hardening: the raised box's penumbra did not widen (%d -> %d)", HighHard, HighSoft);
+        CHECK(double(HighSoft) / HighHard > 1.3 * double(LowSoft) / LowHard, "contact-hardening: the resting box's penumbra widened as much as the raised one's (%d -> %d, %d -> %d)", LowHard, LowSoft, HighHard, HighSoft);
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");
