@@ -17,7 +17,7 @@ struct light_t
 {
     vec4 PosRadius;                 // world position, radius
     vec4 DirTan;                    // spot: direction, tan of the half field of view; point: w 0
-    vec4 Info;                      // x: the first face's table entry, y: near
+    vec4 Info;                      // x: the first face's table entry, y: near, z: its resolution bias (1: moving - local_pages::MovingBias)
 };
 struct frame_t
 {
@@ -101,7 +101,7 @@ void main()
             const vec2 UV = vec2(dot(D, R), dot(D, U)) / (d * TanHalf);
             if (any(greaterThan(abs(UV), vec2(1.0)))) continue;                         // outside the spot's frustum
             const float Texel0 = 2.0 * d * TanHalf / float(kLevel0Pages * kPageTexels);
-            const int   Level  = clamp(int(floor(log2(max(Foot, 1e-9) / Texel0) + F[Push.m_Frame].P0.y)), 0, kLevels - 1);
+            const int   Level  = clamp(int(floor(log2(max(Foot, 1e-9) / Texel0) + F[Push.m_Frame].P0.y + Lt.Info.z)), 0, kLevels - 1);
             atomicAdd(s_Count[0], 1u);
             atomicAdd(s_Count[5 + Level], 1u);
             const uint FaceBase = uint(Lt.Info.x) + uint(Face * kFaceEntries);

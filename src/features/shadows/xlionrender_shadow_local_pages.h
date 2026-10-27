@@ -92,6 +92,15 @@ namespace xlionrender::shadows
         const setup& getSetup(void) const noexcept { return m_Setup; }
         void setBudget(int Budget) noexcept { m_Setup.m_Budget = Budget; }
 
+        // The resolution bias of a light slot's requests: a light moving now or within moving_frames_v frames asks for pages a level coarser
+        // (4 times fewer, rendered again each frame it moves; Unreal: r.Shadow.Virtual.ResolutionLodBiasLocalMoving, 1)
+        static constexpr std::uint64_t moving_frames_v = 8;
+        float MovingBias(int LightSlot) const noexcept
+        {
+            const auto& L = m_Lights[LightSlot];
+            return L.m_bUsed && L.m_MovedFrame != 0 && m_Frame - L.m_MovedFrame < moving_frames_v ? 1.0f : 0.0f;
+        }
+
         // A light slot's generation (a request names the generation it was made for; the light changed since: dropped)
         std::uint32_t Generation(int LightSlot) const noexcept { return m_Lights[LightSlot].m_Generation; }
         // The scene light a light slot holds (-1: none) and a scene light's slot (-1: none)
@@ -146,6 +155,7 @@ namespace xlionrender::shadows
                 {
                     LS.m_Key = LightKey(Lights[i]);
                     LS.m_bSeen = LS.m_bMoved = true;
+                    LS.m_MovedFrame = Frame;
                     m_SlotOf[i] = s;
                 }
             }
@@ -349,6 +359,7 @@ namespace xlionrender::shadows
             bool            m_bUsed = false, m_bSeen = false;
             bool            m_bMoved = false;           // this frame: the same light, moved or turned
             std::uint64_t   m_Shape = 0;                // its type, radius and cone (ShapeKey): what a move keeps
+            std::uint64_t   m_MovedFrame = 0;           // the last frame it moved (0: never)
         };
 
         int Find(const key& K) const noexcept { const auto It = m_Map.find(Entry(K)); return It == m_Map.end() ? -1 : It->second; }

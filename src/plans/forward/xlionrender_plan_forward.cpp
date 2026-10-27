@@ -736,7 +736,7 @@ namespace xlionrender
             const bool  bSpot = L.m_Type == local_light::type::SPOT;
             F.m_Lights[n].m_PosRadius = xmath::fvec4(L.m_Position, L.m_Radius);
             F.m_Lights[n].m_DirTan    = bSpot ? xmath::fvec4(L.m_Direction.NormalizeCopy(), shadows::SpotTanHalf(L)) : xmath::fvec4(0, 0, 0, 0);
-            F.m_Lights[n].m_Info      = { float(LS * shadows::local_pages::faces_per_light_v * shadows::local_pages::face_entries_v), shadows::LocalNear(L.m_Radius), 0, 0 };
+            F.m_Lights[n].m_Info      = { float(LS * shadows::local_pages::faces_per_light_v * shadows::local_pages::face_entries_v), shadows::LocalNear(L.m_Radius), m_LocalPages.MovingBias(LS), 0 };
             ++n;
         }
         for( int ls = 0; ls < max_local_lights_v; ++ls ) m_LocalReqGen[Slot][std::size_t(ls)] = m_LocalPages.Generation(ls);

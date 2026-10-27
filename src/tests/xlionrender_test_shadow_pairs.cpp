@@ -186,6 +186,7 @@ int main()
         }
         const auto& C = Renderer.getLocalReport().m_Counters;
         std::printf("a moving point light (still movers): shadows CPU %.3f ms, local pages rendered a frame %.1f; its pixels by their level %u of %u\n", Cpu / n, double(nPages) / n, C[1], C[0]);
+        CHECK(double(nPages) / n < 25.0 && C[1] > C[0] * 99 / 100, "a moving point light: %.1f pages a frame (its requests a level coarser while it moves: 40 before), %u of %u pairs by their level", double(nPages) / n, C[1], C[0]);
         CHECK(Compare("a point light"), "compare, a point light's pages");     // (its pages through the pairs against the CPU path)
         Scene.m_LocalLights.clear();
     }
