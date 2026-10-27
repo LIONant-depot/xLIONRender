@@ -878,7 +878,7 @@ namespace xlionrender
         m_LightStats.m_nDropped       = int(Scene.m_LocalLights.size()) - nLights;
         m_LightStats.m_nOverflowCells = 0;
         if( Mode != light_mode::EXACT ) for( const auto n : m_LightCells.m_Count ) m_LightStats.m_nOverflowCells += n >= light_cells::overflow_v;
-        Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_LightHead) };
+        Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_LightTailCandidates) };
         Light.m_LocalBase  = { float(LightBase), float(CellBase), m_LightCellSize, float(m_LightTailSamples) };
         Light.m_ProbeCount = { float(std::max(nProbes, 0)), float(ProbeBase), float(ProbeCells), 0 };
         for( int L = 0; L < light_cells::levels_v; ++L )

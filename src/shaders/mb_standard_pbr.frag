@@ -99,7 +99,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 CameraPos;                    // world position of the camera (wSpacePosition is camera-centered)
 	vec4 ShadowLevels[4];              // reserved (the sun's clipmap, gone 2026-10-27): kept so the compiled materials' layout holds
 	vec4 ShadowParams;                 // reserved (as ShadowLevels)
-	vec4 LocalCount;                     // x: local lights, y: mode (0 exact, 1 cells, 2 cells + sampled tail), z: seed, w: head size
+	vec4 LocalCount;                     // x: local lights, y: mode (0 exact, 1 cells, 2 cells + sampled tail), z: seed, w: the tail's resampling candidates (> 1: RIS)
 	vec4 LocalBase;                      // x: first light in LocalLightList, y: first uint in LightCells, z: level 0 cell size, w: tail samples
 	vec4 CellOrigin[5];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
 	vec4 EnvParams;                      // x: 1 the environment probe replaces the flat ambient, y: its intensity

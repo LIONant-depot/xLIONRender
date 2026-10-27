@@ -195,6 +195,7 @@ int main()
     App.m_bQuietTimes = true;
     auto& Renderer = App.m_Renderer;
     auto& Device   = App.m_Device;
+    Renderer.m_LightTailCandidates = 0;         // (the plain tail samples; resampling has its own measurements below)
 
     xlionrender::mesh_id Sphere, Box;
     CHECK(MakeMesh(Renderer, MakeSphere(), Sphere), "sphere");
@@ -399,6 +400,47 @@ int main()
                    , Mask.size(), PerFrame[0], PerFrame[1], PerFrame[2], Err[0], Err[1], Err[2]);
         CHECK(Err[0] < 0.25 * PerFrame[0] && Err[2] < 0.25 * PerFrame[2], "the glossy floor's mean does not converge (1: %f of %f, 16: %f of %f)", Err[0], PerFrame[0], Err[2], PerFrame[2]);
         CHECK(PerFrame[1] < PerFrame[0] && PerFrame[2] < PerFrame[1], "more tail samples do not reduce the glossy floor's noise");
+
+        // Resampled (RIS: 8 candidates, one shaded): the pixel's own importance - the mean still converges, the noise drops
+        Renderer.m_LightMode = mode::SAMPLED;
+        Renderer.m_LightTailCandidates = 8;
+        double RisFrame = 0, RisErr = 0;
+        {
+            std::vector<double> Sum(Ex.size(), 0.0);
+            for (int f = 0; f < 64; ++f)
+            {
+                CHECK(App.RenderFrame(Glossy, View, Low) && ReadHDR(Device, View, Fr), "glossy resampled");
+                for (std::size_t i = 0; i < Fr.size(); ++i) Sum[i] += Fr[i];
+                RisFrame += Rel(Fr, Ex) / 64.0;
+            }
+            std::vector<float> Mean(Ex.size());
+            for (std::size_t i = 0; i < Mean.size(); ++i) Mean[i] = float(Sum[i] / 64.0);
+            RisErr = Rel(Mean, Ex);
+        }
+        Renderer.m_LightTailCandidates = 0;
+        Renderer.m_LightMode = mode::EXACT;
+        std::printf("glossy floor resampled (8 candidates): per-frame error %.3f, 64-frame mean %.4f\n", RisFrame, RisErr);
+        CHECK(RisErr < 0.25 * RisFrame, "the resampled glossy floor's mean does not converge (%f of %f)", RisErr, RisFrame);
+        CHECK(RisFrame < 0.5 * PerFrame[0], "resampling does not reduce the glossy floor's noise (%f, one sample %f)", RisFrame, PerFrame[0]);
+    }
+
+    // Resampled on the dense scene: one frame against the plain one, and the mean of 64 frames converging
+    {
+        Renderer.m_LightTailCandidates = 8;
+        CHECK(RenderMode(mode::SAMPLED, Frame, 1), "Render resampled");
+        const double One1 = Compare(Frame, Exact).m_MeanRel, OneMs = App.m_LastTimes.m_SceneMs;
+        std::vector<double> Sum(Exact.size(), 0.0);
+        for (int f = 0; f < 64; ++f)
+        {
+            CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Frame), "Render resampled %d", f);
+            for (std::size_t i = 0; i < Frame.size(); ++i) Sum[i] += Frame[i];
+        }
+        std::vector<float> Mean(Exact.size());
+        for (std::size_t i = 0; i < Mean.size(); ++i) Mean[i] = float(Sum[i] / 64.0);
+        const double Err64r = Compare(Mean, Exact).m_MeanRel;
+        Renderer.m_LightTailCandidates = 0;
+        std::printf("dense resampled (8 candidates): 1 frame %.3f (plain %.3f), mean of 64 %.4f; GPU scene %.3f ms\n", One1, One.m_MeanRel, Err64r, OneMs);
+        CHECK(Err64r < One1 * 0.25, "the resampled tail does not converge (1: %f, 64: %f)", One1, Err64r);
     }
 
     // More stratified tail samples: same estimator, less noise per frame

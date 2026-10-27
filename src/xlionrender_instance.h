@@ -207,6 +207,7 @@ namespace xlionrender
         light_mode                                 m_LightMode     = light_mode::CELLS;     // the default: the same image as EXACT, a fraction of the shading (research doc: lab)
         int                                        m_LightHead     = 4;
         int                                        m_LightTailSamples = 1;     // SAMPLED: stratified tail samples per pixel
+        int                                        m_LightTailCandidates = 8;  // SAMPLED: > 1, the tail resampled (RIS) from this many candidates, one shaded (0: the plain samples)
         float                                      m_LightCellSize = 2.0f;     // level 0 cells, world units
         // CPU time of the last render's cell build (ms)
                       double               getLightBuildMs( void ) const                                        noexcept { return m_LightBuildMs; }

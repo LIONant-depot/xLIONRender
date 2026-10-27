@@ -108,8 +108,8 @@ const int kCellLevels = 5;
 const int kCells      = 16;
 const int kLevelCells = kCells * kCells * kCells;
 
-// One light's contribution at the surface (0 outside its radius)
-vec3 LocalLight(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
+// One light's contribution at the surface without its shadow (0 outside its radius)
+vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
 {
     const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];
     const vec3  ToLight = Ld.PosRadius.xyz - In.wSpacePosition.xyz;            // both camera-centered
@@ -120,9 +120,22 @@ vec3 LocalLight(in const int i, in const vec3 N, in const vec3 V, in const float
     const vec3 L = ToLight / Dist;
     if (Ld.DirCosOuter.w > -1.5) Att *= LightSpotCone(dot(-L, Ld.DirCosOuter.xyz), Ld.DirCosOuter.w, Ld.Color.w);
     if (Att < 1e-4) return vec3(0.0);
-    const vec3 Direct = PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att;
+    return PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att;
+}
+
+// Its shadow at the surface (1 lit .. 0 shadowed)
+float LocalLightShadow(in const int i, in const vec3 N)
+{
+    const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];
+    return LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+}
+
+// One light's contribution at the surface (0 outside its radius)
+vec3 LocalLight(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
+{
+    const vec3 Direct = LocalLightUnshadowed(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
     if (all(equal(Direct, vec3(0.0)))) return vec3(0.0);                       // (facing away: no shadow lookups)
-    return Direct * LocalShadow(Ld, -ToLight, N);
+    return Direct * LocalLightShadow(i, N);
 }
 
 // The cell holding a world position: the finest level whose window holds it (-1: none)
@@ -140,13 +153,14 @@ int LocalLightCell(in const vec3 World)
     return -1;
 }
 
-// [0, 1) per pixel and per seed
-float LocalRandom()
+// [0, 1) per pixel and per seed (Stream: independent numbers for the same pixel and seed)
+float LocalRandom(in const uint Stream)
 {
-    uint h = uint(gl_FragCoord.x) * 1973u + uint(gl_FragCoord.y) * 9277u + uint(UBOLight.LocalCount.z) * 26699u;
+    uint h = uint(gl_FragCoord.x) * 1973u + uint(gl_FragCoord.y) * 9277u + uint(UBOLight.LocalCount.z) * 26699u + Stream * 0x9E3779B9u;
     h = (h ^ 61u) ^ (h >> 16); h *= 9u; h ^= h >> 4; h *= 0x27d4eb2du; h ^= h >> 15;
     return float(h >> 8) * (1.0 / 16777216.0);
 }
+float LocalRandom() { return LocalRandom(0u); }
 
 // Modes: 0 every light; 1 the cell's list (the same result: the list holds every light that reaches the cell); 2 the cell's
 // head exactly + tail lights J drawn with probability p(J) (LocalBase.w stratified samples), each weighted 1 / (p(J) samples). Outside the cells: every light.
@@ -175,7 +189,42 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     const uint nExact    = Mode == 1 ? Count : Head;
     for (uint k = 0u; k < nExact; ++k) Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + k)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
 
-    if (Mode == 2 && Count > Head)
+    if (Mode == 2 && Count > Head && UBOLight.LocalCount.w > 1.5)
+    {
+        // Resampled (RIS, P3's first step): M stratified candidates from the cell's tail distribution q, each weighted by the light's
+        // unshadowed contribution at this pixel p (its luminance) over q, one of them picked in proportion to its weight and shaded with its
+        // shadow: f(Y) / p(Y) * sum(w) / M. Unbiased (each candidate is distributed by q; p > 0 wherever the light reaches, f <= the
+        // unshadowed term): the cell's diffuse importance becomes the pixel's own - a glossy highlight's light is found
+        const int   M  = int(UBOLight.LocalCount.w);
+        const float u0 = LocalRandom(0u);
+        float       u1 = LocalRandom(1u);
+        int   k    = 0, Pick = -1;
+        float Prev = 0.0, WSum = 0.0, PickP = 1.0;
+        vec3  PickC = vec3(0.0);
+        for (uint e = Head; e < Count && k < M; ++e)
+        {
+            const float Cdf = uintBitsToFloat(LightCells[EntryBase + 2u * (First + e) + 1u]);
+            int nHits = 0;
+            while (k < M && ((float(k) + u0) / float(M) < Cdf || e + 1u == Count)) { ++nHits; ++k; }
+            if (nHits > 0)
+            {
+                const int   l = int(LightCells[EntryBase + 2u * (First + e)]);
+                const vec3  C = LocalLightUnshadowed(l, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
+                const float P = dot(C, vec3(0.2126, 0.7152, 0.0722));
+                const float W = float(nHits) * P / (Cdf - Prev);                  // (its nHits candidates at once)
+                WSum += W;
+                if (W > 0.0)
+                {
+                    const float a = W / WSum;                                       // (a streaming pick: u1 stays uniform)
+                    if (u1 < a) { Pick = l; PickC = C; PickP = P; u1 = u1 / a; }
+                    else        u1 = (u1 - a) / (1.0 - a);
+                }
+            }
+            Prev = Cdf;
+        }
+        if (Pick >= 0) Sum += PickC * LocalLightShadow(Pick, N) * (WSum / (float(M) * PickP));
+    }
+    else if (Mode == 2 && Count > Head)
     {
         // Samples stratified tail samples (u_k = (k + u) / Samples): one pass, the cumulative probabilities only grow
         const int   Samples = max(int(UBOLight.LocalBase.w), 1);

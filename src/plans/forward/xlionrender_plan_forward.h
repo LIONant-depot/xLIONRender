@@ -114,7 +114,7 @@ namespace xlionrender::details
         std::array<xmath::fvec4, 4>             m_ShadowLevels;     // per level: xy first tile of the window, z tile size, w depth center
         xmath::fvec4                            m_ShadowParams;     // the local lights' pages: x the pool's atlas x (0: none), y the table's first uint, z slots a row, w the resolution bias
         // point and spot lights: the lights and their world cells are in storage buffers (shaders/xlionrender_local_lights.glsl)
-        xmath::fvec4                            m_LocalCount;       // x: lights, y: mode (instance::light_mode), z: seed, w: head size
+        xmath::fvec4                            m_LocalCount;       // x: lights, y: mode (instance::light_mode), z: seed, w: the tail's resampling candidates (instance::m_LightTailCandidates, > 1: RIS)
         xmath::fvec4                            m_LocalBase;        // x: first light in the light buffer, y: first uint in the cell buffer, z: level 0 cell size, w: tail samples
         std::array<xmath::fvec4, light_cells::levels_v> m_CellOrigin;       // per cell level: the window's first cell index
         xmath::fvec4                            m_EnvParams;        // x: 1 the environment probe lights (scene::m_Sky), y: its intensity
