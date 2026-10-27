@@ -143,7 +143,8 @@ int main()
         CHECK(ReadHDR(Device, View, Img), "Read the hot cube");
         const float Top = Img[std::size_t(size_v / 2 - 30) * size_v + size_v / 2], Bottom = Img[std::size_t(size_v / 2 + 30) * size_v + size_v / 2];
         std::printf("hot cubemap overhead: the sphere's top %.3f, bottom %.3f\n", Top, Bottom);
-        CHECK(Top > 2 * Bottom, "the cubemap's bright top does not light the sphere's top (%f vs %f)", Top, Bottom);
+        // (2x held with uvsphere's old normals, tilted toward the poles; the sphere's true ones at these pixels: 1.27 vs 0.68)
+        CHECK(Top > 1.5f * Bottom, "the cubemap's bright top does not light the sphere's top (%f vs %f)", Top, Bottom);
         Scene.m_Sky = Gradient;
         CHECK(App.RenderFrame(Scene, View, Camera), "Render without the cubemaps");
         Device.Destroy(std::move(White));

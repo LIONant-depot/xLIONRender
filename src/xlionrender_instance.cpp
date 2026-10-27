@@ -621,7 +621,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 6, .m_nTextures = 2, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 4 * ring_frames_v, .m_pData = Zeros.data() }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflTimes, { .m_Count = 2 }); Err ) return Err;
-            if( const char* p = std::getenv("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } }
+            if( const char* p = std::getenv("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } if( m_ReflTraceBench > 0 ) m_LightMode = light_mode::SCREEN; }     // (its rays start from the thin G-buffer: the screen tail's)
             if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data() }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nLocal }); Err ) return Err;
