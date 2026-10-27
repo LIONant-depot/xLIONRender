@@ -443,6 +443,55 @@ int main()
         CHECK(Err64r < One1 * 0.25, "the resampled tail does not converge (1: %f, 64: %f)", One1, Err64r);
     }
 
+    // Lights behind a wall (measured): 24 shadowed point lights reach the floor in front of a wall geometrically but the wall hides them,
+    // 4 in front light it. The tail's samples - plain, or resampled by the unshadowed contribution - often pick a hidden light; resampled
+    // with each candidate's visibility in its weight (the default) they rarely do: less noise where the visible lights shine
+    {
+        auto Wall = Scene;
+        Wall.m_Draws = { Scene.m_Draws[0], { .m_Mesh = Scene.m_Draws[0].m_Mesh, .m_L2W = xmath::fmat4::fromTranslation({ 0.0f, 1.0f, 3.0f }) * xmath::fmat4::fromScale({ 16.0f, 3.0f, 0.2f }) } };
+        Wall.m_LocalLights.clear();
+        for (int k = 0; k < 24; ++k)
+            Wall.m_LocalLights.push_back({ .m_Position = { -7.0f + 0.6f * float(k), 0.8f + 0.2f * float(k % 3), 4.0f + 0.4f * float(k % 4) }, .m_Radius = 7.0f, .m_Intensity = 2.0f, .m_bCastShadows = true });
+        for (int k = 0; k < 4; ++k)
+            Wall.m_LocalLights.push_back({ .m_Position = { -3.0f + 2.0f * float(k), 1.0f, -1.0f }, .m_Radius = 5.0f, .m_Intensity = 1.5f, .m_bCastShadows = true });
+        std::vector<float> Ex, Fr;
+        Renderer.m_LightMode = mode::EXACT;
+        for (int f = 0; f < 8; ++f) CHECK(App.RenderFrame(Wall, View, Camera), "wall settle %d", f);
+        CHECK(ReadHDR(Device, View, Ex), "wall exact");
+        std::vector<std::size_t> Mask;
+        for (std::size_t i = 0; i < Ex.size(); ++i) if (Ex[i] > 0.02f) Mask.push_back(i);
+        const auto Rel = [&](const std::vector<float>& A, const std::vector<float>& B)
+        {
+            double d = 0, r = 0;
+            for (auto i : Mask) { d += std::abs(double(A[i]) - B[i]); r += std::abs(double(B[i])); }
+            return d / std::max(r, 1e-9);
+        };
+        double Err[3] = {}, Mean64[3] = {}, Ms[3] = {};
+        for (int v = 0; v < 3; ++v)
+        {
+            Renderer.m_LightMode = mode::SAMPLED;
+            Renderer.m_LightTailCandidates = v == 0 ? 0 : 8;
+            Renderer.m_bLightTailVisibility = v == 2;
+            std::vector<double> Sum(Ex.size(), 0.0);
+            for (int f = 0; f < 64; ++f)
+            {
+                CHECK(App.RenderFrame(Wall, View, Camera) && ReadHDR(Device, View, Fr), "wall sampled");
+                for (std::size_t i = 0; i < Fr.size(); ++i) Sum[i] += Fr[i];
+                Err[v] += Rel(Fr, Ex) / 64.0;
+                Ms[v]  += App.m_LastTimes.m_SceneMs / 64.0;
+            }
+            std::vector<float> Mean(Ex.size());
+            for (std::size_t i = 0; i < Mean.size(); ++i) Mean[i] = float(Sum[i] / 64.0);
+            Mean64[v] = Rel(Mean, Ex);
+        }
+        Renderer.m_LightTailCandidates = 0;
+        Renderer.m_bLightTailVisibility = true;
+        Renderer.m_LightMode = mode::EXACT;
+        std::printf("lights behind a wall (%zu lit values): per-frame error plain %.3f, resampled %.3f, resampled with the shadow %.3f; 64-frame mean %.4f / %.4f / %.4f; GPU scene %.3f / %.3f / %.3f ms\n", Mask.size(), Err[0], Err[1], Err[2], Mean64[0], Mean64[1], Mean64[2], Ms[0], Ms[1], Ms[2]);
+        CHECK(Mean64[0] < 0.25 * Err[0] && Mean64[1] < 0.25 * Err[1] && Mean64[2] < 0.25 * Err[2], "behind a wall: the means do not converge");
+        CHECK(Err[2] < 0.8 * Err[1], "the visibility in the resampling weights does not reduce the noise behind a wall (%f, without %f)", Err[2], Err[1]);
+    }
+
     // More stratified tail samples: same estimator, less noise per frame
     double OneBySamples[3] = {};
     for (int si = 0; si < 3; ++si)
