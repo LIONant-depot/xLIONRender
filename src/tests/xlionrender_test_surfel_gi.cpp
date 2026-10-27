@@ -874,11 +874,12 @@ int main()
         AddQuad(Ground, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
         AddQuad(Sign,   { -0.1f, 1, -0.1f }, { 0.2f, 0, 0 }, { 0, 0, 0.2f }, 0.1f);   // facing down
         Ground.Bake(0.3f, 0.9f); Sign.Bake(0.05f, 0.15f);
-        const auto Run = [&](bool bLinks, int Rays, int Updates, double& Spread, bool bSample = false)
+        const auto Run = [&](bool bLinks, int Rays, int Updates, double& Spread, bool bSample = false, bool bExternal = false)
         {
             world D;
             D.m_bEmitterLinks = bLinks;
             D.m_Setup.m_bEmitterSampling = bSample;
+            D.m_Setup.m_bEmitterDirectExternal = bExternal;
             D.m_Setup.m_RaysPerSurfel = Rays;
             const int iG = D.Add(Ground, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
             const int iS = D.Add(Sign, xmath::fmat4::fromIdentity(), { 0.5f, 0.5f, 0.5f });
@@ -905,6 +906,12 @@ int main()
         const double Sample = Run(true, 8, 20, SSample, true);
         std::printf("light sampling, 8 rays: %.3f (spread %.0f%%)\n", Sample, 100 * SSample);
         CHECK(std::abs(Sample - Ref) < 0.1 * Ref, "the sampled emitters' light is off: %.3f vs the reference %.3f", Sample, Ref);
+        // 6j3. Lighting shades the emitters' direct light (setup::m_bEmitterDirectExternal: its emitter lights) - the CPU's solver keeps it
+        //      out of what it shows in every mode: the rays' hits, the links, the light sampling. The floor under the sign: none of it
+        double SX;
+        const double XHits = Run(false, 8, 20, SX, false, true), XLinks = Run(true, 8, 20, SX, false, true), XSample = Run(true, 8, 20, SX, true, true);
+        std::printf("the emitters' direct light left to lighting: under the sign hits %.4f, links %.4f, sampling %.4f (the reference %.3f)\n", XHits, XLinks, XSample, Ref);
+        CHECK(XHits < 0.05 * Ref && XLinks < 0.05 * Ref && XSample < 0.05 * Ref, "the emitters' direct light is still in the GI: hits %.4f, links %.4f, sampling %.4f (the reference %.3f)", XHits, XLinks, XSample, Ref);
         CHECK(SSample < 0.5 * SHits, "the light sampling is no less noisy than the hits (%.0f%% vs %.0f%%)", 100 * SSample, 100 * SHits);
     }
 

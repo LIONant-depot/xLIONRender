@@ -3774,6 +3774,29 @@ namespace xlionrender::gi
 
         // G5: an emitter's weight for a receiver at C facing N (the links' small disk: A cos cos / (d^2 + A); false: it faces away, or too
         // little) and its radiance now
+        // The emitters' direct light at a hit when lighting shades it (setup::m_bEmitterDirectExternal): one emitter by weighted reservoir
+        // sampling (w lum(L)), its shadow ray - the GPU's EmitterIrradianceAt (xlionrender_gi_pass_common.glsl); the emitter list exists in
+        // the sampling and the links modes
+        v3 EmitterIrradianceAt(const v3& P, const v3& N, std::uint32_t Seed) const noexcept
+        {
+            float Q = 0; int Pick = -1;
+            for (std::size_t k = 0; k < m_Em.size(); ++k)
+            {
+                float w;
+                if (!EmitterWeight(k, P, N, w)) continue;
+                const float q = w * Lum(EmitterRadiance(k));
+                if (q <= 0) continue;
+                Q += q;
+                const float u = float(Hash32(Seed ^ std::uint32_t(k) * 0x85EBCA6Bu) >> 8) * (1.0f / 16777216.0f);
+                if (u * Q < q) Pick = int(k);
+            }
+            if (Pick < 0) return v3{ 0, 0, 0 };
+            const v3 D = m_Em[std::size_t(Pick)].m_C - P;
+            const float d = D.Length();
+            if (d < 1e-6f || Occluded(P + N * 1e-3f, D * (1.0f / d), d * 0.98f)) return v3{ 0, 0, 0 };
+            const v3 Le = EmitterRadiance(std::size_t(Pick));
+            return Le * (Q / Lum(Le));
+        }
         bool EmitterWeight(std::size_t k, const v3& C, const v3& N, float& w) const noexcept
         {
             const v3 D = m_Em[k].m_C - C;
@@ -3845,7 +3868,7 @@ namespace xlionrender::gi
             auto& BA = I.m_BasisAcc[s];
             v3 Sum = W.m_Sum;
             if (s < I.m_EmitB.size())                                   // the emitters it sees (the links): deterministic, no rays
-                for (int i = 0; i < 3; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance
+                for (int i = 0; i < 3 && !m_Setup.m_bEmitterDirectExternal; ++i) { const v3 e = I.m_EmitB[s][i] * (float(R) / (3.0f * pi_v)); Sum = Sum + e; BA[i] = BA[i] + e; }     // the basis' mean is the irradiance (lighting shades it: m_bEmitterDirectExternal)
             I.m_Acc[s]      = Sum * (pi_v / float(R));                  // E = pi mean(L), cosine sampling
             // Buried -> validity 0, by either sign: back faces near it (within its reach: inside a wall or a frame they are centimeters
             // away; full validity up to 20% of its rays, none from 50%), or back faces all around at any distance (inside a solid object;
@@ -3917,15 +3940,16 @@ namespace xlionrender::gi
                 const v3 Dl = Direct(HitPosition(H), Nh, L);
                 W.m_DirectUs += Us(Td, clock::now());
                 const auto Tu = clock::now();
-                const v3 In = Dl + (Q.m_bSupported ? Q.m_E : Unsupported(H));
+                v3 In = Dl + (Q.m_bSupported ? Q.m_E : Unsupported(H));
                 W.m_ReadUs += Us(Tu, clock::now());
-                const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (I.m_EmitB.empty() && !m_Setup.m_bEmitterSampling ? Emission : v3{ 0, 0, 0 });     // with its links (or the sampling) they bring the emitters' light; without (none, or not built yet: a minute for Police) the hits do
+                if (m_Setup.m_bEmitterDirectExternal) In = In + EmitterIrradianceAt(HitPosition(H), Nh, Hash32(std::bit_cast<std::uint32_t>(Off1) ^ std::uint32_t(r + 1) * 0x9E3779B9u ^ 0x5BD1E995u));     // (lighting shades the emitters' direct light: the hit's, here)
+                const v3 Lr = v3{ Albedo.m_X * In.m_X, Albedo.m_Y * In.m_Y, Albedo.m_Z * In.m_Z } * (1.0f / pi_v) + (I.m_EmitB.empty() && !m_Setup.m_bEmitterSampling && !m_Setup.m_bEmitterDirectExternal ? Emission : v3{ 0, 0, 0 });     // with its links (or the sampling) they bring the emitters' light; without (none, or not built yet: a minute for Police) the hits do
                 Sum = Sum + Lr;
                 for (int i = 0; i < 3; ++i) BA[i] = BA[i] + Lr * Bw[i];
             }
             W.m_Sum = Sum; W.m_nBack = nBack; W.m_nBackAll = nBackAll; W.m_nUnsupported = nUnsupported; W.m_nHits = nHits;
             W.m_RaysDone = r1;
-            if (r1 >= R && m_Setup.m_bEmitterSampling) SampleEmitters(W);
+            if (r1 >= R && m_Setup.m_bEmitterSampling && !m_Setup.m_bEmitterDirectExternal) SampleEmitters(W);     // (lighting shades it: the hits get it below)
             if (r1 >= R) FinishPass(W);
             const float u = Us(Tw, clock::now());
             W.m_UnitUs = std::max(W.m_UnitUs, u);
@@ -5071,8 +5095,6 @@ namespace xlionrender::gi
         {
             for (auto& I : m_Instances)
             {
-                const auto& M = *I.m_pMesh;
-                const std::size_t nFine = M.m_Levels[0].size();
                 if (!I.m_bAlive || I.m_Links.empty())
                 {
                     if (!I.m_EmitB.empty() || !I.m_EmitFine.empty()) { I.m_EmitB.clear(); I.m_EmitFine.clear(); I.m_EmitSum.clear(); ++I.m_EmitGen; }
@@ -5080,6 +5102,8 @@ namespace xlionrender::gi
                     I.m_bEmitDirty = I.m_bEmitRelevel = false;
                     continue;
                 }
+                const auto& M = *I.m_pMesh;                 // (only now: a removed instance's mesh may be gone - read here, it crashed now and then)
+                const std::size_t nFine = M.m_Levels[0].size();
                 const bool bParents = I.m_Level != 0;
                 if (bAll || I.m_bEmitDirty || I.m_EmitFine.size() != nFine)
                 {

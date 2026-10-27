@@ -56,7 +56,8 @@ void main()
     vec3 Sum = vec3(V[0], V[1], V[2]);
     vec3 BA[3] = vec3[3](vec3(V[3], V[4], V[5]), vec3(V[6], V[7], V[8]), vec3(V[9], V[10], V[11]));
     const uint Eb = GD[Rec + 44u] + 9u * u;
-    for (int i = 0; i < 3; ++i) { const vec3 e = GV(Eb + 3u * uint(i)) * (float(R) / (3.0 * gi_pi_v)); Sum += e; BA[i] += e; }
+    if ((GD[11] & 64u) == 0u)       // (setup::m_bEmitterDirectExternal: lighting shades the emitters' direct light - not the links')
+        for (int i = 0; i < 3; ++i) { const vec3 e = GV(Eb + 3u * uint(i)) * (float(R) / (3.0 * gi_pi_v)); Sum += e; BA[i] += e; }
     const vec3  Acc  = Sum * (gi_pi_v / float(R));
     const float Near = clamp(1.0 - (float(floatBitsToInt(V[60])) / float(R) - 0.2) / 0.3, 0.0, 1.0);
     const float All  = clamp(1.0 - (float(floatBitsToInt(V[61])) / float(R) - 0.8) / 0.15, 0.0, 1.0);
