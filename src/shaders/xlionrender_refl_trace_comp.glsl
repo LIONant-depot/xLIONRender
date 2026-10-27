@@ -1,34 +1,33 @@
 #version 450
-// Reflections, milestone A (documentation/reflections_strategy.md sec. 11, 12): the world trace's cost measured before anything is built
-// on it. One reflection ray per texel of the screen tail's thin G-buffer (half size: its octahedral normal, roughness, depth), a GGX
-// visible normal (Heitz 2018), the nearest hit in the GI's BVH (GICast: opaque rigid geometry). Push.m_Mode (instance::m_ReflTraceBench):
-// 1 mirror rays (coherent), 2 roughness 0.5 everywhere (incoherent), 3 the materials' roughness. It writes only its counters per ring
-// slot (rays, hits, the BVH's visits) - the benchmark, and the skeleton of the pass graph's pass 5
+// Reflections (documentation/reflections_strategy.md sec. 2-6, milestone B): one reflection ray per texel of the thin G-buffer (half
+// size: its mapped normal, roughness, depth), a GGX visible normal (Heitz 2018), the nearest hit in the GI's BVH (opaque rigid geometry)
+// and the radiance toward the receiver: D(y) = L_e + albedo / pi (E_direct + E_indirect) fresh at the hit with the GI's own model
+// (xlionrender_gi_pass_common.glsl: Direct - the sun and the lights, a BVH shadow ray each -, Indirect - the surfels' read -, SurfaceAt -
+// the capture's albedo and emission -, Unsupported - its fallback); a miss: the sky (the environment atlas at the receiver's roughness).
+// S(y, -w), the hit's own specular, is not evaluated yet (T0 without its probe term, labelled: metals at a hit are their diffuse capture).
+// Writes U = the lobe-mean radiance (one sample: L itself; w = G2/G1 kept for the reconstruction) into the records' second region
+// (instance::reflection records: uvec4 a half-size texel - x: U.rg, y: U.b and conf, z: the hit distance and w, w: the view depth (half,
+// bits 0-15), the octahedral normal (4 + 4 bits), the hit class (bits 24-27)). Push.m_Mode 1..3: the benchmark only (mirror, roughness
+// 0.5, the materials'; nothing written). Its counters per ring slot: rays, hits, the BVH's visits
 layout(local_size_x = 8, local_size_y = 8) in;
 
+#include "xlionrender_gi_pass_common.glsl"           // (bindings 0-4: the BVH and the GI's data)
 #include "xlionrender_octahedral.glsl"
+#include "xlionrender_environment_atlas.glsl"
 
-struct frame_t    { mat4 C2W; mat4 Reproject; vec4 Params; };      // (xlionrender_tail_denoise_comp.glsl's: C2W to the camera-centred world)
-struct GINode     { vec4 m_B[6]; ivec4 m_Child; };
-struct GITri4     { vec4 m_V0[3]; vec4 m_E1[3]; vec4 m_E2[3]; ivec4 m_Tri; };
-struct GIInstance { vec4 m_W2L[3]; ivec4 m_Info; };
-
-layout(std430, set = 0, binding = 0) readonly buffer frame_b     { frame_t    F[]; };
-layout(std430, set = 0, binding = 1) readonly buffer nodes_b     { GINode     GIBvhNodes[]; };
-layout(std430, set = 0, binding = 2) readonly buffer tri4_b      { GITri4     GIBvhTri4[]; };
-layout(std430, set = 0, binding = 3) readonly buffer instances_b { GIInstance GIBvhInstances[]; };
-layout(std430, set = 0, binding = 4) readonly buffer tlas_b      { int        GIBvhTlasLeaves[]; };
-layout(std430, set = 0, binding = 5)          buffer stats_b     { uint       Stats[]; };     // 4 per ring slot: rays, hits, visits, 0
-layout(set = 1, binding = 0) uniform sampler2D GColor;      // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
+struct frame_t { mat4 C2W; mat4 Reproject; vec4 Params; };          // (xlionrender_tail_denoise_comp.glsl's: C2W to the camera-centred world)
+layout(std430, set = 0, binding = 5) readonly buffer frame_b   { frame_t F[]; };
+layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 4 per ring slot: rays, hits, visits, 0
+layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records[]; };    // the view's records: the tail's W x H, then these
+layout(set = 1, binding = 0) uniform sampler2D GColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 1) uniform sampler2D GDepth;
+layout(set = 1, binding = 2) uniform sampler2D EnvAtlas;   // the sky's prefiltered atlas (xlionrender_environment.glsl EnvSample)
 
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; } Push;
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_Pad0, m_Pad1; } Push;
 
-#include "xlionrender_gi_bvh.glsl"
+const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, nothing traced
 
 shared uint s_Rays, s_Hits, s_Visits;
-
-uint Hash(uint x) { x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16; return x; }
 
 // Heitz 2018: a visible normal of an isotropic GGX (alpha a) for the view Ve (local frame, z the normal)
 vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
@@ -43,6 +42,7 @@ vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
     const vec3  Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
     return normalize(vec3(a * Nh.xy, max(1e-6, Nh.z)));
 }
+float Lambda(float c, float a) { c = max(c, 1e-6); return 0.5 * (sqrt(1.0 + a * a * (1.0 - c * c) / (c * c)) - 1.0); }
 
 void main()
 {
@@ -50,7 +50,10 @@ void main()
     barrier();
     const ivec2 Size = ivec2(F[Push.m_Slot].Params.xy);
     const ivec2 p    = ivec2(gl_GlobalInvocationID.xy);
-    const float z    = p.x < Size.x && p.y < Size.y ? texelFetch(GDepth, p, 0).r : 1.0;
+    const bool  bIn  = p.x < Size.x && p.y < Size.y;
+    const uint  i    = uint(Size.x * Size.y) + uint(p.y * Size.x + p.x);
+    const float z    = bIn ? texelFetch(GDepth, p, 0).r : 1.0;
+    uvec4 Rec = uvec4(0u);
     if (z < 1.0)
     {
         g_GIBvhTlasRoot   = Push.m_TlasRoot;
@@ -61,24 +64,65 @@ void main()
         const vec4  G   = texelFetch(GColor, p, 0);
         const vec3  N   = OctDecode(G.xy * 2.0 - 1.0);
         const float Rough = Push.m_Mode == 1u ? 0.0 : Push.m_Mode == 2u ? 0.5 : G.z;
-        const vec3  V   = normalize(-P);
-        const vec3  T   = normalize(abs(N.z) < 0.999 ? cross(vec3(0.0, 0.0, 1.0), N) : cross(vec3(1.0, 0.0, 0.0), N));
-        const vec3  B   = cross(N, T);
-        const vec3  Ve  = vec3(dot(V, T), dot(V, B), max(dot(V, N), 1e-4));
-        const uint  h   = Hash(uint(p.x) * 73856093u ^ uint(p.y) * 19349663u ^ Push.m_Frame * 83492791u);
-        const vec2  u   = vec2(float(h & 0xFFFFu), float(h >> 16)) / 65536.0;
-        const float a   = max(Rough, 0.045) * max(Rough, 0.045);
-        const vec3  H   = Push.m_Mode == 1u ? vec3(0.0, 0.0, 1.0) : SampleVNDF(Ve, a, u);
-        const vec3  Lt  = reflect(-Ve, H);
-        if (Lt.z > 0.0)
+        const vec2  OctN = OctEncode(N) * 0.5 + 0.5;
+        Rec.w = packHalf2x16(vec2(Pc.w > 0.0 ? 1.0 / Pc.w : 0.0, 0.0)) | (uint(OctN.x * 15.0 + 0.5) << 16) | (uint(OctN.y * 15.0 + 0.5) << 20);    // (the view depth: clip w, as the tail's)
+        if (Push.m_Mode != 0u || Rough < Push.m_MaxRough)
         {
-            const vec3 L = normalize(Lt.x * T + Lt.y * B + Lt.z * N);
-            const gi_hit Hit = GICast(P + Push.m_Eye + N * (0.002 * length(P) + 0.001), L, 1e30);
-            atomicAdd(s_Rays, 1u);
-            if (Hit.m_Inst >= 0) atomicAdd(s_Hits, 1u);
-            atomicAdd(s_Visits, uint(g_GIBvhVisits));
+            const vec3  V   = normalize(-P);
+            const vec3  T   = normalize(abs(N.z) < 0.999 ? cross(vec3(0.0, 0.0, 1.0), N) : cross(vec3(1.0, 0.0, 0.0), N));
+            const vec3  B   = cross(N, T);
+            const vec3  Ve  = vec3(dot(V, T), dot(V, B), max(dot(V, N), 1e-4));
+            const uint  h   = Hash32(uint(p.x) * 73856093u ^ uint(p.y) * 19349663u ^ Push.m_Frame * 83492791u);
+            const vec2  u   = vec2(float(h & 0xFFFFu), float(h >> 16)) / 65536.0;
+            const float a   = max(Rough, 0.045) * max(Rough, 0.045);
+            const vec3  H   = Push.m_Mode == 1u ? vec3(0.0, 0.0, 1.0) : SampleVNDF(Ve, a, u);
+            const vec3  Lt  = reflect(-Ve, H);
+            if (Lt.z > 0.0)
+            {
+                const vec3  L = normalize(Lt.x * T + Lt.y * B + Lt.z * N);
+                const float w = (1.0 + Lambda(Ve.z, a)) / (1.0 + Lambda(Ve.z, a) + Lambda(Lt.z, a));     // G2 / G1
+                const vec3  O = P + Push.m_Eye + N * (0.002 * length(P) + 0.001);
+                g_GIBvhSeeThrough = true;                   // (the GI's rays: see-through triangles let them pass)
+                const gi_hit Hit = GICast(O, L, 1e30);
+                atomicAdd(s_Rays, 1u);
+                atomicAdd(s_Visits, uint(g_GIBvhVisits));
+                if (Push.m_Mode == 0u)
+                {
+                    vec3 Lr; uint Class; float Dist = 0.0;
+                    if (Hit.m_Inst >= 0)
+                    {
+                        atomicAdd(s_Hits, 1u);
+                        const uint  R = InstRec(Hit.m_Inst), M = MeshOf(R);
+                        const uvec3 Tr = MTri(M, Hit.m_Tri);
+                        const float b0 = 1.0 - Hit.m_U - Hit.m_V;
+                        const vec3  Py = ToWorld(R, MPos(M, Tr.x) * b0 + MPos(M, Tr.y) * Hit.m_U + MPos(M, Tr.z) * Hit.m_V);
+                        vec3 Ny = NormalToWorld(R, MNrm(M, Tr.x) * b0 + MNrm(M, Tr.y) * Hit.m_U + MNrm(M, Tr.z) * Hit.m_V);
+                        if (dot(Ny, L) > 0.0) Ny = -Ny;
+                        vec3 Albedo, Emission;
+                        SurfaceAt(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Albedo, Emission);
+                        vec3 Ei;
+                        if (!Indirect(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Ei)) Ei = Unsupported(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V);
+                        vec3 Ed = Direct(Py, Ny);
+                        if (EmitterDirectExternal()) Ed += EmitterIrradianceAt(Py, Ny, h);
+                        Lr = Emission / max(GF(5u), 1e-6) + Albedo * (1.0 / gi_pi_v) * (Ed + Ei);     // (the emission as the surface shows it: SurfaceAt's carries the GI's emissive scale)
+                        Class = refl_hit_v; Dist = Hit.m_T;
+                    }
+                    else
+                    {
+                        Lr = AtlasSample(EnvAtlas, vec2(0.0), kEnvAtlas, L, Rough) * Push.m_EnvIntensity;
+                        Class = refl_miss_v;
+                    }
+                    const float Conf = 1.0 - smoothstep(0.5 * Push.m_MaxRough, Push.m_MaxRough, Rough);     // (B: sharp receivers; glossy ones fade to the probes until the reconstruction)
+                    Rec.x = packHalf2x16(Lr.rg);
+                    Rec.y = packHalf2x16(vec2(Lr.b, Conf));
+                    Rec.z = packHalf2x16(vec2(Dist, w));
+                    Rec.w |= Class << 24;
+                }
+                else if (Hit.m_Inst >= 0) atomicAdd(s_Hits, 1u);
+            }
         }
     }
+    if (bIn && Push.m_Mode == 0u) Records[i] = Rec;
     barrier();
     if (gl_LocalInvocationIndex == 0u)
     {

@@ -228,6 +228,10 @@ namespace xlionrender
         gi_settings                 m_GI;
         std::vector<reflection_probe> m_Probes;           // any number: the nearest 32 (instance::probe_slots_v) are resident
         bool                        m_bDebugReflection = false;  // debug: every lit pixel shows only its environment / probe / reflection specular (R^ of documentation/reflections_strategy.md sec. 5)
+        // Reflections (documentation/reflections_strategy.md, milestone B): the main view traces a ray a thin G-buffer texel through the GI's
+        // BVH, lights its hit with the GI's model, and the opaque materials take it as their environment specular. Receivers rougher than
+        // this keep the probes (B: the sharp ones; from half of it they fade to the probes). 0: off. Needs the GI (its BVH and data)
+        float                       m_ReflectionMaxRoughness = 0.0f;
     };
 }
 

@@ -26,17 +26,6 @@ vec3 g_EnvSpecular = vec3(0.0);
 
 const vec2 kProbeAtlas = vec2(3072.0, 1024.0);          // 8 x 4 slots of the sky atlas' layout (384 x 256) - instance::probe_slots_v
 
-vec3 AtlasSample(in const sampler2D Atlas, in const vec2 Origin, in const vec2 AtlasSize, in const vec3 Dir, in const float PerceptualRoughness)
-{
-    const float L  = clamp(PerceptualRoughness, 0.0, 1.0) * float(kEnvLevels - 1);
-    const int   L0 = int(floor(L));
-    const int   L1 = min(L0 + 1, kEnvLevels - 1);
-    const vec2  S  = kEnvAtlas / AtlasSize;                  // a level's uv in the sky layout -> the atlas' uv
-    const vec3  A  = textureLod(Atlas, Origin / AtlasSize + EnvLevelUV(L0, Dir) * S, 0.0).rgb;
-    const vec3  B  = textureLod(Atlas, Origin / AtlasSize + EnvLevelUV(L1, Dir) * S, 0.0).rgb;
-    return mix(A, B, L - float(L0));
-}
-
 vec3 EnvSample(in const vec3 Dir, in const float PerceptualRoughness)
 {
     return AtlasSample(SamplerEnvironment, vec2(0.0), kEnvAtlas, Dir, PerceptualRoughness);
@@ -72,6 +61,39 @@ void ProbeAdd(in const int Record, in const vec3 P, in const vec3 N, in const ve
     Diff    += w * AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, g_GIRefl.w > 0.5 ? ProbeBoxProject(Pr, P, R) : N, 1.0);
     Covered += w;
 }
+
+#ifndef XLION_TAIL_SCREEN
+// The traced reflections (documentation/reflections_strategy.md sec. 5; xlionrender_refl_trace_comp.glsl): the records' second region,
+// a half-size texel each (U: the lobe-mean radiance, its confidence, the view depth, the octahedral normal). The 4 texels around the
+// pixel, bilinear, each weighed by how close its view depth is to this pixel's and how much its normal agrees (the tail's weights,
+// LocalTailScreen) and by its confidence: rgb U, a the confidence here (0: none of the 4 is this surface - the probes stay)
+vec4 ReflScreen(in const vec3 N)
+{
+    const int  W = int(UBOLight.TailParams.y), H = int(UBOLight.TailParams.z);
+    const uint R0 = uint(UBOLight.TailParams.w) + uint(W * H);
+    if (W <= 0 || R0 + uint(W * H) > uint(TailScreen.length())) return vec4(0.0);
+    const vec2  hp = gl_FragCoord.xy * 0.5 - 0.5;
+    const vec2  i0 = floor(hp), f = hp - i0;
+    const float Dist = 1.0 / gl_FragCoord.w;
+    vec3  Su = vec3(0.0);
+    float Sc = 0.0, Sw = 0.0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1, H - 1));
+        const uvec4 Q = TailScreen[R0 + uint(P.y * W + P.x)];
+        const float d = unpackHalf2x16(Q.w & 0xFFFFu).x;
+        if (d <= 0.0) continue;
+        const vec3  n  = OctDecode(vec2(float((Q.w >> 16) & 15u), float((Q.w >> 20) & 15u)) / 15.0 * 2.0 - 1.0);
+        const float wd = max(0.0, 1.0 - abs(d - Dist) / max(0.05 * Dist, 1e-3)), wn = pow(max(dot(n, N), 0.0), 8.0);
+        const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
+        const float w  = wb * wd * wd * wn;
+        const float c  = unpackHalf2x16(Q.y).y;
+        Su += w * c * vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
+        Sc += w * c; Sw += w;
+    }
+    return Sw > 1e-4 && Sc > 1e-4 ? vec4(Su / Sc, Sc / Sw) : vec4(0.0);
+}
+#endif
 
 vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic, in const float AO)
 {
@@ -137,6 +159,9 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         Spec *= SkyLum > 1e-4 ? clamp(GILum / SkyLum, 0.0, 1.0) : 1.0;
         Diff  = GIDiff;
     }
+#ifndef XLION_TAIL_SCREEN
+    if (UBOLight.EnvParams.w > 0.0) { const vec4 U = ReflScreen(N); Spec = mix(Spec, U.rgb, U.a); }      // the traced reflections replace the probes where they cover
+#endif
     const vec2 DFG = textureLod(SamplerEnvDFG, vec2(NdotV, PerceptualRoughness), 0.0).rg;
     g_EnvSpecular = Spec * (F0 * DFG.x + DFG.y) * AO;
     return (Diff * Albedo * (1.0 - Metallic) + Spec * (F0 * DFG.x + DFG.y)) * AO;     // (the lit sum as before, bitwise)

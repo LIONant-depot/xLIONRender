@@ -618,7 +618,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 6, .m_nTextures = 2, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 8, .m_nTextures = 3, .m_PushConstantsSize = 48 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 4 * ring_frames_v, .m_pData = Zeros.data() }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflTimes, { .m_Count = 2 }); Err ) return Err;
             if( const char* p = std::getenv("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } if( m_ReflTraceBench > 0 ) m_LightMode = light_mode::SCREEN; }     // (its rays start from the thin G-buffer: the screen tail's)
@@ -1571,9 +1571,10 @@ namespace xlionrender
             auto Bindings = LitBindings(Textures);
             if( auto Err = m_Device.Create(View.m_TailInstance, { .m_PipeLine = m_TailPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
         }
-        const std::vector<std::array<std::uint32_t, 4>> Zeros(std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
+        // the records (binding 14): the tail's W x H, then the reflections' W x H (xlionrender_refl_trace_comp.glsl); the denoiser's temporal
+        const std::vector<std::array<std::uint32_t, 4>> Zeros(2 * std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
         for( auto* pB : { &View.m_TailResult, &View.m_TailTemporal } )
-            if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = W * H, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()) }); Err ) return Err;
+            if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = (pB == &View.m_TailResult ? 2 : 1) * W * H, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()) }); Err ) return Err;
         View.m_TailWidth = W; View.m_TailHeight = H;
         View.m_bTailPrev = false;
         return nullptr;

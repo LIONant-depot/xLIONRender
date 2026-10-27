@@ -1794,13 +1794,14 @@ namespace xlionrender
     void instance::renderTail( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept
     {
         if( createTailTargets(View) ) { Light.m_LocalCount.m_Y = float(int(light_mode::CELLS)); return; }      // (no targets: the split lists exactly)
+        const bool bLights = m_LightModeUsed == light_mode::SCREEN;      // (else only the G-buffer, for the reflections)
         const int W = View.m_TailWidth, H = View.m_TailHeight;
         if( std::vector<std::uint64_t> Ns; m_TailTimes.getResults(Ns) && Ns.size() >= 5 && Ns[1] >= Ns[0] && Ns[2] >= Ns[1] && Ns[4] >= Ns[2] && Ns[3] >= Ns[4] && Ns[0] != ~0ull )
         {
             m_TailReport.m_GBufferMs = double(Ns[1] - Ns[0]) * 1e-6; m_TailReport.m_TailMs = double(Ns[2] - Ns[1]) * 1e-6; m_TailReport.m_DenoiseMs = double(Ns[3] - Ns[2]) * 1e-6;
             m_TailReport.m_TemporalMs = double(Ns[4] - Ns[2]) * 1e-6;
         }
-        m_TailReport.m_bOn = true; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
+        m_TailReport.m_bOn = bLights; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
         m_TailReport.m_MemoryMB = double(W) * double(H) * (4 + 8 + 4 + 4 + 4 + 2 * 16) / (1024.0 * 1024.0);     // (G-buffer, motion, depth, the tail's two, the denoiser's two)
 
         // A camera cut (a jump past 2 m, or the view turned past 45 degrees): no history (the GI screen pass's rule)
@@ -1821,7 +1822,7 @@ namespace xlionrender
         // off the buffers and loses the device); without it the GI dummy is bound and the screen trace alone shadows those lights
         const auto Bvh = m_pGITrace && m_bTailTraceBvh ? m_pGITrace->getBvh() : gi::gpu_trace::bvh_view{ nullptr, nullptr, nullptr, nullptr, 0, 0, true };
         Light.m_TailBvh    = { Bvh.m_bEmpty ? 0.0f : 1.0f, std::bit_cast<float>(Bvh.m_TlasRoot), std::bit_cast<float>(Bvh.m_PrimOffset), 0.0f };
-        Light.m_LocalCount.m_Y = float(int(light_mode::SCREEN));
+        if( bLights ) Light.m_LocalCount.m_Y = float(int(light_mode::SCREEN));
 
         Window.WriteTimestamp(m_TailTimes, 0);
         {
@@ -1895,6 +1896,8 @@ namespace xlionrender
             m_TailReport.m_nGBufferDraws = nDraws; m_TailReport.m_nNoVariant = nNoVariant;
         }
         Window.WriteTimestamp(m_TailTimes, 1);
+        if( bLights )
+        {
         {
             auto Cmd = Window.StartRenderPass(View.m_TailPass);
             const auto B = [&](const xgpu::buffer* p) { return Bvh.m_bEmpty ? &m_GIDummy : const_cast<xgpu::buffer*>(p); };
@@ -1928,11 +1931,26 @@ namespace xlionrender
             }
         }
         Window.WriteTimestamp(m_TailTimes, 3);
-        // Reflections milestone A: the world trace's benchmark (shaders/xlionrender_refl_trace_comp.glsl) - its counters of this ring slot
-        // (written ring_frames_v frames ago, done) into the report, cleared, then this frame's rays
-        if( m_ReflTraceBench > 0 && !Bvh.m_bEmpty )
+        }
+        // Reflections (shaders/xlionrender_refl_trace_comp.glsl; documentation/reflections_strategy.md milestone B): a ray a G-buffer texel
+        // through the GI's BVH, its hit lit with the GI's model, into the records' second region - the materials' EnvLighting reads it
+        // (UBOLight.EnvParams.w: the roughness up to which, 0 none this frame). Its counters of this ring slot (written ring_frames_v frames
+        // ago, done) into the report, cleared. m_ReflTraceBench > 0: the benchmark's rays only (mirror, roughness 0.5, the materials')
+        const auto BvhR = m_pGITrace ? m_pGITrace->getBvh() : gi::gpu_trace::bvh_view{ nullptr, nullptr, nullptr, nullptr, 0, 0, true };
+        Light.m_EnvParams.m_W = 0.0f;
+        if( (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData )
         {
             const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+            if( !bLights )      // (the denoiser writes this slot's frame when it runs)
+            {
+                const xmath::fvec4 Params{ float(W), float(H), 0.0f, float(View.m_TailFrame & 1023u) };
+                const xmath::fmat4 Identity = xmath::fmat4::fromIdentity();
+                (void)m_TailFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
+                {
+                    auto* pB = static_cast<std::byte*>(p);
+                    std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &Identity, 64); std::memcpy(pB + 128, &Params, 16);
+                });
+            }
             std::uint32_t Got[4] = {};
             (void)m_ReflStats.MemoryMap(Slot * 4, 4, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
@@ -1942,7 +1960,8 @@ namespace xlionrender
                 {
                     const double n = m_ReflSumN;
                     m_ReflReport = { m_ReflTraceBench, m_ReflSum[0] / n, m_ReflSum[1] / n, m_ReflSum[2] / std::max(m_ReflSum[1], 1.0), m_ReflSum[3] / std::max(m_ReflSum[1], 1.0), m_ReflSumN };
-                    std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
+                    static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
                         , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay);
                     std::fflush(stdout);
                     m_ReflSumN = 0; for( auto& v : m_ReflSum ) v = 0;
@@ -1950,13 +1969,16 @@ namespace xlionrender
                 }
             }
             const xmath::fvec3 E = Eye;
-            const struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; } Push
-                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), Bvh.m_TlasRoot, Bvh.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame };
-            auto Buffers  = std::array<xgpu::buffer*, 6>{ &m_TailFrames, const_cast<xgpu::buffer*>(Bvh.m_pNodes), const_cast<xgpu::buffer*>(Bvh.m_pTri4), const_cast<xgpu::buffer*>(Bvh.m_pInstances), const_cast<xgpu::buffer*>(Bvh.m_pTlas), &m_ReflStats };
-            auto Textures = std::array<const xgpu::texture*, 2>{ &View.m_TailGColor, &View.m_TailGDepth };
+            const float MaxRough = m_ReflTraceBench > 0 ? 0.0f : Scene.m_ReflectionMaxRoughness;
+            const struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_Pad0, m_Pad1; } Push
+                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, 0, 0 };
+            const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
+            auto Buffers  = std::array<xgpu::buffer*, 8>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult };
+            auto Textures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas };
             Window.WriteTimestamp(m_ReflTimes, 0);
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
             Window.WriteTimestamp(m_ReflTimes, 1);
+            Light.m_EnvParams.m_W = MaxRough;
         }
         View.m_TailPrevC2W = C2W; View.m_TailPrevW2C = W2C; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
         m_pTailRecords = &View.m_TailResult;
@@ -2371,7 +2393,7 @@ namespace xlionrender
             };
 
             // The screen tail (light_mode::SCREEN): the thin G-buffer, the tail pass and the denoiser, before the scene pass reads them
-            if( bMain && pLight && m_LightModeUsed == light_mode::SCREEN ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);
+            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
             else if( bMain ) m_TailReport.m_bOn = false;
 
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)

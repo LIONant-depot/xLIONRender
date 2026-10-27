@@ -439,6 +439,90 @@ int main()
         DumpRGB("refl_lab_probe", WithProbe, size_v, size_v);
     }
 
+    //--------------------------------------------------------------------------------------------------------------------------------
+    // Milestone B: the lab again, its meshes with GI (rigid cluster meshes with surfels: the GI's BVH and data), the traced reflections on
+    // (scene::m_ReflectionMaxRoughness). R^ against the same independent reference, per receiver - today's numbers and the traced ones
+    {
+        Camera.LookAt(v3{ 0.6f, 1.6f, -4.2f }, v3{ 0.2f, 0.5f, 1.0f });
+        struct gi_object { xprim_geom::mesh m_Prim; v3 m_At; float m_Scale; xlionrender::material m_Mat; };
+        auto Sized = [](float X, float Y, float Z, int n) { return xprim_geom::cube::Generate(n, n, n, n, xprim_geom::float3{ X, Y, Z }); };
+        enum : int { floor_v, back_v, left_v, sign_v, chrome_v, gold_v };
+        std::vector<gi_object> Lab =
+        { { Sized(10, 1, 10, 20),  { 0, -0.5f, 0 },      1,    { .m_BaseColor = { 0.45f, 0.45f, 0.45f }, .m_Roughness = 0.10f } }
+        , { Sized(8, 3, 0.4f, 16), { 0, 1.5f, 3.5f },    1,    { .m_BaseColor = { 0.75f, 0.12f, 0.10f }, .m_Roughness = 0.8f } }
+        , { Sized(0.4f, 3, 7, 16), { -2.8f, 1.5f, 0 },   1,    { .m_BaseColor = { 0.10f, 0.60f, 0.15f }, .m_Roughness = 0.8f } }
+        , { Sized(1.4f, 0.5f, 0.1f, 4), { 0.9f, 1.9f, 3.25f }, 1, { .m_BaseColor = { 0.05f, 0.05f, 0.05f }, .m_Roughness = 0.6f, .m_Emissive = { 6, 4, 1.5f } } }
+        , { SpherePrim,            { -0.4f, 0.6f, 0.4f }, 1.2f, { .m_BaseColor = { 0.95f, 0.93f, 0.88f }, .m_Metallic = 1, .m_Roughness = 0.05f } }
+        , { SpherePrim,            { 1.3f, 0.5f, 0.9f },  1,    { .m_BaseColor = { 1.00f, 0.78f, 0.34f }, .m_Metallic = 1, .m_Roughness = 0.35f } } };
+        std::vector<cluster_buffers> Buffers(Lab.size());
+        std::vector<xlionrender::gi::surfel_mesh> Rays(Lab.size());
+        std::vector<object> Objects;
+        xlionrender::scene Scene;
+        for (std::size_t k = 0; k < Lab.size(); ++k)
+        {
+            xlionrender::mesh_id Id;
+            CHECK(MakeStaticBuffers(Device, Lab[k].m_Prim, 5.0f, Buffers[k]) && !Renderer.CreateClusterGeom(Id, Buffers[k].Geom()) && !Renderer.SetMeshGI(Id, MakeSurfels(Lab[k].m_Prim, 0.15f, 0.45f)), "the lab's GI mesh %zu", k);
+            Rays[k] = RayMesh(Lab[k].m_Prim);
+            const auto L2W = xmath::fmat4::fromTranslation({ Lab[k].m_At.m_X, Lab[k].m_At.m_Y, Lab[k].m_At.m_Z }) * xmath::fmat4::fromScale({ Lab[k].m_Scale, Lab[k].m_Scale, Lab[k].m_Scale });
+            Objects.push_back({ &Rays[k], Id, L2W, Lab[k].m_Mat });
+            Scene.m_Draws.push_back({ .m_Mesh = Id, .m_L2W = L2W, .m_Material = Lab[k].m_Mat, .m_Instance = 100 + k });
+        }
+        Scene.m_Sun   = { .m_Direction = { 0.35f, -1, 0.45f }, .m_Intensity = 2.5f };
+        Scene.m_Sky.m_Intensity = 1;
+        Scene.m_LocalLights = { { .m_Position = { -1.2f, 1.4f, -0.8f }, .m_Radius = 4, .m_Color = { 1, 0.9f, 0.75f }, .m_Intensity = 3 } };
+        Scene.m_GI = { .m_bEnable = true, .m_EmissiveScale = 1 };       // (the reference's emission lights as it shows: the GI's default lights it 100 times brighter)
+        Scene.m_bDebugReflection = true;
+        Scene.m_Probes.clear();
+
+        xlionrender::gi::world World;
+        MakeWorld(Objects, World);
+        const reference Reference{ World, Objects, Scene };
+        rgb_image Today, Traced;
+        App.m_bQuietTimes = true;
+        for (int f = 0; f < 240; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "settle the GI");
+        CHECK(ReadRGB(Device, View, Today), "read today (GI on, no traced reflections)");
+        Scene.m_ReflectionMaxRoughness = 0.3f;
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "render the traced reflections");
+        CHECK(ReadRGB(Device, View, Traced), "read the traced reflections");
+
+        rgb_image Ref(Today.size(), 0.0f);
+        mask MFloor(size_v * size_v, 0), MChrome = MFloor, MGold = MFloor;
+        for (int y = 0; y < size_v; ++y) for (int x = 0; x < size_v; ++x)
+        {
+            const std::size_t i = std::size_t(y) * size_v + x;
+            const v3 D = Ray(x, y, SX, SY);
+            const auto H = World.Cast(Camera.getPosition(), D);
+            if (H.m_Inst < 0) continue;
+            const v3 N = World.HitNormal(H).NormalizeCopy();
+            if (N.Dot(D) > -0.2f) continue;
+            const int Id = H.m_Inst;
+            if (Id != floor_v && Id != chrome_v && Id != gold_v) continue;
+            (Id == floor_v ? MFloor : Id == chrome_v ? MChrome : MGold)[i] = 1;
+            sample_rng Rng(std::uint32_t(i * 7919 + 1));
+            const v3 R = Reference.Reflected(World.HitPosition(H), N, D * -1.0f, Objects[std::size_t(Id)].m_Mat, 64, Rng);
+            Ref[i * 3] = R.m_X; Ref[i * 3 + 1] = R.m_Y; Ref[i * 3 + 2] = R.m_Z;
+        }
+        double MeanRef = 0, n = 0;
+        for (std::size_t i = 0; i < MFloor.size(); ++i) if (MFloor[i] || MChrome[i] || MGold[i]) { MeanRef += Lum(&Ref[i * 3]); ++n; }
+        const double Floor = 1e-3 * MeanRef / std::max(n, 1.0);
+        std::printf("milestone B, the lab with GI (R^ against the reference; RMAE | dark-leak):\n  %-10s %-24s %-24s\n", "receiver", "today (probes / sky)", "traced (sharp: r < 0.3)");
+        const std::pair<const char*, const mask*> Rows[] = { { "floor", &MFloor }, { "chrome", &MChrome }, { "rough gold", &MGold } };
+        double ChromeTraced = 0, ChromeToday = 0, FloorTraced = 0, FloorToday = 0;
+        for (const auto& [pName, pM] : Rows)
+        {
+            const double Et = RMAE(Today, Ref, *pM, Floor), Er = RMAE(Traced, Ref, *pM, Floor);
+            std::printf("  %-10s RMAE %6.3f | leak %6.3f   RMAE %6.3f | leak %6.3f\n", pName, Et, DarkLeak(Today, Ref, *pM, Floor), Er, DarkLeak(Traced, Ref, *pM, Floor));
+            if (pM == &MChrome) { ChromeTraced = Er; ChromeToday = Et; }
+            if (pM == &MFloor) { FloorTraced = Er; FloorToday = Et; }
+        }
+        DumpRGB("refl_b_ref", Ref, size_v, size_v);
+        DumpRGB("refl_b_today", Today, size_v, size_v);
+        DumpRGB("refl_b_traced", Traced, size_v, size_v);
+        CHECK(FloorTraced < 0.7 * FloorToday, "the traced reflections do not improve the floor (%.3f against today's %.3f)", FloorTraced, FloorToday);
+        CHECK(ChromeTraced < 0.5 * ChromeToday, "the traced reflections do not improve the chrome sphere (%.3f against today's %.3f)", ChromeTraced, ChromeToday);
+        Scene.m_ReflectionMaxRoughness = 0;
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");

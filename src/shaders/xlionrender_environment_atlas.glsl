@@ -26,3 +26,15 @@ vec2 EnvLevelUV(in const int Level, in const vec3 Dir)
     const float Inner = R.z - 2.0 * kEnvBorder;
     return (R.xy + kEnvBorder + (OctEncode(Dir) * 0.5 + 0.5) * Inner) / kEnvAtlas;
 }
+
+// A direction's prefiltered radiance at a roughness: the two levels around it, blended (the sky's atlas, a probe's slot)
+vec3 AtlasSample(in const sampler2D Atlas, in const vec2 Origin, in const vec2 AtlasSize, in const vec3 Dir, in const float PerceptualRoughness)
+{
+    const float L  = clamp(PerceptualRoughness, 0.0, 1.0) * float(kEnvLevels - 1);
+    const int   L0 = int(floor(L));
+    const int   L1 = min(L0 + 1, kEnvLevels - 1);
+    const vec2  S  = kEnvAtlas / AtlasSize;                  // a level's uv in the sky layout -> the atlas' uv
+    const vec3  A  = textureLod(Atlas, Origin / AtlasSize + EnvLevelUV(L0, Dir) * S, 0.0).rgb;
+    const vec3  B  = textureLod(Atlas, Origin / AtlasSize + EnvLevelUV(L1, Dir) * S, 0.0).rgb;
+    return mix(A, B, L - float(L0));
+}
