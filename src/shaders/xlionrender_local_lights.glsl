@@ -173,6 +173,7 @@ float LocalRandom() { return LocalRandom(0u); }
 vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
 {
     vec3 Sum = vec3(0.0);
+    if (UBOLight.LocalCount.x < 0.5) return Sum;                       // (no lights: no cells either)
     const int Mode = int(UBOLight.LocalCount.y);
     const int Cell = Mode == 0 ? -1 : LocalLightCell(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
     if (Cell < 0)
@@ -183,15 +184,9 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     }
 
     const uint Base      = uint(UBOLight.LocalBase.y);
-    const uint Header    = LightCells[Base + uint(Cell)];               // bits 0-19 first entry, 20-27 count, 28-31 head count
-    const uint EntryBase = Base + uint(kCellLevels * kLevelCells);
-    const uint First     = Header & 0xFFFFFu, Count = (Header >> 20) & 0xFFu, Head = Header >> 28;
-    if (Count == 255u)                                                  // the cell's list did not fit: every light (exact)
-    {
-        const int nLights = int(UBOLight.LocalCount.x);
-        for (int i = 0; i < nLights; ++i) Sum += LocalLight(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
-        return Sum;
-    }
+    const uint Header    = LightCells[Base + 2u * uint(Cell) + 1u];      // the header: the first entry; the count (bits 0-23), the head count (24-31)
+    const uint EntryBase = Base + uint(2 * kCellLevels * kLevelCells);
+    const uint First     = LightCells[Base + 2u * uint(Cell)], Count = Header & 0xFFFFFFu, Head = Header >> 24;
     const uint nExact    = Mode == 1 ? Count : Head;
     for (uint k = 0u; k < nExact; ++k) Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + k)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
 

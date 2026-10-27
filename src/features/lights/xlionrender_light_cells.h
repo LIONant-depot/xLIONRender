@@ -9,10 +9,10 @@
 // head_v most important lights, kept in light order) is shaded exactly, the tail by one light J drawn with its probability
 // p(J): L = sum(head) + f(J) / p(J). Every tail light keeps p > 0 (a floor), head and tail never share a light.
 //
-// Layout (uints, shaders/xlionrender_local_lights.glsl reads the same): per cell (level-major, then slot) one packed header
-// uint - bits 0-19 the first entry, 20-27 the count, 28-31 the head count; a count of overflow_v (255) means "more than fits":
-// the shader shades that cell with every light (exact, never a dropped light) - then the entries { light index,
-// floatBitsToUint(tail cumulative probability) }.
+// Layout (uints, shaders/xlionrender_local_lights.glsl reads the same): per cell (level-major, then slot) a header of 2 uints - the
+// first entry, then the count (bits 0-23) and the head count (24-31) - then the entries { light index, floatBitsToUint(tail cumulative
+// probability) }. (A header was 1 uint: a count of 255 or more, or entries past 20 bits, made the cell "overflow" - shaded with every
+// light of the scene: 4096 lights a pixel at the dense rig's 4096.)
 // ponytail: rebuilt from scratch every render on the CPU (the lab measures that cost); dirty cells, the visibility term and
 // a compute builder come after the lab says the cells earn their place.
 
@@ -33,10 +33,9 @@ namespace xlionrender
         static constexpr int levels_v = 5;                                      // level 4: 32 unit cells, a 512 unit window (aerial views stay inside)
         static constexpr int cells_v  = 16;                                     // per level and axis
         static constexpr int level_cells_v = cells_v * cells_v * cells_v;
-        static constexpr int header_uints_v = 1;
-        static constexpr std::uint32_t overflow_v  = 255;                       // a packed count: the cell's list does not fit
+        static constexpr int header_uints_v = 2;
         static constexpr std::uint32_t max_head_v  = 15;
-        static constexpr std::uint32_t max_entry_v = (1u << 20) - 1;
+        static constexpr std::uint32_t max_count_v = (1u << 24) - 1;
         static constexpr std::uint32_t entry_base_v = levels_v * level_cells_v * header_uints_v;     // the entries' first uint
 
         struct light
@@ -117,12 +116,12 @@ namespace xlionrender
 
             if (HeadCount > 0) for (int c = 0; c < nCells; ++c) SplitCell(c, std::min<int>(HeadCount, max_head_v), Importance);
 
-            // The packed headers (a list too long for the count, or entries past 20 bits: the cell is shaded exactly)
+            // The headers: the first entry; the count and the head count
             for (int c = 0; c < nCells; ++c)
             {
-                const bool          bOver = m_Count[c] >= overflow_v || m_First[c] + m_Count[c] > max_entry_v;
-                const std::uint32_t n     = bOver ? overflow_v : m_Count[c];
-                m_Data[c] = (bOver ? 0 : m_First[c]) | (n << 20) | (std::min(m_Head[c], max_head_v) << 28);
+                assert(m_Count[c] <= max_count_v);
+                m_Data[2 * c]     = m_First[c];
+                m_Data[2 * c + 1] = std::min(m_Count[c], max_count_v) | (std::min(m_Head[c], max_head_v) << 24);
             }
         }
 

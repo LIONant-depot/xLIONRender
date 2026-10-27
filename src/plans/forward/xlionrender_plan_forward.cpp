@@ -685,7 +685,7 @@ namespace xlionrender
     int instance::vsmTableBase( void ) noexcept
     {
         const std::uint64_t Frame = m_Device.getFrameIndex();
-        if( Frame != m_LightFrame ) { m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0; }
+        beginCellFrame(Frame);
         if( m_VSMTableFrame == Frame ) return m_VSMTableBase;
         m_VSM.BuildTable(m_VSMTable);
         {   // the previous epoch's table right after it (the same size): the shading reads it where this epoch has no page yet; then the movers'
@@ -696,7 +696,7 @@ namespace xlionrender
             m_VSMTable.insert(m_VSMTable.end(), More.begin(), More.end());
         }
         const int n = int(m_VSMTable.size());
-        m_VSMTableBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
+        m_VSMTableBase = int(Frame % ring_frames_v) * m_CellStride + m_CellRingUsed;
         (void)m_CellRing.MemoryMapFrameRegion(m_VSMTableBase, n, [&](void* p) { std::memcpy(p, m_VSMTable.data(), std::size_t(n) * sizeof(std::uint32_t)); });   // (this frame's slot: no wait for the frame in flight)
         m_CellRingUsed += n;
         m_VSMTableFrame = Frame;
@@ -707,12 +707,12 @@ namespace xlionrender
     int instance::localTableBase( void ) noexcept
     {
         const std::uint64_t Frame = m_Device.getFrameIndex();
-        if( Frame != m_LightFrame ) { m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0; }
+        beginCellFrame(Frame);
         if( m_LocalTableFrame == Frame ) return m_LocalTableBase;
         m_LocalPages.BuildTable(m_LocalTable);
         const int n = std::max(int(m_LocalTable.size()), 1);
         m_LocalTable.resize(std::size_t(n), 0u);
-        m_LocalTableBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
+        m_LocalTableBase = int(Frame % ring_frames_v) * m_CellStride + m_CellRingUsed;
         (void)m_CellRing.MemoryMapFrameRegion(m_LocalTableBase, n, [&](void* p) { std::memcpy(p, m_LocalTable.data(), std::size_t(n) * sizeof(std::uint32_t)); });
         m_CellRingUsed += n;
         m_LocalTableFrame = Frame;
@@ -793,10 +793,25 @@ namespace xlionrender
     // The local lights and the captured reflection probes for this render: into this frame's region of the light buffer, and in
     // modes CELLS / SAMPLED their world cells into the cell buffer (features/lights/xlionrender_light_cells.h). Fills the lighting
     // block's local and probe parts.
+    // A frame's first write into the light and cell rings: their use starts again; the cell ring first grows to the largest need seen
+    // (a frame whose cells did not fit rendered EXACT and recorded it: m_CellNeed) - xGPU keeps the old buffer while frames use it
+    void instance::beginCellFrame( std::uint64_t Frame ) noexcept
+    {
+        if( Frame == m_LightFrame ) return;
+        m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0;
+        if( m_CellNeed <= m_CellStride ) return;
+        const int Stride = ((m_CellNeed + m_CellNeed / 4) + 65535) / 65536 * 65536;
+        m_Device.Destroy(std::move(m_CellRing));
+        if( m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * Stride }) == nullptr )
+            m_CellStride = Stride;
+        else (void)m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * m_CellStride });
+        m_CellNeed = 0;
+    }
+
     void instance::writeLocalLights( const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept
     {
         const std::uint64_t Frame = m_Device.getFrameIndex();
-        if( Frame != m_LightFrame ) { m_LightFrame = Frame; m_LightRingUsed = 0; m_CellRingUsed = 0; }
+        beginCellFrame(Frame);
 
         const int nLights = std::min({ int(Scene.m_LocalLights.size()), max_lights_v, light_region_v - m_LightRingUsed });
         const int LightBase = int(Frame % ring_frames_v) * light_region_v + m_LightRingUsed;
@@ -864,21 +879,26 @@ namespace xlionrender
             m_LightBuildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
 
             const int nUints = int(m_LightCells.m_Data.size());
-            if( nUints > max_cell_uints_v - m_CellRingUsed ) { Mode = light_mode::EXACT; ProbeCells = -1; }    // ponytail: too many entries for the buffer
+            if( nUints > m_CellStride - m_CellRingUsed )        // (the ring grows for the next frame: this one, EXACT)
+            {
+                m_CellNeed = std::max(m_CellNeed, m_CellRingUsed + nUints);
+                Mode = light_mode::EXACT; ProbeCells = -1;
+            }
             else
             {
-                CellBase = int(Frame % ring_frames_v) * max_cell_uints_v + m_CellRingUsed;
+                CellBase = int(Frame % ring_frames_v) * m_CellStride + m_CellRingUsed;
                 (void)m_CellRing.MemoryMap(CellBase, nUints, [&](void* pMemory) { std::memcpy(pMemory, m_LightCells.m_Data.data(), nUints * sizeof(std::uint32_t)); });
                 m_CellRingUsed += nUints;
             }
         }
 
+        if( nLights <= 0 && nProbes <= 0 ) Mode = light_mode::EXACT;    // (no cells written: the shader must not read headers at CellBase)
         m_LightModeUsed  = Mode;
         m_LightCellUints = Mode == light_mode::EXACT ? 0 : int(m_LightCells.m_Data.size());
         m_LightStats.m_nLights        = nLights;
         m_LightStats.m_nDropped       = int(Scene.m_LocalLights.size()) - nLights;
-        m_LightStats.m_nOverflowCells = 0;
-        if( Mode != light_mode::EXACT ) for( const auto n : m_LightCells.m_Count ) m_LightStats.m_nOverflowCells += n >= light_cells::overflow_v;
+        m_LightStats.m_nOverflowCells = 0;           // (a cell's list never overflows: 2-uint headers)
+        m_LightStats.m_CellRingMB     = double(ring_frames_v) * double(m_CellStride) * 4.0 / (1024.0 * 1024.0);
         Light.m_LocalCount = { float(nLights), float(int(Mode)), float(m_LightSeed++ & 0xffffff), float(m_bLightTailVisibility ? -m_LightTailCandidates : m_LightTailCandidates) };
         Light.m_LocalBase  = { float(LightBase), float(CellBase), m_LightCellSize, float(m_LightTailSamples) };
         Light.m_ProbeCount = { float(std::max(nProbes, 0)), float(ProbeBase), float(ProbeCells), 0 };

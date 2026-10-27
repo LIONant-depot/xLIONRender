@@ -218,7 +218,7 @@ namespace xlionrender
         // The last render's local lights and what it could not shade as asked (documentation/lighting_strategy.md sec. 3, 9): lights past
         // the buffer (not shaded at all), shadowed lights shaded unshadowed (no map yet: the declared fallback), maps sampled while waiting
         // for a redraw (stale: what P1a removes), cells whose list overflowed (shaded with every light: exact, slower)
-        struct light_stats { int m_nLights = 0; int m_nDropped = 0; int m_nShadowed = 0; int m_nShadowFallback = 0; int m_nShadowStale = 0; int m_nOverflowCells = 0; };
+        struct light_stats { int m_nLights = 0; int m_nDropped = 0; int m_nShadowed = 0; int m_nShadowFallback = 0; int m_nShadowStale = 0; int m_nOverflowCells = 0; double m_CellRingMB = 0; };     // (m_CellRingMB: the light cell ring's memory)
                       light_stats          getLightStats( void ) const                                          noexcept { return m_LightStats; }
         // How many clipmap tiles + local light maps the last Render drew (a static scene: 0 after its first frame)
                       int                  getShadowTilesRendered( void ) const                                 noexcept { return m_nShadowTilesRendered; }
@@ -719,7 +719,10 @@ namespace xlionrender
         // The local lights and their cells: host-visible storage buffers, a region per frame in flight, written per render
         static constexpr int        max_lights_v            = 4096;
         static constexpr int        light_region_v          = 4 * max_lights_v;    // a frame's lights: the main view + probe capture faces
-        static constexpr int        max_cell_uints_v        = light_cells::levels_v * light_cells::level_cells_v * light_cells::header_uints_v + 2 * 262144;
+        static constexpr int        max_cell_uints_v        = light_cells::levels_v * light_cells::level_cells_v * light_cells::header_uints_v + 2 * 262144;     // the start
+        int                         m_CellStride            = max_cell_uints_v;    // a frame's region of the cell ring (grows: beginCellFrame)
+        int                         m_CellNeed              = 0;                   // the largest a frame needed that did not fit
+        void                        beginCellFrame( std::uint64_t Frame ) noexcept;
         xgpu::buffer                m_LightRing;
         xgpu::buffer                m_CellRing;
         light_cells                 m_LightCells;

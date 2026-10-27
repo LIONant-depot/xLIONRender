@@ -184,9 +184,8 @@ int main()
         CHECK(nSplit > 100, "Only %d cells have a tail", nSplit);
         for (int c = 0; c < xlionrender::light_cells::levels_v * xlionrender::light_cells::level_cells_v; ++c)
         {
-            const std::uint32_t H = Cells.m_Data[c];
-            if (Cells.Count(c) >= xlionrender::light_cells::overflow_v) { CHECK(((H >> 20) & 0xFF) == 255, "Cell %d: an overflowing list is not marked", c); continue; }
-            CHECK((H & 0xFFFFF) == Cells.First(c) && ((H >> 20) & 0xFF) == Cells.Count(c) && (H >> 28) == Cells.Head(c), "Cell %d: the packed header does not decode", c);
+            const std::uint32_t H0 = Cells.m_Data[2 * c], H1 = Cells.m_Data[2 * c + 1];
+            CHECK(H0 == Cells.First(c) && (H1 & 0xFFFFFF) == Cells.Count(c) && (H1 >> 24) == Cells.Head(c), "Cell %d: the header does not decode", c);
         }
     }
 
@@ -235,8 +234,8 @@ int main()
         CHECK(S.m_Max < 1e-4, "SAMPLED differs from CELLS with every light in the heads (max %e)", S.m_Max);
     }
 
-    // Overflow: 300 lights piled on one spot - their cells hold more than a packed header can count, the shader shades those
-    // cells with every light: still the same image as EXACT
+    // A pile: 300 lights on one spot - more than a cell's header counted before (255: the cell was shaded with every light of the scene);
+    // the 2-uint headers list them all, no cell overflows: still the same image as EXACT
     {
         auto Pile = MakeLights(300, 3.0f, 4.0f, 17);
         for (auto& l : Pile) { l.m_Position = { 0.5f, 1.0f, 1.0f }; l.m_Type = xlionrender::local_light::type::POINT; l.m_Intensity = 0.05f; }
@@ -244,10 +243,25 @@ int main()
         std::vector<float> Exact, Cells;
         CHECK(RenderMode(mode::EXACT, Exact) && RenderMode(mode::CELLS, Cells), "Render the pile");
         CHECK(Renderer.getLightModeUsed() == mode::CELLS, "The pile fell back to EXACT for the whole render");
-        CHECK(Renderer.getLightStats().m_nOverflowCells > 0, "The pile's overflowing cells are not counted (LightCellsOverflow)");
+        CHECK(Renderer.getLightStats().m_nOverflowCells == 0, "The pile overflows %d cells", Renderer.getLightStats().m_nOverflowCells);
         const auto C = Compare(Cells, Exact);
-        std::printf("overflow: cells vs exact %.2e (max %.2e)\n", C.m_MeanRel, C.m_Max);
-        CHECK(C.m_Max < 1e-4, "Overflowing cells differ from EXACT (max %e)", C.m_Max);
+        std::printf("pile: cells vs exact %.2e (max %.2e)\n", C.m_MeanRel, C.m_Max);
+        CHECK(C.m_Max < 1e-4, "The pile's cells differ from EXACT (max %e)", C.m_Max);
+    }
+
+    // 4096 lights: the cells' data outgrows the cell ring's first size - the frame that did not fit renders EXACT and the ring grows,
+    // the next ones use the cells (no global fallback), the same image as EXACT
+    {
+        auto Many = MakeLights(4096, 2.0f, 5.0f, 23);
+        for (auto& l : Many) { l.m_bCastShadows = false; l.m_Intensity = 0.05f; }
+        Scene.m_LocalLights = Many;
+        std::vector<float> Exact, Cells;
+        const double MB0 = Renderer.getLightStats().m_CellRingMB;
+        CHECK(RenderMode(mode::EXACT, Exact) && RenderMode(mode::CELLS, Cells), "Render 4096 lights");
+        std::printf("4096 lights: the cell ring %.1f -> %.1f MB, the mode used %s\n", MB0, Renderer.getLightStats().m_CellRingMB, Renderer.getLightModeUsed() == mode::CELLS ? "CELLS" : "EXACT (fallback)");
+        CHECK(Renderer.getLightModeUsed() == mode::CELLS, "4096 lights fell back to EXACT for the whole render");
+        const auto C = Compare(Cells, Exact);
+        CHECK(C.m_Max < 1e-3 && C.m_MeanRel < 1e-5, "4096 lights: CELLS differs from EXACT (mean %e, max %e)", C.m_MeanRel, C.m_Max);
     }
 
     // Dense overlap: 256 lights of radius 3-7

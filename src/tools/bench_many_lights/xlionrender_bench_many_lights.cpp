@@ -116,7 +116,7 @@ int main(int argc, char** argv)
     struct variant { const char* Name; mode M; int Candidates; bool bVis; };
     const variant Variants[] = { { "cells", mode::CELLS, 0, false }, { "plain", mode::SAMPLED, 0, false }, { "ris", mode::SAMPLED, 8, false }, { "ris+vis", mode::SAMPLED, 8, true } };
     std::printf("many-light rig: %d warmed frames a measure; per mode the GPU scene pass ms (*: the cell buffer was full, the render fell back to EXACT), and SAMPLED's per-frame error against CELLS (mean |a - b| / mean b); the CPU cell build ms\n", nFrames);
-    std::printf("%-10s %6s %9s %9s |", "view", "lights", "overflow", "build ms");
+    std::printf("%-10s %6s %9s %9s %8s |", "view", "lights", "overflow", "build ms", "ring MB");
     for (const auto& V : Variants) std::printf(" %8s ms", V.Name);
     for (int v = 1; v < 4; ++v) std::printf(" %8s err", Variants[v].Name);
     std::printf("\n");
@@ -131,7 +131,7 @@ int main(int argc, char** argv)
         for (int n : Densities)
         {
             Scene.m_LocalLights = Lights(n);
-            double Gpu[4] = {}, Err[4] = {}, Build = 0; int Over = 0; bool bFell[4] = {};
+            double Gpu[4] = {}, Err[4] = {}, Build = 0, RingMB = 0; int Over = 0; bool bFell[4] = {};
             std::vector<float> Ref, Fr;
             for (int v = 0; v < 4; ++v)
             {
@@ -156,9 +156,9 @@ int main(int argc, char** argv)
                 }
                 Gpu[v] /= std::max(nGpu, 1);
                 bFell[v] = Renderer.getLightModeUsed() != Variants[v].M;       // (the cell buffer full: the whole render EXACT)
-                if (v == 0) Over = Renderer.getLightStats().m_nOverflowCells;
+                if (v == 0) { Over = Renderer.getLightStats().m_nOverflowCells; RingMB = Renderer.getLightStats().m_CellRingMB; }
             }
-            std::printf("%-10s %6d %9d %9.3f |", Sz.Name, n, Over, Build);
+            std::printf("%-10s %6d %9d %9.3f %8.1f |", Sz.Name, n, Over, Build, RingMB);
             for (int v = 0; v < 4; ++v) std::printf(" %10.3f%c", Gpu[v], bFell[v] ? '*' : ' ');
             for (int v = 1; v < 4; ++v) std::printf(" %12.3f", Err[v]);
             std::printf("\n");
