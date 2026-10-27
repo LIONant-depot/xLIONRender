@@ -352,6 +352,21 @@ int main()
     std::printf("spot shadowed texels: %d\n", nSpot);
     CHECK(nSpot > 150, "Only %d texels in the spot light's shadow", nSpot);
 
+    // At the cap: 32 shadowed point lights over the scene (192 pinned pages of 1024 slots, the requests competing for the rest) - every
+    // frame's table holds invariant 1, no pixel is left without a page (the pinned ones), the pool's pressure shows as rejections or
+    // coarser pages, never as a hole
+    {
+        Scene.m_LocalLights.clear();
+        for (int k = 0; k < xlionrender::max_local_lights_v; ++k)
+            Scene.m_LocalLights.push_back({ .m_Position = { -2.0f + 0.6f * float(k % 8), 0.5f + 0.3f * float(k / 8), -1.5f + 0.9f * float(k / 8) }, .m_Radius = 4.0f, .m_Intensity = 1.0f });
+        CHECK(Settle(12), "32 shadowed lights: invariant 1 on every frame");
+        const auto& R = Renderer.getLocalReport();
+        std::printf("32 shadowed lights: pairs %u - by their level %u, coarser %u, none %u; resident %d + pinned %d, rejected %d\n"
+                   , R.m_Counters[0], R.m_Counters[1], R.m_Counters[2], R.m_Counters[3], R.m_Pages.m_Resident, R.m_Pages.m_ResidentPinned, R.m_Pages.m_Rejected);
+        CHECK(R.m_Pages.m_ResidentPinned == 6 * xlionrender::max_local_lights_v && R.m_Counters[0] > 0 && R.m_Counters[3] == 0
+             , "32 shadowed lights: %d pinned (192), %u of %u pairs with no page", R.m_Pages.m_ResidentPinned, R.m_Counters[3], R.m_Counters[0]);
+    }
+
     // The budget: 3 new shadowed point lights, 2 unpinned pages a frame (the pinned ones always); settled, the same image as a full rebuild
     Scene.m_LocalLights = { Point, Point, Point };
     Scene.m_LocalLights[1].m_Position = { -0.6f, 1.4f, 0.2f };
