@@ -191,6 +191,10 @@ namespace xlionrender
         // The screen tail's last frame (light_mode::SCREEN): its passes' GPU time (a ring late) and its targets' memory
         struct tail_report { bool m_bOn = false; int m_Width = 0, m_Height = 0; double m_GBufferMs = 0, m_TailMs = 0, m_DenoiseMs = 0, m_TemporalMs = 0, m_MemoryMB = 0; int m_nGBufferDraws = 0, m_nNoVariant = 0; };     // (m_DenoiseMs: both passes, m_TemporalMs the first)     // (m_nNoVariant: lit submeshes left out, their material without a G-buffer variant)
                       const tail_report&   getTailReport( void ) const                                          noexcept { return m_TailReport; }
+        // Reflections milestone A (documentation/reflections_strategy.md sec. 11): the world trace's benchmark (m_ReflTraceBench), the last
+        // 120 frames' means: its GPU ms, the rays (a texel of the thin G-buffer each), the hits, the BVH's visits per ray
+        struct refl_report { int m_Mode = 0; double m_Ms = 0, m_Rays = 0, m_HitRate = 0, m_VisitsPerRay = 0; int m_Frames = 0; };
+                      const refl_report&   getReflReport( void ) const                                          noexcept { return m_ReflReport; }
         // A material's G-buffer variant (its fragment compiled with XLION_GBUFFER_OUTPUT): it is drawn into the screen tail's thin G-buffer
         // (without one, a material shades its tail inline - the sampled path)
         [[nodiscard]] xgpu::device::error* SetMaterialGBuffer( material_id Id, const xgpu::shader& FragmentGBuffer ) noexcept;
@@ -218,6 +222,7 @@ namespace xlionrender
         float                                      m_TailTraceLength = 1.0f;                // SCREEN: the tail's unshadowed lights' screen trace (contact shadows), world units (0: none)
         int                                        m_TailTraceSteps  = 12;
         bool                                       m_bTailTraceBvh   = true;                // SCREEN: those lights' shadow ray also through the GI's BVH (P4; the opaque rigid GI meshes, off screen too)
+        int                                        m_ReflTraceBench  = 0;                   // (measurement) SCREEN, the GI on: a reflection ray a thin G-buffer texel through the GI's BVH (shaders/xlionrender_refl_trace_comp.glsl): 1 mirror, 2 roughness 0.5, 3 the materials'; 0 off. Init: XLION_REFL_BENCH
         // Emissive surfaces as lights (documentation/lighting_gi_interface_notice.md): the GI's emitter view (gi::world::ForEachEmitter) as
         // lights without shadow pages. Off by default: the GI's bounce already holds the emitters' light on the surfaces around them - with
         // both, it counts twice - so this one switch also hands that term to lighting (gi::world::setup::m_bEmitterDirectExternal: the GI keeps
@@ -401,6 +406,14 @@ namespace xlionrender
         xgpu::compute               m_TailDenoise;
         xgpu::buffer                m_TailFrames;                   // the denoiser's frame (host visible, a slot a ring frame)
         xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
+        xgpu::shader                m_ReflTraceShader;              // the reflection trace's benchmark (m_ReflTraceBench): its pass, counters (4 per ring slot), timestamps
+        xgpu::compute               m_ReflTrace;
+        xgpu::buffer                m_ReflStats;
+        xgpu::timestamps            m_ReflTimes;
+        refl_report                 m_ReflReport;
+        double                      m_ReflSum[4] = {};              // (the report's running sums: ms, rays, hits, visits)
+        int                         m_ReflSumN = 0;
+        bool                        m_bReflTraceCycle = false;      // (XLION_REFL_BENCH=9: each report the next mode)
         tail_report                 m_TailReport;
         xgpu::buffer*               m_pTailRecords = nullptr;       // binding 14 of the lit pipelines this render: the view's records (SCREEN), else none
         xgpu::buffer*               TailBuffer( void ) noexcept     { return m_pTailRecords ? m_pTailRecords : &m_GIDummy; }

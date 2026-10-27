@@ -124,7 +124,7 @@ namespace xlionrender::details
         xmath::fvec4                            m_LocalCount;       // x: lights, y: mode (instance::light_mode), z: seed, w: the tail's resampling candidates (instance::m_LightTailCandidates, > 1: RIS; negative: with their visibility)
         xmath::fvec4                            m_LocalBase;        // x: first light in the light buffer, y: first uint in the cell buffer, z: level 0 cell size, w: tail samples
         std::array<xmath::fvec4, light_cells::levels_v> m_CellOrigin;       // per cell level: the window's first cell index
-        xmath::fvec4                            m_EnvParams;        // x: 1 the environment probe lights (scene::m_Sky), y: its intensity
+        xmath::fvec4                            m_EnvParams;        // x: 1 the environment probe lights (scene::m_Sky), y: its intensity, z: 1 the reflection debug view (scene::m_bDebugReflection)
         xmath::fvec4                            m_ProbeCount;       // x: captured probes (innermost first), y: the first's record in the light buffer,
                                                                     // z: their cell headers' first uint in the cell buffer (-1: no cells, every probe)
         // the sun's virtual shadow pages (shaders/xlionrender_shadow_vsm.glsl; appended, so materials compiled before read the rest as it was)

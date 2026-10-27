@@ -227,6 +227,7 @@ namespace xlionrender
         std::uint64_t               m_SelectedUser = ~0ull;     // the draw (its m_UserID) the editor has selected: outlined with the editor's outline shader (xlionrender_outline_obb_*)
         gi_settings                 m_GI;
         std::vector<reflection_probe> m_Probes;           // any number: the nearest 32 (instance::probe_slots_v) are resident
+        bool                        m_bDebugReflection = false;  // debug: every lit pixel shows only its environment / probe / reflection specular (R^ of documentation/reflections_strategy.md sec. 5)
     };
 }
 

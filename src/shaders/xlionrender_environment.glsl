@@ -19,6 +19,11 @@ vec4 g_GIRefl = vec4(0.0);  // (xlionrender_surfel_gi.glsl: the surfels' light a
 #endif
 uint g_GISource = 0u;      // which read set g_GI (the COVERAGE debug view): 0 none (the ambient, as without GI), 1 the vertex read, 2 the pixel read
 
+// The reflection debug view (scene::m_bDebugReflection, UBOLight.EnvParams.z): the pixel shows only the receiver's environment / probe /
+// reflection specular - R^ of documentation/reflections_strategy.md sec. 5 (the BRDF weighting included); black where none was evaluated
+vec3 g_EnvSpecular = vec3(0.0);
+#define ReflDebugOr(Lit) (UBOLight.EnvParams.z > 0.5 ? g_EnvSpecular : (Lit))
+
 const vec2 kProbeAtlas = vec2(3072.0, 1024.0);          // 8 x 4 slots of the sky atlas' layout (384 x 256) - instance::probe_slots_v
 
 vec3 AtlasSample(in const sampler2D Atlas, in const vec2 Origin, in const vec2 AtlasSize, in const vec3 Dir, in const float PerceptualRoughness)
@@ -133,5 +138,6 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         Diff  = GIDiff;
     }
     const vec2 DFG = textureLod(SamplerEnvDFG, vec2(NdotV, PerceptualRoughness), 0.0).rg;
-    return (Diff * Albedo * (1.0 - Metallic) + Spec * (F0 * DFG.x + DFG.y)) * AO;
+    g_EnvSpecular = Spec * (F0 * DFG.x + DFG.y) * AO;
+    return (Diff * Albedo * (1.0 - Metallic) + Spec * (F0 * DFG.x + DFG.y)) * AO;     // (the lit sum as before, bitwise)
 }

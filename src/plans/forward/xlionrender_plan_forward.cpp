@@ -1928,6 +1928,36 @@ namespace xlionrender
             }
         }
         Window.WriteTimestamp(m_TailTimes, 3);
+        // Reflections milestone A: the world trace's benchmark (shaders/xlionrender_refl_trace_comp.glsl) - its counters of this ring slot
+        // (written ring_frames_v frames ago, done) into the report, cleared, then this frame's rays
+        if( m_ReflTraceBench > 0 && !Bvh.m_bEmpty )
+        {
+            const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+            std::uint32_t Got[4] = {};
+            (void)m_ReflStats.MemoryMap(Slot * 4, 4, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
+            if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
+            {
+                m_ReflSum[0] += double(Ns[1] - Ns[0]) * 1e-6; m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2];
+                if( ++m_ReflSumN == 120 )
+                {
+                    const double n = m_ReflSumN;
+                    m_ReflReport = { m_ReflTraceBench, m_ReflSum[0] / n, m_ReflSum[1] / n, m_ReflSum[2] / std::max(m_ReflSum[1], 1.0), m_ReflSum[3] / std::max(m_ReflSum[1], 1.0), m_ReflSumN };
+                    std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
+                        , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay);
+                    std::fflush(stdout);
+                    m_ReflSumN = 0; for( auto& v : m_ReflSum ) v = 0;
+                    if( m_bReflTraceCycle ) m_ReflTraceBench = m_ReflTraceBench % 3 + 1;      // (XLION_REFL_BENCH=9: the three modes in turn)
+                }
+            }
+            const xmath::fvec3 E = Eye;
+            const struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; } Push
+                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), Bvh.m_TlasRoot, Bvh.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame };
+            auto Buffers  = std::array<xgpu::buffer*, 6>{ &m_TailFrames, const_cast<xgpu::buffer*>(Bvh.m_pNodes), const_cast<xgpu::buffer*>(Bvh.m_pTri4), const_cast<xgpu::buffer*>(Bvh.m_pInstances), const_cast<xgpu::buffer*>(Bvh.m_pTlas), &m_ReflStats };
+            auto Textures = std::array<const xgpu::texture*, 2>{ &View.m_TailGColor, &View.m_TailGDepth };
+            Window.WriteTimestamp(m_ReflTimes, 0);
+            Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
+            Window.WriteTimestamp(m_ReflTimes, 1);
+        }
         View.m_TailPrevC2W = C2W; View.m_TailPrevW2C = W2C; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
         m_pTailRecords = &View.m_TailResult;
     }
@@ -1986,7 +2016,7 @@ namespace xlionrender
 
                 writeLocalLights(Window, Scene, Eye, Light);
                 if( m_LightModeUsed == light_mode::SCREEN && !bMain ) Light.m_LocalCount.m_Y = float(int(light_mode::CELLS));     // (the screen tail is the main view's: the others' every light of the list)
-                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, 0, 0 };
+                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? 1.0f : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
 
             }
 
