@@ -297,6 +297,11 @@ bool LocalLightDemod(in const int i, in const vec3 N, in const vec3 V, in const 
     return any(greaterThan(Diff + Spec, vec3(0.0)));
 }
 
+#ifdef XLION_TAIL_SCREEN
+// The tail pass's screen trace (xlionrender_tail_screen_frag.glsl): 1 the way to the light is clear in the half-size depth .. 0 blocked
+float TailContactShadow(in const vec3 P, in const vec3 ToLight);
+#endif
+
 // The screen tail's sample (xlionrender_tail_screen_frag.glsl): the cell's tail resampled as LocalLights' mode 2 does (M candidates, their
 // weights with their one-tap visibility), the target the demodulated term's luminance; the picked light's demodulated diffuse and specular
 // with its filtered shadow, weighted f / p. False: no tail at the point (no cell, or its list fits in the head)
@@ -346,7 +351,12 @@ bool LocalTailDemod(in const vec3 N, in const vec3 V, in const float NdotV, in c
         ++e;
     }
     if (Pick < 0) return true;                                                  // (a tail, all of it dark here: 0)
-    const float Wt = LocalLightShadow(Pick, N) * (WSum / (float(M) * PickP));
+    float Wt = LocalLightShadow(Pick, N) * (WSum / (float(M) * PickP));
+#ifdef XLION_TAIL_SCREEN
+    // a light without shadow pages: contact-shadowed by the screen trace (the picked light only - unbiased: its contribution x its visibility)
+    const LocalLightData Lp = LocalLightList[int(UBOLight.LocalBase.x) + Pick];
+    if (Lp.Shadow.z <= 0.0 && UBOLight.TailTrace.x > 0.0) Wt *= TailContactShadow(In.wSpacePosition.xyz, Lp.PosRadius.xyz - In.wSpacePosition.xyz);
+#endif
     Diff = PickD * Wt; Spec = PickS * Wt;
     return true;
 }

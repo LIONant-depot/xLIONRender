@@ -119,6 +119,8 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	// the screen tail (lighting_p3_design.md "The decision": the half-size G-buffer, xlionrender_tail_screen_frag.glsl, the denoiser; appended)
 	vec4 TailParams;                     // x: 1 the material reads the denoised tail (LocalCount.y 3), y, z: the half-size targets' width, height, w: its first texel's record in TailScreen
 	mat4 TailC2W;                        // the tail pass: clip -> camera-centred world
+	mat4 TailW2C;                        // its camera-centred world -> clip (the screen trace)
+	vec4 TailTrace;                      // the screen trace: x its length (world units; 0: none), y steps, z the depth's thickness (fraction of the view depth)
 #endif
 } UBOLight;
 

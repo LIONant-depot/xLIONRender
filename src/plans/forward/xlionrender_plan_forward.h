@@ -140,6 +140,8 @@ namespace xlionrender::details
         // targets' width and height, w its first texel's record in the tail buffer (binding 14); the tail pass's clip -> camera-centred world
         xmath::fvec4                            m_TailParams;
         xmath::fmat4                            m_TailC2W;
+        xmath::fmat4                            m_TailW2C;          // the tail pass's camera-centred world -> clip (its screen trace)
+        xmath::fvec4                            m_TailTrace;        // the screen trace: x its length (world units; 0: none), y steps, z the depth's thickness (fraction of the view depth)
     };
 
     // The sun's virtual pages: the request pass's frame data (shaders/xlionrender_vsm_request_comp.glsl frame_t, std430)

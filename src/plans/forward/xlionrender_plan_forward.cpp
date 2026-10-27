@@ -1717,6 +1717,8 @@ namespace xlionrender
 
         Light.m_TailParams = { 1.0f, float(W), float(H), 0.0f };
         Light.m_TailC2W    = C2W;
+        Light.m_TailW2C    = W2C;
+        Light.m_TailTrace  = { m_TailTraceLength, float(m_TailTraceSteps), 0.05f, 0.0f };
         Light.m_LocalCount.m_Y = float(int(light_mode::SCREEN));
 
         Window.WriteTimestamp(m_TailTimes, 0);

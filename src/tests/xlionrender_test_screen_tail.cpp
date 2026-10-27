@@ -124,6 +124,8 @@ int main()
         S.m_Report = Renderer.getTailReport(); S.m_Used = Renderer.getLightModeUsed();
         return S;
     };
+    // (the denoiser's gates against CELLS, which does not shadow unshadowed lights: the screen trace off - the wall's test below has it)
+    Renderer.m_TailTraceLength = 0.0f;
     const auto Inline = Still(mode::SAMPLED), Screen = Still(mode::SCREEN);
     std::printf("still: per-frame error inline %.3f, screen %.3f; flicker inline %.3f, screen %.3f; 16-frame mean's error inline %.3f, screen %.3f; its brightness / CELLS' inline %.3f, screen %.3f\n"
                , Inline.m_Err, Screen.m_Err, Inline.m_Flicker, Screen.m_Flicker, Inline.m_MeanErr, Screen.m_MeanErr, Inline.m_Ratio, Screen.m_Ratio);
@@ -213,6 +215,48 @@ int main()
         const double EI = Cross(mode::SAMPLED, 77), EStatic = Cross(mode::SCREEN, 0), EMoving = Cross(mode::SCREEN, 77);
         std::printf("a mover crossing: per-frame error inline %.3f, screen without its motion %.3f, with it %.3f\n", EI, EStatic, EMoving);
         CHECK(EMoving < EStatic && EMoving < EI, "the mover's motion does not help: %.3f with it, %.3f without (inline %.3f)", EMoving, EStatic, EI);
+    }
+
+    // The screen trace (P3: "the tail contact-shadowed"): a wall, 32 point lights on one side within reach of the other. The reference: the
+    // lights shadowed by their pages (CELLS). Against it, the lights unshadowed in SCREEN - their tail through the wall (a leak) without the
+    // trace, contact-shadowed with it (the head's lights, shaded by the materials, still leak: they are the ones pages are for)
+    {
+        xlionrender::scene Wall;
+        Wall.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = At(0, -0.05f, 0, 30, 0.1f, 30), .m_Material = { .m_Roughness = 0.7f } });
+        Wall.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = At(0, 1.25f, 0, 0.3f, 2.5f, 14.0f), .m_Material = { .m_Roughness = 0.7f } });
+        Wall.m_Sun     = { .m_Intensity = 0.0f, .m_bCastShadows = false };
+        Wall.m_Ambient = { 0.01f, 0.01f, 0.012f };
+        std::mt19937 Rng(3);
+        std::uniform_real_distribution<float> U(0, 1);
+        for (int i = 0; i < 32; ++i)
+            Wall.m_LocalLights.push_back({ .m_Position = { -0.6f - 1.8f * U(Rng), 0.4f + 1.4f * U(Rng), -6.0f + 12.0f * U(Rng) }, .m_Radius = 5.0f, .m_Color = { 1.0f, 0.85f, 0.6f }, .m_Intensity = 0.8f, .m_bCastShadows = true });
+        xgpu::tools::view WallCam;
+        WallCam.setFov(xmath::radian{ 1.0f });
+        WallCam.setViewport({ 0, 0, W, H });
+        WallCam.LookAt(xmath::fvec3{ 5.0f, 1.6f, -7.0f }, xmath::fvec3{ 0.0f, 0.5f, 0.0f });
+        std::vector<float> Shadowed, Img2;
+        Renderer.m_LightMode = mode::CELLS;
+        bool bOk = true;
+        for (int f = 0; f < 20 && bOk; ++f) bOk = App.RenderFrame(Wall, Ref, WallCam);
+        bOk = bOk && ReadHDR(Device, Ref, Shadowed);
+        for (auto& L : Wall.m_LocalLights) L.m_bCastShadows = false;
+        const auto Screen = [&](float Trace) -> double
+        {
+            Renderer.m_LightMode = mode::SCREEN;
+            Renderer.m_TailTraceLength = Trace;
+            double E = 0;
+            for (int f = 0; f < 24 && bOk; ++f)
+            {
+                bOk = App.RenderFrame(Wall, View, WallCam);
+                if (f >= 16) { bOk = bOk && ReadHDR(Device, View, Img2); E += RelErr(Img2, Shadowed) / 8; }
+            }
+            return E;
+        };
+        const double ENo = Screen(0.0f), ETrace = Screen(1.0f);
+        Renderer.m_TailTraceLength = 1.0f;
+        CHECK(bOk, "Render the wall");
+        std::printf("a wall, 32 unshadowed lights against their shadowed reference: SCREEN without the screen trace %.3f, with it %.3f\n", ENo, ETrace);
+        CHECK(ETrace < 0.85 * ENo, "the screen trace does not shadow the tail through the wall: %.3f with it, %.3f without", ETrace, ENo);
     }
 
     // The memory at Tomas's Bistro view (3093 x 1493): the targets at half size

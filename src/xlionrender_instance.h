@@ -215,6 +215,8 @@ namespace xlionrender
         };
         light_mode                                 m_LightMode     = light_mode::AUTO;      // CELLS (exact) or, past the threshold, SCREEN (research doc: lab; lighting_p3_design.md)
         int                                        m_LightScreenThreshold = 512;            // AUTO: the lights from which SCREEN is used (the night-market rig: CELLS costs less up to ~300)
+        float                                      m_TailTraceLength = 1.0f;                // SCREEN: the tail's unshadowed lights' screen trace (contact shadows), world units (0: none)
+        int                                        m_TailTraceSteps  = 12;
         int                                        m_LightHead     = 4;
         int                                        m_LightTailSamples = 1;     // SAMPLED: stratified tail samples per pixel
         int                                        m_LightTailCandidates = 8;  // SAMPLED: > 1, the tail resampled (RIS) from this many candidates, one shaded (0: the plain samples)

@@ -18,6 +18,37 @@ layout(binding = 2) uniform sampler2D GBufferDepth;
 layout(location = 0) out vec4 OutDiffuse;
 layout(location = 1) out vec4 OutSpecular;
 
+// The screen trace (P3's "tail contact-shadowed"): from the point toward the light, at most TailTrace.x world units (or the light, if
+// nearer), TailTrace.y steps jittered per texel and frame, each projected into this half-size depth: blocked where the depth there is in
+// front of the ray by more than a small bias and less than the thickness (TailTrace.z of the view depth: a thin object does not shadow
+// what is far behind it). What the screen does not see (off screen, behind the first surface) is not traced: lit
+float TailContactShadow(in const vec3 P, in const vec3 ToLight)
+{
+    const float Len  = length(ToLight);
+    const float Dist = min(UBOLight.TailTrace.x, Len * 0.95);
+    if (Dist <= 0.0) return 1.0;
+    const vec3  Dir   = ToLight / Len;
+    const int   Steps = max(int(UBOLight.TailTrace.y), 1);
+    const vec2  Size  = vec2(UBOLight.TailParams.y, UBOLight.TailParams.z);
+    const float j     = LocalRandom(7u);
+    const vec3  P0    = P + g_LocalFaceN * (0.02 + 0.01 * length(P));          // (off the surface: a small bias)
+    for (int s = 0; s < Steps; ++s)
+    {
+        const float t  = Dist * (float(s) + j) / float(Steps);
+        const vec4  C  = UBOLight.TailW2C * vec4(P0 + Dir * t, 1.0);
+        if (C.w <= 1e-4) return 1.0;
+        const vec3  Ndc = C.xyz / C.w;
+        if (any(greaterThan(abs(Ndc.xy), vec2(1.0)))) return 1.0;               // (off screen: not traced)
+        const ivec2 q  = ivec2((Ndc.xy * 0.5 + 0.5) * Size);
+        const float zq = texelFetch(GBufferDepth, q, 0).r;
+        if (zq >= 1.0) continue;
+        const vec4  Wq = UBOLight.TailC2W * vec4((vec2(q) + 0.5) / Size * 2.0 - 1.0, zq, 1.0);
+        const float dRay = C.w, dScene = 1.0 / Wq.w;                            // (view depths: clip w)
+        if (dRay - dScene > 0.002 * dRay && dRay - dScene < UBOLight.TailTrace.z * dRay) return 0.0;
+    }
+    return 1.0;
+}
+
 void main()
 {
     const ivec2 p = ivec2(gl_FragCoord.xy);
