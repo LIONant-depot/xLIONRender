@@ -763,6 +763,11 @@ namespace xlionrender
         int             m_GIRaysPerSurfel = 8;              // rays per surfel update
         int             m_GIFilterPasses  = 4;              // the GI light's spatial filter passes (smoother with more)
         bool            m_bGIMoments      = true;           // the reads' depth-moment visibility test
+        float           m_ReflectionMaxRoughness = 0.0f;    // traced reflections (they need the GI): the receivers up to this roughness; 0: off (the probes)
+        bool            m_bReflectionFloor   = false;       // a floor is a planar receiver: the scene mirrored in it (exact reflections)
+        bool            m_bReflectionFloorAuto = true;      // that floor: the one under the camera (else at m_ReflectionFloorY)
+        float           m_ReflectionFloorY   = 0.0f;
+        bool            m_bReflectionDebug   = false;       // every lit pixel shows only its environment / reflection specular
 
         XPROPERTY_DEF
         ( "Environment", environment
@@ -781,6 +786,11 @@ namespace xlionrender
         , obj_member<"GIDebug",      &environment::m_GIDebug, member_enum_span<gi_debug_v>, member_help<"SURFELS: every pixel in the color of the surfel it reads most (black: no surfel reaches it); LIGHT: the GI light alone; SURFACE_COLOR: the surface color of the surfel each pixel reads most (the material capture: what the GI bounces); COVERAGE: which read lights each pixel - green its own surfels (per pixel), blue the vertices' (per pixel unsupported there), magenta none (no GI there: the ambient as without GI)">>
         , obj_member<"GIPerPixel",   &environment::m_bGIPerPixel, member_help<"Near meshes read the GI per pixel (a mesh needs no extra vertices for it); off: per vertex only (cheaper, needs dense meshes)">>
         , obj_member<"GIHalfRes",    &environment::m_bGIHalfRes, member_help<"The per-pixel GI read at half resolution, upsampled by depth and normal: a quarter of the reads (opaque surfaces; not in the GI debug views)">>
+        , obj_member<"ReflectionMaxRoughness", &environment::m_ReflectionMaxRoughness, member_help<"Traced reflections (they need the GI): surfaces up to this roughness reflect the scene - a ray a pixel through the GI's geometry, its hit lit by the GI's model - instead of the reflection probes (from half of it they fade back to the probes). 0: off">>
+        , obj_member<"ReflectionFloor",  &environment::m_bReflectionFloor, member_help<"The floor at ReflectionFloorY is a mirror plane: the scene is drawn mirrored in it (everything on screen, characters included) and the floor reflects that image (with ReflectionMaxRoughness above 0)">>
+        , obj_member<"ReflectionFloorAuto", &environment::m_bReflectionFloorAuto, member_help<"The reflecting floor is the one under the camera (found every frame); off: the floor at ReflectionFloorY">>
+        , obj_member<"ReflectionFloorY", &environment::m_ReflectionFloorY, member_help<"The height of the reflecting floor (world Y), when ReflectionFloorAuto is off">>
+        , obj_member<"ReflectionDebug",  &environment::m_bReflectionDebug, member_help<"Every lit pixel shows only its environment / reflection specular (what the probes or the traced reflections give it)">>
         )
     };
 

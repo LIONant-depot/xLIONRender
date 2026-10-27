@@ -232,7 +232,8 @@ namespace xlionrender
         // BVH, lights its hit with the GI's model, and the opaque materials take it as their environment specular. Receivers rougher than
         // this keep the probes (B: the sharp ones; from half of it they fade to the probes). 0: off. Needs the GI (its BVH and data)
         float                       m_ReflectionMaxRoughness = 0.0f;
-        xmath::fvec4                m_ReflectionPlane { 0, 0, 0, 0 };   // a planar receiver's plane (n, d: n.x + d = 0, n toward the viewer's side): the planar view; 0: none
+        xmath::fvec4                m_ReflectionPlane { 0, 0, 0, 0 };   // a planar receiver's plane (n, d: n.x + d = 0, n toward the viewer's side): the planar view; 0: none;
+                                                                        // d NaN: the floor under the eye (the GI's geometry straight down, a surface facing n)
     };
 }
 

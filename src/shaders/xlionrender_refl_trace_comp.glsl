@@ -17,7 +17,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 struct frame_t { mat4 C2W; mat4 Reproject; vec4 Params; };          // (xlionrender_tail_denoise_comp.glsl's: C2W to the camera-centred world)
 layout(std430, set = 0, binding = 5) readonly buffer frame_b   { frame_t F[]; };
-layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 4 per ring slot: rays, hits, visits, 0
+layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 4 per ring slot: rays, hits, visits, the planar texels
 layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records[]; };    // the view's records: the tail's W x H, then these
 layout(set = 1, binding = 0) uniform sampler2D GColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 1) uniform sampler2D GDepth;
@@ -28,7 +28,7 @@ layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_Pr
 
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
-shared uint s_Rays, s_Hits, s_Visits;
+shared uint s_Rays, s_Hits, s_Visits, s_Planar;
 
 // Heitz 2018: a visible normal of an isotropic GGX (alpha a) for the view Ve (local frame, z the normal)
 vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
@@ -47,7 +47,7 @@ float Lambda(float c, float a) { c = max(c, 1e-6); return 0.5 * (sqrt(1.0 + a * 
 
 void main()
 {
-    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; }
+    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; }
     barrier();
     const ivec2 Size = ivec2(F[Push.m_Slot].Params.xy);
     const ivec2 p    = ivec2(gl_GlobalInvocationID.xy);
@@ -77,6 +77,7 @@ void main()
             Rec.y = packHalf2x16(vec2(C.b, Conf));
             Rec.z = packHalf2x16(vec2(0.0, 1.0));
             Rec.w |= refl_planar_v << 24;
+            atomicAdd(s_Planar, 1u);
         }
         else if (Push.m_Mode != 0u || Rough < Push.m_MaxRough)
         {
@@ -141,5 +142,6 @@ void main()
         atomicAdd(Stats[Push.m_Slot * 4u + 0u], s_Rays);
         atomicAdd(Stats[Push.m_Slot * 4u + 1u], s_Hits);
         atomicAdd(Stats[Push.m_Slot * 4u + 2u], s_Visits);
+        atomicAdd(Stats[Push.m_Slot * 4u + 3u], s_Planar);
     }
 }

@@ -414,6 +414,7 @@ namespace xlionrender
         refl_report                 m_ReflReport;
         double                      m_ReflSum[4] = {};              // (the report's running sums: ms, rays, hits, visits)
         int                         m_ReflSumN = 0;
+        double                      m_ReflPlanarSum = 0;
         bool                        m_bReflTraceCycle = false;      // (XLION_REFL_BENCH=9: each report the next mode)
         tail_report                 m_TailReport;
         xgpu::buffer*               m_pTailRecords = nullptr;       // binding 14 of the lit pipelines this render: the view's records (SCREEN), else none
@@ -749,6 +750,8 @@ namespace xlionrender
         std::array<render_view, 6>  m_CaptureViews;
         render_view                 m_PlanarView;                   // reflections' planar view (renderPlanar): the scene mirrored in scene::m_ReflectionPlane, the screen tail's size
         bool                        m_bPlanarOn = false;            // (this frame's: the reflection pass resolves its records from it)
+        int                         m_PlanarWhy = 1;                // (diagnostics: 0 on, 1 off, 2 its view, 3 no GI world, 4 no floor under the eye, 5 the oblique plane)
+        xmath::fvec4                m_PlanarPlane { 0, 0, 0, 0 };   // (its plane this frame, unit normal: the scene's or the floor found under the eye)
         xgpu::pipeline              m_CubeToOctPipeline;
         xgpu::pipeline_instance     m_CubeToOctInstance;
         std::vector<probe_state>    m_ProbeStates;                      // per scene probe

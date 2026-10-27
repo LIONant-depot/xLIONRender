@@ -1955,27 +1955,27 @@ namespace xlionrender
             (void)m_ReflStats.MemoryMap(Slot * 4, 4, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
             {
-                m_ReflSum[0] += double(Ns[1] - Ns[0]) * 1e-6; m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2];
+                m_ReflSum[0] += double(Ns[1] - Ns[0]) * 1e-6; m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2]; m_ReflPlanarSum += Got[3];
                 if( ++m_ReflSumN == 120 )
                 {
                     const double n = m_ReflSumN;
                     m_ReflReport = { m_ReflTraceBench, m_ReflSum[0] / n, m_ReflSum[1] / n, m_ReflSum[2] / std::max(m_ReflSum[1], 1.0), m_ReflSum[3] / std::max(m_ReflSum[1], 1.0), m_ReflSumN };
                     static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
-                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
-                        , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay);
+                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray, %.0f planar texels (planar view %s, plane %.3f %.3f %.3f %.3f)\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
+                        , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay, m_ReflPlanarSum / n
+                        , m_bPlanarOn ? "on" : m_PlanarWhy == 4 ? "off: no floor under the eye" : m_PlanarWhy == 5 ? "off: oblique" : m_PlanarWhy == 2 ? "off: view" : "off", m_PlanarPlane.m_X, m_PlanarPlane.m_Y, m_PlanarPlane.m_Z, m_PlanarPlane.m_W);
                     std::fflush(stdout);
-                    m_ReflSumN = 0; for( auto& v : m_ReflSum ) v = 0;
+                    m_ReflSumN = 0; m_ReflPlanarSum = 0; for( auto& v : m_ReflSum ) v = 0;
                     if( m_bReflTraceCycle ) m_ReflTraceBench = m_ReflTraceBench % 3 + 1;      // (XLION_REFL_BENCH=9: the three modes in turn)
                 }
             }
             const xmath::fvec3 E = Eye;
             const float MaxRough = m_ReflTraceBench > 0 ? 0.0f : Scene.m_ReflectionMaxRoughness;
             const bool  bPlanar  = m_bPlanarOn && m_PlanarView.m_Width == W && m_PlanarView.m_Height == H;
-            const auto& Pl = Scene.m_ReflectionPlane;
-            const float PlLen = std::sqrt(Pl.m_X * Pl.m_X + Pl.m_Y * Pl.m_Y + Pl.m_Z * Pl.m_Z);
+            const auto& Pl = m_PlanarPlane;
             const struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_Pad1; float m_Plane[4]; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, 0
-                , { bPlanar ? Pl.m_X / PlLen : 0.0f, bPlanar ? Pl.m_Y / PlLen : 0.0f, bPlanar ? Pl.m_Z / PlLen : 0.0f, bPlanar ? Pl.m_W / PlLen : 0.0f } };
+                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f } };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
             auto Buffers  = std::array<xgpu::buffer*, 8>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult };
             auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor };
@@ -1995,7 +1995,7 @@ namespace xlionrender
     // probe's face (bMain false: no screen tail, no reflections of its own - no feedback)
     void instance::renderPlanar( xgpu::window& Window, const scene& Scene, const render_view& Main, const xgpu::tools::view& Camera ) noexcept
     {
-        m_bPlanarOn = false;
+        m_bPlanarOn = false; m_PlanarWhy = 1;
         const auto& Pl = Scene.m_ReflectionPlane;
         const float Len = std::sqrt(Pl.m_X * Pl.m_X + Pl.m_Y * Pl.m_Y + Pl.m_Z * Pl.m_Z);
         if( Scene.m_ReflectionMaxRoughness <= 0 || Len < 1e-6f ) return;
@@ -2003,10 +2003,22 @@ namespace xlionrender
         if( m_PlanarView.m_Width != W || m_PlanarView.m_Height != H )
         {
             if( m_PlanarView.m_Width ) DestroyView(m_PlanarView);
-            if( CreateView(m_PlanarView, { .m_Width = W, .m_Height = H }) ) { m_PlanarView = {}; return; }
+            if( CreateView(m_PlanarView, { .m_Width = W, .m_Height = H }) ) { m_PlanarView = {}; m_PlanarWhy = 2; return; }
         }
         const xmath::fvec3 n{ Pl.m_X / Len, Pl.m_Y / Len, Pl.m_Z / Len };
-        const float        d = Pl.m_W / Len;
+        float              d = Pl.m_W / Len;
+        if( std::isnan(d) )         // the floor under the eye: the GI's geometry straight down, a surface facing n
+        {
+            if( !m_pGIWorld ) { m_PlanarWhy = 3; return; }
+            // (straight down from where the view's centre ray lands - the floor of what is looked at -, else from the eye)
+            const auto C = m_pGIWorld->Cast(Camera.getPosition(), Camera.getForward(), 1000.0f);
+            const xmath::fvec3 From = C.m_Inst >= 0 ? Camera.getPosition() + Camera.getForward() * (C.m_T - 0.05f) : Camera.getPosition();
+            auto H = m_pGIWorld->Cast(From, n * -1.0f, 1000.0f);
+            if( (H.m_Inst < 0 || m_pGIWorld->HitNormal(H).Dot(n) < 0.95f) && C.m_Inst >= 0 ) H = m_pGIWorld->Cast(Camera.getPosition(), n * -1.0f, 1000.0f);
+            if( H.m_Inst < 0 || m_pGIWorld->HitNormal(H).Dot(n) < 0.95f ) { m_PlanarWhy = 4; return; }
+            d = -n.Dot(m_pGIWorld->HitPosition(H));
+        }
+        m_PlanarPlane = { n.m_X, n.m_Y, n.m_Z, d };
         xmath::fmat4 Reflect = xmath::fmat4::fromIdentity();
         for( int r = 0; r < 3; ++r )
         {
@@ -2026,12 +2038,12 @@ namespace xlionrender
             const xmath::fvec4 q = Inv * xmath::fvec4{ Cc[0] >= 0 ? 1.0f : -1.0f, Cc[1] >= 0 ? 1.0f : -1.0f, 1.0f, 1.0f };
             const float Wq = M(3, 0) * q[0] + M(3, 1) * q[1] + M(3, 2) * q[2] + M(3, 3) * q[3];
             const float Cq = C[0] * q[0] + C[1] * q[1] + C[2] * q[2] + C[3] * q[3];
-            if( std::abs(Cq) < 1e-12f ) return;
+            if( std::abs(Cq) < 1e-12f ) { m_PlanarWhy = 5; return; }
             for( int c = 0; c < 4; ++c ) M(2, c) = C[c] * (Wq / Cq);
         }
         for( int c = 0; c < 4; ++c ) M(0, c) = -M(0, c);
         renderScenePass(Window, Scene, m_PlanarView, M * xmath::fmat4::fromTranslation(EyeM), EyeM, false);
-        m_bPlanarOn = true;
+        m_bPlanarOn = true; m_PlanarWhy = 0;
     }
 
     void instance::renderScenePass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept
