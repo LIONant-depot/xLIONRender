@@ -1977,8 +1977,8 @@ namespace xlionrender
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, 0
                 , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f } };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
-            auto Buffers  = std::array<xgpu::buffer*, 8>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult };
-            auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor };
+            auto Buffers  = std::array<xgpu::buffer*, 10>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams };
+            auto Textures = std::array<const xgpu::texture*, 5>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth };
             Window.WriteTimestamp(m_ReflTimes, 0);
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
             Window.WriteTimestamp(m_ReflTimes, 1);
@@ -2042,7 +2042,43 @@ namespace xlionrender
             for( int c = 0; c < 4; ++c ) M(2, c) = C[c] * (Wq / Cq);
         }
         for( int c = 0; c < 4; ++c ) M(0, c) = -M(0, c);
-        renderScenePass(Window, Scene, m_PlanarView, M * xmath::fmat4::fromTranslation(EyeM), EyeM, false);
+        const xmath::fmat4 W2CM = M * xmath::fmat4::fromTranslation(EyeM);
+        renderScenePass(Window, Scene, m_PlanarView, W2CM, EyeM, false);
+
+        // its pyramid (rough receivers: xlionrender_refl_planar_mips_comp.glsl) and its parameters for the reflection pass (this ring slot)
+        std::array<std::uint32_t, 8 * 4> Levels{};
+        std::uint32_t Base = 0;
+        int Lw = W, Lh = H, nLevels = 0;
+        while( nLevels < 7 && (Lw > 1 || Lh > 1) )
+        {
+            Lw = std::max(1, (Lw + 1) / 2); Lh = std::max(1, (Lh + 1) / 2); ++nLevels;
+            Levels[4 * nLevels] = Base; Levels[4 * nLevels + 1] = std::uint32_t(Lw); Levels[4 * nLevels + 2] = std::uint32_t(Lh);
+            Base += std::uint32_t(Lw * Lh);
+        }
+        Levels[1] = std::uint32_t(W); Levels[2] = std::uint32_t(H);
+        if( m_PlanarLevels != nLevels || m_PlanarMipsBuffer.getEntryCount() < int(Base) )
+        {
+            m_Device.Destroy(std::move(m_PlanarMipsBuffer));
+            if( m_Device.Create(m_PlanarMipsBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = int(std::max<std::uint32_t>(Base, 1)) }) ) { m_PlanarLevels = 0; return; }
+            m_PlanarLevels = nLevels;
+        }
+        for( int L = 1; L <= nLevels; ++L )
+        {
+            const std::uint32_t Push[8] = { L == 1 ? std::uint32_t(W) : Levels[4 * (L - 1) + 1], L == 1 ? std::uint32_t(H) : Levels[4 * (L - 1) + 2], Levels[4 * L + 1], Levels[4 * L + 2]
+                                          , L == 1 ? 0u : Levels[4 * (L - 1)], Levels[4 * L], L == 1 ? 1u : 0u, 0u };
+            auto Buffers  = std::array<xgpu::buffer*, 1>{ &m_PlanarMipsBuffer };
+            auto Textures = std::array<const xgpu::texture*, 1>{ &m_PlanarView.m_HDR };
+            Window.Dispatch(m_PlanarMips, Buffers, Textures, Push, sizeof(Push), (int(Levels[4 * L + 1]) + 7) / 8, (int(Levels[4 * L + 2]) + 7) / 8);
+        }
+        const float ProjScale = float(H) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));
+        const xmath::fmat4 C2WM = W2CM.Inverse();
+        const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+        (void)m_PlanarParams.MemoryMapFrameRegion(Slot, 1, [&](void* p)
+        {
+            auto* pB = static_cast<std::byte*>(p);
+            const float Info[4] = { ProjScale, float(nLevels), 0, 0 };
+            std::memcpy(pB, &C2WM, 64); std::memcpy(pB + 64, Info, 16); std::memcpy(pB + 80, Levels.data(), sizeof(Levels));
+        });
         m_bPlanarOn = true; m_PlanarWhy = 0;
     }
 

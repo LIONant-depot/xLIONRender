@@ -19,10 +19,14 @@ struct frame_t { mat4 C2W; mat4 Reproject; vec4 Params; };          // (xlionren
 layout(std430, set = 0, binding = 5) readonly buffer frame_b   { frame_t F[]; };
 layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 4 per ring slot: rays, hits, visits, the planar texels
 layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records[]; };    // the view's records: the tail's W x H, then these
+layout(std430, set = 0, binding = 8) readonly buffer mips_b    { uvec2   PlanarMips[]; }; // the planar view's pyramid (xlionrender_refl_planar_mips_comp.glsl)
+struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; };                                  // the planar view's clip -> its eye's centred world; x: the half view's pixels a unit at distance 1, y: the pyramid's levels; per level: its base, w, h
+layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; };        // (a ring slot each)
 layout(set = 1, binding = 0) uniform sampler2D GColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 1) uniform sampler2D GDepth;
 layout(set = 1, binding = 2) uniform sampler2D EnvAtlas;   // the sky's prefiltered atlas (xlionrender_environment.glsl EnvSample)
 layout(set = 1, binding = 3) uniform sampler2D Planar;     // the planar view (instance::renderPlanar), this size, x mirrored; alpha: drawn (m_bPlanar)
+layout(set = 1, binding = 4) uniform sampler2D PlanarDepth;
 
 layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_Pad1; vec4 m_Plane; } Push;
 
@@ -44,6 +48,34 @@ vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
     return normalize(vec3(a * Nh.xy, max(1e-6, Nh.z)));
 }
 float Lambda(float c, float a) { c = max(c, 1e-6); return 0.5 * (sqrt(1.0 + a * a * (1.0 - c * c) / (c * c)) - 1.0); }
+
+// The planar view's pyramid at uv (0..1, the planar view's), level L (0: the view itself), bilinear: rgb, the coverage
+vec4 PlanarLevel(int L, vec2 uv)
+{
+    if (L == 0) return textureLod(Planar, uv, 0.0);
+    const uvec4 Lv = PL[Push.m_Slot].Level[L];
+    const vec2  q  = uv * vec2(Lv.yz) - 0.5;
+    const ivec2 i0 = ivec2(floor(q));
+    const vec2  f  = q - vec2(i0);
+    vec4 S = vec4(0.0);
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 t = clamp(i0 + ivec2(k & 1, k >> 1), ivec2(0), ivec2(Lv.yz) - 1);
+        const uvec2 m = PlanarMips[Lv.x + uint(t.y) * Lv.y + uint(t.x)];
+        const vec4  c = vec4(unpackHalf2x16(m.x), unpackHalf2x16(m.y));
+        S += vec4(c.rgb * c.a, c.a) * (((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y));
+    }
+    return S.a > 1e-4 ? vec4(S.rgb / S.a, S.a) : vec4(0.0);
+}
+vec4 PlanarAt(vec2 uv, float Lod)
+{
+    const float Lc = clamp(Lod, 0.0, PL[Push.m_Slot].Info.y);
+    const int   L0 = int(floor(Lc));
+    const vec4  A  = PlanarLevel(L0, uv);
+    if (Lc - float(L0) < 1e-3 || float(L0) >= PL[Push.m_Slot].Info.y) return A;
+    const vec4  B  = PlanarLevel(L0 + 1, uv);
+    return mix(A, B, Lc - float(L0));
+}
 
 void main()
 {
@@ -70,12 +102,25 @@ void main()
         const float PlaneDist = dot(Push.m_Plane.xyz, P + Push.m_Eye) + Push.m_Plane.w;
         if (Push.m_Mode == 0u && Push.m_bPlanar > 0.5 && Rough < Push.m_MaxRough && abs(PlaneDist) < 0.01 + 0.002 * length(P) && dot(N, Push.m_Plane.xyz) > 0.95)
         {
-            // a planar receiver: the planar view at the mirrored texel (a point of the plane lands there); nothing drawn there: the probes
-            const vec4  C    = texelFetch(Planar, ivec2(Size.x - 1 - p.x, p.y), 0);
-            const float Conf = C.a > 0.5 ? 1.0 - smoothstep(0.5 * Push.m_MaxRough, Push.m_MaxRough, Rough) : 0.0;
+            // a planar receiver: the planar view at the mirrored texel (a point of the plane lands there). Rough: its pyramid at the level
+            // of the lobe's footprint - the reflected distance t (the planar depth) times alpha, in the view's pixels at the receiver's
+            // distance (a labelled approximation of the rough planar class: an ideal image filtered, it cannot show what the mirror misses).
+            // Nothing drawn there: the probes (the coverage is the confidence)
+            const ivec2 m    = ivec2(Size.x - 1 - p.x, p.y);
+            const vec2  uv   = (vec2(m) + 0.5) / vec2(Size);
+            const float zp   = texelFetch(PlanarDepth, m, 0).r;
+            float Lod = 0.0, t = 0.0;
+            if (zp < 1.0)
+            {
+                const vec4 Q = PL[Push.m_Slot].C2W * vec4(uv * 2.0 - 1.0, zp, 1.0);
+                t = max(length(Q.xyz / Q.w) - length(P), 0.0);
+                const float a  = max(Rough, 0.045) * max(Rough, 0.045);
+                Lod = log2(max(2.0 * t * a / max(length(P), 1e-3) * PL[Push.m_Slot].Info.x, 1.0));
+            }
+            const vec4 C = PlanarAt(uv, Lod);
             Rec.x = packHalf2x16(C.rg);
-            Rec.y = packHalf2x16(vec2(C.b, Conf));
-            Rec.z = packHalf2x16(vec2(0.0, 1.0));
+            Rec.y = packHalf2x16(vec2(C.b, clamp(C.a, 0.0, 1.0)));
+            Rec.z = packHalf2x16(vec2(t, 1.0));
             Rec.w |= refl_planar_v << 24;
             atomicAdd(s_Planar, 1u);
         }

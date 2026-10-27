@@ -527,6 +527,38 @@ int main()
         CHECK(FloorPlanar < FloorTraced, "the planar view does not improve the floor over the traced rays (%.3f against %.3f)", FloorPlanar, FloorTraced);
         CHECK(FloorTraced < 0.7 * FloorToday, "the traced reflections do not improve the floor (%.3f against today's %.3f)", FloorTraced, FloorToday);
         CHECK(ChromeTraced < 0.5 * ChromeToday, "the traced reflections do not improve the chrome sphere (%.3f against today's %.3f)", ChromeTraced, ChromeToday);
+        // A rough floor (roughness 0.3): the planar view filtered by the lobe's footprint (its pyramid), against the reference, today's
+        // probes and one traced ray a texel (no reconstruction yet: noisy)
+        {
+            Objects[floor_v].m_Mat.m_Roughness = 0.3f;
+            Scene.m_Draws[floor_v].m_Material.m_Roughness = 0.3f;
+            rgb_image RToday, RTraced, RPlanar, RRef(Today.size(), 0.0f);
+            const auto Shot = [&](float MaxRough, bool bPlane, rgb_image& Out) -> bool
+            {
+                Scene.m_ReflectionMaxRoughness = MaxRough;
+                Scene.m_ReflectionPlane = bPlane ? xmath::fvec4{ 0, 1, 0, 0 } : xmath::fvec4{ 0, 0, 0, 0 };
+                for (int f = 0; f < 6; ++f) if (!App.RenderFrame(Scene, View, Camera)) return false;
+                return ReadRGB(Device, View, Out);
+            };
+            CHECK(Shot(0, false, RToday) && Shot(0.5f, false, RTraced) && Shot(0.5f, true, RPlanar), "render the rough floor");
+            Scene.m_ReflectionPlane = { 0, 0, 0, 0 };
+            for (int y = 0; y < size_v; ++y) for (int x = 0; x < size_v; ++x)
+            {
+                const std::size_t i = std::size_t(y) * size_v + x;
+                if (!MFloor[i]) continue;
+                const v3 D = Ray(x, y, SX, SY);
+                const auto H = World.Cast(Camera.getPosition(), D);
+                sample_rng Rng(std::uint32_t(i * 7919 + 3));
+                const v3 R = Reference.Reflected(World.HitPosition(H), World.HitNormal(H).NormalizeCopy(), D * -1.0f, Objects[floor_v].m_Mat, 256, Rng);
+                RRef[i * 3] = R.m_X; RRef[i * 3 + 1] = R.m_Y; RRef[i * 3 + 2] = R.m_Z;
+            }
+            const double Et = RMAE(RToday, RRef, MFloor, Floor), Er = RMAE(RTraced, RRef, MFloor, Floor), Ep = RMAE(RPlanar, RRef, MFloor, Floor);
+            std::printf("a rough floor (0.3), RMAE: today %.3f, one traced ray a texel %.3f, the filtered planar view %.3f\n", Et, Er, Ep);
+            DumpRGB("refl_b_rough_ref", RRef, size_v, size_v);
+            DumpRGB("refl_b_rough_planar", RPlanar, size_v, size_v);
+            DumpRGB("refl_b_rough_traced", RTraced, size_v, size_v);
+            CHECK(Ep < Et && Ep < Er, "the filtered planar view is not the best on the rough floor (%.3f; today %.3f, traced %.3f)", Ep, Et, Er);
+        }
         Scene.m_ReflectionMaxRoughness = 0;
     }
 

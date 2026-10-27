@@ -749,6 +749,10 @@ namespace xlionrender
         bool                        m_bProbeAtlasReady      = false;
         std::array<render_view, 6>  m_CaptureViews;
         render_view                 m_PlanarView;                   // reflections' planar view (renderPlanar): the scene mirrored in scene::m_ReflectionPlane, the screen tail's size
+        xgpu::shader                m_PlanarMipsShader;             // its pyramid (shaders/xlionrender_refl_planar_mips_comp.glsl): the pass, the levels, its parameters a ring slot each
+        xgpu::compute               m_PlanarMips;
+        xgpu::buffer                m_PlanarMipsBuffer, m_PlanarParams;
+        int                         m_PlanarLevels = 0;
         bool                        m_bPlanarOn = false;            // (this frame's: the reflection pass resolves its records from it)
         int                         m_PlanarWhy = 1;                // (diagnostics: 0 on, 1 off, 2 its view, 3 no GI world, 4 no floor under the eye, 5 the oblique plane)
         xmath::fvec4                m_PlanarPlane { 0, 0, 0, 0 };   // (its plane this frame, unit normal: the scene's or the floor found under the eye)
