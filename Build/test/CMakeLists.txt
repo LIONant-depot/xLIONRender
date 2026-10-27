@@ -77,6 +77,11 @@ target_link_libraries(xlionrender_stress PRIVATE xlionrender_new)
 add_executable(xlionrender_bench_overrides "${XLIONRENDER_DIR}/src/tools/bench_overrides/xlionrender_bench_overrides.cpp" ${TEST_SHADER_HEADERS})
 target_link_libraries(xlionrender_bench_overrides PRIVATE xlionrender_new)
 
+# The dense many-light rig (documentation/lighting_p3_design.md) - not a test
+#   Build/test/vs2022/Release/xlionrender_bench_many_lights.exe [--densities 64,256,1024,2048,4096] [--frames N] [--big 0|1]
+add_executable(xlionrender_bench_many_lights "${XLIONRENDER_DIR}/src/tools/bench_many_lights/xlionrender_bench_many_lights.cpp" ${TEST_SHADER_HEADERS})
+target_link_libraries(xlionrender_bench_many_lights PRIVATE xlionrender_new)
+
 # GI lab, experiment 1 (CPU only: vertex surfels vs a path-traced reference; research doc "chosen direction")
 #   Build/test/vs2022/Release/xlionrender_gi_lab.exe [--quick]
 add_executable(xlionrender_gi_lab "${XLIONRENDER_DIR}/src/tools/gi_lab/xlionrender_gi_lab.cpp")
