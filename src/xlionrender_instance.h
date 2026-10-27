@@ -220,7 +220,8 @@ namespace xlionrender
         bool                                       m_bTailTraceBvh   = true;                // SCREEN: those lights' shadow ray also through the GI's BVH (P4; the opaque rigid GI meshes, off screen too)
         // Emissive surfaces as lights (documentation/lighting_gi_interface_notice.md): the GI's emitter view (gi::world::ForEachEmitter) as
         // lights without shadow pages. Off by default: the GI's bounce already holds the emitters' light on the surfaces around them - with
-        // both, it counts twice, until the GI leaves that term to lighting (Tomas's decision)
+        // both, it counts twice - so this one switch also hands that term to lighting (gi::world::setup::m_bEmitterDirectExternal: the GI keeps
+        // the emitters' bounces, not their direct light). Or scene::gi_settings::m_bEmitterLights (the Environment's GIEmitterLights)
         bool                                       m_bEmitterLights   = false;
         int                                        m_EmitterLightsMax = 2048;               // the strongest by power (luminance x area); the rest left out (getLightStats)
         float                                      m_EmitterCutoff    = 0.002f;             // an emitter light's reach: where its luminance x A / (d^2 + A) falls under this
@@ -770,7 +771,7 @@ namespace xlionrender
         std::vector<emitter_light>      m_EmitterLights;                    // the GI's emitters as lights (m_bEmitterLights), made again when its generation changes
         std::uint64_t                   m_EmitterLightsGen  = 0;
         int                             m_nEmittersLeftOut  = 0;
-        void                            refreshEmitterLights( void ) noexcept;
+        void                            refreshEmitterLights( bool bOn ) noexcept;
         int                         m_LightRingUsed         = 0;
         int                         m_CellRingUsed          = 0;
         std::uint64_t               m_LightFrame            = ~0ull;

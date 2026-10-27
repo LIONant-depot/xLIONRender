@@ -445,6 +445,9 @@ namespace xlionrender::gi
             std::uint64_t DirKey = Hash(1469598103934665603ull, &L.m_SunDirection, sizeof(L.m_SunDirection));
             DirKey = Hash(DirKey, &L.m_SunColor, sizeof(L.m_SunColor));
             if (!L.m_Points.empty()) DirKey = Hash(DirKey, L.m_Points.data(), L.m_Points.size() * sizeof(L.m_Points[0]));
+            // (lighting shades the emitters' direct light - setup::m_bEmitterDirectExternal -: D without it, F with it at the hits; switched: all again)
+            const std::uint64_t External = W.m_Setup.m_bEmitterDirectExternal ? 0x5EEDC0DE5EEDC0DEull : 0ull;
+            SkyKey ^= External; DirKey ^= External;
             // (a move or a material while the links settle or build: all of them again; once they solve, the rows the change touches -
             // LocalRebuild - the rest of the scene keeps its links)
             const std::uint64_t Local = m_LinkState == 2 ? m_LinkLocalKey : ((m_XformGen << 20) * 0x9E3779B97F4A7C15ull ^ W.MaterialGenSum());

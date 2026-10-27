@@ -60,7 +60,7 @@ int main()
     xlionrender::mesh_id Box, ClusterBox;
     CHECK(MakeMesh(Renderer, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), Box), "box");
     cluster_buffers ClusterBuffers;                                             // (a mover: a cluster mesh with an instance id - its transform kept)
-    cluster_buffers WallBuffers, PanelBuffers;                                  // (P4's wall and the glowing panel: GI meshes - rigid cluster meshes)
+    cluster_buffers WallBuffers, PanelBuffers, FloorBuffers;                    // (P4's wall, the glowing panel and its floor: GI meshes - rigid cluster meshes)
     cluster_buffers SkinBuffers;                                                // (a skinned mover: one bone, its last pose after this frame's in the bone buffer)
     xgpu::buffer    SkinBones;
     xlionrender::mesh_id SkinMoving, SkinStill;
@@ -380,13 +380,17 @@ int main()
     // Emissive surfaces as lights (instance::m_bEmitterLights; the GI's emitter view, gi::world::ForEachEmitter): a glowing panel (1 x 1 m,
     // 2 cm thick, 2 m over the floor) with GI. The same energy: the view's flux (radiance x area) is the panel's (its emission x the GI's
     // scale x its surface), and its discs' irradiance at the floor under it (the form factor the shading uses, A cos cos / (d^2 + A)) is
-    // the panel's own (its integral) - within 5% each. Then the floor under it lit by them (CELLS: exact)
+    // the panel's own (its integral) - within 5% each. Then the floor under it (a GI mesh too) lit by the GI alone (its emitter samples) and
+    // by the emitter lights with the GI's bounces (the switch hands the emitters' direct light to lighting): the same light, not twice
     {
+        xlionrender::mesh_id GIFloor;
+        const auto FloorPrim = xprim_geom::cube::Generate(15, 15, 15, 15, xprim_geom::float3{ 12.0f, 0.1f, 12.0f });
+        CHECK(MakeStaticBuffers(Device, FloorPrim, 2.2f, FloorBuffers) && !Renderer.CreateClusterGeom(GIFloor, FloorBuffers.Geom()) && !Renderer.SetMeshGI(GIFloor, MakeSurfels(FloorPrim, 0.3f, 0.9f)), "the floor's GI mesh");
         xlionrender::mesh_id GIPanel;
         const auto PanelPrim = xprim_geom::cube::Generate(15, 15, 15, 15, xprim_geom::float3{ 1.0f, 0.02f, 1.0f });
         CHECK(MakeStaticBuffers(Device, PanelPrim, 2.2f, PanelBuffers) && !Renderer.CreateClusterGeom(GIPanel, PanelBuffers.Geom()) && !Renderer.SetMeshGI(GIPanel, MakeSurfels(PanelPrim, 0.1f, 0.3f)), "the panel's GI mesh");
         xlionrender::scene Glow;
-        Glow.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = At(0, -0.05f, 0, 30, 0.1f, 30), .m_Material = { .m_Roughness = 0.9f } });
+        Glow.m_Draws.push_back({ .m_Mesh = GIFloor, .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.05f, 0 }), .m_Material = { .m_Roughness = 0.9f }, .m_Instance = 6 });
         Glow.m_Draws.push_back({ .m_Mesh = GIPanel, .m_L2W = xmath::fmat4::fromTranslation({ 0, 2.0f, 0 }), .m_Material = { .m_Emissive = { 0.02f, 0.02f, 0.02f } }, .m_Instance = 7 });
         Glow.m_Sun     = { .m_Intensity = 0.0f, .m_bCastShadows = false };
         Glow.m_Ambient = { 0.0f, 0.0f, 0.0f };
@@ -399,10 +403,10 @@ int main()
         bool bOk = true;
         for (int f = 0; f < 2000 && bOk && (f < 3 || Renderer.isGICapturing()); ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
         std::vector<float> Off, On;
-        for (int f = 0; f < 4 && bOk; ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
+        for (int f = 0; f < 300 && bOk; ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);                  // (the GI settled)
         bOk = bOk && ReadHDR(Device, GView, Off);
         Renderer.m_bEmitterLights = true;
-        for (int f = 0; f < 4 && bOk; ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
+        for (int f = 0; f < 300 && bOk; ++f) bOk = App.RenderFrame(Glow, GView, GlowCam);
         bOk = bOk && ReadHDR(Device, GView, On) && On.size() == Off.size() && On.size() == std::size_t(GW) * GH;
         const auto Stats = Renderer.getLightStats();
         Renderer.m_bEmitterLights = false;
@@ -428,12 +432,12 @@ int main()
         }
         const double FluxPanel = Le * (2.0 * 1.0 + 4.0 * 0.02);
         const std::size_t c = std::size_t(GH / 2) * std::size_t(GW) + std::size_t(GW / 2);       // (ReadHDR: the red channel)
-        std::printf("a glowing panel: %d emitter surfels (%d lights, %d left out); flux %.3f against the panel's %.3f, irradiance under it %.4f against %.4f; the floor there %.4f without the emitter lights, %.4f with them\n"
+        std::printf("a glowing panel: %d emitter surfels (%d lights, %d left out); flux %.3f against the panel's %.3f, irradiance under it %.4f against %.4f; the floor there: the GI alone %.4f, the emitter lights + the GI's bounces %.4f\n"
                    , n, Stats.m_nEmitters, Stats.m_nEmittersLeftOut, Flux, FluxPanel, E, EPanel, Off[c], On[c]);
         CHECK(n > 0 && Stats.m_nEmitters == n, "the emitter lights: %d of the view's %d", Stats.m_nEmitters, n);
         CHECK(std::abs(Flux / FluxPanel - 1.0) < 0.05, "the emitter view's flux %.3f, the panel's %.3f", Flux, FluxPanel);
         CHECK(std::abs(E / EPanel - 1.0) < 0.05, "the emitter discs' irradiance %.4f, the panel's %.4f", E, EPanel);
-        CHECK(On[c] > Off[c] + 0.1f * float(EPanel), "the emitter lights do not light the floor: %.4f with, %.4f without", On[c], Off[c]);
+        CHECK(Off[c] > 0.02f && std::abs(On[c] / Off[c] - 1.0f) < 0.2f, "the floor under the panel: the GI alone %.4f, the emitter lights with the GI's bounces %.4f (twice the light: counted twice)", Off[c], On[c]);
     }
 
     // The memory at Tomas's Bistro view (3093 x 1493): the targets at half size

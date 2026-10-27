@@ -436,3 +436,38 @@ void SurfaceAt(int Id, int Tri, float U, float V, out vec3 Albedo, out vec3 Emis
     Emission = SE * (GF(5u) / W);
 }
 
+// The emitters' direct light at a hit, when lighting shades it (setup::m_bEmitterDirectExternal, GD[11] bit 64: its emitter lights,
+// instance::m_bEmitterLights): the GI keeps it out of what it shows - a surfel takes no emitter sample and no emission its rays hit -
+// and in what it bounces, as it does the lights' (Direct): one emitter by weighted reservoir sampling over the table (w lum(L), the pass'
+// G5), its shadow ray; the irradiance, 0 when it is hidden or there is none
+bool EmitterDirectExternal() { return (GD[11] & 64u) != 0u; }
+vec3 EmitterIrradianceAt(vec3 P, vec3 N, uint Seed)
+{
+    const uint Tb = GD[14], nE = GD[15];
+    float Q = 0.0; int Pick = -1;
+    for (uint k = 0u; k < nE; ++k)
+    {
+        const uint e = Tb + 12u * k;
+        const vec3 D = GV(e) - P;
+        const float d2 = dot(D, D);
+        if (d2 < 1e-10) continue;
+        const vec3 Dn = D * (1.0 / sqrt(d2));
+        const float cr = dot(N, Dn), ce = -dot(GV(e + 3u), Dn);
+        if (cr <= 0.0 || ce <= 0.0) continue;
+        const float A = GF(e + 6u), w = A * cr * ce / (d2 + A);
+        if (w < 1e-5) continue;
+        const vec3 Le = GV(e + 7u);
+        const float q = w * (0.2126 * Le.x + 0.7152 * Le.y + 0.0722 * Le.z);
+        if (q <= 0.0) continue;
+        Q += q;
+        const float u = float(Hash32(Seed ^ k * 0x85EBCA6Bu) >> 8) * (1.0 / 16777216.0);
+        if (u * Q < q) Pick = int(k);
+    }
+    if (Pick < 0) return vec3(0);
+    const uint e = Tb + 12u * uint(Pick);
+    const vec3 D = GV(e) - P;
+    const float d = length(D);
+    if (Occluded(P + N * 1e-3, D * (1.0 / d), d * 0.98)) return vec3(0);
+    const vec3 Le = GV(e + 7u);
+    return Le * (Q / (0.2126 * Le.x + 0.7152 * Le.y + 0.0722 * Le.z));
+}

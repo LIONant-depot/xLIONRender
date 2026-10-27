@@ -401,6 +401,13 @@ namespace xlionrender
             W.m_Setup.m_EmissiveScale = Scene.m_GI.m_EmissiveScale;
             W.DirtyAll();
         }
+        // lighting shades the emitters' direct light (its emitter lights: one switch, never both) - the GI keeps their bounces; switched:
+        // every instance re-solves (what it shows changes)
+        if( const bool bExternal = m_bEmitterLights || Scene.m_GI.m_bEmitterLights; W.m_Setup.m_bEmitterDirectExternal != bExternal )
+        {
+            W.m_Setup.m_bEmitterDirectExternal = bExternal;
+            W.LowerAll();
+        }
         // G3, G4 (gi_dynamic_master_plan.md): the rays on the GPU, over frames. This frame's slice dispatched after the update (it commits
         // what came in, picks when the batch is all in); the last frame's slice into the world before it (Collect, at the top: before
         // anything here changes the world, whose copy of the GPU's state must be current first)
@@ -818,10 +825,10 @@ namespace xlionrender
     // one-sided disc of its area - the GI's own form factor, A cos / (d^2 + A) (shaders/xlionrender_local_lights.glsl LocalEmitterAtt) -, its
     // radiance the GI's (its emissive scale in), no shadow pages; the strongest m_EmitterLightsMax by power, the rest left out. Made again
     // only when the view's generation changes (an emitter added, moved, its emission or the scale changed)
-    void instance::refreshEmitterLights( void ) noexcept
+    void instance::refreshEmitterLights( bool bOn ) noexcept
     {
         const auto* pW = m_pGIWorld.get();
-        if( !m_bEmitterLights || pW == nullptr ) { m_EmitterLights.clear(); m_EmitterLightsGen = 0; m_nEmittersLeftOut = 0; return; }
+        if( !bOn || pW == nullptr ) { m_EmitterLights.clear(); m_EmitterLightsGen = 0; m_nEmittersLeftOut = 0; return; }
         const std::uint64_t Gen = pW->EmittersGen();
         if( Gen == m_EmitterLightsGen ) return;
         m_EmitterLightsGen = Gen;
@@ -848,7 +855,7 @@ namespace xlionrender
     {
         const std::uint64_t Frame = m_Device.getFrameIndex();
         beginCellFrame(Frame);
-        refreshEmitterLights();
+        refreshEmitterLights(m_bEmitterLights || Scene.m_GI.m_bEmitterLights);
 
         // the scene's lights, then the emitters' (after them: no shadow pages - the local pages index the scene's)
         const int nScene  = std::min({ int(Scene.m_LocalLights.size()), max_lights_v, light_region_v - m_LightRingUsed });

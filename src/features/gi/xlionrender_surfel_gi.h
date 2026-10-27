@@ -1988,6 +1988,7 @@ namespace xlionrender::gi
             float   m_OverheadMs    = 0;        // Phase 6b: the GI work of the frame outside Update (the renderer's upload, by its last frames): taken from the allowance        // the shown light's spatial filter (BasisLight): each pass about one surfel radius wider
             bool    m_bGPUTrace     = false;    // G3 (gi_dynamic_master_plan.md): Update picks and commits, the GPU traces (gpu_trace: GPUWork, DeliverGPU)
             bool    m_bGPUShown     = false;    // G4: the shown light is the GPU's (gpu_trace::Show): Update makes none (UpdateShown, BasisLight)
+            bool    m_bEmitterDirectExternal = false;  // lighting shades the emitters' direct light (instance::m_bEmitterLights): kept out of what the GI shows, in what it bounces (the GPU trace's; ponytail: not the CPU's)
             bool    m_bEmitterSampling = false; // G5 (gi_dynamic_master_plan.md): the emitters' light by light sampling in each pass (SampleEmitters: 8
                                                 // samples, one shadow ray each), not the links (not built); the rays' hits leave the emission out
             bool    m_bGPUOwned     = false;    // G4c: the light lives on the GPU only (with m_bGPUTrace, m_bGPUShown): the pick hands out ranges
@@ -2298,6 +2299,22 @@ namespace xlionrender::gi
         const std::vector<v3>& SurfelEmission( int Id ) const noexcept { return m_Instances[Id].m_SurfEmission; }
 
         void DirtyAll() noexcept { for (auto& I : m_Instances) if (I.m_bAlive) MarkDirty(I, 1.0f); }
+
+        // Every surfel's light lowered now (estimator::Lower: its next sample nearly replaces it) and queued (urgent), as a move does to the
+        // surfels near it (ApplyAffect) - a change of what the GI shows everywhere (setup::m_bEmitterDirectExternal: lighting takes the
+        // emitters' direct light). DirtyAll waits for each instance's next pass, which a settled world rarely starts
+        void LowerAll() noexcept
+        {
+            for (int i = 0; i < int(m_Instances.size()); ++i)
+            {
+                auto& I = m_Instances[std::size_t(i)];
+                if (!I.m_bAlive || I.m_E.empty()) continue;
+                for (auto& Es : I.m_Est) Es.Lower(1.0f);
+                if (m_Setup.m_bGPUTrace) m_GPUOps.push_back({ i, -1, 1.0f, 0 });
+                const int n = I.m_Level == 0 ? int(std::min<std::size_t>(I.m_nOwned, I.m_E.size())) : int(I.m_E.size());
+                for (int s = 0; s < n && s < int(I.m_UrgentMark.size()); ++s) if (!I.m_UrgentMark[std::size_t(s)]) { I.m_UrgentMark[std::size_t(s)] = 1; I.m_Urgent.push_back(s); }
+            }
+        }
 
         // Phase 6: the explicit "relight everything" (a command): every instance traced again under the allowance (sliced, never at once),
         // each surfel's light the warm start (estimator::Lower). At most once in m_RelightPeriod updates: a call sooner is kept and done
@@ -3040,7 +3057,7 @@ namespace xlionrender::gi
             D[7]  = m_Emitters.empty() ? 1u : 0u;
             D[8]  = std::bit_cast<std::uint32_t>(m_Setup.m_MinBlend);
             D[10] = std::uint32_t(std::max(m_Setup.m_RaysPerSurfel, 1));
-            D[11] = (m_Setup.m_bAdaptiveRays ? 1u : 0u) | (m_Setup.m_bDistanceTiers ? 2u : 0u) | (m_Setup.m_bAblateHitRead ? 4u : 0u) | (m_Setup.m_bAblateFreeze ? 8u : 0u) | (m_Setup.m_bAblateStats ? 16u : 0u) | (m_Setup.m_bAblateFallback ? 32u : 0u);
+            D[11] = (m_Setup.m_bAdaptiveRays ? 1u : 0u) | (m_Setup.m_bDistanceTiers ? 2u : 0u) | (m_Setup.m_bAblateHitRead ? 4u : 0u) | (m_Setup.m_bAblateFreeze ? 8u : 0u) | (m_Setup.m_bAblateStats ? 16u : 0u) | (m_Setup.m_bAblateFallback ? 32u : 0u) | (m_Setup.m_bEmitterDirectExternal ? 64u : 0u);
             D[12] = std::bit_cast<std::uint32_t>(m_Setup.m_RayUncertainty);
             D[13] = m_Setup.m_bEmitterSampling ? 1u : 0u;
         }

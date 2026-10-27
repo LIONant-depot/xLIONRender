@@ -53,7 +53,9 @@ void main()
             vec3 Albedo, Emission, Q;
             SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
             const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
-            const vec3 In = Direct(Ph, Nh) + (Indirect(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Q) ? Q : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));
+            vec3 In = Direct(Ph, Nh) + (Indirect(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Q) ? Q : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));
+            // (lighting shades the emitters' direct light - its emitter lights light what the probes light too -: the hit's own here, as Direct)
+            if (EmitterDirectExternal()) { In += EmitterIrradianceAt(Ph, Nh, PHash(uint(Push.m_Frame) * 7919u + p * 64u + lid)); Emission = vec3(0); }
             L = Albedo * In * (1.0 / gi_pi_v) + Emission;
         }
     }

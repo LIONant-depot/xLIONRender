@@ -214,6 +214,7 @@ namespace xlionrender
         float           m_PixelsPerSurfel = 256;    // the screen area (pixels) an instance needs per fine surfel: below it the GI holds its parent surfels, whatever its shape
         float           m_Saturation    = 1;        // the shown GI light's saturation (1: as solved; luminance kept): the filter and the coarse surfels average its colors toward grey
         float           m_EmissiveScale = 100;      // self-illuminated materials are lights with no light entity, their emission a texture color (0..1): the GI takes it this many times brighter (their look on screen stays)
+        bool            m_bEmitterLights = false;   // the GI's emitters as lighting's lights (instance::m_bEmitterLights): their direct light shaded by lighting, the GI keeps their bounces
     };
 
     struct scene

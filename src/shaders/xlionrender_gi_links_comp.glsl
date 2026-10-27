@@ -134,6 +134,8 @@ void main()
             if (A.x + A.y + A.z <= 0.0) continue;
             const vec3 Nh = OctDec(unpackSnorm2x16(h.w));
             F += A * Direct(Cd + vec3(xy, zr.x), Nh);
+            // (lighting shades the emitters' direct light: they light the hits here, as the lights - their bounces stay in the GI)
+            if (EmitterDirectExternal()) F += A * EmitterIrradianceAt(Cd + vec3(xy, zr.x), Nh, Hash32(uint(kd) * 0x9E3779B9u ^ q * 0x85EBCA6Bu ^ 0x5BD1E995u));
         }
         GIDirTmp[kd] = vec4(F, 0.0);
         return;
@@ -195,7 +197,7 @@ void main()
             vec3 Albedo, Emission;
             SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
             const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
-            const vec3 Em = GD[13] == 0u && (GD[R + 47u] & 32u) == 0u ? Emission : vec3(0);
+            const vec3 Em = GD[13] == 0u && (GD[R + 47u] & 32u) == 0u && !EmitterDirectExternal() ? Emission : vec3(0);     // (lighting shades it: not in D)
             Dsum += Em * (gi_pi_v / float(Rn));
             if (uint(r) < gi_hitcap_v) { s_HP[r] = Ph - C; s_HN[r] = Nh; s_HA[r] = Albedo * (1.0 / float(Rn)); s_HC[r] = 0u; }
             vec3 Q;
@@ -217,8 +219,8 @@ void main()
                 }
             }
         }
-        // the emitters' light the pass adds besides its rays (sampled: its expectation, every emitter in sight)
-        if (GD[13] != 0u)
+        // the emitters' light the pass adds besides its rays (sampled: its expectation, every emitter in sight); lighting shades it: not in D
+        if (GD[13] != 0u && !EmitterDirectExternal())
         {
             const uint Tb = GD[14], nE = GD[15];
             for (uint e8 = lid; e8 < nE; e8 += 64u)

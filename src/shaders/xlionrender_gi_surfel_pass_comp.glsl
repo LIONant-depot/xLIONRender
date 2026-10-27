@@ -76,13 +76,15 @@ void main()
             const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
             if (!bQ) { if (nUns == 0) { UnsAt = Ph; FirstUns = r; } ++nUns; }
             ++nHits;
-            const vec3 In = Direct(Ph, Nh) + (bQ ? Q : (GD[11] & 32u) != 0u ? GV(HR + 5u) : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));     // (bit 32, measurement only: the fallback's walk replaced by the instance's mean)
-            const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + (GD[13] == 0u && (GD[R + 47u] & 32u) == 0u ? Emission : vec3(0));     // (no light sampling, no links: the hits bring the emitters' light)
+            vec3 In = Direct(Ph, Nh) + (bQ ? Q : (GD[11] & 32u) != 0u ? GV(HR + 5u) : Unsupported(H.m_Inst, H.m_Tri, H.m_U, H.m_V));     // (bit 32, measurement only: the fallback's walk replaced by the instance's mean)
+            const bool bExternal = EmitterDirectExternal();             // (lighting shades the emitters' direct light: the hit's own, here, as Direct)
+            if (bExternal) In += EmitterIrradianceAt(Ph, Nh, Hash32(floatBitsToUint(Off1) ^ uint(r + 1) * 0x9E3779B9u ^ 0x5BD1E995u));
+            const vec3 Lr = Albedo * In * (1.0 / gi_pi_v) + (GD[13] == 0u && (GD[R + 47u] & 32u) == 0u && !bExternal ? Emission : vec3(0));     // (no light sampling, no links: the hits bring the emitters' light)
             Sum += Lr; BA0 += Lr * Bw.x; BA1 += Lr * Bw.y; BA2 += Lr * Bw.z;
         }
         // G5: the emitters' light by light sampling (gi::world::SampleEmitters: this lane's sample of gi_lanes_v): an emitter by weighted
         // reservoir sampling over the table (w lum(L), the same hashes), its shadow ray, L Q / lum(L) split into the basis as the links'
-        if (GD[13] != 0u)
+        if (GD[13] != 0u && !EmitterDirectExternal())                 // (lighting shades it: EmitterIrradianceAt)
         {
             const uint Seed = Hash32(Hash32(floatBitsToUint(Off1) ^ Hash32(floatBitsToUint(Off2))) ^ uint(Lane + 1) * 0x9E3779B9u);
             const uint Tb = GD[14], nE = GD[15];
