@@ -39,6 +39,7 @@
 #include "dependencies/xLIONCore/src/transform/xlioncore_hierarchy.h"
 #include "dependencies/xLIONCore/src/tags/xlioncore_tags.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics.h"
+#include "dependencies/xLIONCore/src/game/xlioncore_game.h"
 #undef  XSCRIPT_IMPORT_ONLY
 #include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"   // registering macro back for anything after
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
@@ -52,6 +53,34 @@
 
 namespace xlionrender
 {
+    // The Animation system: while the game runs, each playing Animation's time moves on by the frame's game time x its speed - wrapped into its
+    // clip when it loops, stopped at an end when it does not (Playing off). The clip's length from its package as loaded (the Animation's, else
+    // its Skinned Mesh's geometry's own); not loaded yet: the time just moves. The pose is the renderer's (scene_renderer::AddSkinnedMesh)
+    struct animation_system : xecs::system::instance
+    {
+        constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Animation" };
+        using xecs::system::instance::instance;
+
+        void operator()( animation& A, const skinned_mesh* pSkin ) noexcept
+        {
+            const auto* pGame = xlioncore::game::From(getGameMgr());
+            if (!A.m_bPlaying || pGame == nullptr) return;
+            A.m_Time += pGame->m_Time.m_DeltaTime * A.m_Speed;
+
+            using namespace xlioncore::resources;
+            std::uint64_t Pkg = A.m_Package.m_Instance.m_Value;
+            if (Pkg == 0 && pSkin && !pSkin->m_Geom.empty())
+                if (auto* pGeom = static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, pSkin->m_Geom.m_Instance.m_Value))) Pkg = pGeom->getAnimationRef().m_Instance.m_Value;
+            auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
+            if (pPkg == nullptr || A.m_Clip < 0 || A.m_Clip >= int(pPkg->getClips().size())) return;
+            const auto& Clip = pPkg->getClips()[std::size_t(A.m_Clip)];
+            const float Length = Clip.m_FPS > 0 ? float(Clip.m_nFrames) / float(Clip.m_FPS) : 0.0f;
+            if (Length <= 0) return;
+            if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
+            else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }
+        }
+    };
+
     struct system : xecs::system::instance
     {
         constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Render" };
@@ -287,6 +316,18 @@ namespace xlionrender
                     xmath::fmat4 L2W;
                     if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
                     R.AddMesh(C, pMaterial, L2W, Ent.m_Value);
+                });
+            }
+            {   // the Skinned Meshes, posed by their Animation when they have one
+                xecs::query::instance Query;
+                Query.m_Must.AddFromComponents<xlioncore::transform, skinned_mesh>();
+                LeaveOut(Query, View);
+                auto S = Search(Query);
+                Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const skinned_mesh& C, const animation* pAnim, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+                {
+                    xmath::fmat4 L2W;
+                    if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
+                    R.AddSkinnedMesh(C, pAnim, L2W, Ent.m_Value);
                 });
             }
             Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });

@@ -19,7 +19,7 @@ void XecsPlugin_RegisterSystems(xecs::game_mgr::instance& GameMgr) noexcept
     // this DLL's own copy (and its built-ins) by GUID before the system below is created and queries it.
     GameMgr.m_ComponentMgr.LockComponentTypes();
     xecs::component::mgr::SyncLocalBitIDs<xlioncore::transform, xlioncore::render_transform, xlioncore::no_render_tag, xecs::editor::no_render_tag>();
-    GameMgr.RegisterSystems<xlionrender::system>();
+    GameMgr.RegisterSystems<xlionrender::animation_system, xlionrender::system>();
 }
 
 extern "C" __declspec(dllexport)

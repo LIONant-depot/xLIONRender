@@ -23,6 +23,9 @@
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_runtime.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_rsc_loader.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_runtime.h"
+#include "plugins/xskeleton.plugin/source/xskeleton_xgpu_rsc_loader.h"
+#include "plugins/xanim_package.plugin/source/xanim_package_xgpu_rsc_loader.h"
+#include "dependencies/xGPU/source/Tools/editors/xgpu_editor_anim_pose.h"     // the pose of a skeleton at a clip's time (the skin editor's preview poses it the same way)
 
 #include <cstdio>
 #include <unordered_map>
@@ -66,6 +69,20 @@ namespace xlionrender
         std::unordered_map<const void*, std::shared_ptr<gi_load>>  m_GILoads;      // Phase 7: the surfels being made on a worker, per geometry
         double                                          m_TotalGILoadMs = 0;           // every geometry's surfels made ready so far (DescribeScene)
         std::unordered_map<const void*, int>            m_GIBaked;
+        // The Skinned Meshes, per entity: its bones' skinning matrices in a buffer per frame in flight (written without waiting), each with its
+        // renderer mesh (a mesh reads its bones from one buffer); let go when the entity is not drawn for a while (Begin)
+        static constexpr int                            skin_frames_v = 3;      // (instance::ring_frames_v: the frames in flight and the one recorded)
+        struct skinned_entity
+        {
+            const void*                         m_pGeom  = nullptr;
+            int                                 m_nBones = 0;
+            std::array<xgpu::buffer, skin_frames_v> m_Bones;
+            std::array<mesh_id, skin_frames_v>  m_Mesh;
+            std::uint32_t                       m_Frame  = 0;
+        };
+        std::unordered_map<std::uint64_t, skinned_entity> m_Skinned;
+        std::vector<xmath::fmat4>                       m_PoseWorlds, m_SkinMatrices;
+        xgpu::device*                                   m_pDevice = nullptr;
         std::unordered_set<const void*>                 m_OutlineMade;  // per geometry: its outline mesh given to the renderer (made the first time it is the selected one)      // per geometry: its surfels given to the renderer (1), or it has none (0)
         stats                                           m_Stats;
 
@@ -73,6 +90,7 @@ namespace xlionrender
         {
             if (m_bReady || m_bFailed) return m_bReady;
             if (m_Renderer.Init(Device)) { m_bFailed = true; return false; }
+            m_pDevice = &Device;
             m_bReady = true;
             return true;
         }
@@ -313,6 +331,62 @@ namespace xlionrender
             m_Scene.m_Draws.push_back(std::move(D));
         }
 
+        // A Skinned Mesh entity into the scene (pAnim: its Animation; null: the rest pose): its skeleton posed at the clip's time (the Animation's
+        // package, else the geometry's own animations), each bone's skinning matrix (its world times its inverse bind pose, as the skin editor's
+        // preview) into this frame's bone buffer, its materials as the Mesh's. Not in the GI's geometry (no surfels: it moves): a RECEIVER
+        void AddSkinnedMesh(const skinned_mesh& Skin, const animation* pAnim, const xmath::fmat4& L2W, std::uint64_t Entity) noexcept
+        {
+            using namespace xlioncore::resources;
+            ++m_Stats.m_Meshes;
+            auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
+            auto* pSkel = pGeom ? static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
+            if (pGeom == nullptr || pSkel == nullptr || pGeom->m_nVertices == 0 || m_pDevice == nullptr) { ++m_Stats.m_Waiting; return; }
+            const auto Bones  = pSkel->getBones();
+            const int  nBones = int(Bones.size());
+            if (nBones == 0) { ++m_Stats.m_Waiting; return; }
+
+            const std::uint64_t Pkg = pAnim == nullptr ? 0 : pAnim->m_Package.empty() ? pGeom->getAnimationRef().m_Instance.m_Value : pAnim->m_Package.m_Instance.m_Value;
+            auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
+            if (pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && int(pPkg->getBoneNameHashes().size()) == nBones)
+                xgpu::tools::editors::ComputeAnimatedBoneWorlds(*pSkel, *pPkg, pAnim->m_Clip, pAnim->m_Time, m_PoseWorlds);
+            else xgpu::tools::editors::ComputeRestBoneWorlds(*pSkel, m_PoseWorlds);      // (no animation, its package not loaded yet, or another skeleton's)
+
+            auto& E = m_Skinned[Entity];
+            if (E.m_pGeom != pGeom || E.m_nBones != nBones)
+            {
+                ReleaseSkinned(E);
+                for (int k = 0; k < skin_frames_v; ++k)
+                    if (m_pDevice->Create(E.m_Bones[k], { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = nBones, .m_bWriteOnly = true })
+                        || m_Renderer.CreateClusterGeom(E.m_Mesh[k], MakeSkinGeom(*pGeom, E.m_Bones[k])))
+                    { ReleaseSkinned(E); ++m_Stats.m_Waiting; return; }
+                E.m_pGeom = pGeom; E.m_nBones = nBones;
+            }
+            E.m_Frame = m_Frame;
+            const int k = int(m_Frame % skin_frames_v);
+            m_SkinMatrices.resize(std::size_t(nBones));
+            for (int i = 0; i < nBones; ++i) m_SkinMatrices[std::size_t(i)] = m_PoseWorlds[std::size_t(i)] * Bones[std::size_t(i)].m_InvBindPose;
+            (void)E.m_Bones[k].MemoryMapFrameRegion(0, nBones, [&](void* p) { std::memcpy(p, m_SkinMatrices.data(), std::size_t(nBones) * sizeof(xmath::fmat4)); });     // (this frame's buffer: the frames in flight read the others)
+
+            draw D{ .m_Mesh = E.m_Mesh[k], .m_L2W = L2W, .m_UserID = Entity, .m_Instance = std::uint64_t(m_InstanceIds.Of(Entity)) | (std::uint64_t(gi_role::RECEIVER) << draw_gi_role_shift_v) };
+            const auto Defaults = pGeom->getDefaultMaterialInstances();
+            D.m_Materials.resize(Defaults.size());
+            for (std::size_t i = 0; i < Defaults.size(); ++i)
+            {
+                const auto* pSlot = Skin.m_bOverrideMaterials && i < Skin.m_Slots.size() ? &Skin.m_Slots[i] : nullptr;
+                const std::uint64_t MI = pSlot && pSlot->m_Material.m_Instance.m_Value ? pSlot->m_Material.m_Instance.m_Value : Defaults[i].m_Instance.m_Value;
+                D.m_Materials[i] = pSlot ? OverrideOf(Entity, i, MI, pSlot->m_Params) : MaterialOf(MI);
+                m_Stats.m_ConstantSlots += !D.m_Materials[i].isValid();
+            }
+            ++m_Stats.m_Drawn;
+            m_Scene.m_Draws.push_back(std::move(D));
+        }
+        void ReleaseSkinned(skinned_entity& E) noexcept
+        {
+            for (auto& M : E.m_Mesh) if (M.isValid()) { m_Renderer.DestroyMesh(M); M = {}; }
+            for (auto& B : E.m_Bones) if (B.m_Private) m_pDevice->Destroy(std::move(B));       // (the device frees them once no frame in flight reads them)
+            E.m_pGeom = nullptr; E.m_nBones = 0;
+        }
+
         // A light shines along its entity's -Y
         static xmath::fvec3 DownOf(const xmath::fmat4& L2W) noexcept { auto D = L2W.TransformDirection({ 0, -1, 0 }); D.NormalizeSafe(); return D; }
 
@@ -354,6 +428,11 @@ namespace xlionrender
             m_Scene.m_GI      = {};
             m_Stats           = {};
             m_InstanceIds.Begin();
+
+            // The Skinned Meshes not drawn for a while (deleted, hidden) let their bones and meshes go
+            for (auto It = m_Skinned.begin(); It != m_Skinned.end();)
+                if (m_Frame - It->second.m_Frame > 2u * skin_frames_v) { ReleaseSkinned(It->second); It = m_Skinned.erase(It); }
+                else ++It;
 
             // The override slots not drawn last frame let their materials go
             for (auto It = m_OverrideSlots.begin(); It != m_OverrideSlots.end();)
@@ -401,6 +480,7 @@ namespace xlionrender
             m_Overrides.Clear(m_Renderer);
             for (auto& [Key, M] : m_Materials) m_Renderer.DestroyMaterial(M.m_Id);
             for (auto& [Key, Id] : m_Meshes)    m_Renderer.DestroyMesh(Id);
+            for (auto& [Key, E] : m_Skinned)    ReleaseSkinned(E);
         }
     };
 }

@@ -24,6 +24,8 @@
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_runtime.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_rsc_loader.h"
 #include "plugins/xgeom_static.plugin/source/xgeom_static_xgpu_runtime.h"
+#include "plugins/xgeom_skin.plugin/source/xgeom_skin_xgpu_rsc_loader.h"
+#include "plugins/xgeom_skin.plugin/source/xgeom_skin_xgpu_runtime.h"
 
 #include <vector>
 #include <string>
@@ -37,7 +39,12 @@ namespace xlionrender
     inline constexpr auto material_instance_type_guid_v = xresource::type_guid(xresource::guid_generator::Instance64FromString("MaterialInstance"));
     inline constexpr auto material_type_guid_v          = xresource::type_guid(xresource::guid_generator::Instance64FromString("Material"));
     inline constexpr auto texture_type_guid_v           = xresource::type_guid(xresource::guid_generator::Instance64FromString("texture"));
+    inline constexpr auto geom_skin_type_guid_v         = xresource::type_guid(xresource::guid_generator::Instance64FromString("GeomSkin"));
+    inline constexpr auto skeleton_type_guid_v          = xresource::type_guid(xresource::guid_generator::Instance64FromString("xSkeleton"));
+    inline constexpr auto anim_package_type_guid_v      = xresource::type_guid(xresource::guid_generator::Instance64FromString("xAnimPackage"));
     using geom_static_ref       = xresource::def_guid<geom_static_type_guid_v>;
+    using geom_skin_ref         = xresource::def_guid<geom_skin_type_guid_v>;
+    using anim_package_ref      = xresource::def_guid<anim_package_type_guid_v>;
     using material_instance_ref = xresource::def_guid<material_instance_type_guid_v>;
     using texture_ref           = xresource::def_guid<texture_type_guid_v>;
 
@@ -79,7 +86,7 @@ namespace xlionrender
 
     // The marker and the revert of a slot's rows (member_override_state): a parameter row is overridden when the slot sets it, the Material row when
     // the slot swaps the instance; the revert sets the row's Override text to empty / the Material to the geometry's own (defined after mesh)
-    inline void MeshSlotOverrideState( const xproperty::type::object&, void* pMesh, void* pBase, std::string_view Path, bool& bOverridden
+    inline void MeshSlotOverrideState( const xproperty::type::object& Type, void* pMesh, void* pBase, std::string_view Path, bool& bOverridden
                                      , std::vector<xproperty::settings::member_override_state_t::revert>* pChoices ) noexcept;
 
     // The inspector's row of one parameter of a slot's material instance (never saved): its name and the value the entity draws with - its
@@ -405,11 +412,73 @@ namespace xlionrender
         )
     };
 
+    // A skinned geometry drawn with its materials, deformed by its skeleton's pose (an Animation on the same entity plays one of its clips; without
+    // one: the rest pose). The materials as the Mesh's: per material slot of the geometry its own instance, or one the entity swaps in, with the
+    // entity's own parameter values (mesh_slot). Not in the GI's geometry (it moves every frame): lit by it like a RECEIVER (the probes)
+    struct skinned_mesh
+    {
+        constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "SkinnedMesh" };
+
+        geom_skin_ref                       m_Geom;
+        bool                                m_bOverrideMaterials = false;
+        std::vector<mesh_slot>              m_Slots;
+
+        // The slots, one per material slot of the geometry (as loaded), each knowing the geometry's own instance (as mesh::Slots)
+        std::vector<mesh_slot>& Slots( void ) noexcept
+        {
+            auto* pGeom = m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(xlioncore::resources::GetResource(geom_skin_type_guid_v.m_Value, m_Geom.m_Instance.m_Value));
+            if (pGeom == nullptr) return m_Slots;
+            const auto Defaults = pGeom->getDefaultMaterialInstances();
+            if (m_Slots.size() != Defaults.size()) m_Slots.resize(Defaults.size());
+            for (std::size_t i = 0; i < Defaults.size(); ++i)
+            {
+                m_Slots[i].m_Default.m_Instance.m_Value = xlioncore::resources::GuidOf(material_instance_type_guid_v.m_Value, Defaults[i].m_Instance.m_Value);
+                if (m_Slots[i].m_Name.empty()) m_Slots[i].m_Name = std::format("Slot {}", i);
+            }
+            return m_Slots;
+        }
+
+        XPROPERTY_DEF
+        ( "SkinnedMesh", skinned_mesh
+        , obj_member<"Geom", &skinned_mesh::m_Geom, member_help<"The GeomSkin resource to draw: its skeleton is the one its pose comes from (an Animation on this entity plays it; without one, the rest pose)">>
+        , obj_member<"Override Materials", &skinned_mesh::m_bOverrideMaterials, member_help<"This entity's own materials: per material slot of the geometry, another material instance and its own values for the parameters it chooses. Off: the geometry's materials">>
+        , obj_member<"Slots", +[](skinned_mesh& O) -> std::vector<mesh_slot>& { return O.Slots(); }, member_array_size_readonly<>, member_ui_open<true>
+            , member_dynamic_flags<+[](const skinned_mesh& M) { xproperty::flags::type F{}; F.m_bDontShow = !M.m_bOverrideMaterials; F.m_bDontSave = !M.m_bOverrideMaterials; return F; }>
+            , member_help<"The geometry's material slots: the material instance each draws with and the values this entity draws its parameters with. An edit overrides; > reverts">>
+        )
+    };
+
+    // Plays one clip of an animation package on the entity's Skinned Mesh (its skeleton's bones): the Animation system moves Time on while the game
+    // runs (Play); the renderer poses the skeleton at Time. The shape of a single-clip player (Unity's legacy Animation, Godot's AnimationPlayer,
+    // Unreal's single-node mode): which clip, where in it, how fast, looping or not, playing or not - a state machine or blending would sit above
+    // it later. Outside Play the pose stays at Time (edit Time to look through the clip)
+    struct animation
+    {
+        constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "Animation" };
+
+        anim_package_ref    m_Package;              // empty: the Skinned Mesh's geometry's own animations (GeomSkin's AnimationRef)
+        int                 m_Clip      = 0;        // ponytail: by index (the compiled clips keep only their names' hashes); by name when a tool lists them
+        float               m_Time      = 0;        // seconds into the clip
+        float               m_Speed     = 1;
+        bool                m_bLoop     = true;
+        bool                m_bPlaying  = true;
+
+        XPROPERTY_DEF
+        ( "Animation", animation
+        , obj_member<"Package", &animation::m_Package, member_help<"The animation package whose clip plays (empty: the Skinned Mesh's geometry's own animations). Its skeleton must be the geometry's">>
+        , obj_member<"Clip",    &animation::m_Clip,    member_help<"Which clip of the package plays (its index)">>
+        , obj_member<"Time",    &animation::m_Time,    member_help<"Seconds into the clip: the pose drawn. The Animation system moves it on while the game runs">>
+        , obj_member<"Speed",   &animation::m_Speed,   member_help<"How fast time moves in the clip: 1 as authored, 0 frozen, negative backwards">>
+        , obj_member<"Loop",    &animation::m_bLoop,   member_help<"At the end the clip starts again; off: it stops at its last frame (Playing turns off)">>
+        , obj_member<"Playing", &animation::m_bPlaying, member_help<"Whether time moves while the game runs">>
+        )
+    };
+
     // The rows' marker and revert (member_override_state): Path names the slot and the row ("...Slots[G:s]/Parameters[G:r]..." or ".../Material").
     // The levels a row inherits through: the material (and its instances), the geometry's instance or the slot's swap, a prefab (pBase: the
     // prefab's Mesh, when this one is a prefab instance's), the entity. Overridden: the entity differs from what it inherits (from the prefab
     // when there is one). The revert goes one level up; when the prefab overrides the row too, a second choice goes past it
-    inline void MeshSlotOverrideState( const xproperty::type::object&, void* pMesh, void* pBase, std::string_view Path, bool& bOverridden
+    inline void MeshSlotOverrideState( const xproperty::type::object& Type, void* pMesh, void* pBase, std::string_view Path, bool& bOverridden
                                      , std::vector<xproperty::settings::member_override_state_t::revert>* pChoices ) noexcept
     {
         bOverridden = false;
@@ -422,12 +491,15 @@ namespace xlionrender
         };
         std::size_t SlotEnd = 0, RowEnd = 0;
         const int iSlot = IndexAfter("Slots[G:", SlotEnd);
-        auto& M = *static_cast<mesh*>(pMesh);
-        if (iSlot < 0 || std::size_t(iSlot) >= M.m_Slots.size()) return;
-        auto& Slot = M.m_Slots[iSlot];
+        // (the slots' owner: a Mesh or a Skinned Mesh)
+        const bool bSkinned = &Type == xproperty::getObjectByType<skinned_mesh>();
+        auto& Slots = bSkinned ? static_cast<skinned_mesh*>(pMesh)->m_Slots : static_cast<mesh*>(pMesh)->m_Slots;
+        if (iSlot < 0 || std::size_t(iSlot) >= Slots.size()) return;
+        auto& Slot = Slots[iSlot];
         static const mesh_slot s_None{};
-        const auto* pB        = static_cast<const mesh*>(pBase);
-        const auto& BaseSlot  = pB && std::size_t(iSlot) < pB->m_Slots.size() ? pB->m_Slots[iSlot] : s_None;     // (a prefab without the slot: nothing set there)
+        const auto* pBSlots   = pBase == nullptr ? nullptr : bSkinned ? &static_cast<const skinned_mesh*>(pBase)->m_Slots : &static_cast<const mesh*>(pBase)->m_Slots;
+        const auto* pB        = pBSlots;
+        const auto& BaseSlot  = pB && std::size_t(iSlot) < pB->size() ? (*pB)[iSlot] : s_None;     // (a prefab without the slot: nothing set there)
         using revert          = xproperty::settings::member_override_state_t::revert;
 
         if (Path.substr(SlotEnd + 1).starts_with("/Material"))
@@ -716,6 +788,8 @@ namespace xlionrender
     XSCRIPT_REGISTER_COMPONENT(light_point, "Rendering", 54)
     XSCRIPT_REGISTER_COMPONENT(light_spot,  "Rendering", 55)
     XSCRIPT_REGISTER_COMPONENT(environment, "Rendering", 56)
+    XSCRIPT_REGISTER_COMPONENT(skinned_mesh, "Rendering", 58)
+    XSCRIPT_REGISTER_COMPONENT(animation,   "Rendering", 59)
     XSCRIPT_REGISTER_COMPONENT(mesh_material, "Deprecated", 57)     // (old files: the editor moves it into the Mesh, UpgradeOldMaterials; not offered to add)
 }
 
