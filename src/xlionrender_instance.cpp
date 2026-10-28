@@ -104,6 +104,9 @@ namespace xlionrender
         constexpr std::uint32_t s_ReflTraceComp[] = {
             #include "xlionrender_refl_trace_comp.h"
         };
+        constexpr std::uint32_t s_ReflDenoiseComp[] = {
+            #include "xlionrender_refl_denoise_comp.h"
+        };
         constexpr std::uint32_t s_ReflPlanarMipsComp[] = {
             #include "xlionrender_refl_planar_mips_comp.h"
         };
@@ -623,6 +626,9 @@ namespace xlionrender
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 10, .m_nTextures = 5, .m_PushConstantsSize = 80 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflDenoiseComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflDenoise, { .m_pShader = &m_ReflDenoiseShader, .m_nBuffers = 4, .m_nTextures = 3, .m_PushConstantsSize = 16 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 64 + 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMipsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflPlanarMipsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMips, { .m_pShader = &m_PlanarMipsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 16 + 8 * 16 + 16 + 2 * 16 * refl_boxes_v, .m_EntryCount = ring_frames_v }); Err ) return Err;
@@ -1581,7 +1587,7 @@ namespace xlionrender
         }
         // the records (binding 14): the tail's W x H, then the reflections' W x H (xlionrender_refl_trace_comp.glsl); the denoiser's temporal
         const std::vector<std::array<std::uint32_t, 4>> Zeros(2 * std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
-        for( auto* pB : { &View.m_TailResult, &View.m_TailTemporal } )
+        for( auto* pB : { &View.m_TailResult, &View.m_TailTemporal, &View.m_ReflTemporal, &View.m_ReflHistory } )      // (the reflections' reconstruction: its two)
             if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = (pB == &View.m_TailResult ? 2 : 1) * W * H, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()) }); Err ) return Err;
         View.m_TailWidth = W; View.m_TailHeight = H;
         View.m_bTailPrev = false;
@@ -1621,7 +1627,7 @@ namespace xlionrender
         Kill(View.m_SharpGPass); Kill(View.m_SharpGColor); Kill(View.m_SharpGMotion); Kill(View.m_SharpGDepth);
         View.m_SharpWidth = View.m_SharpHeight = 0;
         Kill(View.m_TailInstance); Kill(View.m_TailGPass); Kill(View.m_TailGColor); Kill(View.m_TailGDepth); Kill(View.m_TailGMotion);
-        Kill(View.m_TailPass); Kill(View.m_TailDiffuse); Kill(View.m_TailSpecular); Kill(View.m_TailResult); Kill(View.m_TailTemporal);
+        Kill(View.m_TailPass); Kill(View.m_TailDiffuse); Kill(View.m_TailSpecular); Kill(View.m_TailResult); Kill(View.m_TailTemporal); Kill(View.m_ReflTemporal); Kill(View.m_ReflHistory);
         View.m_TailWidth = View.m_TailHeight = 0;
         View.m_bTailPrev = false;
     }

@@ -80,6 +80,7 @@ namespace xlionrender
         xgpu::renderpass        m_TailPass;
         xgpu::pipeline_instance m_TailInstance;
         xgpu::buffer            m_TailResult, m_TailTemporal;
+        xgpu::buffer            m_ReflTemporal, m_ReflHistory;      // the reflections' reconstruction (xlionrender_refl_denoise_comp.glsl): its pass between, last frame's result
         xmath::fmat4            m_TailPrevC2W = xmath::fmat4::fromIdentity();
         xmath::fmat4            m_TailPrevW2C = xmath::fmat4::fromIdentity();
         xmath::fvec3            m_TailPrevEye{ 0, 0, 0 };

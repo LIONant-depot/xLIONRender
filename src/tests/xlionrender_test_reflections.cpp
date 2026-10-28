@@ -483,6 +483,7 @@ int main()
         CHECK(ReadRGB(Device, View, Today), "read today (GI on, no traced reflections)");
         Scene.m_ReflectionMaxRoughness = 0.3f;
         Scene.m_bReflectionJitter = true;                   // (the 16 frames' mean: a new ray a texel each)
+        Scene.m_bReflectionReconstruct = false;             // (B measures the estimator itself: its one ray a texel, no reconstruction)
         // (the traced reflections are one ray a texel, a new one each frame: the mean of 16 frames is the estimator's expectation - its
         // bias, what B gates; the noise is the reconstruction's, milestone D)
         const auto Mean = [&](int Frames, rgb_image& Out) -> bool
@@ -588,6 +589,117 @@ int main()
             const double Still = Change(false), Moving = Change(true);
             std::printf("the rough floor's change a frame: %.5f without the jitter, %.5f with it\n", Still, Moving);
             CHECK(Still >= 0 && Moving > 0 && Still * 10 < Moving, "the reflections still move without the jitter (%.5f against %.5f)", Still, Moving);
+
+            // Milestone D, the reconstruction (scene::m_bReflectionReconstruct), on the rough floor traced (no planar view), against one
+            // ray a texel: (1) flicker - the floor's mean change a frame, still camera; (2) one frame against the reference, beside the
+            // estimator's 16-frame mean (what a perfect reconstruction of its noise would reach); (3) lag - the lamp off, the frames until
+            // the floor follows the estimator's mean of the new light; (4) ghosting - the chrome sphere moved away, the frames until its
+            // reflection is gone from the floor
+            {
+                Scene.m_ReflectionMaxRoughness = 0.5f;
+                Scene.m_bReflectionJitter = true;
+                const auto FloorMean = [&](const rgb_image& I) { double s = 0, n = 0; for (std::size_t i = 0; i < MFloor.size(); ++i) if (MFloor[i]) { s += Lum(&I[i * 3]); ++n; } return s / std::max(n, 1.0); };
+                const auto Diff = [&](const rgb_image& A, const rgb_image& B) { double s = 0, n = 0; for (std::size_t i = 0; i < MFloor.size(); ++i) if (MFloor[i]) { s += std::abs(Lum(&A[i * 3]) - Lum(&B[i * 3])); ++n; } return s / std::max(n, 1.0); };
+                const auto Flicker = [&](bool bRec, rgb_image& Last) -> double
+                {
+                    Scene.m_bReflectionReconstruct = bRec;
+                    rgb_image A, B;
+                    for (int f = 0; f < 30; ++f) if (!App.RenderFrame(Scene, View, Camera)) return -1;
+                    if (!ReadRGB(Device, View, A)) return -1;
+                    double d = 0;
+                    for (int f = 0; f < 8; ++f) { if (!App.RenderFrame(Scene, View, Camera) || !ReadRGB(Device, View, B)) return -1; d += Diff(A, B); A = B; }
+                    Last = A;
+                    return d / 8;
+                };
+                rgb_image RawOne, RecOne, RawMean;
+                const double FRaw = Flicker(false, RawOne), FRec = Flicker(true, RecOne);
+                Scene.m_bReflectionReconstruct = false;
+                CHECK(Mean(16, RawMean), "the estimator's mean");
+                const double ERaw = RMAE(RawOne, RRef, MFloor, Floor), ERec = RMAE(RecOne, RRef, MFloor, Floor), EMean = RMAE(RawMean, RRef, MFloor, Floor);
+                std::printf("milestone D, the rough floor (0.3): change a frame %.5f -> %.5f reconstructed; RMAE of one frame %.3f -> %.3f (the estimator's 16-frame mean %.3f)\n", FRaw, FRec, ERaw, ERec, EMean);
+                DumpRGB("refl_d_rough_raw", RawOne, size_v, size_v);
+                DumpRGB("refl_d_rough_rec", RecOne, size_v, size_v);
+                CHECK(FRec >= 0 && FRec < 0.25 * FRaw, "the reconstruction does not calm the floor (%.5f against %.5f a frame)", FRec, FRaw);
+                CHECK(ERec < ERaw && ERec < 1.15 * EMean, "a reconstructed frame is not near the estimator's mean (%.3f; one ray %.3f, the mean %.3f)", ERec, ERaw, EMean);
+
+                // lag: the lamp off - the frames until the floor's mean is within 3% of where it settles, reconstructed and as traced (the
+                // GI's own response is in both: the reconstruction's lag is the difference)
+                const auto Lag = [&](bool bRec, std::vector<double>& Track) -> int
+                {
+                    Scene.m_bReflectionReconstruct = bRec;
+                    const auto Lamp = Scene.m_LocalLights;
+                    rgb_image I;
+                    Scene.m_LocalLights.clear();
+                    for (int f = 0; f < 90; ++f) if (!App.RenderFrame(Scene, View, Camera)) return -1;
+                    if (!ReadRGB(Device, View, I)) return -1;
+                    const double Off = FloorMean(I);
+                    Scene.m_LocalLights = Lamp;
+                    for (int f = 0; f < 90; ++f) if (!App.RenderFrame(Scene, View, Camera)) return -1;
+                    Scene.m_LocalLights.clear();
+                    int n = -1;
+                    for (int f = 1; f <= 16 && n < 0; ++f)
+                    {
+                        if (!App.RenderFrame(Scene, View, Camera) || !ReadRGB(Device, View, I)) return -1;
+                        const double e = std::abs(FloorMean(I) - Off) / std::max(Off, 1e-6);
+                        Track.push_back(e);
+                        if (e < 0.03) n = f;
+                    }
+                    Scene.m_LocalLights = Lamp;
+                    return n;
+                };
+                std::vector<double> TRaw, TRec;
+                const int LagRaw = Lag(false, TRaw), LagRec = Lag(true, TRec);
+                std::printf("milestone D, the lamp off: the floor within 3%% of where it settles after %d frames as traced, %d reconstructed (errors:", LagRaw, LagRec);
+                for (double e : TRec) std::printf(" %.3f", e);
+                std::printf(")\n");
+                CHECK(LagRaw > 0 && LagRec > 0 && LagRec <= LagRaw + 3, "the reconstruction lags the lamp (%d frames, %d as traced)", LagRec, LagRaw);
+
+                // ghosting: the chrome sphere moved 1.9 m aside - its reflection on the floor must leave with it. Where the floor showed it
+                // (the floor's texels whose settled images with and without the sphere differ by more than a fifth of the floor's mean),
+                // the part of that difference still there each frame after the move (signed toward the sphere's image), reconstructed and
+                // as traced: the GI's own response to the move (the sphere's bounce and occlusion fade over many frames) is in both, so the
+                // reconstruction's ghost is what it keeps beyond the traced estimator's - the frames until it is within 0.05 of it
+                const auto Ghost = [&](bool bRec, std::vector<double>& Track) -> int
+                {
+                    Scene.m_bReflectionReconstruct = bRec;
+                    const auto Was = Scene.m_Draws[chrome_v].m_L2W, Away = xmath::fmat4::fromTranslation({ -1.9f, 0.6f, 0.4f }) * xmath::fmat4::fromScale({ 1.2f, 1.2f, 1.2f });
+                    rgb_image Gone, With, Now;
+                    Scene.m_Draws[chrome_v].m_L2W = Away;
+                    for (int f = 0; f < 120; ++f) if (!App.RenderFrame(Scene, View, Camera)) return -1;
+                    if (!ReadRGB(Device, View, Gone)) return -1;
+                    Scene.m_Draws[chrome_v].m_L2W = Was;
+                    for (int f = 0; f < 120; ++f) if (!App.RenderFrame(Scene, View, Camera)) return -1;
+                    if (!ReadRGB(Device, View, With)) return -1;
+                    const double Cut = 0.2 * FloorMean(Gone);
+                    double Was0 = 0, nM = 0;
+                    for (std::size_t i = 0; i < MFloor.size(); ++i) if (MFloor[i] && std::abs(Lum(&With[i * 3]) - Lum(&Gone[i * 3])) > Cut) { Was0 += std::abs(Lum(&With[i * 3]) - Lum(&Gone[i * 3])); ++nM; }
+                    Scene.m_Draws[chrome_v].m_L2W = Away;
+                    int n = -1;
+                    for (int f = 1; f <= 8 && nM > 0; ++f)
+                    {
+                        if (!App.RenderFrame(Scene, View, Camera) || !ReadRGB(Device, View, Now)) return -1;
+                        double Left = 0;
+                        for (std::size_t i = 0; i < MFloor.size(); ++i) if (MFloor[i] && std::abs(Lum(&With[i * 3]) - Lum(&Gone[i * 3])) > Cut) Left += (Lum(&Now[i * 3]) - Lum(&Gone[i * 3])) * (Lum(&With[i * 3]) > Lum(&Gone[i * 3]) ? 1.0 : -1.0);     // (signed: the noise cancels)
+                        const double e = Left / std::max(Was0, 1e-9);
+                        Track.push_back(e);
+                        n = f;
+                    }
+                    Scene.m_Draws[chrome_v].m_L2W = Was;
+                    return n;
+                };
+                std::vector<double> GRaw, GRec;
+                const int GhostRaw = Ghost(false, GRaw), GhostRec = Ghost(true, GRec);
+                int Kept = -1;
+                for (std::size_t f = 0; f < GRec.size() && f < GRaw.size() && Kept < 0; ++f) if (GRec[f] <= GRaw[f] + 0.05) Kept = int(f) + 1;
+                std::printf("milestone D, the chrome sphere moved away: its reflection on the floor within 0.05 of the traced estimator's after %d frames (left:", Kept);
+                for (double e : GRec) std::printf(" %.2f", e);
+                std::printf(" | traced:");
+                for (double e : GRaw) std::printf(" %.2f", e);
+                std::printf(")\n");
+                CHECK(GhostRaw == 8 && GhostRec == 8 && Kept > 0 && Kept <= 2, "the reconstruction ghosts the moved sphere (%d frames)", Kept);
+                Scene.m_bReflectionReconstruct = false;
+                Scene.m_bReflectionJitter = false;
+            }
         }
         Scene.m_ReflectionMaxRoughness = 0;
     }

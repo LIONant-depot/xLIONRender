@@ -238,6 +238,9 @@ namespace xlionrender
         // its one ray - with nothing accumulating them, a new ray every frame only made the glossy receivers (and a mirror's edges,
         // through VNDF's 0.045 floor) flicker
         bool                        m_bReflectionJitter = false;
+        // The reflections' reconstruction (milestone D: temporal by the reflection's virtual motion, then spatial by the lobe; it accumulates,
+        // so the rays change every frame while it runs). Off: the one ray a texel as traced
+        bool                        m_bReflectionReconstruct = true;
     };
 }
 

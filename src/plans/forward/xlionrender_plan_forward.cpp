@@ -2007,7 +2007,7 @@ namespace xlionrender
             }
             const auto& Pl = m_PlanarPlane;
             struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; } Push
-                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
+                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
                 , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, 0 } };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
             auto Buffers  = std::array<xgpu::buffer*, 10>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams };
@@ -2018,8 +2018,28 @@ namespace xlionrender
             {
                 auto P2 = Push;
                 P2.m_Full[0] = View.m_SharpWidth; P2.m_Full[1] = View.m_SharpHeight; P2.m_Full[2] = 2 * W * H; P2.m_SharpMax = m_ReflSharpMax;
+                P2.m_Frame = Scene.m_bReflectionJitter ? View.m_TailFrame : 0u;     // (the sharp ones are not reconstructed: their one ray each stays unless asked)
                 auto T2 = std::array<const xgpu::texture*, 5>{ &View.m_SharpGColor, &View.m_SharpGDepth, &m_EnvAtlas, Textures[3], Textures[4] };
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
+            }
+            // the reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then spatial;
+            // the half-size records it leaves are what the materials read
+            if( Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 )
+            {
+                const xmath::fmat4 ToPrev = View.m_bTailPrev ? View.m_TailPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) : xmath::fmat4::fromIdentity();
+                const xmath::fvec4 RP{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
+                (void)m_ReflFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
+                {
+                    auto* pB = static_cast<std::byte*>(p);
+                    std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &ToPrev, 64); std::memcpy(pB + 128, &RP, 16);
+                });
+                auto DBuffers  = std::array<xgpu::buffer*, 4>{ &m_ReflFrames, &View.m_TailResult, &View.m_ReflTemporal, &View.m_ReflHistory };
+                auto DTextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_TailGMotion };
+                for( std::uint32_t Pass = 0; Pass < 2; ++Pass )
+                {
+                    const std::uint32_t DPush[4] = { Pass, std::uint32_t(Slot), 0, 0 };
+                    Window.Dispatch(m_ReflDenoise, DBuffers, DTextures, DPush, sizeof(DPush), (W + 7) / 8, (H + 7) / 8);
+                }
             }
             Window.WriteTimestamp(m_ReflTimes, 1);
             Light.m_EnvParams.m_W = MaxRough;

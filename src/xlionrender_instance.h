@@ -411,6 +411,9 @@ namespace xlionrender
         xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
         xgpu::shader                m_ReflTraceShader;              // the reflection trace's benchmark (m_ReflTraceBench): its pass, counters (4 per ring slot), timestamps
         xgpu::compute               m_ReflTrace;
+        xgpu::shader                m_ReflDenoiseShader;            // the reflections' reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl), its frames (a ring slot each)
+        xgpu::compute               m_ReflDenoise;
+        xgpu::buffer                m_ReflFrames;
         xgpu::buffer                m_ReflStats;
         xgpu::timestamps            m_ReflTimes;
         refl_report                 m_ReflReport;
