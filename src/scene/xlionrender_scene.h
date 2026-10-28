@@ -184,7 +184,7 @@ namespace xlionrender
         xmath::fvec3    m_Position  { 0, 0, 0 };
         xmath::fvec3    m_BoxMin    { -5, -5, -5 };         // world: influence and parallax box
         xmath::fvec3    m_BoxMax    {  5,  5,  5 };
-        float           m_Blend     = 1.0f;
+        float           m_Blend     = 0.1f;
     };
 
     // Diffuse GI (features/gi/xlionrender_surfel_gi.h): draws of meshes given surfels (instance::SetMeshGI) with a persistent

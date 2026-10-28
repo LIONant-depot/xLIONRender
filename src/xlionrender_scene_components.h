@@ -717,7 +717,7 @@ namespace xlionrender
         constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "ReflectionProbe" };
 
         xmath::fvec3    m_Extents       = { 5, 5, 5 };      // half the box (world units, around the entity): its influence and its parallax
-        float           m_Blend         = 1.0f;             // the box's faces fade it over this distance
+        float           m_Blend         = 0.1f;             // the box's faces fade it over this distance (1 m left a room's spheres' lower metre to the flat ambient: black; Unreal's box transition is ~1 cm) (1 m left the lower metre of a room's spheres to the flat ambient: black; Unreal's box transition is ~1 cm)
 
         XPROPERTY_DEF
         ( "ReflectionProbe", reflection_probe_component
