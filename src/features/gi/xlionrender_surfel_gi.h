@@ -1617,7 +1617,8 @@ namespace xlionrender::gi
         // GeomStatic compiler packs it into the resource, the renderer unpacks it at load instead of building it (seconds in Release, half
         // a minute in Debug for the Police Station). Only what the surfels and the geometry decide: the same in both. Unpack checks the
         // block's tag and sizes (false: build them)
-        static constexpr std::uint32_t derived_tag_v = 0x36444947u;    // "GID6": the lists packed (PackReadGrid). GID5: as they are, read: unpacked
+        static constexpr std::uint32_t derived_tag_v = 0x37444947u;    // "GID7": the neighbors of a curved layer (SameLayer). GID6: the lists packed
+        static constexpr std::uint32_t derived_tag6_v = 0x36444947u;   // (PackReadGrid), its neighbors read: made again. GID5: as they are, read: unpacked
         static constexpr std::uint32_t derived_tag5_v = 0x35444947u;   // (GID4, never released: the center as an entry; GID3: the origins as
                                                                         // positions and normals, read: made again;
                                                                         // GID2: no first patch; GID1: no sub-cell masks, no flags): a change to the layout below is a new tag
@@ -1647,8 +1648,8 @@ namespace xlionrender::gi
             std::size_t i = 0;
             const auto Take = [&](std::size_t n) { const bool b = i + n <= W.size(); const std::size_t at = i; i += n; return b ? W.data() + at : nullptr; };
             const std::uint32_t* p = Take(8);
-            if (p == nullptr || (p[0] != derived_tag_v && p[0] != derived_tag5_v && p[0] != derived_tag3_v)) return false;
-            const bool bPacked = p[0] == derived_tag_v;
+            if (p == nullptr || (p[0] != derived_tag_v && p[0] != derived_tag6_v && p[0] != derived_tag5_v && p[0] != derived_tag3_v)) return false;
+            const bool bPacked = p[0] == derived_tag_v || p[0] == derived_tag6_v;
             const bool bTag3 = p[0] == derived_tag3_v;
             const bool bLeak = (p[1] & 1u) != 0;
             const std::uint32_t FirstPatch = p[2];
@@ -1683,6 +1684,7 @@ namespace xlionrender::gi
             m_ReadList.assign(pList, pList + nList);
             if (bPacked) { auto T = m_ReadTable; auto L = m_ReadList; PackReadGrid(false, T, L, m_ReadTable, m_ReadList); }
             m_Neighbors = std::move(Nbs);
+            if (p[0] != derived_tag_v) BuildNeighbors();               // (before GID7: a curved surface's surfels had no neighbors)
             if (bTag3) BuildOrigins();                                  // (a GID3 resource: its origins made again from the vertex surfels, the same ones)
             else { m_OriginFirst.assign(pOF, pOF + nOFirst); m_OriginVert.assign(pOV, pOV + nO); }
             SortReadLists();
@@ -1723,13 +1725,20 @@ namespace xlionrender::gi
         // frame 10 cm behind them is another), and nothing between them higher than it (the line between them lifted by it is clear:
         // the slats' edges do not stop it, a baseboard or a wall does). It was: in sight from half a radius off the surface - over
         // everything lower than that, into the layer behind
+        // A curved surface is one layer too: the centers are measured against the mean normal (two points of a sphere or a cylinder are
+        // exactly in its plane; against either one's own plane they were apart by the curve, and a small sphere's surfels had no
+        // neighbors - each showed its own noise, a patch per surfel), and the lift adds the sag of the chord between them (it passes
+        // under a convex surface by half the chord times the tangent of a quarter of the normals' angle). Coplanar surfels: as before
         static constexpr float layer_v = 0.1f;
         bool SameLayer(const surfel& A, const surfel& B) const noexcept
         {
             const float h = layer_v * A.m_Radius;
-            const v3 D = B.m_Center - A.m_Center;
-            if (std::abs(D.Dot(A.m_Normal)) > h || std::abs(D.Dot(B.m_Normal)) > h) return false;
-            return Sees(A.m_Center, A.m_Normal, B) || SeesLifted(A, B, h);
+            const v3 D = B.m_Center - A.m_Center, M = A.m_Normal + B.m_Normal;
+            const float m = M.Length();
+            if (m < 1e-6f || std::abs(D.Dot(M)) > h * m) return false;
+            const float c = std::clamp(A.m_Normal.Dot(B.m_Normal), -1.0f, 1.0f), ch = std::sqrt(0.5f * (1 + c));             // (cos of half the angle)
+            const float Sag = c < 1.0f ? 0.5f * D.Length() * std::sqrt(std::max(0.0f, (1 - ch) / (1 + ch))) : 0.0f;     // (tan of a quarter)
+            return Sees(A.m_Center, A.m_Normal, B) || SeesLifted(A, B, h + Sag);
         }
 
         // Do two surfels see each other from h off their surfaces (the risers up to there clear too)?

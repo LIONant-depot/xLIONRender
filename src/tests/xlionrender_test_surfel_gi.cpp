@@ -458,6 +458,95 @@ int main()
         CHECK(nStep == 0 && nCurb == 0, "the filter blends surfaces apart: %d across the step, %d across the curb", nStep, nCurb);
     }
 
+    // 6p. A curved surface is one layer: a small sphere's surfels (Police's sphere grid: 25 cm radius, 0.25 surfels) are filtered with
+    //     their neighbors (against either one's own plane they were apart by the curve, and the chord between them passes under it: every
+    //     surfel was alone, a patch of its own noise each)
+    {
+        surfel_mesh Ball;
+        constexpr int rings_v = 32, segs_v = 48;
+        constexpr float r_v = 0.25f;
+        for (int j = 0; j <= rings_v; ++j)
+            for (int i = 0; i <= segs_v; ++i)
+            {
+                const float th = 3.14159265f * j / rings_v, ph = 6.28318531f * i / segs_v;
+                const v3 n{ std::sin(th) * std::cos(ph), std::cos(th), std::sin(th) * std::sin(ph) };
+                Ball.m_Pos.push_back(n * r_v); Ball.m_Nrm.push_back(n);
+            }
+        for (int j = 0; j < rings_v; ++j)
+            for (int i = 0; i < segs_v; ++i)
+            {
+                const int a = j * (segs_v + 1) + i, b = a + 1, c = a + segs_v + 1, d = c + 1;
+                Ball.m_Tris.push_back({ a, b, c });            // (counter-clockwise from outside)
+                Ball.m_Tris.push_back({ b, d, c });
+            }
+        Ball.Bake(0.125f, 0.375f);
+        const auto& Nb = Ball.m_Neighbors[0];
+        int nAlone = 0;
+        for (std::size_t s = 0; s < Ball.m_Levels[0].size(); ++s) nAlone += Nb.m_First[s + 1] == Nb.m_First[s];
+        std::printf("a 25 cm sphere: %d of %zu surfels have no neighbor to filter with\n", nAlone, Ball.m_Levels[0].size());
+        CHECK(!Ball.m_Levels[0].empty() && nAlone * 10 < int(Ball.m_Levels[0].size()), "a sphere's surfels are not filtered together (%d alone)", nAlone);
+
+        // 6q. The filter's frames (gi_surfel_reconstruction_proposal.md v2.1, work order 1-2 - a measurement, the transfer not shipped): a
+        //     neighbor's 3 colors are in its own frame; transferred into the receiver's (M_ij = b_j^B(d_i^A), the 3-lobe model's transfer)
+        //     before they are averaged, or added component by component (the filter as it is). The transfer's unit checks (the identity on
+        //     one frame, a constant kept; a single lobe there and back, its loss), then the sphere under one directional light (each surfel's
+        //     3 colors that light's cosine to its lobes) filtered both ways, against the light's own colors. Measured 2026-10-28: 0.503
+        //     transferred, 0.473 component by component - both the filter's spatial blur on a curved surface, not its frames (a target of
+        //     the work order's steps 3-4; this comparison becomes their gate)
+        {
+            const auto Transfer = [](const basis& From, const basis& To) { return std::array{ BasisWeights(From, To[0]), BasisWeights(From, To[1]), BasisWeights(From, To[2]) }; };
+            const v3 N1 = v3{ 0.1f, 0.95f, 0.2f }.NormalizeCopy(), N2 = v3{ 0.6f, 0.75f, 0.1f }.NormalizeCopy();
+            const basis A = BasisDirs(N1), B = BasisDirs(N2);
+            const auto Id = Transfer(A, A), M = Transfer(A, B), Back = Transfer(B, A);
+            float OffDiag = 0, RowErr = 0;
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) { if (i != j) OffDiag = std::max(OffDiag, std::abs(Id[i][j])); }
+            for (int i = 0; i < 3; ++i) RowErr = std::max(RowErr, std::abs(M[i][0] + M[i][1] + M[i][2] - 1.0f));
+            float In[3] = { 1, 0, 0 }, Mid[3], Out[3];
+            for (int i = 0; i < 3; ++i) Mid[i] = M[i][0] * In[0] + M[i][1] * In[1] + M[i][2] * In[2];
+            for (int i = 0; i < 3; ++i) Out[i] = Back[i][0] * Mid[0] + Back[i][1] * Mid[1] + Back[i][2] * Mid[2];
+            std::printf("basis transfer: identity off-diagonal %.2e, rows' sum error %.2e (a constant kept), a single lobe there and back %.3f %.3f %.3f\n", OffDiag, RowErr, Out[0], Out[1], Out[2]);
+            CHECK(OffDiag < 1e-5f && RowErr < 1e-5f, "the basis transfer is not the identity on one frame (%.2e) or does not keep a constant (%.2e)", OffDiag, RowErr);
+
+            const v3 Dl = v3{ 0.3f, 0.8f, 0.5f }.NormalizeCopy();
+            const auto& L0 = Ball.m_Levels[0];
+            const auto& Nb = Ball.m_Neighbors[0];
+            std::vector<float> Field(3 * L0.size());
+            for (std::size_t s = 0; s < L0.size(); ++s)
+            {
+                const basis D = BasisDirs(L0[s].m_Normal);
+                for (int i = 0; i < 3; ++i) Field[3 * s + std::size_t(i)] = std::max(D[std::size_t(i)].Dot(Dl), 0.0f);
+            }
+            const auto Filter = [&](bool bTransfer)
+            {
+                std::vector<float> Cur = Field, Next(Field.size());
+                for (int p = 0; p < 4; ++p)
+                {
+                    for (std::size_t s = 0; s < L0.size(); ++s)
+                    {
+                        const basis Ds = BasisDirs(L0[s].m_Normal);
+                        float Sum[3] = { Cur[3 * s], Cur[3 * s + 1], Cur[3 * s + 2] }, Wt = 1;
+                        for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k)
+                        {
+                            const std::size_t j = Nb.m_Index[k];
+                            const auto Mt = Transfer(BasisDirs(L0[j].m_Normal), Ds);
+                            for (int i = 0; i < 3; ++i)
+                                Sum[i] += Nb.m_Weight[k] * (bTransfer ? Mt[std::size_t(i)][0] * Cur[3 * j] + Mt[std::size_t(i)][1] * Cur[3 * j + 1] + Mt[std::size_t(i)][2] * Cur[3 * j + 2] : Cur[3 * j + std::size_t(i)]);
+                            Wt += Nb.m_Weight[k];
+                        }
+                        for (int i = 0; i < 3; ++i) Next[3 * s + std::size_t(i)] = Sum[i] / Wt;
+                    }
+                    std::swap(Cur, Next);
+                }
+                double e = 0, r = 0;
+                for (std::size_t q = 0; q < Field.size(); ++q) { e += std::abs(Cur[q] - Field[q]); r += Field[q]; }
+                return e / r;
+            };
+            const double eT = Filter(true), eP = Filter(false);
+            std::printf("a sphere under one directional light, its filtered lobes against the light's own: %.3f transferred, %.3f added component by component (mean relative error: the filter's blur)\n", eT, eP);
+            CHECK(eT < 1.0 && eP < 1.0, "the filtered lobes lost the light (%.3f, %.3f)", eT, eP);
+        }
+    }
+
     // 6n. Closed blinds (slats stacked tighter than a surfel, each tilted): the slats block the line along the surface between their
     //     surfels, but lifted off it they see each other - the spatial filter blends them (else each keeps its own slat's shadowing: blotches)
     {
