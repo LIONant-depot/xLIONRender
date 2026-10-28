@@ -371,6 +371,13 @@ vec3 PBRLighting
 )
 {
 	vec3 emissive = inEmissiveColor * inAO; // Modulate early for occlusion
+#if !defined(XLION_LDR_OUTPUT) && !defined(XLION_GBUFFER_OUTPUT) && !defined(XLION_TAIL_SCREEN) && !defined(XLION_NO_GI_PIXEL)
+	// The GI's material capture (and the reflections' hits shaded by it): the material's values, nothing lit - returned before the lights,
+	// the shadows and the environment (a capture pixel ran them all for nothing: each hits' draw of a material cost ~50 us of latency)
+	if (GIDebugCode(InGIRef.y) == 3u)
+		return (InGIRef.y & gi_capture_specular_v) != 0u ? ((InGIRef.y & gi_capture_emission_v) != 0u ? vec3(inRoughness, inMetalic, 0.0) : mix(vec3(inF0), inAlbedo, inMetalic))
+		                                                 : (InGIRef.y & gi_capture_emission_v) != 0u ? inEmissiveColor : inAlbedo * (1.0 - inMetalic);
+#endif
 
 
 	// Ambient baseline: Compute always�cheap; 2025 grazing approx for subtle IBL hack (neural-inspired, no cubemap).
