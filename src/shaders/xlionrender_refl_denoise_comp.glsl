@@ -171,6 +171,28 @@ void SpatialPass(ivec2 p)
         }
         S /= W;
     }
+    else
+    {
+        // a sharp receiver (no lobe to filter): its coverage feathered over its 3 x 3 neighbours of the same surface - the screen trace's
+        // hit / miss edge (a ray passing behind a sphere: the probe beyond) was a hard, aliased cut in a mirror (Tomas). Its light stays its
+        // own where it hit, its neighbours' hits' where it missed
+        float C = 0.0, Cw = 0.0; vec3 Hs = vec3(0.0); float Hw = 0.0;
+        for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+        {
+            const ivec2 q = p + ivec2(x, y);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, Size()))) continue;
+            const uvec4 Tq = Temporal[uint(q.y * Size().x + q.x)];
+            if (RecClass(Tq) == 0u || abs(MetaDist(Tq.w) - d) > 0.05 * d || dot(MetaNormal(Tq.w), N) < 0.8) continue;
+            const float w = (x == 0 && y == 0) ? 2.0 : 1.0;
+            const vec4  Q = RecQ(Tq);
+            C += w * Q.a; Cw += w;
+            Hs += w * Q.rgb; Hw += w * Q.a;
+        }
+        const float Cf = Cw > 0.0 ? C / Cw : S.a;
+        const vec3  U  = S.a > 1e-3 ? S.rgb / S.a : (Hw > 1e-4 ? Hs / Hw : vec3(0.0));
+        S = vec4(U * Cf, Cf);
+    }
     const uvec4 O = WithQ(T, S);
     Records[Base() + i] = uvec4(O.x, O.y, Records[Base() + i].z, O.w);
     History[i] = uvec4(O.x, O.y, T.z, O.w);

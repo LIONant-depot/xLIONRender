@@ -68,7 +68,9 @@ void main()
         const vec3  T  = normalize(abs(N.z) < 0.999 ? cross(vec3(0.0, 0.0, 1.0), N) : cross(vec3(1.0, 0.0, 0.0), N));
         const vec3  B  = cross(N, T);
         const vec3  Ve = vec3(dot(V, T), dot(V, B), max(dot(V, N), 1e-4));
-        const uint  h  = Hash(uint(p.x) * 73856093u ^ uint(p.y) * 19349663u ^ Push.m_Frame * 83492791u);
+        // (a mirror's ray the same every frame: its start's jitter changing made its hits at silhouettes toggle - flicker; a rough one's
+        // new every frame, for the reconstruction to average)
+        const uint  h  = Hash(uint(p.x) * 73856093u ^ uint(p.y) * 19349663u ^ (G.z < 0.05 ? 0u : Push.m_Frame * 83492791u));
         const float a  = max(Rough, 0.045) * max(Rough, 0.045);
         const vec3  Hm = Rough < 0.05 ? vec3(0.0, 0.0, 1.0) : SampleVNDF(Ve, a, vec2(float(h & 0xFFFFu), float(h >> 16)) / 65536.0);
         const vec3  Lt = reflect(-Ve, Hm);
@@ -119,15 +121,17 @@ void main()
                 const float Dist = length(Ph - O);
                 // a surface (the ray within the thickness behind it), not the sky, facing the ray. A ray toward the camera meets the back
                 // of what it passes (a sphere nearer the eye: never on screen): its front's light stands for it, over more depth
-                const bool  bToward = dot(L, P) < 0.0;
-                const float Thick   = bToward ? 4.0 * Push.m_Thickness + 0.1 * length(Ph) : Push.m_Thickness + 0.02 * length(Ph);
-                if (zs < 1.0 && length(Pr) - length(Ph) <= Thick && (bToward || dot(Nh, L) < 0.2))
+                // (blended over the ray's angle to the view, not switched: on a sphere the switch's line - the ray across the view -
+                // is a great circle, a straight line through its image: a wedge with hard edges in a mirror, Tomas)
+                const float Toward = smoothstep(-0.3, 0.3, -dot(L, P) / max(length(P), 1e-6));
+                const float Thick  = mix(Push.m_Thickness + 0.02 * length(Ph), 4.0 * Push.m_Thickness + 0.1 * length(Ph), Toward);
+                if (zs < 1.0 && length(Pr) - length(Ph) <= Thick && dot(Nh, L) < 0.2 + 1.0 * Toward)
                 {
                     const vec4 Pp  = F[Push.m_Slot].ToPrev * vec4(Ph, 1.0);
                     const vec2 uv  = s.xy * 0.5 + 0.5;
                     const vec2 uvp = F[Push.m_Slot].Params.z > 0.5 && Pp.w > 0.0 ? Pp.xy / Pp.w * 0.5 + 0.5 : uv;
                     const vec2 e   = min(min(uv, 1.0 - uv), min(uvp, 1.0 - uvp));
-                    const float Conf = smoothstep(0.0, 0.08, min(e.x, e.y)) * (1.0 - smoothstep(0.7, 1.0, Dist / Push.m_MaxDist));
+                    const float Conf = smoothstep(0.0, 0.2, min(e.x, e.y)) * (1.0 - smoothstep(0.7, 1.0, Dist / Push.m_MaxDist));
                     vec3 C = textureLod(SceneHDR, clamp(uvp, vec2(0.0), vec2(1.0)), 0.0).rgb;
                     C = any(isnan(C)) || any(isinf(C)) ? vec3(0.0) : min(C, vec3(64.0));     // (fireflies: the denoiser clamps the rest)
                     if (Conf > 0.0)
