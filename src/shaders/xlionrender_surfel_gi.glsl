@@ -45,6 +45,13 @@ vec3 GISurfelNormal(in const uint b) { return vec3(uintBitsToFloat(GIMesh[b + 4u
 
 // What a normal n reads of a surfel's light (its HL2 basis, gi::BasisDirs / BasisWeights): the 3 colors weighted by n's squared
 // cosines to the surfel's basis directions (normalized). The surfel's own normal reads their mean; a normal-mapped one leans to its side
+#ifndef XLION_GI_READ_KERNEL
+#define XLION_GI_READ_KERNEL
+// The read's kernel over a surfel's reach (2 radii), of f = 1 - d / 2r (gi_surfel_reconstruction_proposal.md v2.1, work order 3): Wendland's
+// C2, (1 - q)^4 (4q + 1) = f^4 (5 - 4f) - flat at the center (f^2's slope there drew a bump per surfel where the light is noisy), 1 at
+// the center, 0 with its slope at the reach (gi::ReadKernel's twin)
+float GIReadKernel(float f) { return f * f * f * f * (5.0 - 4.0 * f); }
+#endif
 vec3 GIBasisRead(in const uint LightIndex, in const vec3 SurfelNormal, in const vec3 n)
 {
     const vec3  T = normalize(cross(abs(SurfelNormal.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), SurfelNormal)), B = cross(SurfelNormal, T);
@@ -207,7 +214,7 @@ uint SurfelGIDominant(in const vec3 P, in const vec3 N)
         const uint  b = GIMesh[0] + 8u * s;
         const float c = dot(GISurfelNormal(b), N);
         const float f = max(0.0, 1.0 - length(P - GISurfelCenter(b)) / (2.0 * uintBitsToFloat(GIMesh[b + 3u])));
-        const float w = c < 0.5 ? 0.0 : f * f * c * GIReadWeight(e, P, N, PatchN);
+        const float w = c < 0.5 ? 0.0 : GIReadKernel(f) * c * GIReadWeight(e, P, N, PatchN);
         if (w > BestW) { BestW = w; Best = s; }
     }
     return Best;
@@ -300,7 +307,7 @@ vec4 SurfelGIList(in const vec3 P, in const vec3 N, in const vec3 Nmap, in const
         // levels: no pop at the switch)
         const uint  sl = Level == 1u ? (GIMesh[b + 7u] & 0xFFFFu) : s;      // (bit 31: a patch surfel)
         const uint  bl = Level == 1u ? GIMesh[1] + 8u * sl : b;
-        const float w0 = f * f * c * cn * (g_GINoCorners ? 1.0 : GIReadWeight(e, P, N, PatchN)) * GIValidity(LightOffset + sl);
+        const float w0 = GIReadKernel(f) * c * cn * (g_GINoCorners ? 1.0 : GIReadWeight(e, P, N, PatchN)) * GIValidity(LightOffset + sl);
         if (w0 <= 0.0) continue;
         const vec3  B = GIBasisRead(LightOffset + sl, GISurfelNormal(bl), Nmap);           // the normal-mapped normal reads the basis
         const vec3  Br = bRefl ? GIBasisRead(LightOffset + sl, GISurfelNormal(bl), g_GIReflDir) : vec3(0.0);

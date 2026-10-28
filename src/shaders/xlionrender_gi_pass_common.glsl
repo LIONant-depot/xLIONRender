@@ -26,6 +26,13 @@ const uint  gi_inst_v = 49u;                 // gi::world::gpu_inst_v
 const float gi_pi_v   = 3.14159265;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
+#ifndef XLION_GI_READ_KERNEL
+#define XLION_GI_READ_KERNEL
+// The read's kernel over a surfel's reach (2 radii), of f = 1 - d / 2r (gi_surfel_reconstruction_proposal.md v2.1, work order 3): Wendland's
+// C2, (1 - q)^4 (4q + 1) = f^4 (5 - 4f) - flat at the center (f^2's slope there drew a bump per surfel where the light is noisy), 1 at
+// the center, 0 with its slope at the reach (gi::ReadKernel's twin)
+float GIReadKernel(float f) { return f * f * f * f * (5.0 - 4.0 * f); }
+#endif
 uint  Hash32(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }     // (gi::world::Hash32)
 vec3  GV(uint i) { return vec3(uintBitsToFloat(GD[i]), uintBitsToFloat(GD[i + 1u]), uintBitsToFloat(GD[i + 2u])); }
 
@@ -301,7 +308,7 @@ bool ReadPoint(int Id, vec3 P, vec3 N, out vec3 E)
         if (uint(sl) >= nLight) continue;
         const float t = min((c - 0.5) * 4.0, 1.0), cn = t * t * (3.0 - 2.0 * t);
         const float Corner = float((e >> 16) & 15u) * k0 + float((e >> 20) & 15u) * k1 + float((e >> 24) & 15u) * k2 + float((e >> 28) & 15u) * k3;
-        const float w0 = f * f * c * cn * Corner * GF(GD[R + 3u] + uint(sl));
+        const float w0 = GIReadKernel(f) * c * cn * Corner * GF(GD[R + 3u] + uint(sl));
         if (w0 <= 0.0) continue;
         const vec3 El = GV(GD[R + 2u] + 3u * uint(sl));
         RS += El * w0; RW += w0;
@@ -340,7 +347,7 @@ vec3 ReadVertex(uint R, uint M, uint Level, uint Vertex, out float W)
         const float c = dot(GV(Sb + 3u), N);
         if (c < 0.5) continue;
         const float f = max(0.0, 1.0 - length(DirToWorld(R, P - GV(Sb))) / (2.0 * GF(Sb + 6u) * GF(R + 15u)));
-        const float w = (f * f * c + 1e-6) * GF(GD[R + 3u] + uint(s));
+        const float w = (GIReadKernel(f) * c + 1e-6) * GF(GD[R + 3u] + uint(s));
         Sum += GV(GD[R + 2u] + 3u * uint(s)) * w;
         W += w;
         if (g_CapTier == 3u && w > 0.0) GI_EMIT(g_CapInst, s, w * g_CapB * g_CapScale);
@@ -426,7 +433,7 @@ void SurfaceAt(int Id, int Tri, float U, float V, out vec3 Albedo, out vec3 Emis
             const float c = dot(GV(Sb + 3u), MNrm(M, T[k]));
             if (c < 0.5) continue;
             const float f = max(0.0, 1.0 - length(P - GV(Sb)) / (2.0 * GF(Sb + 6u)));
-            const float w = (f * f * c + 1e-6) * Bc[k];
+            const float w = (GIReadKernel(f) * c + 1e-6) * Bc[k];
             if (bSA) SA += GV(GD[R + 12u] + 3u * uint(s)) * w;
             if (bSE) SE += GV(GD[R + 13u] + 3u * uint(s)) * w;
             W += w;

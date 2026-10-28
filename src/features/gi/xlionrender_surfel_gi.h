@@ -543,13 +543,18 @@ namespace xlionrender::gi
         float   m_Radius = 0;
     };
 
+    // The read's kernel over a surfel's reach (2 radii), of f = 1 - d / 2r (gi_surfel_reconstruction_proposal.md v2.1, work order 3): Wendland's
+    // C2, (1 - q)^4 (4q + 1) = f^4 (5 - 4f) - flat at the center (f^2's slope there drew a bump per surfel where the light is noisy), 1 at
+    // the center, 0 with its slope at the reach
+    inline float ReadKernel(float f) noexcept { return f * f * f * f * (5.0f - 4.0f * f); }
+
     // Read-time weight of a surfel at a point (mesh space): distance falloff over 2 radii, times the normal match
     inline float SurfelWeight(const surfel& S, const v3& P, const v3& N) noexcept
     {
         const float c = S.m_Normal.Dot(N);
         if (c < 0.5f) return 0;
         const float f = std::max(0.0f, 1.0f - (P - S.m_Center).Length() / (2.0f * S.m_Radius));
-        return f * f * c + 1e-6f;
+        return ReadKernel(f) * c + 1e-6f;
     }
 
     // A hash grid of points (the bake's neighbor searches)
@@ -3612,7 +3617,7 @@ namespace xlionrender::gi
                 if (sl >= nLight) continue;
                 const float t  = std::min((c - 0.5f) * 4.0f, 1.0f), cn = t * t * (3 - 2 * t);     // smoothstep(0.5, 0.75, c)
                 const float Corner = float((e >> 16) & 15u) * k0 + float((e >> 20) & 15u) * k1 + float((e >> 24) & 15u) * k2 + float((e >> 28) & 15u) * k3;
-                const float w0 = f * f * c * cn * Corner * pValid[sl];
+                const float w0 = ReadKernel(f) * c * cn * Corner * pValid[sl];
                 if (w0 <= 0) continue;
                 Rx += pE[sl].m_X * w0; Ry += pE[sl].m_Y * w0; Rz += pE[sl].m_Z * w0; RW += w0;
                 if (m_pReadCapture) m_CapT2.push_back({ sl, w0 });
@@ -5184,7 +5189,7 @@ namespace xlionrender::gi
                     const float c = S.m_Normal.Dot(M.m_Nrm[T[k]]);
                     if (c < 0.5f) continue;
                     const float f = std::max(0.0f, 1.0f - (P - S.m_Center).Length() / (2.0f * S.m_Radius));
-                    const float w = (f * f * c + 1e-6f) * Bc[k];
+                    const float w = (ReadKernel(f) * c + 1e-6f) * Bc[k];
                     if (!I.m_SurfAlbedo.empty())   SA = SA + I.m_SurfAlbedo[s] * w;
                     if (!I.m_SurfEmission.empty()) SE = SE + I.m_SurfEmission[s] * w;
                     W += w;
@@ -5215,7 +5220,7 @@ namespace xlionrender::gi
                 const float c = S.m_Normal.Dot(N);
                 if (c < 0.5f) continue;
                 const float f = std::max(0.0f, 1.0f - I.m_L2W.TransformDirection(P - S.m_Center).Length() / (2.0f * S.m_Radius * I.m_MeanScale));
-                const float w = (f * f * c + 1e-6f) * I.m_Valid[s];
+                const float w = (ReadKernel(f) * c + 1e-6f) * I.m_Valid[s];
                 Sum = Sum + I.m_E[s] * w;
                 W += w;
                 if (m_pReadCapture && w > 0) m_pReadCapture->push_back({ s, w * m_CaptureScale });     // (CompileTransport)

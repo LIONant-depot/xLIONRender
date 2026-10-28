@@ -74,7 +74,7 @@ vec4 SurfelGI(in const vec3 LocalPos, in const vec3 LocalNormal, in const mat3x4
         const float cn     = smoothstep(0.5, 0.75, c);         // fades in (no line where smoothed normals sweep through 0.5)
         const float d      = length(vec4(LocalPos - Center, 0.0) * L2wRows) / (2.0 * Radius * MeanScale);
         const float f      = max(0.0, 1.0 - d);
-        const float w      = (f * f * c * cn + 1e-6) * GIValidity(push.giOffset + s) * GIVisibility(LocalPos, Center, Normal, Radius, push.giOffset + s);
+        const float w      = (GIReadKernel(f) * c * cn + 1e-6) * GIValidity(push.giOffset + s) * GIVisibility(LocalPos, Center, Normal, Radius, push.giOffset + s);
         Sum += vec4(GIBasisRead(push.giOffset + s, Normal, LocalNormal) * w, w);
     }
     return Sum;
