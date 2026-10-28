@@ -16,7 +16,7 @@ const int   kVSMPageTexels   = 128;
 const float kVSMNormalOffset = 1.5;
 const float kVSMDepthBias    = 1.0;
 const float kVSMDepthRange   = 4.0;
-const float kVSMLevelBand    = 0.1;     // the share of a level (in its footprint's log2) that cross-fades into the next
+const float kVSMLevelBand    = 0.4;     // the share of a level (in its footprint's log2) that cross-fades into the next (0.1 left a hard seam where the finer level took over while moving: Tomas)
 const float kVSMMaxSlopeBias = 8.0;     // texels of depth: the receiver plane's bias at most (Unreal clamps it too: flickering lit pixels)     // vsm::depth_range_v: a level's depth half range, in its window's extents
 
 // The pages' debug views (VSMParams2.w): 2 the level per pixel (a colour a level, page borders darker), 3 the footprint against the
