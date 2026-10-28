@@ -1300,10 +1300,24 @@ namespace xlionrender
             }
 
             const auto& Pr = Scene.m_Probes[m_ProbeCapturing];
+            // measurement (XLION_PROBE_TRACE): a capture frame's GPU cost - its faces, its prefilter - printed past 10 ms
+            static const bool s_bCost = std::getenv("XLION_PROBE_TRACE") != nullptr;
+            static xgpu::timestamps s_TS; static bool s_bTS = false; static std::vector<std::uint64_t> s_Ns;
+            if( s_bCost && !s_bTS ) s_bTS = m_Device.Create(s_TS, { .m_Count = 3 }) == nullptr;
+            if( s_bCost && s_bTS )
+            {
+                if( s_TS.getResults(s_Ns) && s_Ns.size() >= 3 && s_Ns[1] >= s_Ns[0] )
+                {
+                    const double Faces = (s_Ns[1] - s_Ns[0]) * 1e-6, Pre = s_Ns[2] >= s_Ns[1] ? (s_Ns[2] - s_Ns[1]) * 1e-6 : 0.0;
+                    if( Faces + Pre > 10 ) { std::printf("PROBECOST faces %.2f, prefilter %.2f ms (frame %llu)\n", Faces, Pre, (unsigned long long)m_Device.getFrameIndex()); std::fflush(stdout); }
+                }
+                Window.WriteTimestamp(s_TS, 0);
+            }
             for( ; Budget > 0 && m_ProbeNextFace < 6; --Budget, ++m_ProbeNextFace )
                 renderScenePass(Window, Scene, m_CaptureViews[m_ProbeNextFace]
                                , shadows::FaceW2C(xmath::fvec3{ 0, 0, 0 }, shadows::CubeFaceAxis(m_ProbeNextFace), 1.0f, 0.05f, 2000.0f), Pr.m_Position, false);
-            if( m_ProbeNextFace < 6 ) return;
+            if( s_bCost && s_bTS ) Window.WriteTimestamp(s_TS, 1);
+            if( m_ProbeNextFace < 6 ) { if( s_bCost && s_bTS ) Window.WriteTimestamp(s_TS, 2); return; }
 
             {
                 auto Cmd = Window.StartRenderPass(m_EnvSourcePass[0]);
@@ -1315,6 +1329,7 @@ namespace xlionrender
             }
             auto& St = m_ProbeStates[m_ProbeCapturing];
             prefilterInto(Window, m_ProbeAtlasPass, float(St.m_Slot % probe_slots_x_v * 384), float(St.m_Slot / probe_slots_x_v * 256));
+            if( s_bCost && s_bTS ) Window.WriteTimestamp(s_TS, 2);
             St.m_bValid = true;
             ++m_nProbeCaptures;
             m_ProbeCapturing = -1;
