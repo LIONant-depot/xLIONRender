@@ -455,6 +455,16 @@ int main()
         std::printf("near view (1536): %u pixels by their level %.2f%%; pages requested %d; request pass %.3f ms\n", C[0], Pct(C[1], C[0]), Renderer.getVSMReport().m_Pages.m_Requested, Renderer.getVSMReport().m_RequestGpuMs);
         if (Measure("near view (1536)", HUnlit, HLit, true, hires_v, { 0.07, 13.79, 28.0, 66, 27 })) return 1;
     }
+    // The near view under a sun with a disc (2 degrees): the penumbrae (the contact-hardening's: the disc of taps two levels finer) against
+    // the soft truth - 16 rays over the disc - near the edges
+    {
+        std::vector<float> SUnlit, SLit;
+        const float Angle = Scene.m_Sun.m_SourceAngle;
+        Scene.m_Sun.m_SourceAngle = 2.0f;
+        CHECK(Pair(SUnlit, SLit), "near view, a soft sun");
+        if (Measure("near view, a 2 degree sun (1536)", SUnlit, SLit, true, hires_v, { 100.0, 100.0, 100.0, 1 << 30, 1 << 30 })) return 1;
+        Scene.m_Sun.m_SourceAngle = Angle;
+    }
 
     // The far view: the ground to 60 m (Tomas: the texels too large on screen)
     {
