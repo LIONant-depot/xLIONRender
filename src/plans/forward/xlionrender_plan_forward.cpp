@@ -280,7 +280,8 @@ namespace xlionrender
                     m_GITrack[Id].m_L2W = D.m_L2W;
                 }
             }
-            m_GITrack[Id].m_Render = m_GIRender;
+            m_GITrack[Id].m_Render   = m_GIRender;
+            m_GITrack[Id].m_DrawSlot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u;
             return bAdded;
             };
             if( pM->m_pGI )
@@ -1959,9 +1960,13 @@ namespace xlionrender
             }
             std::uint32_t Got[8] = {};
             (void)m_ReflStats.MemoryMap(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
-            if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
+            if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 5 && Ns[0] != ~0ull && Ns[4] > Ns[0] )
             {
-                m_ReflSum[0] += double(Ns[1] - Ns[0]) * 1e-6; m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2]; m_ReflPlanarSum += Got[3]; m_ReflIncompleteSum += Got[5]; if( Got[3] ) m_ReflPlanarRough = double(Got[4]) * 0.01 / double(Got[3]);
+                m_ReflSum[0] += double(Ns[4] - Ns[0]) * 1e-6;
+                m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2]; m_ReflPlanarSum += Got[3]; m_ReflIncompleteSum += Got[5]; if( Got[3] ) m_ReflPlanarRough = double(Got[4]) * 0.01 / double(Got[3]);
+                for( int k = 0; k < 4; ++k ) m_ReflSplit[k] += Ns[k + 1] >= Ns[k] ? double(Ns[k + 1] - Ns[k]) * 1e-6 : 0.0;
+                m_ReflTextured += Got[6]; m_ReflTexturedFull += Got[7];
+                if( Ns.size() >= 7 && Ns[5] >= Ns[2] && Ns[6] >= Ns[5] && Ns[3] >= Ns[6] ) { m_ReflHitSplit[0] += double(Ns[5] - Ns[2]) * 1e-6; m_ReflHitSplit[1] += double(Ns[6] - Ns[5]) * 1e-6; m_ReflHitSplit[2] += double(Ns[3] - Ns[6]) * 1e-6; }
                 if( ++m_ReflSumN == 120 )
                 {
                     const double n = m_ReflSumN;
@@ -1970,8 +1975,9 @@ namespace xlionrender
                     if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray, %.0f planar texels of roughness %.2f, %.0f rays PREFIX_INCOMPLETE (planar view %s, plane %.3f %.3f %.3f %.3f)\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
                         , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay, m_ReflPlanarSum / n, m_ReflPlanarRough, m_ReflIncompleteSum / n
                         , m_bPlanarOn ? "on" : m_PlanarWhy == 4 ? "off: no floor under the eye" : m_PlanarWhy == 5 ? "off: oblique" : m_PlanarWhy == 2 ? "off: view" : "off", m_PlanarPlane.m_X, m_PlanarPlane.m_Y, m_PlanarPlane.m_Z, m_PlanarPlane.m_W);
+                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLSPLIT sharp trace %.3f, trace %.3f, hits' shading %.3f, reconstruction %.3f ms; %.0f hits textured a frame (%.0f at full size; bins %.3f, draws %.3f, relight %.3f)\n", m_ReflSplit[0] / n, m_ReflSplit[1] / n, m_ReflSplit[2] / n, m_ReflSplit[3] / n, m_ReflTextured / n + m_ReflTexturedFull / n, m_ReflTexturedFull / n, m_ReflHitSplit[0] / n, m_ReflHitSplit[1] / n, m_ReflHitSplit[2] / n);
                     std::fflush(stdout);
-                    m_ReflSumN = 0; m_ReflPlanarSum = 0; m_ReflIncompleteSum = 0; for( auto& v : m_ReflSum ) v = 0;
+                    m_ReflSumN = 0; m_ReflPlanarSum = 0; m_ReflIncompleteSum = 0; for( auto& v : m_ReflSum ) v = 0; for( auto& v : m_ReflSplit ) v = 0; m_ReflTextured = 0; m_ReflTexturedFull = 0; for( auto& v : m_ReflHitSplit ) v = 0;
                     if( m_bReflTraceCycle ) m_ReflTraceBench = m_ReflTraceBench % 3 + 1;      // (XLION_REFL_BENCH=9: the three modes in turn)
                 }
             }
@@ -2006,22 +2012,32 @@ namespace xlionrender
                 });
             }
             const auto& Pl = m_PlanarPlane;
-            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; } Push
+            // the hits to texture: the trace appends them to m_HitList (their keys: the half size's texels, then the full size's sharp ones)
+            const std::uint32_t HalfKeys = std::uint32_t(W * H);
+            const bool bHits = m_ReflTraceBench == 0 && Scene.m_ReflectionTextureMaxRoughness > 0 && createHitTargets() == nullptr;
+            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
-                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, 0 } };
+                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, 0 }
+                , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) } };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
-            auto Buffers  = std::array<xgpu::buffer*, 10>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams };
-            auto Textures = std::array<const xgpu::texture*, 5>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth };
+            auto Buffers  = std::array<xgpu::buffer*, 11>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats };
+            auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
+            // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
+            // list's places before the glossy ones
             Window.WriteTimestamp(m_ReflTimes, 0);
-            Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
-            if( bSharp )        // the sharp receivers at full size (their records after the half-size ones, 2 pixels a record)
+            if( bSharp )
             {
                 auto P2 = Push;
                 P2.m_Full[0] = View.m_SharpWidth; P2.m_Full[1] = View.m_SharpHeight; P2.m_Full[2] = 2 * W * H; P2.m_SharpMax = m_ReflSharpMax;
                 P2.m_Frame = Scene.m_bReflectionJitter ? View.m_TailFrame : 0u;     // (the sharp ones are not reconstructed: their one ray each stays unless asked)
-                auto T2 = std::array<const xgpu::texture*, 5>{ &View.m_SharpGColor, &View.m_SharpGDepth, &m_EnvAtlas, Textures[3], Textures[4] };
+                auto T2 = std::array<const xgpu::texture*, 6>{ &View.m_SharpGColor, &View.m_SharpGDepth, &m_EnvAtlas, Textures[3], Textures[4], &View.m_SharpGMotion };
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
             }
+            Window.WriteTimestamp(m_ReflTimes, 1);
+            Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
+            Window.WriteTimestamp(m_ReflTimes, 2);
+            if( bHits ) shadeReflectionHits(Window, Scene, View, BvhR, Slot, HalfKeys, std::uint32_t(2 * W * H));
+            Window.WriteTimestamp(m_ReflTimes, 3);
             // the reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then spatial;
             // the half-size records it leaves are what the materials read
             if( Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 )
@@ -2041,11 +2057,112 @@ namespace xlionrender
                     Window.Dispatch(m_ReflDenoise, DBuffers, DTextures, DPush, sizeof(DPush), (W + 7) / 8, (H + 7) / 8);
                 }
             }
-            Window.WriteTimestamp(m_ReflTimes, 1);
+            Window.WriteTimestamp(m_ReflTimes, 4);
             Light.m_EnvParams.m_W = MaxRough;
         }
         View.m_TailPrevC2W = C2W; View.m_TailPrevW2C = W2C; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
         m_pTailRecords = &View.m_TailResult;
+    }
+
+    // Reflections, the hits' textures (shaders/xlionrender_refl_hits_comp.glsl): the bins - per GI instance drawn this frame, per its
+    // material slot: its (material, draw slot) - and the bins counted the frame this ring slot last ran (their hits shaded now: a bin
+    // first hit shows its capture's albedo a frame), then count, scan and scatter on the GPU, each drawn bin's hits through its
+    // material's capture variant into the shade target (albedo, emission), and the relight into the records
+    void instance::shadeReflectionHits( xgpu::window& Window, const scene& Scene, render_view& View, const gi::gpu_trace::bvh_view& BvhR, int Slot, std::uint32_t HalfKeys, std::uint32_t FullBase ) noexcept
+    {
+        // this frame's bins
+        std::unordered_map<std::uint64_t, std::uint32_t> BinOf;
+        const auto KeyOf = [](material_id M, std::uint32_t DrawSlot) { std::uint64_t k = 0; std::memcpy(&k, &M, std::min(sizeof(M), sizeof(k))); return (k << 20) ^ DrawSlot; };
+        m_HitBinKeys.clear();
+        std::vector<std::uint32_t> T(m_GITrack.size(), ~0u);
+        for( std::size_t Id = 0; Id < m_GITrack.size(); ++Id )
+        {
+            const auto& G = m_GITrack[Id];
+            if( G.m_Render != m_GIRender || G.m_Materials.empty() ) continue;
+            T[Id] = std::uint32_t(T.size());
+            for( const auto& M : G.m_Materials )
+            {
+                const auto [It, bNew] = BinOf.try_emplace(KeyOf(M, G.m_DrawSlot), std::uint32_t(m_HitBinKeys.size()));
+                if( bNew )
+                {
+                    if( m_HitBinKeys.size() >= hit_max_bins_v ) { BinOf.erase(It); T.push_back(~0u); continue; }
+                    m_HitBinKeys.push_back({ M, G.m_DrawSlot });
+                }
+                T.push_back(It->second);
+            }
+        }
+        const std::uint32_t nBins = std::uint32_t(m_HitBinKeys.size());
+        if( nBins == 0 ) return;
+        // the bins this ring slot counted (its frame is done) that are bins again now: drawn, if their material has a capture pipeline
+        const std::uint32_t DrawnAt = std::uint32_t(T.size());
+        T.resize(T.size() + (hit_max_bins_v + 31) / 32, 0u);
+        std::vector<std::uint32_t> Drawn;
+        {
+            if( m_HitBinKeysAt.size() < ring_frames_v ) m_HitBinKeysAt.resize(ring_frames_v);
+            const auto& Was = m_HitBinKeysAt[std::size_t(Slot)];
+            (void)m_HitCounts.MemoryMap(std::size_t(Slot) * hit_max_bins_v, hit_max_bins_v, [&](void* p)
+            {
+                const auto* C = static_cast<const std::uint32_t*>(p);
+                for( std::size_t b = 0; b < Was.size(); ++b )
+                {
+                    if( C[b] == 0 ) continue;
+                    const auto It = BinOf.find(KeyOf(Was[b].first, Was[b].second));
+                    if( It == BinOf.end() ) continue;
+                    auto* pMat = findMaterial(m_HitBinKeys[It->second].first);
+                    if( pMat == nullptr || getCaptureInstance(*pMat) == nullptr ) continue;
+                    T[DrawnAt + It->second / 32] |= 1u << (It->second % 32);
+                    Drawn.push_back(It->second);
+                }
+            });
+            m_HitBinKeysAt[std::size_t(Slot)] = m_HitBinKeys;
+        }
+        // the tables, in this ring slot's region
+        if( m_HitTableCap < T.size() )
+        {
+            if( m_HitTables.m_Private ) { xgpu::buffer Old; Old.m_Private.swap(m_HitTables.m_Private); }     // (its destructor queues the deferred destroy)
+            m_HitTableCap = std::max<std::uint32_t>(std::uint32_t(T.size() * 3 / 2), 1u << 16);
+            if( m_Device.Create(m_HitTables, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = int(4 * m_HitTableCap), .m_EntryCount = ring_frames_v }) ) { m_HitTableCap = 0; return; }
+        }
+        (void)m_HitTables.MemoryMapFrameRegion(Slot, 1, [&](void* p) { std::memcpy(p, T.data(), T.size() * 4); });
+
+        const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
+        auto Buffers  = std::array<xgpu::buffer*, 12>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_HitList, &m_HitTables, &m_HitBins, &m_HitCounts, &m_HitDraws, &m_HitCapture, &View.m_TailResult };
+        auto Textures = std::array<const xgpu::texture*, 1>{ &m_HitShadeTex };
+        struct { std::uint32_t m_Pass, m_Keys, m_Half, m_FullBase, m_Bins, m_Cap, m_Drawn, m_Slot, m_Width, m_TableBase; float m_TexMax; std::uint32_t m_Parity, m_Debug; } Push
+            { 0, hit_cap_v, HalfKeys, FullBase, nBins, hit_cap_v, DrawnAt, std::uint32_t(Slot), hit_width_v, std::uint32_t(Slot) * m_HitTableCap, Scene.m_ReflectionTextureMinReflectance, (View.m_TailFrame & 1023u) & 1u, std::getenv("XLION_REFL_HITS_ALBEDO") ? std::uint32_t(std::atoi(std::getenv("XLION_REFL_HITS_ALBEDO"))) : 0u };
+        for( std::uint32_t Pass = 0; Pass < 3; ++Pass )
+        {
+            Push.m_Pass = Pass;
+            Window.Dispatch(m_ReflHits, Buffers, Textures, &Push, sizeof(Push), Pass == 1 ? 1 : int((hit_cap_v + 255) / 256));
+        }
+        Window.WriteTimestamp(m_ReflTimes, 5);
+        // the drawn bins' hits, a pixel each, through their materials' capture variants (xlionrender_gi_capture_vert.glsl reads m_HitCapture)
+        if( !Drawn.empty() )
+        {
+            // (the UBOs as they are: the main pass's entries - the capture variant reads neither; a new entry here would be the one the
+            // main pass binds, its lighting zeroed)
+            auto  Cmd = Window.StartRenderPass(m_HitShadePass);
+            std::array<xgpu::buffer*, 10> CBuffers{ &m_HitCapture, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+            for( const std::uint32_t b : Drawn )
+            {
+                auto* pMat  = findMaterial(m_HitBinKeys[b].first);
+                auto* pInst = getCaptureInstance(*pMat);
+                Cmd.setPipelineInstance(*pInst, std::span{ CBuffers });
+                if( pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);
+                Cmd.setDynamicUBO(m_LightUBO, 1);
+                Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                Cmd.setBuffer(m_HitVB);
+                Cmd.setBuffer(m_HitIB);
+                for( std::uint32_t Pass = 0; Pass < 2; ++Pass )      // (albedo x (1 - metal), emission: xlionrender_surfel_gi.glsl's capture flags)
+                {
+                    Cmd.setPushConstants(details::push_static_geom{ 0u, m_HitBinKeys[b].second, (hit_width_v << 16) | (hit_cap_v / hit_width_v), (3u << 9) | (Pass ? 0x800u : 0u), pMat->m_ParamBase });
+                    Cmd.DrawIndexedIndirect(m_HitDraws, int(Pass * nBins + b), 1);
+                }
+            }
+        }
+        Window.WriteTimestamp(m_ReflTimes, 6);
+        Push.m_Pass = 3;
+        Window.Dispatch(m_ReflHits, Buffers, Textures, &Push, sizeof(Push), int((hit_cap_v + 255) / 256));
     }
 
     // Reflections, the planar view (documentation/reflections_strategy.md sec. 8): the scene mirrored in scene::m_ReflectionPlane, at the

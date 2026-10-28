@@ -768,6 +768,8 @@ namespace xlionrender
         bool            m_bReflectionFloorAuto = true;      // that floor: the one under the camera (else at m_ReflectionFloorY)
         float           m_ReflectionFloorY   = 0.0f;
         bool            m_bReflectionDebug   = false;       // every lit pixel shows only its environment / reflection specular
+        float           m_ReflectionTextureMaxRoughness = 0.3f;     // the receivers up to this roughness see the hits' own material (textures)
+        float           m_ReflectionTextureMinReflectance = 0.6f;   // ... when their reflection shows at least this much (visible reflectance x sharpness)
 
         XPROPERTY_DEF
         ( "Environment", environment
@@ -790,6 +792,8 @@ namespace xlionrender
         , obj_member<"ReflectionFloor",  &environment::m_bReflectionFloor, member_help<"The floor at ReflectionFloorY is a mirror plane: the scene is drawn mirrored in it (everything on screen, characters included) and the floor reflects that image (with ReflectionMaxRoughness above 0)">>
         , obj_member<"ReflectionFloorAuto", &environment::m_bReflectionFloorAuto, member_help<"The reflecting floor is the one under the camera (found every frame); off: the floor at ReflectionFloorY">>
         , obj_member<"ReflectionFloorY", &environment::m_ReflectionFloorY, member_help<"The height of the reflecting floor (world Y), when ReflectionFloorAuto is off">>
+        , obj_member<"ReflectionTextureMaxRoughness", &environment::m_ReflectionTextureMaxRoughness, member_help<"Traced reflections on surfaces up to this roughness show what they hit with its material's own textures (each hit shaded by its material: costs more with more materials hit); rougher ones show its captured color (blended over the last quarter). 0: none">>
+        , obj_member<"ReflectionTextureMinReflectance", &environment::m_ReflectionTextureMinReflectance, member_help<"Hits are shaded by their material only where the reflection shows: the surface's visible reflectance (its F0 through the view angle) times its sharpness at least this (1: mirrors and polished metals only; lower: more surfaces, more cost). A white dielectric reflects about 4%: its reflection keeps the captured color">>
         , obj_member<"ReflectionDebug",  &environment::m_bReflectionDebug, member_help<"Every lit pixel shows only its environment / reflection specular (what the probes or the traced reflections give it)">>
         )
     };

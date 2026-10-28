@@ -378,7 +378,10 @@ vec3 PBRLighting
 #ifdef XLION_GBUFFER_OUTPUT
 	// The material's G-buffer variant (the half-size thin G-buffer: lighting_p3_design.md "The decision"): its octahedral normal (x 0.5
 	// + 0.5) and roughness, as the material's color into the 10-10-10-2 target - no lighting compiled in
-	OutGMotion = InPrevClip.w > 1e-6 ? vec4(InPrevClip.xy / InPrevClip.w, InPrevClip.w, 1.0) : vec4(0.0);
+	// (its w: the motion's flag and the surface's F0 luminance - the reflections' hit shading picks its receivers by it: 1 + F0, or -F0
+	// without a motion: the tail's denoiser reads only w > 0.5)
+	const float F0l = clamp(dot(mix(vec3(inF0), inAlbedo, inMetalic), vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+	OutGMotion = InPrevClip.w > 1e-6 ? vec4(InPrevClip.xy / InPrevClip.w, InPrevClip.w, 1.0 + F0l) : vec4(0.0, 0.0, 0.0, -F0l);
 	return vec3(OctEncode(N) * 0.5 + 0.5, max(inRoughness, MIN_ROUGHNESS));
 #endif
 	vec3	V					= normalize(UBOLight.wSpaceEyePos.xyz - In.wSpacePosition.xyz);
@@ -435,7 +438,7 @@ vec3 PBRLighting
 #else
 	const vec3 Local = vec3(0.0);
 #endif
-	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return ReflDebugOr(VSMDebugOr(GIDebugOr(ambient + Local + emissive)));
+	if (Shadow < 1e-4 || att < 1e-4 || NdotL < 1e-4) return GIDebugOr(ReflDebugOr(VSMDebugOr(ambient + Local + emissive)));
 
 	// Commit to lit path: Rest here.
 	vec3	H					= normalize(V + L);
@@ -466,6 +469,6 @@ vec3 PBRLighting
 	vec3	radiance			= UBOLight.LightColor.rgb * lightTint * att * UBOLight.LightParams.z; // Apply intensity mult
 	vec3	directLighting		= (diffuse + specular) * radiance * NdotL * Shadow;
 
-	return ReflDebugOr(VSMDebugOr(GIDebugOr(ambient + directLighting + Local + emissive)));
+	return GIDebugOr(ReflDebugOr(VSMDebugOr(ambient + directLighting + Local + emissive)));     // (the GI's debug and capture outputs last: a capture under the reflection debug view is still the material's)
 }
 #endif   // XLION_TAIL_SCREEN

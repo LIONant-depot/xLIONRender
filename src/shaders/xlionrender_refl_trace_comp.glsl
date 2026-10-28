@@ -23,19 +23,30 @@ layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records
 layout(std430, set = 0, binding = 8) readonly buffer mips_b    { uvec2   PlanarMips[]; }; // the planar view's pyramid (xlionrender_refl_planar_mips_comp.glsl)
 struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; uvec4 nBoxes; vec4 Box[128]; };      // (Box: the unrepresented drawn things' world boxes, lo / hi: instance::refl_boxes_v)                                  // the planar view's clip -> its eye's centred world; x: the half view's pixels a unit at distance 1, y: the pyramid's levels; per level: its base, w, h
 layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; };        // (a ring slot each)
+// The hits to texture (xlionrender_refl_hits_comp.glsl), a list: Hits[0] its counts (x, y: by the frame's parity - the hits pass clears
+// the next frame's), then three a hit - x: the instance, y: the triangle, z, w: the barycentrics u, v; then E = (E_direct + E_indirect) / pi (rgb), the
+// hit's own specular S (rgb) as halves, the ray cone's width at the hit and the receiver's selection weight (halves). The record's U is
+// the per-triangle capture's (Le + albedo E + S); then its key (the half size's W x H texels, then the full size's sharp ones, rows padded
+// to even) and its place (the hits pass's). The hits pass replaces the record's U with the material's own texels where it shaded them. Only the
+// receivers whose reflection shows (Push.m_Tex: their visible reflectance - F0 through the split sum's DFG, Karis' fit - times their
+// sharpness): a white dielectric shows 4% of what it reflects, its hits keep the capture's
+layout(std430, set = 0, binding = 10) buffer hits_b { uvec4 Hits[]; };
 layout(set = 1, binding = 0) uniform sampler2D GColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 1) uniform sampler2D GDepth;
 layout(set = 1, binding = 2) uniform sampler2D EnvAtlas;   // the sky's prefiltered atlas (xlionrender_environment.glsl EnvSample)
 layout(set = 1, binding = 3) uniform sampler2D Planar;     // the planar view (instance::renderPlanar), this size, x mirrored; alpha: drawn (m_bPlanar)
 layout(set = 1, binding = 4) uniform sampler2D PlanarDepth;
+layout(set = 1, binding = 5) uniform sampler2D GMotion;    // w: the motion's flag and the surface's F0 luminance (1 + F0, or -F0)
 
 // m_SharpMax: the receivers sharper than this are traced at full size (0: none); m_Full: this dispatch is that one - the full size, its
 // records' first (x, y, z; x 0: the half-size dispatch)
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; } Push;
+// m_Tex: x the receivers' roughness up to which their hits get their material's own shading (fading over its last quarter), y the visible
+// reflectance from which (scene::m_ReflectionTextureMaxRoughness, m_ReflectionTextureMinReflectance), w the list's capacity; x 0: none
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex; } Push;
 
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
-shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete;
+shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured;
 shared uvec2 s_Pair[64];       // (the full-size dispatch: two pixels a record)
 
 // Heitz 2018: a visible normal of an isotropic GGX (alpha a) for the view Ve (local frame, z the normal)
@@ -141,7 +152,7 @@ vec4 PlanarAt(vec2 uv, float Lod)
 
 void main()
 {
-    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; }
+    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; }
     barrier();
     const bool  bFull = Push.m_Full.x > 0;
     const ivec2 Size = bFull ? Push.m_Full.xy : ivec2(F[Push.m_Slot].Params.xy);
@@ -150,6 +161,7 @@ void main()
     const uint  i    = uint(Size.x * Size.y) + uint(p.y * Size.x + p.x);
     const float z    = bIn ? texelFetch(GDepth, p, 0).r : 1.0;
     uvec4 Rec = uvec4(0u);
+    const uint Key = bFull ? uint(F[Push.m_Slot].Params.x * F[Push.m_Slot].Params.y) + uint(p.y * ((Size.x + 1) & ~1) + p.x) : uint(p.y * Size.x + p.x);
     if (z < 1.0)
     {
         g_GIBvhTlasRoot   = Push.m_TlasRoot;
@@ -235,6 +247,33 @@ void main()
                         DirectAndSpecular(Py, Ny, -L, bSpec ? GV(Sb) : vec3(0.04), bSpec ? GF(Sb + 3u) : 1.0, bSpec, Ed, Sy);
                         if (EmitterDirectExternal()) Ed += EmitterIrradianceAt(Py, Ny, h);
                         Lr = Emission / max(GF(5u), 1e-6) + Albedo * (1.0 / gi_pi_v) * (Ed + Ei) + Sy;     // (the emission as the surface shows it: SurfaceAt's carries the GI's emissive scale)
+                        // the receiver's visible reflectance (its F0's luminance from the G-buffer's motion w; the split sum's directional
+                        // albedo, Karis' fit) times its sharpness: the hits worth the material's own texels
+                        const float Mw = texelFetch(GMotion, p, 0).w, F0l = Mw > 0.5 ? Mw - 1.0 : -Mw;
+                        const vec4  c0 = vec4(-1.0, -0.0275, -0.572, 0.022), c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+                        const vec4  rr = Rough * c0 + c1;
+                        const float a4 = min(rr.x * rr.x, exp2(-9.28 * Ve.z)) * rr.x + rr.y;
+                        const vec2  AB = vec2(-1.04, 1.04) * a4 + rr.zw;
+                        const float Sel = (F0l * AB.x + AB.y) * (1.0 - smoothstep(0.75 * Push.m_Tex.x, Push.m_Tex.x, Rough));
+                        const uint  Par = uint(Push.m_Tex.z) & 1u;          // (the frame's parity: the hits pass's count)
+                        const uint  At  = Push.m_Tex.x > 0.0 && Sel >= 0.75 * Push.m_Tex.y ? atomicAdd(Hits[0][Par], 1u) : 0xFFFFFFFFu;
+                        if (At != 0xFFFFFFFFu) atomicAdd(s_Textured, 1u);
+                        if (At < uint(Push.m_Tex.w))
+                        {
+                            // the ray cone (Amanatides; Ray Tracing Gems ch. 20): the texel's angle, twice the surface's spread (its normal's
+                            // change to the next texels: a convex mirror's minification) and the lobe's, times the distance, from the
+                            // texel's own width at the receiver
+                            const vec4  P1 = F[Push.m_Slot].C2W * vec4(Ndc + vec2(2.0 / float(Size.x), 0.0), z, 1.0);
+                            const float Px = acos(clamp(dot(normalize(P1.xyz / P1.w), P / length(P)), -1.0, 1.0));
+                            const vec3  Nx = OctDecode(texelFetch(GColor, min(p + ivec2(1, 0), Size - 1), 0).xy * 2.0 - 1.0);
+                            const vec3  Ny = OctDecode(texelFetch(GColor, min(p + ivec2(0, 1), Size - 1), 0).xy * 2.0 - 1.0);
+                            const float Beta = 0.5 * acos(clamp(min(dot(N, Nx), dot(N, Ny)), -1.0, 1.0));
+                            const float Cone = Px * length(P) + (Px + 2.0 * Beta + a) * Hit.m_T;
+                            Hits[1u + 3u * At]  = uvec4(uint(Hit.m_Inst), uint(Hit.m_Tri), floatBitsToUint(Hit.m_U), floatBitsToUint(Hit.m_V));
+                            const vec3  E = (Ed + Ei) * (1.0 / gi_pi_v);
+                            Hits[2u + 3u * At]  = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, Sy.r)), packHalf2x16(Sy.gb), packHalf2x16(vec2(Cone, Sel)));
+                            Hits[3u + 3u * At]  = uvec4(Key, 0xFFFFFFFFu, 0u, 0u);
+                        }
                         Class = refl_hit_v; Dist = Hit.m_T;
                     }
                     else
@@ -265,7 +304,9 @@ void main()
                     if (abs(Dy - length(P)) < 0.01 * length(P)) { atomicAdd(s_Hits, 1u); if (all(lessThan(abs(Ndc), vec2(0.2)))) atomicAdd(s_Incomplete, 1u); }
                     // (and as the record, for the reflection debug view: green agrees, red the BVH nearer, blue farther / missed)
                     const float e = (Dy - length(P)) / length(P);
-                    const vec3  C = Push.m_Mode == 6u ? vec3(max(dot(N, -normalize(P)), 0.0))                                      // (6: N.V - a sphere's bright spot at its centre)
+                    const float Mw = texelFetch(GMotion, p, 0).w;
+                    const vec3  C = Push.m_Mode == 7u ? vec3(Mw > 0.5 ? Mw - 1.0 : -Mw, Mw > 0.5 ? 1.0 : 0.0, abs(Mw) < 1e-6 ? 1.0 : 0.0)   // (7: the G-buffer's F0 luminance (red), its motion flag (green), none (blue))
+                                  : Push.m_Mode == 6u ? vec3(max(dot(N, -normalize(P)), 0.0))                                      // (6: N.V - a sphere's bright spot at its centre)
                                   : Push.m_Mode == 5u ? N * 0.5 + 0.5                                                              // (5: the G-buffer's normal the trace uses)
                                   : vec3(clamp(-e * 10.0, 0.0, 1.0), abs(e) < 0.01 ? 1.0 : 0.0, clamp(e * 10.0, 0.0, 1.0));    // (red / blue: 10 x the error)
                     Rec.x = packHalf2x16(C.rg); Rec.y = packHalf2x16(vec2(C.b, 1.0)); Rec.z = packHalf2x16(vec2(0.0, 1.0)); Rec.w |= refl_hit_v << 24;
@@ -296,5 +337,6 @@ void main()
         atomicAdd(Stats[Push.m_Slot * 8u + 3u], s_Planar);
         atomicAdd(Stats[Push.m_Slot * 8u + 4u], s_PlanarRough);
         atomicAdd(Stats[Push.m_Slot * 8u + 5u], s_Incomplete);
+        atomicAdd(Stats[Push.m_Slot * 8u + (bFull ? 7u : 6u)], s_Textured);     // (the textured hits: the half size's, the full size's)
     }
 }

@@ -39,7 +39,7 @@ namespace
     xlionrender::gi::surfel_mesh RayMesh(const xprim_geom::mesh& Prim)
     {
         xlionrender::gi::surfel_mesh M;
-        for (const auto& V : Prim.m_Vertices) { M.m_Pos.push_back({ V.m_Position.m_X, V.m_Position.m_Y, V.m_Position.m_Z }); M.m_Nrm.push_back({ V.m_Normal.m_X, V.m_Normal.m_Y, V.m_Normal.m_Z }); }
+        for (const auto& V : Prim.m_Vertices) { M.m_Pos.push_back({ V.m_Position.m_X, V.m_Position.m_Y, V.m_Position.m_Z }); M.m_Nrm.push_back({ V.m_Normal.m_X, V.m_Normal.m_Y, V.m_Normal.m_Z }); M.m_UV.push_back({ V.m_Texcoord.m_X, V.m_Texcoord.m_Y }); }
         for (std::size_t i = 0; i + 2 < Prim.m_Indices.size(); i += 3) M.m_Tris.push_back({ int(Prim.m_Indices[i]), int(Prim.m_Indices[i + 1]), int(Prim.m_Indices[i + 2]) });
         M.Bake(0.08f, 0.25f);
         return M;
@@ -123,7 +123,7 @@ namespace
         return { Fr.ToWorld(L), Schlick(F0, std::clamp(Ve.Dot(H), 0.0f, 1.0f)) * ((1 + LV) / (1 + LV + LL)) };
     }
 
-    struct object { const xlionrender::gi::surfel_mesh* m_pRay; xlionrender::mesh_id m_Mesh; xmath::fmat4 m_L2W; xlionrender::material m_Mat; };
+    struct object { const xlionrender::gi::surfel_mesh* m_pRay; xlionrender::mesh_id m_Mesh; xmath::fmat4 m_L2W; xlionrender::material m_Mat; float (*m_pTexture)(float u, float v) = nullptr; };   // (m_pTexture: the albedo's factor at a UV)
 
     // The independent reference (see the top)
     struct reference
@@ -147,7 +147,14 @@ namespace
             if (H.m_Inst < 0) return Sky(D);
             v3 N = m_World.HitNormal(H).NormalizeCopy();
             if (N.Dot(D) > 0) N = N * -1.0f;
-            return Shade(m_World.HitPosition(H), N, D * -1.0f, m_Objects[std::size_t(H.m_Inst)].m_Mat, Depth, Rng);
+            const auto& Ob = m_Objects[std::size_t(H.m_Inst)];
+            if (Ob.m_pTexture == nullptr || Ob.m_pRay->m_UV.size() != Ob.m_pRay->m_Pos.size()) return Shade(m_World.HitPosition(H), N, D * -1.0f, Ob.m_Mat, Depth, Rng);
+            const auto& T = Ob.m_pRay->m_Tris[std::size_t(H.m_Tri)];
+            const auto& A = Ob.m_pRay->m_UV[std::size_t(T[0])]; const auto& B = Ob.m_pRay->m_UV[std::size_t(T[1])]; const auto& C = Ob.m_pRay->m_UV[std::size_t(T[2])];
+            const float b0 = 1 - H.m_U - H.m_V;
+            auto M = Ob.m_Mat;
+            M.m_BaseColor = M.m_BaseColor * Ob.m_pTexture(A[0] * b0 + B[0] * H.m_U + C[0] * H.m_V, A[1] * b0 + B[1] * H.m_U + C[1] * H.m_V);
+            return Shade(m_World.HitPosition(H), N, D * -1.0f, M, Depth, Rng);
         }
 
         v3 Shade(const v3& P, const v3& N, const v3& Wo, const xlionrender::material& M, int Depth, sample_rng& Rng) const noexcept
@@ -461,7 +468,9 @@ int main()
         for (std::size_t k = 0; k < Lab.size(); ++k)
         {
             xlionrender::mesh_id Id;
-            CHECK(MakeStaticBuffers(Device, Lab[k].m_Prim, 5.0f, Buffers[k]) && !Renderer.CreateClusterGeom(Id, Buffers[k].Geom()) && !Renderer.SetMeshGI(Id, MakeSurfels(Lab[k].m_Prim, 0.15f, 0.45f)), "the lab's GI mesh %zu", k);
+            auto Surfels = MakeSurfels(Lab[k].m_Prim, 0.15f, 0.45f);
+            for (const auto& V : Lab[k].m_Prim.m_Vertices) Surfels.m_UV.push_back({ V.m_Texcoord.m_X, V.m_Texcoord.m_Y });     // (after the bake: the hits' UVs, no surfel capture)
+            CHECK(MakeStaticBuffers(Device, Lab[k].m_Prim, 5.0f, Buffers[k]) && !Renderer.CreateClusterGeom(Id, Buffers[k].Geom()) && !Renderer.SetMeshGI(Id, std::move(Surfels)), "the lab's GI mesh %zu", k);
             Rays[k] = RayMesh(Lab[k].m_Prim);
             const auto L2W = xmath::fmat4::fromTranslation({ Lab[k].m_At.m_X, Lab[k].m_At.m_Y, Lab[k].m_At.m_Z }) * xmath::fmat4::fromScale({ Lab[k].m_Scale, Lab[k].m_Scale, Lab[k].m_Scale });
             Objects.push_back({ &Rays[k], Id, L2W, Lab[k].m_Mat });
@@ -700,6 +709,113 @@ int main()
                 Scene.m_bReflectionReconstruct = false;
                 Scene.m_bReflectionJitter = false;
             }
+        }
+
+        // Textures at the hit (the hits' shading: xlionrender_refl_hits_comp.glsl): the back wall's albedo a checker of 32 x 32 squares
+        // (0.25 m: finer than its triangles, so the per-triangle capture can only average them) through a real material; the chrome
+        // sphere and the floor traced (roughness 0.05, 0.10: both sharp, at full size), one ray a texel, 16 frames' mean, against the
+        // reference given the same texture
+        {
+            static constexpr std::uint32_t s_Frag[] = {
+                #include "xlionrender_test_albedo_frag.h"
+            };
+            xgpu::shader Frag;
+            CHECK(!Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Frag), std::size(s_Frag) } } }), "albedo shader");
+            static constexpr int tex_v = 256, squares_v = 32;
+            const auto Checker = [](float u, float v) -> float { const int a = int(std::floor(u * squares_v)), b = int(std::floor(v * squares_v)); return ((a + b) & 1) ? 0.9f : 0.15f; };
+            std::vector<std::uint32_t> Texels;
+            std::vector<xgpu::texture::setup::mip_size> Mips;
+            {
+                std::vector<float> L(std::size_t(tex_v) * tex_v);
+                for (int y = 0; y < tex_v; ++y) for (int x = 0; x < tex_v; ++x) L[std::size_t(y) * tex_v + x] = Checker((float(x) + 0.5f) / tex_v, (float(y) + 0.5f) / tex_v);
+                for (int n = tex_v; n >= 1; n /= 2)
+                {
+                    const std::size_t At = Texels.size();
+                    for (float l : L) { const auto c = std::uint32_t(std::lround(std::clamp(l, 0.0f, 1.0f) * 255)); Texels.push_back(c | (c << 8) | (c << 16) | 0xff000000u); }
+                    Mips.push_back({ std::uint32_t((Texels.size() - At) * 4) });
+                    if (n == 1) break;
+                    std::vector<float> H(std::size_t(n / 2) * (n / 2));
+                    for (int y = 0; y < n / 2; ++y) for (int x = 0; x < n / 2; ++x)
+                        H[std::size_t(y) * (n / 2) + x] = 0.25f * (L[std::size_t(2 * y) * n + 2 * x] + L[std::size_t(2 * y) * n + 2 * x + 1] + L[std::size_t(2 * y + 1) * n + 2 * x] + L[std::size_t(2 * y + 1) * n + 2 * x + 1]);
+                    L = std::move(H);
+                }
+            }
+            xgpu::texture Tex;
+            CHECK(!Device.Create(Tex, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = tex_v, .m_Height = tex_v, .m_MipSizes = Mips
+                                      , .m_AllFacesData = { reinterpret_cast<const std::byte*>(Texels.data()), Texels.size() * 4 }, .m_isGamma = false }), "checker texture");
+            xlionrender::material_id Mat;
+            const auto Slots = std::array<xgpu::texture*, 2>{ nullptr, &Tex };
+            CHECK(!Renderer.CreateMaterial(Mat, Frag, Slots), "checker material");
+            static float (*s_Checker)(float, float) = +[](float u, float v) -> float { const int a = int(std::floor(u * squares_v)), b = int(std::floor(v * squares_v)); return ((a + b) & 1) ? 0.9f : 0.15f; };
+            Objects[back_v].m_pTexture = s_Checker;
+            Objects[floor_v].m_Mat.m_Roughness = 0.05f;
+            Scene.m_Draws[floor_v].m_Material.m_Roughness = 0.05f;
+            Scene.m_Draws[back_v].m_Materials = { Mat };
+            Scene.m_ReflectionMaxRoughness = 0.3f;
+            Scene.m_ReflectionPlane = { 0, 0, 0, 0 };
+            Scene.m_bReflectionJitter = true;
+            Scene.m_bReflectionReconstruct = false;
+            for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "the textured wall");
+            for (int f = 0; f < 300 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "capturing the textured wall");
+            for (int f = 0; f < 120; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "settle the textured wall");
+            rgb_image TRef(Today.size(), 0.0f);
+            for (int y = 0; y < size_v; ++y) for (int x = 0; x < size_v; ++x)
+            {
+                const std::size_t i = std::size_t(y) * size_v + x;
+                if (!MChrome[i] && !MFloor[i]) continue;
+                const v3 D = Ray(x, y, SX, SY);
+                const auto H = World.Cast(Camera.getPosition(), D);
+                sample_rng Rng(std::uint32_t(i * 7919 + 5));
+                const v3 R = Reference.Reflected(World.HitPosition(H), World.HitNormal(H).NormalizeCopy(), D * -1.0f, Objects[std::size_t(H.m_Inst)].m_Mat, 64, Rng);
+                TRef[i * 3] = R.m_X; TRef[i * 3 + 1] = R.m_Y; TRef[i * 3 + 2] = R.m_Z;
+            }
+            rgb_image Captured, Textured;
+            Scene.m_ReflectionTextureMaxRoughness = 0;
+            CHECK(Mean(16, Captured), "the hits as captured");
+            Scene.m_ReflectionTextureMaxRoughness = 0.3f;
+            CHECK(Mean(16, Textured), "the hits shaded");
+            const double CC = RMAE(Captured, TRef, MChrome, Floor), CT = RMAE(Textured, TRef, MChrome, Floor), FC = RMAE(Captured, TRef, MFloor, Floor), FT = RMAE(Textured, TRef, MFloor, Floor);
+            std::printf("textures at the hit (a 32 x 32 checker on the back wall): chrome RMAE %.3f as captured -> %.3f shaded, floor %.3f -> %.3f\n", CC, CT, FC, FT);
+            DumpRGB("refl_tex_ref", TRef, size_v, size_v);
+            DumpRGB("refl_tex_captured", Captured, size_v, size_v);
+            DumpRGB("refl_tex_shaded", Textured, size_v, size_v);
+            CHECK(FT < 0.9 * FC && CT <= CC * 1.02, "the hits' textures do not bring the floor closer to the reference (%.3f against %.3f; chrome %.3f against %.3f)", FT, FC, CT, CC);     // (the chrome sees the wall little: unchanged)
+
+            // The cutoff's sweep (scene::m_ReflectionTextureMaxRoughness): the floor at roughness 0.1 .. 0.5, its reflection as captured and
+            // shaded, against the reference - how much the hits' textures still bring as the lobe widens (a table; no gate)
+            std::printf("textures at the hit, the floor's roughness against what the shading brings (RMAE as captured -> shaded):");
+            for (const float Rho : { 0.10f, 0.20f, 0.30f, 0.40f, 0.50f })
+            {
+                Objects[floor_v].m_Mat.m_Roughness = Rho;
+                Scene.m_Draws[floor_v].m_Material.m_Roughness = Rho;
+                Scene.m_ReflectionMaxRoughness = 0.6f;
+                rgb_image SRef(Today.size(), 0.0f), SC, ST;
+                for (int y = 0; y < size_v; ++y) for (int x = 0; x < size_v; ++x)
+                {
+                    const std::size_t i = std::size_t(y) * size_v + x;
+                    if (!MFloor[i]) continue;
+                    const v3 D = Ray(x, y, SX, SY);
+                    const auto H = World.Cast(Camera.getPosition(), D);
+                    sample_rng Rng(std::uint32_t(i * 7919 + 11));
+                    const v3 R = Reference.Reflected(World.HitPosition(H), World.HitNormal(H).NormalizeCopy(), D * -1.0f, Objects[floor_v].m_Mat, 64, Rng);
+                    SRef[i * 3] = R.m_X; SRef[i * 3 + 1] = R.m_Y; SRef[i * 3 + 2] = R.m_Z;
+                }
+                Scene.m_ReflectionTextureMaxRoughness = 0;
+                CHECK(Mean(16, SC), "the sweep, captured");
+                Scene.m_ReflectionTextureMaxRoughness = 1.0f;
+                CHECK(Mean(16, ST), "the sweep, shaded");
+                std::printf("  %.1f: %.3f -> %.3f", Rho, RMAE(SC, SRef, MFloor, Floor), RMAE(ST, SRef, MFloor, Floor));
+            }
+            std::printf("\n");
+            Objects[floor_v].m_Mat.m_Roughness = 0.10f;
+            Scene.m_Draws[floor_v].m_Material.m_Roughness = 0.10f;
+            Scene.m_ReflectionTextureMaxRoughness = 0.3f;
+            Scene.m_Draws[back_v].m_Materials = {};
+            Objects[back_v].m_pTexture = nullptr;
+            Scene.m_bReflectionJitter = false;
+            for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "the wall again");
+            Renderer.DestroyMaterial(Mat);
+            Device.Destroy(std::move(Tex));
         }
         Scene.m_ReflectionMaxRoughness = 0;
     }

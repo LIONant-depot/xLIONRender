@@ -241,6 +241,12 @@ namespace xlionrender
         // The reflections' reconstruction (milestone D: temporal by the reflection's virtual motion, then spatial by the lobe; it accumulates,
         // so the rays change every frame while it runs). Off: the one ray a texel as traced
         bool                        m_bReflectionReconstruct = true;
+        // The receivers up to this roughness see the hits' own material - each hit shaded by its material's capture variant (textures,
+        // per-entity parameters); rougher ones its per-triangle capture, blended over the last quarter. 0: none
+        float                       m_ReflectionTextureMaxRoughness = 0.3f;
+        // ... and whose reflection shows: their visible reflectance (F0 through the split sum's directional albedo) times their sharpness at
+        // least this (a white dielectric reflects 4%: its hits keep the capture's; metals and mirrors get their hits' textures)
+        float                       m_ReflectionTextureMinReflectance = 0.6f;
     };
 }
 

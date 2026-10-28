@@ -107,6 +107,9 @@ namespace xlionrender
         constexpr std::uint32_t s_ReflDenoiseComp[] = {
             #include "xlionrender_refl_denoise_comp.h"
         };
+        constexpr std::uint32_t s_ReflHitsComp[] = {
+            #include "xlionrender_refl_hits_comp.h"
+        };
         constexpr std::uint32_t s_ReflPlanarMipsComp[] = {
             #include "xlionrender_refl_planar_mips_comp.h"
         };
@@ -248,6 +251,9 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_GICaptureTex));
         ReleaseBuffer(m_GICaptureVB);
         ReleaseBuffer(m_GICaptureIB);
+        if( m_HitShadePass.m_Private ) m_Device.Destroy(std::move(m_HitShadePass));
+        if( m_HitShadeTex.m_Private ) m_Device.Destroy(std::move(m_HitShadeTex));
+        for( auto* pB : { &m_HitVB, &m_HitIB, &m_HitCapture, &m_HitTables, &m_HitBins, &m_HitCounts, &m_HitDraws, &m_HitList } ) if( pB->m_Private ) ReleaseBuffer(*pB);
         m_Device.Destroy(std::move(m_GIConstCaptureInstance));
         m_Device.Destroy(std::move(m_GIConstCapturePipeline));
         for( auto& T : m_EnvSource ) m_Device.Destroy(std::move(T));
@@ -625,16 +631,18 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 10, .m_nTextures = 5, .m_PushConstantsSize = 80 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 11, .m_nTextures = 6, .m_PushConstantsSize = 96 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflDenoiseComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflDenoise, { .m_pShader = &m_ReflDenoiseShader, .m_nBuffers = 4, .m_nTextures = 3, .m_PushConstantsSize = 16 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflHitsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflHitsComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflHits, { .m_pShader = &m_ReflHitsShader, .m_nBuffers = 12, .m_nTextures = 1, .m_PushConstantsSize = 52 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 64 + 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMipsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflPlanarMipsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMips, { .m_pShader = &m_PlanarMipsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 16 + 8 * 16 + 16 + 2 * 16 * refl_boxes_v, .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMipsBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = 1, .m_pData = Zeros.data() }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 8 * ring_frames_v, .m_pData = Zeros.data() }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTimes, { .m_Count = 2 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTimes, { .m_Count = 7 }); Err ) return Err;     // (the start, after the trace, the sharp trace, the hits' shading, the reconstruction)
             if( const char* p = std::getenv("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } if( m_ReflTraceBench > 0 ) m_LightMode = light_mode::SCREEN; }     // (its rays start from the thin G-buffer: the screen tail's)
             if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data() }); Err ) return Err;
@@ -1596,6 +1604,38 @@ namespace xlionrender
 
     // Reflections' sharp receivers: the G-buffer at the view's full size (the tail's formats: its pipelines draw into it) and the records
     // with the full-size region (xlionrender_refl_trace_comp.glsl: 2 pixels a record), made when they are first needed
+    // The reflections' hit shading (shaders/xlionrender_refl_hits_comp.glsl): its shade target (the albedo's rows, then the emission's: a
+    // pixel a hit, the GI capture's format - the materials' capture pipelines draw into it), the hits' one-pixel quads (static: a place's
+    // corners, per pass), their capture entries, the bins, their counts for the CPU (a ring slot each), the indirect draws. Made on first use
+    xgpu::device::error* instance::createHitTargets( void ) noexcept
+    {
+        if( m_HitShadePass.m_Private ) return nullptr;
+        using usage = xgpu::buffer::setup::usage;
+        constexpr std::uint32_t Rows = hit_cap_v / hit_width_v;
+        if( auto Err = m_Device.Create(m_HitShadeTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = int(hit_width_v), .m_Height = int(2 * Rows), .m_isGamma = false }); Err ) return Err;
+        {
+            auto A = std::array{ xgpu::renderpass::attachment{ m_HitShadeTex } };
+            if( auto Err = m_Device.Create(m_HitShadePass, { .m_Attachments = A, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
+        }
+        // one quad (its corners come from its instance: xlionrender_gi_capture_vert.glsl's hits), an instance a hit
+        if( auto Err = m_Device.Create(m_HitVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 4 }); Err ) return Err;
+        (void)m_HitVB.MemoryMap(0, 4, [&](void* p) { std::memset(p, 0, 4 * 2 * sizeof(float)); });
+        if( auto Err = m_Device.Create(m_HitIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6 }); Err ) return Err;
+        (void)m_HitIB.MemoryMap(0, 6, [](void* p) { const std::uint32_t Q[6] = { 0, 1, 2, 0, 2, 3 }; std::memcpy(p, Q, sizeof(Q)); });
+        // (each with its data: a GPU_READ buffer made without any stays a host staging buffer - the shaders' accesses over the bus)
+        const std::vector<xmath::fvec4> Zeros(2 * hit_cap_v, xmath::fvec4{ 0, 0, 0, 0 });
+        if( auto Err = m_Device.Create(m_HitCapture, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = int(2 * hit_cap_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()) }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitBins, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(3 * hit_max_bins_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()) }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitCounts, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(ring_frames_v * hit_max_bins_v) }); Err ) return Err;
+        (void)m_HitCounts.MemoryMap(0, ring_frames_v * hit_max_bins_v, [](void* p) { std::memset(p, 0, ring_frames_v * hit_max_bins_v * sizeof(std::uint32_t)); });
+        {
+            const std::vector<std::array<std::uint32_t, 4>> ListZeros(1 + 3 * std::size_t(hit_cap_v), std::array<std::uint32_t, 4>{});
+            if( auto Err = m_Device.Create(m_HitList, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(1 + 3 * hit_cap_v), .m_pData = const_cast<std::array<std::uint32_t, 4>*>(ListZeros.data()) }); Err ) return Err;
+        }
+        if( auto Err = m_Device.Create(m_HitDraws, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = int(2 * hit_max_bins_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()) }); Err ) return Err;
+        return nullptr;
+    }
+
     xgpu::device::error* instance::createSharpTargets( render_view& View ) noexcept
     {
         const int nNeed = 2 * View.m_TailWidth * View.m_TailHeight + ((View.m_Width + 1) & ~1) * View.m_Height / 2;

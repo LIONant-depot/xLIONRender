@@ -2846,7 +2846,7 @@ namespace xlionrender::gi
         // record (gpu_inst_v words); the lights; the setup. Layouts (word offsets):
         //   mesh:     0 nVerts 1 pos 2 nrm 3 tris 4 vertSurfels (2 per uint, 0xFFFF none) 5 level0 (7 floats: center, normal, radius)
         //             6 n0 7 level1 8 n1 9 parentOf 10 readTable (4 per entry) 11 its size 12 readList 13 readCell 14 originFirst
-        //             15 originPos 16 originNrm 17 leak protection 18..20 level 0's neighbor lists (first, index, weight: the shown
+        //             15 originPos 16 UVs (2 floats a vertex), then the triangles' material slots (none: no UVs) 17 leak protection 18..20 level 0's neighbor lists (first, index, weight: the shown
         //             light's filter; none) 21..23 level 1's 24, 25 per parent its children (first: n1 + 1, index: the re-level)
         //   instance: 0 mesh 1 level 2 E 3 valid 4 moments (32 per surfel) 5..7 mean light 8..10 albedo 11 triAlbedo 12 surfAlbedo
         //             13 surfEmission 14 see-through bits 15 meanScale 16..27 L2W rows 28..39 W2L rows 40 alive   (~0u: none)
@@ -2921,7 +2921,15 @@ namespace xlionrender::gi
                 H[13] = F(M.m_ReadCell);
                 H[14] = M.m_OriginFirst.empty() ? gpu_none_v : Words(M.m_OriginFirst.data(), M.m_OriginFirst.size());
                 H[15] = Words(M.m_OriginVert.data(), M.m_OriginVert.size());     // (per origin a vertex of H[1] / H[2], or the surfel's own: GIOrigin)
-                H[16] = gpu_none_v;
+                // the hits' texturing (reflections: shaders/xlionrender_refl_hits_comp.glsl): per vertex its UV (2 floats), then per triangle
+                // its material slot (none: the mesh has no UVs)
+                if (M.m_UV.size() == M.m_Pos.size() && !M.m_Pos.empty())
+                {
+                    H[16] = Words(M.m_UV.data(), 2 * M.m_UV.size());
+                    const std::size_t At = Grow(M.m_Tris.size());
+                    for (std::size_t t = 0; t < M.m_Tris.size(); ++t) D[At + t] = t < M.m_TriMaterial.size() ? M.m_TriMaterial[t] : 0u;
+                }
+                else H[16] = gpu_none_v;
                 H[17] = M.m_bLeakProtection ? 1u : 0u;
                 for (int Lv = 0; Lv < 2; ++Lv)
                 {

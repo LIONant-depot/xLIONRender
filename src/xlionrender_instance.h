@@ -223,7 +223,7 @@ namespace xlionrender
         int                                        m_TailTraceSteps  = 12;
         bool                                       m_bTailTraceBvh   = true;                // SCREEN: those lights' shadow ray also through the GI's BVH (P4; the opaque rigid GI meshes, off screen too)
         float                                      m_ReflSharpMax    = 0.1f;                // reflections: the receivers sharper than this trace at the view's full size (their own G-buffer); 0: all at half size
-        int                                        m_ReflTraceBench  = 0;                   // (measurement) SCREEN, the GI on: a reflection ray a thin G-buffer texel through the GI's BVH (shaders/xlionrender_refl_trace_comp.glsl): 1 mirror, 2 roughness 0.5, 3 the materials'; checks shown as the records (with ReflectionDebug): 4 the camera's ray through the BVH against the G-buffer's depth (green agrees, red / blue 10 x the error; hits: within 1%), 5 the G-buffer's normal, 6 its N.V; 0 off. Init: XLION_REFL_BENCH
+        int                                        m_ReflTraceBench  = 0;                   // (measurement) SCREEN, the GI on: a reflection ray a thin G-buffer texel through the GI's BVH (shaders/xlionrender_refl_trace_comp.glsl): 1 mirror, 2 roughness 0.5, 3 the materials'; checks shown as the records (with ReflectionDebug): 4 the camera's ray through the BVH against the G-buffer's depth (green agrees, red / blue 10 x the error; hits: within 1%), 5 the G-buffer's normal, 6 its N.V, 7 its F0 luminance (the motion target's w: the hits' texturing selects by it); 0 off. Init: XLION_REFL_BENCH
         // Emissive surfaces as lights (documentation/lighting_gi_interface_notice.md): the GI's emitter view (gi::world::ForEachEmitter) as
         // lights without shadow pages. Off by default: the GI's bounce already holds the emitters' light on the surfaces around them - with
         // both, it counts twice - so this one switch also hands that term to lighting (gi::world::setup::m_bEmitterDirectExternal: the GI keeps
@@ -414,8 +414,23 @@ namespace xlionrender
         xgpu::shader                m_ReflDenoiseShader;            // the reflections' reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl), its frames (a ring slot each)
         xgpu::compute               m_ReflDenoise;
         xgpu::buffer                m_ReflFrames;
+        // Reflections, the hits' textures (shaders/xlionrender_refl_hits_comp.glsl): the hits binned by their draw's material and shaded by
+        // the material's capture variant, a pixel each, into m_HitShadeTex (the albedo's rows, then the emission's); made on first use
+        static constexpr std::uint32_t hit_width_v = 1024, hit_cap_v = 1024 * 1024, hit_max_bins_v = 4096;     // (a million hits: Police's mirror from 0.7 m at 3778 x 1600 is 0.85 million)
+        xgpu::shader                m_ReflHitsShader;
+        xgpu::compute               m_ReflHits;
+        xgpu::texture               m_HitShadeTex;
+        xgpu::renderpass            m_HitShadePass;
+        xgpu::buffer                m_HitVB, m_HitIB, m_HitCapture, m_HitTables, m_HitBins, m_HitCounts, m_HitDraws;
+        std::uint32_t               m_HitTableCap   = 0;        // m_HitTables' words a ring slot
+        std::vector<std::pair<material_id, std::uint32_t>> m_HitBinKeys;   // per bin: its material and draw slot (this frame's)
+        std::vector<std::vector<std::pair<material_id, std::uint32_t>>> m_HitBinKeysAt;      // per ring slot: the bins its counts are of
+        xgpu::buffer                m_HitList;                  // the trace's hits to shade: their counts, then three uvec4 a hit (hit_cap_v)
+        xgpu::device::error*        createHitTargets( void ) noexcept;
+        void                        shadeReflectionHits( xgpu::window& Window, const scene& Scene, render_view& View, const gi::gpu_trace::bvh_view& BvhR, int Slot, std::uint32_t HalfKeys, std::uint32_t FullBase ) noexcept;
         xgpu::buffer                m_ReflStats;
         xgpu::timestamps            m_ReflTimes;
+        double                      m_ReflSplit[4] = {}, m_ReflTextured = 0, m_ReflTexturedFull = 0, m_ReflHitSplit[3] = {};     // (the hits' shading: bins, draws, relight)            // (measurement) the sharp trace, the trace, the hits' shading, the reconstruction: ms summed over the report's frames
         refl_report                 m_ReflReport;
         double                      m_ReflSum[4] = {};              // (the report's running sums: ms, rays, hits, visits)
         int                         m_ReflSumN = 0;
@@ -528,6 +543,7 @@ namespace xlionrender
             std::uint64_t           m_GIStamp   = 0;                    // mesh_slot::m_GIStamp of the surfels it was added with
             std::uint64_t           m_Render    = 0;                    // the last render that drew it
             std::vector<material_id> m_Materials;                       // what its colors are captured from (a change: captured again)
+            std::uint32_t           m_DrawSlot  = 0;                    // its draw's instance slot this frame (the reflections' hit shading: the capture's)
             std::vector<std::uint32_t> m_Moments;                       // its moments packed for the GPU (the last update's surfels repacked)
             std::uint32_t           m_MomentsReset = ~0u;               // gi::world::MomentsReset when they were packed (another: all again)
             int                     m_Offset    = -1;                   // its place in every frame slot of the rings (its mean, then its surfels): updateGI
