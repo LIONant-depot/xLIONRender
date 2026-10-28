@@ -251,15 +251,19 @@ namespace xlionrender::gi
         }
         // The links' first bounce of the lights (E = D + F + T E): each item's hit clusters lit (the links shader's mode 1: a shadow ray to
         // the sun and to each lamp from each cluster). After a build and whenever a light changes: the links stay
-        bool RelightLinks(xgpu::window& Window, std::size_t nItems) noexcept
+        // A slice [First, First + Count) when the lights move (PumpLinks' per-frame budget): its smoothing reads the others as they are
+        bool RelightLinks(xgpu::window& Window, std::size_t nItems, std::size_t First = 0, std::size_t Count = ~std::size_t(0)) noexcept
         {
             if (!m_bLinks || !m_bSolve || nItems == 0 || m_Data.empty() || !CopyLinksLocal(Window, nItems)) return false;
-            const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, 1, {} };
+            const std::size_t End = std::min(nItems, First + std::min(Count, nItems));
+            if (First >= End) return true;
+            const int nGroups = int((End - First + 63) / 64);
+            const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(End), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First), 1, {} };
             if (!LinkAux()) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
-            Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int((nItems + 63) / 64));
-            const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Smooth{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, 4, {} };
-            Window.Dispatch(m_LinksC, B, &Smooth, sizeof(Smooth), int((nItems + 63) / 64));
+            Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), nGroups);
+            const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Smooth{ int(End), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First), 4, {} };
+            Window.Dispatch(m_LinksC, B, &Smooth, sizeof(Smooth), nGroups);
             m_bLinkDirValid = true;
             ++m_nRelights;
             if (std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS relit %zu items, %u lamps in the GPU data\n", nItems, m_Data.size() > 3 ? m_Data[3] : 0u); std::fflush(stdout); }     // (measurement)
@@ -430,6 +434,8 @@ namespace xlionrender::gi
         std::size_t LocalRows(void) const noexcept { return m_nLocalRows; }
         std::size_t LinkBuilds(void) const noexcept { return m_nLinkBuilds; }
         std::size_t Relights(void) const noexcept { return m_nRelights; }
+        std::size_t LinkItemCount(void) const noexcept { return m_LinkItems.size(); }
+        void        SetRelightPerFrame(std::size_t n) noexcept { m_RelightPerFrame = std::max<std::size_t>(n, 1); }     // the lights' relight budget
         // Experiment D in a renderer (XLION_GI_LINKS): after Settle frames of the ray solver (the reads' validity and moments), the links of
         // every level-0 surfel are built, PerFrame surfels a frame; two frames after the last slice they are solved, one iteration a frame.
         // A pack, a move or a level switch drops them (built again Settle frames on). After Submit, before Show
@@ -484,7 +490,27 @@ namespace xlionrender::gi
                                 MB(2 * links_v * n * 8), 0.0, MB(hits_v * n * 16), 0.0, MB(n * (16 * 2 + 32 * 2 + 16 * 3))), std::fflush(stdout);
                 }
                 LocalRebuild(Window, W, L, Frame, Rays, PerFrame);
-                if ((!m_bLinkDirValid || DirKey != m_LinkDirKey) && RelightLinks(Window, m_LinkItems.size())) m_LinkDirKey = DirKey;
+                // The lights' first bounce: all at once the first time; after a light changes, relight_per_frame_v items a frame round the
+                // items from where the last frame stopped - each change owes one whole round (a slow sun: an even refresh; a sudden one spread
+                // over frames). HTraceWSGI's per-frame budget (xLION_Docs research/htrace_wsgi.md): its cost bounded, not the scene's size
+                // ponytail: round-robin; the camera's distance / visibility / the sun's turn since an item's last relight first when the lag shows
+                static const bool        s_bNoRelight = std::getenv("XLION_GI_NO_RELIGHT") != nullptr;      // (measurement: the relight's upper bound)
+                static const char*       s_pPerFrame  = std::getenv("XLION_GI_RELIGHT_PER_FRAME");         // (measurement: the budget)
+                const std::size_t        Budget       = s_pPerFrame ? std::size_t(std::max(1, std::atoi(s_pPerFrame))) : m_RelightPerFrame;
+                const std::size_t nItems = m_LinkItems.size();
+                if (!m_bLinkDirValid) { if (RelightLinks(Window, nItems)) { m_LinkDirKey = DirKey; m_RelightOwed = 0; } }
+                else
+                {
+                    if (DirKey != m_LinkDirKey && !s_bNoRelight) { m_LinkDirKey = DirKey; m_RelightOwed = nItems; }
+                    if (m_RelightOwed > 0 && nItems > 0)
+                    {
+                        const std::size_t n = std::min({ Budget, m_RelightOwed, nItems });
+                        m_RelightCursor %= nItems;
+                        (void)RelightLinks(Window, nItems, m_RelightCursor, n);
+                        if (m_RelightCursor + n > nItems) (void)RelightLinks(Window, nItems, 0, m_RelightCursor + n - nItems);     // (the wrap)
+                        m_RelightCursor = (m_RelightCursor + n) % nItems; m_RelightOwed -= n;
+                    }
+                }
                 if (SolveLinks(Window, m_LinkItems.size())) ++m_LinkSolves;
                 // GI sections: the solve wrote every surfel's light, the ghosts' too (their own links): they take their owners' again, or
                 // a section's border steps (Submit's copy ran before the solve)
@@ -1011,6 +1037,8 @@ namespace xlionrender::gi
         std::vector<char>                   m_LocalNear;                                       // per item: near a moved object (the CPU's part of the flags)
         bool                                m_bLinkDirValid = false;
         std::uint64_t                       m_LinkDirKey = 0;
+        std::size_t                         m_RelightPerFrame = 16384;     // the lights' relight budget, items a frame (SetRelightPerFrame)
+        std::size_t                         m_RelightCursor = 0, m_RelightOwed = 0;     // where the round is, the items it still owes
         std::size_t                         m_nLinkBuilds = 0;
         std::size_t                         m_nRelights = 0;
         bool                                m_bLinksLocal = false;

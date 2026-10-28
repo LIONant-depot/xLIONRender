@@ -195,6 +195,22 @@ int main()
             Diff += std::abs(Lum(CacheAt(Inst.m_World, Pts[i].first, Pts[i].second)) - Lum(CacheAt(Pre.m_World, Pts[i].first, Pts[i].second))) / RefMean / Pts.size();
         }
         std::printf("Cornell from instances vs path traced: mean %.1f%%, max %.1f%%; rotated instance vs pre-transformed: %.1f%%\n", Err * 100, Max * 100, Diff * 100);
+        // ... and its colour (the bleed: the luminance above can match with grey bounces): per point the red and green shares of r+g+b,
+        // the mean of their distance from the reference's, in points where the reference is coloured (Tomas: "little color bleeding")
+        {
+            const auto Share = [](const v3& c) { const double s = std::max(1e-9, double(c.m_X) + c.m_Y + c.m_Z); return std::pair{ c.m_X / s, c.m_Y / s }; };
+            double ChromaErr = 0, RefChroma = 0, OurChroma = 0; int n = 0;
+            for (std::size_t i = 0; i < Pts.size(); ++i)
+            {
+                const auto [rr, rg] = Share(Ref[i]);
+                if (std::abs(rr - rg) < 0.05) continue;                         // (a grey point: no bleed to compare)
+                const auto [cr, cg] = Share(CacheAt(Inst.m_World, Pts[i].first, Pts[i].second));
+                ChromaErr += std::abs(cr - rr) + std::abs(cg - rg); RefChroma += std::abs(rr - rg); OurChroma += std::abs(cr - cg); ++n;
+            }
+            n = std::max(n, 1);
+            std::printf("Cornell bleed: |red - green| share %.3f vs the reference's %.3f (%d coloured points), the shares off by %.3f\n", OurChroma / n, RefChroma / n, n, ChromaErr / n);
+            CHECK(OurChroma > 0.8 * RefChroma && ChromaErr / n < 0.05, "the Cornell box's colour bleed is off the reference: |r - g| %.3f vs %.3f, off by %.3f", OurChroma / n, RefChroma / n, ChromaErr / n);
+        }
         CHECK(Err < 0.06 && Max < 0.2, "the instanced Cornell box is off the reference (%.1f%% / %.1f%%)", Err * 100, Max * 100);
         CHECK(Diff < 0.04, "a rotated instance differs from the same geometry pre-transformed (%.1f%%)", Diff * 100);
     }

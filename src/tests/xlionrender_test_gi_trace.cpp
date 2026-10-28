@@ -619,6 +619,7 @@ int main()
         const std::size_t nBuildsBefore = T.LinkBuilds(), nRelightsBefore = T.Relights();
         std::vector<v3> Before;
         for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i)) Before.push_back(e);
+        const v3 LampAt = L.m_Points[0].m_Position;
         L.m_Points[0].m_Position = { -1.5f, 1.0f, -1.0f };
         for (int u = 40; u < 80; ++u)
         {
@@ -645,6 +646,42 @@ int main()
         // ... by relighting the links' hits, not by building them again: nothing light-dependent is in them (with the lamp's light baked
         // and relit by a difference, the Police level's old lamp spot stayed 64% too bright; built again, the Bistro waited 6 s)
         CHECK(T.LinkBuilds() == nBuildsBefore && T.LinkState() == 2 && T.Relights() > nRelightsBefore, "a light moved: the links were built again (%zu builds, %zu relights, state %d)", T.LinkBuilds() - nBuildsBefore, T.Relights() - nRelightsBefore, T.LinkState());
+
+        // ... over frames, a budget a frame (the Bistro relit all its 545k surfels in the frame the sun moved: 75 ms): the light moved back
+        // with a fifth of the items a frame relit - a round of slices, each frame's no more than the budget - and the room's light is
+        // where it was before the move
+        {
+            const std::size_t nItems = T.LinkItemCount(), Budget = nItems / 5 + 1, nRelights0 = T.Relights();
+            T.SetRelightPerFrame(Budget);
+            L.m_Points[0].m_Position = LampAt;
+            std::size_t nMost = 0;
+            for (int u = 0; u < 40; ++u)
+            {
+                const std::size_t r0 = T.Relights();
+                Drain(App, T, W);
+                while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+                const std::uint64_t Frame = App.m_Device.getFrameIndex();
+                T.Collect(W, Frame);
+                W.Update(L, v3{ 0, 1.6f, -1.9f }, 1 << 30, 200 + u);
+                T.Submit(App.m_Window, W, L, Frame, 1000.0f, v3{ 0, 1.6f, -1.9f });
+                T.PumpLinks(App.m_Window, W, L, Frame, 64, 4, 1 << 20);
+                { auto Cmd = App.m_Window.getCmdBuffer(); }
+                App.m_Window.PageFlip();
+                nMost = std::max(nMost, T.Relights() - r0);
+            }
+            Sync(App, T, W);
+            double D2 = 0, S2 = 0; std::size_t k2 = 0;
+            for (int i = 0; i < W.InstanceCount(); ++i) for (const auto& e : W.InstanceLight(i))
+            {
+                if (k2 >= Before.size()) break;
+                const auto& b = Before[k2++];
+                D2 += std::abs(e.m_X - b.m_X) + std::abs(e.m_Y - b.m_Y) + std::abs(e.m_Z - b.m_Z); S2 += b.m_X + b.m_Y + b.m_Z;
+            }
+            T.SetRelightPerFrame(16384);
+            std::printf("the light moved back, %zu of %zu items relit a frame: %zu slices (at most %zu a frame), the light %.2f%% off the original\n", Budget, nItems, T.Relights() - nRelights0, nMost, 100.0 * D2 / std::max(S2, 1e-9));
+            CHECK(T.Relights() - nRelights0 >= 5 && nMost <= 2, "the relight was not spread over frames (%zu slices, at most %zu a frame)", T.Relights() - nRelights0, nMost);
+            CHECK(D2 < 0.01 * S2, "the sliced relight did not bring the light back (%.2f%% off)", 100.0 * D2 / std::max(S2, 1e-9));
+        }
 
         // A material changed (an instance recolored) once the links solve: only the rows that read it are built again - the links stay
         // (state 2 throughout), the rest of the room keeps its rows, and its light follows the new color
