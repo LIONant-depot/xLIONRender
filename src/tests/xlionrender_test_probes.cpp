@@ -25,11 +25,14 @@ namespace
     }
 
     // The probe atlas' level 0 texel of a direction (xlionrender_octahedral.glsl / xlionrender_environment_atlas.glsl)
-    std::array<float, 3> ProbeTexel(xgpu::device& Device, const xgpu::texture& Atlas, int Slot, xmath::fvec3 D)
+    std::array<float, 4> ProbeTexel4(xgpu::device& Device, const xgpu::texture& Atlas, int Slot, xmath::fvec3 D);
+    std::array<float, 3> ProbeTexel(xgpu::device& Device, const xgpu::texture& Atlas, int Slot, xmath::fvec3 D) { const auto T = ProbeTexel4(Device, Atlas, Slot, D); return { T[0], T[1], T[2] }; }
+    // (its alpha: the distance from the probe's centre to what it saw)
+    std::array<float, 4> ProbeTexel4(xgpu::device& Device, const xgpu::texture& Atlas, int Slot, xmath::fvec3 D)
     {
         std::vector<std::byte> Raw;
         int W, H;
-        if (Device.ReadTexture(Atlas, Raw, W, H)) return { -1, -1, -1 };
+        if (Device.ReadTexture(Atlas, Raw, W, H)) return { -1, -1, -1, -1 };
         D = D.NormalizeCopy();
         float E[3] = { D.m_X, D.m_Z, -D.m_Y };
         const float L1 = std::abs(E[0]) + std::abs(E[1]) + std::abs(E[2]);
@@ -38,7 +41,7 @@ namespace
         if (E[2] < 0) { PX = (1 - std::abs(E[1])) * (E[0] >= 0 ? 1.f : -1.f); PY = (1 - std::abs(E[0])) * (E[1] >= 0 ? 1.f : -1.f); }
         const int X = Slot % 4 * 384 + int(2 + (PX * 0.5f + 0.5f) * 252), Y = Slot / 4 * 256 + int(2 + (PY * 0.5f + 0.5f) * 252);
         const auto* p = reinterpret_cast<const std::uint16_t*>(Raw.data()) + (std::size_t(Y) * W + X) * 4;
-        return { HalfToFloat(p[0]), HalfToFloat(p[1]), HalfToFloat(p[2]) };
+        return { HalfToFloat(p[0]), HalfToFloat(p[1]), HalfToFloat(p[2]), HalfToFloat(p[3]) };
     }
 }
 
@@ -85,6 +88,12 @@ int main()
     const auto NX = ProbeTexel(Device, Renderer.getProbeAtlas(), 0, { -1, -0.2f, 0 });
     std::printf("probe: +X (%.2f %.2f %.2f)  -X (%.2f %.2f %.2f)\n", PX[0], PX[1], PX[2], NX[0], NX[1], NX[2]);
     CHECK(PX[0] > 2 * PX[1] && NX[1] > 2 * NX[0], "The probe does not see red toward +X and green toward -X");
+    // ... and how far: the red box's face at x = 3 along (1, -0.2, 0) from the probe (0, 2.5, 0) is 3.06 away (the reflections' search)
+    {
+        const float Dist = ProbeTexel4(Device, Renderer.getProbeAtlas(), 0, { 1, -0.2f, 0 })[3];
+        std::printf("probe: the distance toward +X %.3f (the box's face: 3.06)\n", Dist);
+        CHECK(std::abs(Dist - 3.06f) < 0.3f, "The probe's distance toward the red box is %.3f, not 3.06", Dist);
+    }
 
     // Shading: the mirror sphere reflects the red box with the probe
     std::vector<float> WithProbe;

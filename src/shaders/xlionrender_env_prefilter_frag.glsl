@@ -64,7 +64,8 @@ void main()
     const vec3  N     = OctDecode(OctFold(UV));
 
     const float Rough = P.Params.x;
-    if (Rough <= 0.0) { outColor = vec4(Source(N, 0.0), 1.0); return; }
+    // (level 0: its alpha too - a probe's distances, xlionrender_env_cube_to_oct_frag.glsl; the sky's 1)
+    if (Rough <= 0.0) { const vec2 UV0 = (kEnvBorder + (OctEncode(N) * 0.5 + 0.5) * (P.Params.y - 2.0 * kEnvBorder)) / P.Params.y; outColor = vec4(Source(N, 0.0), textureLod(SamplerSource0, UV0, 0.0).a); return; }
 
     const vec3  Up  = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     const vec3  T   = normalize(cross(Up, N));

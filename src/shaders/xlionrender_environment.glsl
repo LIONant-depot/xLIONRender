@@ -51,13 +51,51 @@ vec3 ProbeBoxProject(in const LocalLightData Pr, in const vec3 P, in const vec3 
     return t > 0.0 && t < 1e29 && dot(D, D) > 1e-12 ? normalize(D) : R;     // (outside the box, degenerate: the plain reflection)
 }
 
+// The probe's distance toward Dir: its level 0's alpha (the distance from its centre to what it saw: xlionrender_env_cube_to_oct_frag.glsl)
+float ProbeDistance(in const LocalLightData Pr, in const vec3 Dir)
+{
+    return textureLod(SamplerProbes, Pr.Shadow.xy / kProbeAtlas + EnvLevelUV(0, Dir) * (kEnvAtlas / kProbeAtlas), 0.0).a;
+}
+
+// The reflection ray from P meets what the probe saw, not its box's walls (a distance impostor: Szirmay-Kalos et al. 2005,
+// xLION_Docs/probe_depth_plan.md): from the box's guess, the ray's point at the distance the probe stored toward the current direction
+// (|Q + R t| = r: Q the receiver from the centre), its direction again - a character between the probe and a wall is found where she
+// stands. Ok: how well it converged (the stored distance at the end against the point's), 0: the box's
+vec3 ProbeSearch(in const LocalLightData Pr, in const vec3 P, in const vec3 R, in const vec3 BoxDir, out float Ok)
+{
+    const vec3  Q  = P - Pr.PosRadius.xyz;
+    const float qr = dot(Q, R), qq = dot(Q, Q);
+    vec3  Dir = BoxDir;
+    float t   = 0.0;
+    Ok = 0.0;
+    for (int k = 0; k < 5; ++k)
+    {
+        const float r = ProbeDistance(Pr, Dir), Disc = qr * qr - qq + r * r;
+        if (Disc < 0.0) return BoxDir;
+        t   = -qr + sqrt(Disc);
+        Dir = normalize(Q + R * t);
+    }
+    const float r = ProbeDistance(Pr, Dir);
+    Ok = 1.0 - smoothstep(0.1, 0.4, abs(r - length(Q + R * t)) / max(r, 1e-3));
+    return Dir;
+}
+
 // One probe into the running sums (its weight times what the earlier, inner probes left)
 void ProbeAdd(in const int Record, in const vec3 P, in const vec3 N, in const vec3 R, in const float PerceptualRoughness, inout vec3 Spec, inout vec3 Diff, inout float Covered)
 {
     const LocalLightData Pr = LocalLightList[Record];
     const float w = ProbeWeight(Pr, P) * (1.0 - Covered);
     if (w <= 0.0) return;
-    Spec    += w * AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, ProbeBoxProject(Pr, P, R), PerceptualRoughness);
+    const vec3 Box = ProbeBoxProject(Pr, P, R);
+    vec3 S = AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, Box, PerceptualRoughness);
+    const float Sharp = 1.0 - smoothstep(0.05, 0.12, PerceptualRoughness);    // (near-mirrors only: a lobe's blur hides the box's error, and the search's patches showed through it)
+    if (Sharp > 0.0)
+    {
+        float Ok;
+        const vec3 Found = ProbeSearch(Pr, P, R, Box, Ok);
+        if (Ok * Sharp > 0.0) S = mix(S, AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, Found, PerceptualRoughness), Ok * Sharp);
+    }
+    Spec    += w * S;
     Diff    += w * AtlasSample(SamplerProbes, Pr.Shadow.xy, kProbeAtlas, g_GIRefl.w > 0.5 ? ProbeBoxProject(Pr, P, R) : N, 1.0);
     Covered += w;
 }

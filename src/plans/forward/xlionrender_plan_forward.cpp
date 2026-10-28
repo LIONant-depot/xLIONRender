@@ -1369,7 +1369,7 @@ namespace xlionrender
             {
                 auto Cmd = Window.StartRenderPass(m_EnvSourcePass[0]);
                 Cmd.setPipelineInstance(m_CubeToOctInstance);
-                Cmd.setPushConstants(details::push_env_cube_to_oct{ { float(env_source_size_v), 0, 0, 0 } });
+                Cmd.setPushConstants(details::push_env_cube_to_oct{ { float(env_source_size_v), 0.05f, 2000.0f, 0 } });     // (the faces' near, far: FaceW2C's above)
                 Cmd.setBuffer(m_FullscreenVB);
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);

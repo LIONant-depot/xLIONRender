@@ -855,13 +855,14 @@ namespace xlionrender
             if( auto Err = Device.Create(ClearVert3, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_ClearDepthVert) }); Err ) return Err;
             if( auto Err = Device.Create(CubeToOct,  { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_EnvCubeToOctFrag) }); Err ) return Err;
             auto Shaders = std::array<const xgpu::shader*, 2>{ &CubeToOct, &ClearVert3 };
-            std::vector<xgpu::pipeline::sampler> Samplers(6, xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true, .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } });
+            std::vector<xgpu::pipeline::sampler> Samplers(12, xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true, .m_AddressMode = std::array{ xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP, xgpu::pipeline::sampler::address_mode::CLAMP } });     // (6 colors, 6 depths)
             xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_env_cube_to_oct), .m_Samplers = Samplers };
             Setup.m_Primitive.m_Cull            = xgpu::pipeline::primitive::cull::NONE;
             Setup.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
             if( auto Err = Device.Create(m_CubeToOctPipeline, Setup); Err ) return Err;
             std::vector<xgpu::pipeline_instance::sampler_binding> Faces;
             for( auto& V : m_CaptureViews ) Faces.emplace_back(V.m_HDR);
+            for( auto& V : m_CaptureViews ) Faces.emplace_back(V.m_Depth);
             if( auto Err = Device.Create(m_CubeToOctInstance, { .m_PipeLine = m_CubeToOctPipeline, .m_SamplersBindings = Faces }); Err ) return Err;
         }
 
