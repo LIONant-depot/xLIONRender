@@ -773,7 +773,7 @@ int main()
             }
         std::printf("beside a door frame: %d of %d wall points read the wall's surfels\n", nRead, nBeside);
 
-        // 6s. The bake's thinning over ground clutter (surfel_mesh::SeesAbove, TriangleComponents): a 10 m floor at R 0.5 keeps the
+        // 6s. The bake's thinning over ground clutter (surfel_mesh::SeesAround, TriangleProxies): a 10 m floor at R 0.5 keeps the
         // surfels its area asks for with posts, a curb and a plant standing on it - with Sees alone each kept its own surfels around
         // them (the Bistro: 7.4x the spacing's count). A floor slab running under a wall (one piece) still keeps the two sides apart
         {
@@ -798,6 +798,15 @@ int main()
             const int nBare = FloorSurfels(Bare), nNow = FloorSurfels(Cluttered), nOld = FloorSurfels(Old);
             std::printf("thinning over clutter: the floor's surfels %d bare, %d with posts, a curb and a plant (%d with the sight test alone)\n", nBare, nNow, nOld);
             CHECK(nNow <= nBare * 11 / 10 && nNow < nOld, "the clutter keeps surfels of the floor: %d bare, %d cluttered (%d the old rule)", nBare, nNow, nOld);
+
+            // ... and a floor of separate tiles (1 m, 2 mm apart: no shared vertex, each its own piece - the Bistro's floors and walls of
+            // many meshes) with the same clutter: one surface (surfel_mesh::TriangleProxies), the bare floor's count
+            surfel_mesh Tiled;
+            for (float x = -5; x < 5; x += 1.0f) for (float z = -5; z < 5; z += 1.0f) AddQuad(Tiled, { x + 0.001f, 0, z + 0.001f }, { 0, 0, 0.998f }, { 0.998f, 0, 0 }, 0.5f);
+            Clutter(Tiled); Tiled.Bake(0.5f, 1.5f);
+            const int nTiled = FloorSurfels(Tiled);
+            std::printf("a tiled floor (100 separate tiles) with the clutter: %d floor surfels (bare %d)\n", nTiled, nBare);
+            CHECK(nTiled <= nBare * 11 / 10, "a floor of separate tiles keeps surfels per tile: %d (bare %d)", nTiled, nBare);
 
             // the slab under a wall (a 2 m wall at x = 0, standing on it): floor points beside it read nothing of the other side
             surfel_mesh Slab;
@@ -1475,7 +1484,7 @@ int main()
             return true;
         };
         std::vector<v3> CP, CN; std::vector<std::array<float, 3>> CT; M.Candidates(0.25f, CP, CN, &CT);
-        std::vector<int> Piece(CP.size()); { const auto TP = M.TriangleComponents(); for (std::size_t c = 0; c < CP.size(); ++c) Piece[c] = TP[std::size_t(CT[c][0])]; }
+        std::vector<int> Piece(CP.size()); { const auto TP = M.TriangleProxies(0.25f); for (std::size_t c = 0; c < CP.size(); ++c) Piece[c] = TP[std::size_t(CT[c][0])]; }
         const auto Fine = Darts(CP, CN, 0.25f, &Piece);
         std::vector<v3> SP, SN; for (const auto& S : Fine) { SP.push_back(S.m_Center); SN.push_back(S.m_Normal); }
         const auto Parents = Darts(SP, SN, 0.75f);

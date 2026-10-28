@@ -1336,7 +1336,7 @@ namespace xlionrender::gi
             std::vector<v3> CP, CN;
             std::vector<std::array<float, 3>> CT;
             Candidates(Radius, CP, CN, &CT);
-            const auto TriPiece = TriangleComponents();
+            const auto TriPiece = TriangleProxies(Radius);
             std::vector<int> Order(CP.size());
             for (std::size_t i = 0; i < Order.size(); ++i) Order[i] = int(i);
             rng Shuffle(0x5EEDu);
@@ -1379,7 +1379,7 @@ namespace xlionrender::gi
             const auto Poisson = [this](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G, std::vector<int>* pFrom = nullptr, std::size_t Max = ~std::size_t(0), const std::vector<int>* pPiece = nullptr)
             {
                 Out.clear();
-                std::vector<int> OutPiece;                          // (per kept surfel its candidate's piece: TriangleComponents)
+                std::vector<int> OutPiece;                          // (per kept surfel its candidate's proxy: TriangleProxies)
                 if (pFrom) pFrom->clear();
                 G = { R, {} };
                 std::vector<int> Order(P.size());
@@ -1473,7 +1473,7 @@ namespace xlionrender::gi
             Candidates(Radius, CP, CN, &CT);
             std::vector<int> Piece(CP.size());
             {
-                const auto TriPiece = TriangleComponents();
+                const auto TriPiece = TriangleProxies(Radius);
                 for (std::size_t c = 0; c < CP.size(); ++c) Piece[c] = TriPiece[std::size_t(CT[c][0])];
             }
             Lap(0);
@@ -1808,7 +1808,7 @@ namespace xlionrender::gi
         }
 
         // The bake's thinning: does a kept surfel stand for a candidate (coplanar, within R)? If it sees it (Sees), or - on its own
-        // connected piece (TriangleComponents) - past the clutter (SeesAround: any of five parallel rays clear, the centre's and four
+        // proxy (TriangleProxies: a planar patch across pieces and meshes) - past the clutter (SeesAround: any of five parallel rays clear, the centre's and four
         // thin_sight_v of R aside along the surface). A post, a chair leg, a pole, a plant between them blocks some of the rays, a wall
         // blocks them all: a wall standing on a floor slab that runs under it (one piece) still keeps the rooms apart; across pieces
         // a line of sight as before (a door a few cm behind its frame is its own). It was Sees alone: anything between two candidates
@@ -1829,25 +1829,69 @@ namespace xlionrender::gi
             }
             return false;
         }
-        // Per triangle its connected piece (triangles sharing a vertex position: welded across UV seams)
-        std::vector<int> TriangleComponents() const noexcept
+        // The surface proxies (xLION_Docs gi_surfel_proxies_plan.md; Lumen's mesh cards): per triangle its proxy - a planar patch the
+        // faces of one group lie on, whatever piece or mesh part they come from (a floor of separate tiles, a wall of several meshes,
+        // a decal on it: one surface). Grown from the largest triangle not yet in one: a triangle joins when it lies within R of a member
+        // (their points), faces the seed's way (cos >= proxy_cos_v) and all its corners are within proxy_dev_v R of the seed's plane - a
+        // fixed plane: a curved surface splits into patches, never drifts. Open, of any outline (an L-shaped floor is one)
+        static constexpr float proxy_cos_v = 0.99f, proxy_dev_v = 0.1f;     // (0.95 joined faces 15 degrees apart: a surfel then stood for a face the read cannot see it from - holes, test 6c)
+        std::vector<int> TriangleProxies(float Radius) const noexcept
         {
-            std::vector<int> Up(m_Tris.size());
-            for (std::size_t t = 0; t < Up.size(); ++t) Up[t] = int(t);
-            const auto Find = [&](int a) { while (Up[std::size_t(a)] != a) { Up[std::size_t(a)] = Up[std::size_t(Up[std::size_t(a)])]; a = Up[std::size_t(a)]; } return a; };
-            std::unordered_map<std::uint64_t, int> First;      // a vertex position's first triangle
-            First.reserve(m_Pos.size());
-            for (int t = 0; t < int(m_Tris.size()); ++t)
-                for (int k = 0; k < 3; ++k)
+            const int nT = int(m_Tris.size());
+            std::vector<v3> Ctr(static_cast<std::size_t>(nT)), Nrm(static_cast<std::size_t>(nT));
+            std::vector<float> Area(static_cast<std::size_t>(nT));
+            for (int t = 0; t < nT; ++t)
+            {
+                const auto& T = m_Tris[std::size_t(t)];
+                const v3 A = m_Pos[std::size_t(T[0])], B = m_Pos[std::size_t(T[1])], C = m_Pos[std::size_t(T[2])], X = (B - A).Cross(C - A);
+                Ctr[std::size_t(t)] = (A + B + C) * (1.0f / 3.0f); Area[std::size_t(t)] = 0.5f * X.Length();
+                Nrm[std::size_t(t)] = X.Length() > 1e-12f ? X.NormalizeCopy() : m_Nrm[std::size_t(T[0])];
+            }
+            // a grid of cell R over each triangle's corners and centroid (the points proximity is tested on)
+            const auto Point = [&](int t, int k) { return k < 3 ? m_Pos[std::size_t(m_Tris[std::size_t(t)][std::size_t(k)])] : Ctr[std::size_t(t)]; };
+            const auto Cell  = [&](const v3& P, int dx, int dy, int dz) { const auto q = [&](float v, int d) { return std::uint64_t(std::int64_t(std::floor(v / Radius)) + d) & 0x1FFFFF; }; return q(P.m_X, dx) | q(P.m_Y, dy) << 21 | q(P.m_Z, dz) << 42; };
+            std::unordered_map<std::uint64_t, std::vector<int>> Grid;
+            Grid.reserve(std::size_t(nT) * 2);
+            for (int t = 0; t < nT; ++t) for (int k = 0; k < 4; ++k) { auto& L = Grid[Cell(Point(t, k), 0, 0, 0)]; if (L.empty() || L.back() != t) L.push_back(t); }
+            std::vector<int> Order(static_cast<std::size_t>(nT));
+            for (int t = 0; t < nT; ++t) Order[std::size_t(t)] = t;
+            std::stable_sort(Order.begin(), Order.end(), [&](int a, int b) { return Area[std::size_t(a)] > Area[std::size_t(b)]; });
+            std::vector<int> Proxy(std::size_t(nT), -1), Queue;
+            int nProxies = 0;
+            for (const int s : Order)
+            {
+                if (Proxy[std::size_t(s)] >= 0) continue;
+                const v3 N = Nrm[std::size_t(s)]; const float D = N.Dot(Ctr[std::size_t(s)]);
+                const int id = nProxies++;
+                Proxy[std::size_t(s)] = id; Queue.assign(1, s);
+                while (!Queue.empty())
                 {
-                    const v3& P = m_Pos[std::size_t(m_Tris[std::size_t(t)][std::size_t(k)])];
-                    std::uint32_t b[3]; std::memcpy(b, &P, sizeof(b));
-                    const std::uint64_t Key = (std::uint64_t(b[0]) * 0x9E3779B97F4A7C15ull) ^ (std::uint64_t(b[1]) * 0xC2B2AE3D27D4EB4Full) ^ (std::uint64_t(b[2]) * 0x165667B19E3779F9ull);
-                    const auto [It, bNew] = First.try_emplace(Key, t);
-                    if (!bNew) { const int a = Find(t), c = Find(It->second); if (a != c) Up[std::size_t(a)] = c; }
+                    const int t = Queue.back(); Queue.pop_back();
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        const v3 P = Point(t, k);
+                        for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            const auto It = Grid.find(Cell(P, dx, dy, dz));
+                            if (It == Grid.end()) continue;
+                            for (const int u : It->second)
+                            {
+                                if (Proxy[std::size_t(u)] >= 0 || Nrm[std::size_t(u)].Dot(N) < proxy_cos_v) continue;
+                                bool bOn = true, bNear = false;
+                                for (int j = 0; j < 4; ++j)
+                                {
+                                    const v3 Q = Point(u, j);
+                                    if (j < 3) bOn = bOn && std::abs(N.Dot(Q) - D) <= proxy_dev_v * Radius;
+                                    bNear = bNear || (Q - P).Length() <= Radius;
+                                }
+                                if (!bOn || !bNear) continue;
+                                Proxy[std::size_t(u)] = id; Queue.push_back(u);
+                            }
+                        }
+                    }
                 }
-            for (std::size_t t = 0; t < Up.size(); ++t) Up[t] = Find(int(t));
-            return Up;
+            }
+            return Proxy;
         }
 
         bool Sees(const v3& P, const v3& N, const surfel& S) const noexcept
