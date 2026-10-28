@@ -223,7 +223,7 @@ namespace xlionrender
         int                                        m_TailTraceSteps  = 12;
         bool                                       m_bTailTraceBvh   = true;                // SCREEN: those lights' shadow ray also through the GI's BVH (P4; the opaque rigid GI meshes, off screen too)
         float                                      m_ReflSharpMax    = 0.1f;                // reflections: the receivers sharper than this trace at the view's full size (their own G-buffer); 0: all at half size
-        int                                        m_ReflTraceBench  = 0;                   // (measurement) SCREEN, the GI on: a reflection ray a thin G-buffer texel through the GI's BVH (shaders/xlionrender_refl_trace_comp.glsl): 1 mirror, 2 roughness 0.5, 3 the materials'; 0 off. Init: XLION_REFL_BENCH
+        int                                        m_ReflTraceBench  = 0;                   // (measurement) SCREEN, the GI on: a reflection ray a thin G-buffer texel through the GI's BVH (shaders/xlionrender_refl_trace_comp.glsl): 1 mirror, 2 roughness 0.5, 3 the materials'; checks shown as the records (with ReflectionDebug): 4 the camera's ray through the BVH against the G-buffer's depth (green agrees, red / blue 10 x the error; hits: within 1%), 5 the G-buffer's normal, 6 its N.V; 0 off. Init: XLION_REFL_BENCH
         // Emissive surfaces as lights (documentation/lighting_gi_interface_notice.md): the GI's emitter view (gi::world::ForEachEmitter) as
         // lights without shadow pages. Off by default: the GI's bounce already holds the emitters' light on the surfaces around them - with
         // both, it counts twice - so this one switch also hands that term to lighting (gi::world::setup::m_bEmitterDirectExternal: the GI keeps

@@ -482,6 +482,7 @@ int main()
         for (int f = 0; f < 240; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "settle the GI");
         CHECK(ReadRGB(Device, View, Today), "read today (GI on, no traced reflections)");
         Scene.m_ReflectionMaxRoughness = 0.3f;
+        Scene.m_bReflectionJitter = true;                   // (the 16 frames' mean: a new ray a texel each)
         // (the traced reflections are one ray a texel, a new one each frame: the mean of 16 frames is the estimator's expectation - its
         // bias, what B gates; the noise is the reconstruction's, milestone D)
         const auto Mean = [&](int Frames, rgb_image& Out) -> bool
@@ -570,6 +571,23 @@ int main()
             DumpRGB("refl_b_rough_planar", RPlanar, size_v, size_v);
             DumpRGB("refl_b_rough_traced", RTraced, size_v, size_v);
             CHECK(Ep < Et && Ep < Er, "the filtered planar view is not the best on the rough floor (%.3f; today %.3f, traced %.3f)", Ep, Et, Er);
+
+            // Without the jitter (scene::m_bReflectionJitter, the default until D accumulates) each texel keeps its ray: the rough floor
+            // stays still from frame to frame (only the GI's own updates move it); with it, it changes every frame
+            const auto Change = [&](bool bJitter) -> double
+            {
+                Scene.m_bReflectionJitter = bJitter;
+                Scene.m_ReflectionMaxRoughness = 0.5f;
+                rgb_image A, B;
+                for (int f = 0; f < 4; ++f) if (!App.RenderFrame(Scene, View, Camera)) return -1;
+                if (!ReadRGB(Device, View, A) || !App.RenderFrame(Scene, View, Camera) || !ReadRGB(Device, View, B)) return -1;
+                double d = 0, n = 0;
+                for (std::size_t i = 0; i < MFloor.size(); ++i) if (MFloor[i]) { d += std::abs(Lum(&A[i * 3]) - Lum(&B[i * 3])); ++n; }
+                return d / std::max(n, 1.0);
+            };
+            const double Still = Change(false), Moving = Change(true);
+            std::printf("the rough floor's change a frame: %.5f without the jitter, %.5f with it\n", Still, Moving);
+            CHECK(Still >= 0 && Moving > 0 && Still * 10 < Moving, "the reflections still move without the jitter (%.5f against %.5f)", Still, Moving);
         }
         Scene.m_ReflectionMaxRoughness = 0;
     }

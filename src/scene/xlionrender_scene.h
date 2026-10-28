@@ -234,6 +234,10 @@ namespace xlionrender
         float                       m_ReflectionMaxRoughness = 0.0f;
         xmath::fvec4                m_ReflectionPlane { 0, 0, 0, 0 };   // a planar receiver's plane (n, d: n.x + d = 0, n toward the viewer's side): the planar view; 0: none;
                                                                         // d NaN: the floor under the eye (the GI's geometry straight down, a surface facing n)
+        // A new ray a texel every frame (for a consumer that accumulates them: D's reconstruction, a test's mean); off, each texel keeps
+        // its one ray - with nothing accumulating them, a new ray every frame only made the glossy receivers (and a mirror's edges,
+        // through VNDF's 0.045 floor) flicker
+        bool                        m_bReflectionJitter = false;
     };
 }
 

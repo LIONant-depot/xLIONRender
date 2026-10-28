@@ -1976,7 +1976,7 @@ namespace xlionrender
                 }
             }
             const xmath::fvec3 E = Eye;
-            const float MaxRough = m_ReflTraceBench > 0 ? 0.0f : Scene.m_ReflectionMaxRoughness;
+            const float MaxRough = m_ReflTraceBench >= 4 ? 1.0f : m_ReflTraceBench > 0 ? 0.0f : Scene.m_ReflectionMaxRoughness;    // (4: its records shown)
             const bool  bPlanar  = m_bPlanarOn && m_PlanarView.m_Width == W && m_PlanarView.m_Height == H;
             // the boxes of the drawn things the GI's BVH does not hold (skinned, without GI; world space): a ray's prefix crossing one is
             // PREFIX_INCOMPLETE (documentation/reflections_strategy.md sec. 4: a label - its confidence, not its light)
@@ -2007,7 +2007,7 @@ namespace xlionrender
             }
             const auto& Pl = m_PlanarPlane;
             struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; } Push
-                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, View.m_TailFrame, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
+                { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
                 , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, 0 } };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
             auto Buffers  = std::array<xgpu::buffer*, 10>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams };

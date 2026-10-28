@@ -202,12 +202,13 @@ void main()
             const vec2  u   = vec2(float(h & 0xFFFFu), float(h >> 16)) / 65536.0;
             const float a   = max(Rough, 0.045) * max(Rough, 0.045);
             const vec3  H   = Push.m_Mode == 1u ? vec3(0.0, 0.0, 1.0) : SampleVNDF(Ve, a, u);
-            const vec3  Lt  = reflect(-Ve, H);
+            const vec3  Lt  = Push.m_Mode >= 4u ? vec3(0.0, 0.0, 1.0) : reflect(-Ve, H);
             if (Lt.z > 0.0)
             {
-                const vec3  L = normalize(Lt.x * T + Lt.y * B + Lt.z * N);
+                // (mode 4, measurement: the camera's own ray to the texel - the BVH against the raster: a hit within 1% of the depth counts)
+                const vec3  L = Push.m_Mode >= 4u ? normalize(P) : normalize(Lt.x * T + Lt.y * B + Lt.z * N);
                 const float w = (1.0 + Lambda(Ve.z, a)) / (1.0 + Lambda(Ve.z, a) + Lambda(Lt.z, a));     // G2 / G1
-                const vec3  O = P + Push.m_Eye + N * (0.002 * length(P) + 0.001);
+                const vec3  O = Push.m_Mode >= 4u ? Push.m_Eye : P + Push.m_Eye + N * (0.002 * length(P) + 0.001);
                 g_GIBvhSeeThrough = true;                   // (the GI's rays: see-through triangles let them pass)
                 const gi_hit Hit = GICast(O, L, 1e30);
                 atomicAdd(s_Rays, 1u);
@@ -248,11 +249,32 @@ void main()
                     Rec.w |= Class << 24;
                     if (PrefixIncomplete(O, L, Hit.m_Inst >= 0 ? Hit.m_T : 1e30)) { Rec.w |= 1u << 28; atomicAdd(s_Incomplete, 1u); }     // (bit 28: PREFIX_INCOMPLETE)
                 }
+                else if (Push.m_Mode >= 4u)
+                {
+                    // (mode 4: the hit's point from its barycentrics against the raster's: within 1% of the distance a hit; s_Incomplete:
+                    // the hits of the view's centre, |ndc| < 0.2)
+                    float Dy = 1e30;
+                    if (Hit.m_Inst >= 0)
+                    {
+                        const uint  R = InstRec(Hit.m_Inst), M = MeshOf(R);
+                        const uvec3 Tr = MTri(M, Hit.m_Tri);
+                        const float b0 = 1.0 - Hit.m_U - Hit.m_V;
+                        Dy = length(ToWorld(R, MPos(M, Tr.x) * b0 + MPos(M, Tr.y) * Hit.m_U + MPos(M, Tr.z) * Hit.m_V) - Push.m_Eye);
+
+                    }
+                    if (abs(Dy - length(P)) < 0.01 * length(P)) { atomicAdd(s_Hits, 1u); if (all(lessThan(abs(Ndc), vec2(0.2)))) atomicAdd(s_Incomplete, 1u); }
+                    // (and as the record, for the reflection debug view: green agrees, red the BVH nearer, blue farther / missed)
+                    const float e = (Dy - length(P)) / length(P);
+                    const vec3  C = Push.m_Mode == 6u ? vec3(max(dot(N, -normalize(P)), 0.0))                                      // (6: N.V - a sphere's bright spot at its centre)
+                                  : Push.m_Mode == 5u ? N * 0.5 + 0.5                                                              // (5: the G-buffer's normal the trace uses)
+                                  : vec3(clamp(-e * 10.0, 0.0, 1.0), abs(e) < 0.01 ? 1.0 : 0.0, clamp(e * 10.0, 0.0, 1.0));    // (red / blue: 10 x the error)
+                    Rec.x = packHalf2x16(C.rg); Rec.y = packHalf2x16(vec2(C.b, 1.0)); Rec.z = packHalf2x16(vec2(0.0, 1.0)); Rec.w |= refl_hit_v << 24;
+                }
                 else if (Hit.m_Inst >= 0) atomicAdd(s_Hits, 1u);
             }
         }
     }
-    if (!bFull && bIn && Push.m_Mode == 0u) Records[i] = Rec;
+    if (!bFull && bIn && (Push.m_Mode == 0u || Push.m_Mode >= 4u)) Records[i] = Rec;
     if (bFull)          // two pixels a record: rgb and, its sign the confidence, the view depth (the materials match it)
     {
         const float Depth = unpackHalf2x16(Rec.w & 0xFFFFu).x;
