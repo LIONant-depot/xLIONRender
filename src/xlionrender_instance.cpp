@@ -1711,6 +1711,7 @@ namespace xlionrender
         Times.m_ShadowMs  = (T[1] - T[0]) * 1e-6;
         Times.m_SceneMs   = (T[2] - T[1]) * 1e-6;
         Times.m_ToneMapMs = (T[3] - T[2]) * 1e-6;
+        m_LastGPUTimes    = Times;
         return true;
     }
 }

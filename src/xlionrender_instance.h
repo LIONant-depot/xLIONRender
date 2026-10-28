@@ -310,6 +310,8 @@ namespace xlionrender
 
         // true when a newer frame's timings arrived since the last call
                       bool                 getGPUTimes  ( gpu_times& Times )                                    noexcept;
+        // the latest timings any getGPUTimes read (several readers share them: each set reaches only the first)
+                      const gpu_times&     getLastGPUTimes( void ) const                                        noexcept { return m_LastGPUTimes; }
                       const cpu_times&     getCPUTimes  ( void ) const                                          noexcept { return m_CPUTimes; }
         // How many material pipelines exist (materials of one fragment shader and state share them; tests)
                       int                  getPipelineCount( void ) const                                       noexcept { return int(m_SharedPipelines.size()); }
@@ -715,6 +717,7 @@ namespace xlionrender
         struct prev_caster { xmath::fbbox m_World; std::uint64_t m_First; };       // (m_First: the shadow pass the key first appeared in)
         std::unordered_map<std::uint64_t, prev_caster> m_PrevCasters;   // last frame's casters (key -> world bounds), to find what changed
         int                                     m_nShadowTilesRendered = 0;
+        struct { int m_CpuDraws, m_CpuCasters, m_IndirectDraws, m_IndirectMax, m_PageClears; std::int64_t m_CpuTris; } m_ShadowDrawStats{};     // (measurement: the shadow pass's commands a frame - XLION_FRAME_CSV)
         bool                                    m_bShadowAtlasReady    = false;         // stands in for the shadow map until shadows exist
         xgpu::buffer                m_LightUBO;
 
@@ -848,6 +851,7 @@ namespace xlionrender
         std::vector<mesh_slot>      m_Meshes;
         std::vector<material_slot>  m_Materials;
         std::vector<std::uint64_t>  m_TimestampNs;
+        gpu_times                   m_LastGPUTimes          = {};         // (getLastGPUTimes)
         std::uint64_t               m_GPUTimesSerial        = 0;          // counts the timings getGPUTimes read (whoever asked: the ledger records each once)
         bool                        m_bReady        = false;
     };

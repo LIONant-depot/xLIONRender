@@ -1352,6 +1352,7 @@ namespace xlionrender
         }
 
         m_nShadowTilesRendered = 0;
+        m_ShadowDrawStats      = {};
 
         // The casters and what changed since the last render: new and gone casters, moved or re-materialed ones, and skinned
         // ones (old and new bounds). Draws with an instance id compare against their slot's last state (no hashing, bounds kept
@@ -1461,7 +1462,8 @@ namespace xlionrender
         }
         m_PairsReport.m_nCandidates = m_PairsReport.m_nRuns = 0;
         m_PairsReport.m_bGPU        = false;
-        if( Sun.m_bCastShadows )
+        static const bool s_bNoSunShadows = std::getenv("XLION_NO_SUN_SHADOWS") != nullptr;     // (measurement: the sun's pages' cost - an ablation)
+        if( Sun.m_bCastShadows && !s_bNoSunShadows )
         {
             if( std::vector<std::uint64_t> Ns; m_VSMTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
                 m_VSMReport.m_RequestGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
@@ -1677,6 +1679,7 @@ namespace xlionrender
                 Cmd.setDynamicUBO(m_ShadowUBO, 0);
                 BindClusterStreams(Cmd, *Run.m_pGeom);
                 Cmd.DrawIndexedIndirectCount(m_pShadowPairs->m_Commands, int(Run.m_First), m_pShadowPairs->m_Counts, int(r), int(Run.m_Max));
+                ++m_ShadowDrawStats.m_IndirectDraws; m_ShadowDrawStats.m_IndirectMax += Run.m_Max;
             }
         };
 
@@ -1755,6 +1758,7 @@ namespace xlionrender
                         if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot, 0u, MaterialBase, G.m_PrevBones });
                         else        Cmd.setPushConstants(details::push_static_geom{ c, Draws[i].m_Slot, 0u, 0xFFFFFFFFu, MaterialBase });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
+                        ++m_ShadowDrawStats.m_CpuDraws; m_ShadowDrawStats.m_CpuTris += C.m_nIndices / 3;
                     }
                 }
             }
@@ -1770,6 +1774,8 @@ namespace xlionrender
 
             // The sun's virtual pages: each in its slot of the atlas, cleared, its casters (light-space rect test)
             if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 0);
+            m_ShadowDrawStats.m_PageClears += int(m_VSM.m_ToRender.size());      // (a viewport, a scissor and a clear draw each)
+            m_ShadowDrawStats.m_CpuCasters  = int(AllCasters.size());
             for( const auto& P : m_VSM.m_ToRender )
             {
                 Viewport(Cmd, P.m_AtlasX, P.m_AtlasY, shadows::vsm::page_texels_v);
@@ -3454,12 +3460,17 @@ namespace xlionrender
             {
                 for( int k = 0; k < 6; ++k ) s_Sum[k] += (s_Ns[k + 1] - s_Ns[k]) * 1e-6;
                 // measurement (XLION_FRAME_CSV=<file>, the scorecard's game sequence): every frame's parts, for p95 / max
-                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total\n"); return f; }();
+                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands\n"); return f; }();
                 if( s_pCsv )
                 {
                     std::fprintf(s_pCsv, "%llu", (unsigned long long)m_Device.getFrameIndex());
                     for( int k = 0; k < 6; ++k ) std::fprintf(s_pCsv, ",%.4f", (s_Ns[k + 1] - s_Ns[k]) * 1e-6);
-                    std::fprintf(s_pCsv, ",%.4f\n", (s_Ns[6] - s_Ns[0]) * 1e-6);
+                    { gpu_times G; (void)getGPUTimes(G); }       // (their split: the latest the scene pass' own timers have - read by whoever came first)
+                    const auto& G = getLastGPUTimes();
+                    const auto& Pg = m_VSMReport.m_Pages;     // (the sun's pages rendered this frame: the fine ones, the net's; a new epoch)
+                    const auto& Sd = m_ShadowDrawStats;     // (the shadow pass's commands this frame: the CPU path's draws, the pairs' indirect ones)
+                    std::fprintf(s_pCsv, ",%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%lld,%d,%d,%d,%d,%d\n", (s_Ns[6] - s_Ns[0]) * 1e-6, G.m_ShadowMs, G.m_SceneMs, G.m_ToneMapMs, Pg.m_Rendered, Pg.m_RenderedPinned, Pg.m_Epochs
+                                , Sd.m_CpuDraws, (long long)Sd.m_CpuTris, Sd.m_CpuCasters, Sd.m_IndirectDraws, Sd.m_IndirectMax, Sd.m_PageClears, m_PairsReport.m_nCandidates);
                     if( m_Device.getFrameIndex() % 60 == 0 ) std::fflush(s_pCsv);
                 }
                 if( ++s_n == 120 ) { std::printf("RENDERGPU environment %.2f, instances %.2f, GI update %.2f, captures %.2f, shadows+scene+tonemap %.2f, overlays+outline %.2f ms\n", s_Sum[0] / s_n, s_Sum[1] / s_n, s_Sum[2] / s_n, s_Sum[3] / s_n, s_Sum[4] / s_n, s_Sum[5] / s_n); std::fflush(stdout); s_n = 0; for( auto& v : s_Sum ) v = 0; }
@@ -3492,7 +3503,7 @@ namespace xlionrender
         updateBudget();
         const auto T2b = clock::now();
         renderScenePass(Window, Scene, View, W2C, Eye, true);
-        if( Scene.m_Sun.m_bCastShadows ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
+        if( Scene.m_Sun.m_bCastShadows && !std::getenv("XLION_NO_SUN_SHADOWS") ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
         localRequestPass(Window, Scene, View, W2C, Eye);
         const auto T2c = clock::now();
 
