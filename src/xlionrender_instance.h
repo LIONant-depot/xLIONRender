@@ -561,6 +561,15 @@ namespace xlionrender
             std::array<std::vector<int>, ring_frames_v> m_Pending, m_MomPending;   // the surfels a slot has not had since they changed
         };
         std::unique_ptr<gi::world>  m_pGIWorld;
+        // The GI's GPU slice (methodology: 2 ms of the frame's 16): its steady cost (the GPU update and Show, measured while no relight is
+        // owed, smoothed) and the relight's budget a frame, what the slice leaves (instance::updateGI)
+        float                       m_GISliceMs = 2.0f;
+        xgpu::timestamps            m_GISliceTS;                    // 0 before Submit, 1 after the probes, 2 before Show, 3 after it, 4 before the probes
+        bool                        m_bGISliceTS = false, m_bGISliceTSTried = false;
+        double                      m_GISteadyMs = -1;              // (-1: not measured yet)
+        double                      m_GISteadyNoProbesMs = -1;      // the same without the probe grid's update (a relight frame skips it)
+        int                         m_GIQuietFrames = 0;            // frames since a relight was owed (the timestamps read are a few frames old)
+        std::vector<std::uint64_t>  m_GISliceNs;
         std::unique_ptr<gi::gpu_trace> m_pGITrace;              // G3: the GI's trace on the GPU (scene::gi_settings::m_bGPUTrace)
         bool                        m_bGITraceFailed = false;   // its Init failed: the CPU traces
         bool                        m_bGIToCPU = false, m_bGIToCPUAsked = false;     // the GPU turned off: its light read back first (updateGI)

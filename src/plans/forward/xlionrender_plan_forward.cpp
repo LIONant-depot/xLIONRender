@@ -447,6 +447,23 @@ namespace xlionrender
         if( bGPU )
         {
             const auto TSubmit = std::chrono::steady_clock::now();
+            // The relight's budget: the GI's slice less its steady cost (the update and Show, measured while no relight was owed: a few
+            // frames old, smoothed) - a light change's catch-up never takes the GI past its slice (XLION_GI_RELIGHT_MS still overrides)
+            m_GIQuietFrames = m_pGITrace->isRelighting() ? 0 : m_GIQuietFrames + 1;
+            if( !m_bGISliceTSTried ) { m_bGISliceTSTried = true; m_bGISliceTS = m_Device.Create(m_GISliceTS, { .m_Count = 5 }) == nullptr; }
+            if( m_bGISliceTS )
+            {
+                if( m_GISliceTS.getResults(m_GISliceNs) && m_GISliceNs.size() >= 5 && m_GISliceNs[1] >= m_GISliceNs[4] && m_GISliceNs[4] > m_GISliceNs[0] && m_GISliceNs[3] > m_GISliceNs[2] && m_GIQuietFrames > ring_frames_v + 1 )
+                {
+                    const double Show = double(m_GISliceNs[3] - m_GISliceNs[2]) * 1e-6;
+                    const double Ms = double(m_GISliceNs[1] - m_GISliceNs[0]) * 1e-6 + Show, NoProbes = double(m_GISliceNs[4] - m_GISliceNs[0]) * 1e-6 + Show;
+                    m_GISteadyMs = m_GISteadyMs < 0 ? Ms : 0.9 * m_GISteadyMs + 0.1 * Ms;
+                    m_GISteadyNoProbesMs = m_GISteadyNoProbesMs < 0 ? NoProbes : 0.9 * m_GISteadyNoProbesMs + 0.1 * NoProbes;
+                }
+                // (a relight round skips the probe grid's update - the skinned meshes' GI waits a few frames: its share is the relight's)
+                if( m_GISteadyMs >= 0 ) m_pGITrace->SetRelightBudgetMs(std::max(float(m_GISliceMs - (m_pGITrace->isRelighting() ? m_GISteadyNoProbesMs : m_GISteadyMs)), 0.1f));
+                Window.WriteTimestamp(m_GISliceTS, 0);
+            }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 0);
             m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 4);
@@ -462,8 +479,10 @@ namespace xlionrender
             }
             // The probe grid (skinned meshes' GI): 32 x 16 x 32 probes a meter apart around the eye, 1024 updated a frame
             static const bool s_bNoProbes = std::getenv("XLION_GI_NO_PROBES") != nullptr;     // (measurement: A/B)
-            if( Scene.m_GI.m_bProbes && !s_bNoProbes ) (void)m_pGITrace->UpdateProbes(Window, Eye, Scene.m_GI.m_ProbeSpacing, { 32, 16, 32 }, 1024, GIFrame);
+            if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 4);
+            if( Scene.m_GI.m_bProbes && !s_bNoProbes && !m_pGITrace->isRelighting() ) (void)m_pGITrace->UpdateProbes(Window, Eye, Scene.m_GI.m_ProbeSpacing, { 32, 16, 32 }, 1024, GIFrame);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 1);
+            if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 1);
             if( (m_bGIToCPU && !m_bGIToCPUAsked) || (!m_GIDumpPath.empty() && !m_bGIDumpAsked) )     // the GPU's light back into the world (the next Collect)
                 if( m_pGITrace->ReadBack(Window, GIFrame) ) { if( m_bGIToCPU ) m_bGIToCPUAsked = true; if( !m_GIDumpPath.empty() ) m_bGIDumpAsked = true; }
             m_GIStats.m_GPUTraceMs = m_pGITrace->LastMs(); m_GIStats.m_GPUPacks = m_pGITrace->Packs(); m_GIStats.m_GPUCpuMs = CollectMs + MsSince(TSubmit);
@@ -677,7 +696,9 @@ namespace xlionrender
                 for( const int Id : DrawSecIds[i] ) PlaceOf(Id);
             }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 2);
+            if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 2);
             (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation, Scene.m_GI.m_bShowBlend);
+            if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 3);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 3);
         }
         m_GIStats.m_UploadBytes += Entries * 3 * sizeof(xmath::fvec4) + MomentUints * sizeof(std::uint32_t);

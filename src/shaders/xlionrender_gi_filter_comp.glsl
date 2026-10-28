@@ -13,9 +13,10 @@ layout(std430, set = 0, binding = 2)          buffer scratch_b { float GIPass[];
 layout(std430, set = 0, binding = 3) readonly buffer places_b  { int   GIPlace[]; };    // per instance its place in the ring region (-1: not drawn), its mean light (RGB9E5; -1: the CPU wrote it)
 layout(std430, set = 0, binding = 4)          buffer light_b   { uvec4 GILight[]; };
 layout(std430, set = 0, binding = 5)          buffer moment_b  { uint  GIMoment[]; };
-layout(std430, set = 0, binding = 6) readonly buffer dir_b     { vec4  GIDir[]; };       // per link item its first bounce, w: the epoch it was relit in
-layout(std430, set = 0, binding = 7) readonly buffer first_b   { uint  GIInstFirst[]; }; // per instance its first link item
+layout(std430, set = 0, binding = 6) readonly buffer dir_b     { vec4  GIDir[]; };       // (unused: bindings 6, 7 kept for the layout)
+layout(std430, set = 0, binding = 7) readonly buffer first_b   { uint  GIInstFirst[]; };
 layout(std430, set = 0, binding = 8)          buffer shown_b   { float GIShown[]; };     // per surfel the light last shown (9 floats): the blend's history
+layout(std430, set = 0, binding = 9)          buffer target_b  { float GITarget[]; };    // per surfel the last complete solution (9 floats): what the shown light fades toward
 
 layout(push_constant) uniform push_t { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push;
 
@@ -70,14 +71,8 @@ void main()
     }
     if (Push.m_Mode == 1)
     {
-        // freshness (the relight over frames, Tomas): a surfel not yet relit since the lights changed (its link item's epoch is not
-        // this one) counts little - itself and as a neighbour - so it shows its relit neighbours' light, its own while none is
-        const bool  bFresh = Push.m_Pad1 != 0 && Level == 0u;
-        const uint  ItemBase = bFresh ? GIInstFirst[Inst] : 0u, ItemEnd = bFresh ? GIInstFirst[Inst + 1u] : 0u;     // (past its own items - a ghost: fresh)
-        const float Stale = 0.02;
-        const float W0 = bFresh && ItemBase + s < ItemEnd && floatBitsToUint(GIDir[ItemBase + s].w) != uint(Push.m_Pad0) ? Stale : 1.0;
-        float a[9]; float W = W0;
-        for (uint q = 0u; q < 9u; ++q) a[q] = GIPass[Src + 9u * g + q] * W0;
+        float a[9]; float W = 1.0;
+        for (uint q = 0u; q < 9u; ++q) a[q] = GIPass[Src + 9u * g + q];
         const uint Nf = GD[M + 18u + 3u * Level];
         if (Nf != gi_none_v)
         {
@@ -85,7 +80,7 @@ void main()
             for (uint k = GD[Nf + s], k1 = GD[Nf + s + 1u]; k < k1; ++k)
             {
                 const uint j = GD[Ni + k];
-                const float w = GF(Nw + k) * GF(GD[R + 3u] + j) * (bFresh && ItemBase + j < ItemEnd && floatBitsToUint(GIDir[ItemBase + j].w) != uint(Push.m_Pad0) ? Stale : 1.0);
+                const float w = GF(Nw + k) * GF(GD[R + 3u] + j);
                 const uint gj = First + j;
                 for (uint q = 0u; q < 9u; ++q) a[q] += GIPass[Src + 9u * gj + q] * w;
                 W += w;
@@ -108,22 +103,20 @@ void main()
     GIMoment[16u * At + t] = Half(GF(Mo + 2u * t)) | (Half(GF(Mo + 2u * t + 1u)) << 16);
     if (t != 0u) return;
     const float Valid = GF(GD[R + 3u] + s);
-    // The shown light moves toward the new one, never jumps (Tomas): 1 - exp(-dt / tau) a frame, two speeds (GIBS's short and long
-    // means): a slow tau while it changes little, a fast one when it changes a lot (a light switched, the sun jumped). m_Pad2: dt in
-    // seconds (its float bits), 0: no history (the first frame, the surfels' order changed) - the new light as it is
-    const float Dt = uintBitsToFloat(uint(Push.m_Pad2));
+    // The shown light never jumps and the scene changes as one (Tomas: a relight over frames looked "like a disco" - surfels flipping
+    // one by one in the bake's random order, each at its own speed). Two buffers: the target, the last COMPLETE solution (m_Pad1: this
+    // frame's is complete - no relight round owed - and becomes it; else the target stays the last complete one), and the shown light,
+    // which moves toward the target by the same fraction everywhere (m_Pad2: that fraction, its float bits - 1 - exp(-dt / tau), 1 with no
+    // history). Lumen's surface cache and DDGI blend the same way: one hysteresis for every texel / probe
+    const float A = uintBitsToFloat(uint(Push.m_Pad2));
     float Cn[9];
-    for (uint q = 0u; q < 9u; ++q) Cn[q] = GIPass[Src + 9u * g + q];
-    if (Dt > 0.0)
+    for (uint q = 0u; q < 9u; ++q)
     {
-        float Yn = 0.0, Yo = 0.0;
-        for (uint q = 0u; q < 9u; ++q) { Yn += Cn[q]; Yo += GIShown[9u * g + q]; }
-        const float Change = abs(Yn - Yo) / max(max(Yn, Yo), 1e-4);
-        const float Tau = mix(0.15, 0.04, smoothstep(0.1, 0.3, Change));     // (0.3 s doubled the settling after a sun jump: 1.4 -> 3 s)
-        const float A = 1.0 - exp(-Dt / Tau);
-        for (uint q = 0u; q < 9u; ++q) Cn[q] = mix(GIShown[9u * g + q], Cn[q], A);
+        if (Push.m_Pad1 != 0) GITarget[9u * g + q] = GIPass[Src + 9u * g + q];
+        const float T = GITarget[9u * g + q];
+        Cn[q] = A >= 1.0 ? T : mix(GIShown[9u * g + q], T, A);
+        GIShown[9u * g + q] = Cn[q];
     }
-    for (uint q = 0u; q < 9u; ++q) GIShown[9u * g + q] = Cn[q];
     uint P[3];
     for (uint i = 0u; i < 3u; ++i)
     {

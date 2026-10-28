@@ -132,6 +132,7 @@ bool Occluded(vec3 O, vec3 D, float TMax)       // world::Occluded: the first hi
     return H.m_Inst >= 0;
 }
 bool g_DirectNoLamps = false;       // (measurement: the links' relight without the lamps - XLION_GI_RELIGHT_NO_LAMPS)
+bool g_DirectNoSunShadow = false;   // (measurement: the sun unshadowed - a shadow map's lookup's upper bound, XLION_GI_RELIGHT_NO_SUN_SHADOW)
 vec3 Direct(vec3 P, vec3 N)
 {
     const uint Lt = GD[2];
@@ -139,7 +140,7 @@ vec3 Direct(vec3 P, vec3 N)
     const vec3 O = P + N * 1e-3;
     const vec3 SunD = GV(Lt), SunC = GV(Lt + 3u);
     const float cs = -dot(N, SunD);
-    if (cs > 0.0 && (SunC.x + SunC.y + SunC.z) > 0.0 && !Occluded(O, SunD * -1.0, 1e30)) E += SunC * cs;
+    if (cs > 0.0 && (SunC.x + SunC.y + SunC.z) > 0.0 && (g_DirectNoSunShadow || !Occluded(O, SunD * -1.0, 1e30))) E += SunC * cs;
     const uint nP = g_DirectNoLamps ? 0u : GD[3];
     for (uint i = 0u; i < nP; ++i)
     {

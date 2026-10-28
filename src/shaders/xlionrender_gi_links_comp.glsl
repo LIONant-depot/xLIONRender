@@ -120,7 +120,8 @@ void main()
     {
         const int kd = Push.m_First + int(gl_GlobalInvocationID.x) * max(Push.m_Pad1, 1);     // (m_Pad1: a stride - the relight's strata, every 8th item)
         if (kd >= Push.m_nItems) return;
-        g_DirectNoLamps = Push.m_Pad0 == 1;                         // (measurement)
+        g_DirectNoLamps = (Push.m_Pad0 & 1) != 0;                   // (measurement)
+        g_DirectNoSunShadow = (Push.m_Pad0 & 2) != 0;
         const int Id = GIItems[kd].m_Ids.x, sd = GIItems[kd].m_Ids.y;
         const uint Rd = InstRec(Id);
         if (GD[Rd + 40u] == 0u || GD[Rd + 1u] != 0u) { GIDir[kd] = vec4(0.0); return; }

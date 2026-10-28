@@ -34,7 +34,7 @@ namespace xlionrender::gi
                 return !Device.Create(Sh, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw }) && !Device.Create(C, { .m_pShader = &Sh, .m_nBuffers = nBuffers, .m_PushConstantsSize = std::size_t(Push) });
             };
             return Make(m_Shader[0], m_Pass, S.m_Pass, 8, 16) && Make(m_Shader[1], m_Scatter, S.m_Scatter, 2, 16) && Make(m_Shader[2], m_Commit, S.m_Commit, 5, 16)
-                && Make(m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make(m_Shader[4], m_Filter, S.m_Filter, 9, 32) && Make(m_Shader[5], m_Expand, S.m_Expand, 4, 32)
+                && Make(m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make(m_Shader[4], m_Filter, S.m_Filter, 10, 32) && Make(m_Shader[5], m_Expand, S.m_Expand, 4, 32)
                 && Make(m_Shader[6], m_Means, S.m_Means, 2, 16) && Make(m_Shader[7], m_Cube, S.m_Cube, 2, 16) && Make(m_Shader[8], m_Migrate, S.m_Migrate, 3, 16)
                 && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 })
                 && ((m_bRelightTS = Device.Create(m_RelightTS, { .m_Count = 2 }) == nullptr) || true)
@@ -263,7 +263,7 @@ namespace xlionrender::gi
             if (First >= End) return true;
             const std::size_t nThreads = (End - First + std::size_t(Stride) - 1) / std::size_t(Stride);
             const int nGroups = int((nThreads + 63) / 64);
-            static const int s_NoLamps = std::getenv("XLION_GI_RELIGHT_NO_LAMPS") ? 1 : 0;      // (measurement: the lamps' share of the relight)
+            static const int s_NoLamps = (std::getenv("XLION_GI_RELIGHT_NO_LAMPS") ? 1 : 0) | (std::getenv("XLION_GI_RELIGHT_NO_SUN_SHADOW") ? 2 : 0);      // (measurement: the lamps' share of the relight; the sun's shadow ray's)
             const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(End), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First), 1, { s_NoLamps, Stride, 0 } };
             if (!LinkAux()) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
@@ -307,9 +307,14 @@ namespace xlionrender::gi
             if (!LinkAux()) return false;
             xgpu::buffer* B[] = { &m_DataB, &m_LinkB, &m_LinkDLocalB, &m_LinkItemLocalB, &m_MeansB2[m_LastMeans], &m_LinkNextB, &m_LinkDirB };
             struct { int m_nItems, m_Mode, m_nInst, m_Links; } Push{ int(nItems), 0, int(m_Data[1]), links_v };
-            Window.Dispatch(m_SolveC, B, &Push, sizeof(Push), Groups);
-            Push.m_Mode = 1;
-            Window.Dispatch(m_SolveC, B, &Push, sizeof(Push), Groups);
+            static const int s_Iters = [] { const char* p = std::getenv("XLION_GI_SOLVE_ITERS"); return p ? std::max(std::atoi(p), 1) : 1; }();     // (measurement: iterations a frame)
+            for (int k = 0; k < s_Iters; ++k)
+            {
+                Push.m_Mode = 0;
+                Window.Dispatch(m_SolveC, B, &Push, sizeof(Push), Groups);
+                Push.m_Mode = 1;
+                Window.Dispatch(m_SolveC, B, &Push, sizeof(Push), Groups);
+            }
             return true;
         }
         // The probe grid (xlionrender_gi_probes_comp.glsl): Dim probes Spacing apart around Eye, PerFrame of them updated a frame (round
@@ -452,6 +457,8 @@ namespace xlionrender::gi
         std::size_t LinkItemCount(void) const noexcept { return m_LinkItems.size(); }
         std::size_t RelitItems(void) const noexcept { return m_nRelitItems; }     // (the relight's items so far: its budget a frame)
         void        SetRelightBudgetMs(float Ms) noexcept { m_RelightBudgetMs = std::max(Ms, 0.0f); }     // the lights' relight a frame, GPU ms
+        void        SetRelightLatencyFloor(bool b) noexcept { m_bRelightLatencyFloor = b; }     // (tests: the budget alone, no latency floor)
+        bool        isRelighting() const noexcept { return m_RelightOwed > 0 || !m_bLinkDirValid; }      // a round of the relight owed (its GPU time on top of the steady GI)
         // Experiment D in a renderer (XLION_GI_LINKS): after Settle frames of the ray solver (the reads' validity and moments), the links of
         // every level-0 surfel are built, PerFrame surfels a frame; two frames after the last slice they are solved, one iteration a frame.
         // A pack, a move or a level switch drops them (built again Settle frames on). After Submit, before Show
@@ -594,25 +601,39 @@ namespace xlionrender::gi
                 }
                 else if (!s_bNoRelight && nUnits > 0)
                 {
-                    if (DirKey != m_LinkDirKey) { ++m_RelightEpoch; m_RelightOwed = nUnits; }     // (a new epoch: every item stale until relit - the display filter)
-                    m_LinkDirKey = DirKey;
-                    if (m_RelightTimedItems > 0 && m_RelightTS.getResults(m_RelightNs) && m_RelightNs.size() >= 2 && m_RelightNs[1] > m_RelightNs[0])
+                    // a change: a round; a change during one: the round goes on (its end is the display's next complete solution: a
+                    // restart would never end under a moving sun), another round after it
+                    if (DirKey != m_LinkDirKey)
                     {
-                        m_RelightMsUnit = double(m_RelightNs[1] - m_RelightNs[0]) * 1e-6 / double(m_RelightTimedItems) * double(relight_unit_v);
-                        m_RelightTimedItems = 0;
+                        if (m_RelightOwed == 0) { ++m_RelightEpoch; m_RelightOwed = nUnits; m_RelightCursor = 0; }
+                        else m_bRelightAgain = true;
+                        m_LinkDirKey = DirKey;
+                    }
+                    else if (m_RelightOwed == 0 && m_bRelightAgain) { m_bRelightAgain = false; ++m_RelightEpoch; m_RelightOwed = nUnits; m_RelightCursor = 0; }
+                    // Its cost: max(latency, units x throughput). The throughput (ms a unit) from the full relight's one big dispatch; the
+                    // latency from the budgeted frames: a few units fill a few of the GPU's units, each item a serial chain of shadow rays (the
+                    // sun's, every lamp's in reach) - Bistro: 1 unit 1.85 ms, 44 units the same, all 466 units 8.3 ms. A frame takes as many
+                    // units as the larger of its budget and that latency buys: a round in ~5 frames, not 466
+                    if (m_RelightTS.getResults(m_RelightNs) && m_RelightNs.size() >= 2 && m_RelightNs[1] > m_RelightNs[0])
+                    {
+                        const double Ms = double(m_RelightNs[1] - m_RelightNs[0]) * 1e-6;
+                        if (m_RelightTimedItems > 0) m_RelightMsUnit = Ms / double(m_RelightTimedItems) * double(relight_unit_v);
+                        else if (m_bRelightTimedFrame) m_RelightLatencyMs = m_RelightLatencyMs > 0 ? 0.8 * m_RelightLatencyMs + 0.2 * Ms : Ms;
+                        m_RelightTimedItems = 0; m_bRelightTimedFrame = false;
                     }
                     static const char* s_pMs = std::getenv("XLION_GI_RELIGHT_MS");     // (measurement: the budget)
                     const double BudgetMs = s_pMs ? std::atof(s_pMs) : double(m_RelightBudgetMs);
-                    const std::size_t PerFrame = m_RelightMsUnit > 0 ? std::clamp(std::size_t(BudgetMs / m_RelightMsUnit), std::size_t(1), nUnits) : std::size_t(16);
+                    const std::size_t PerFrame = m_RelightMsUnit > 0 ? std::clamp(std::size_t(std::max(BudgetMs, m_bRelightLatencyFloor ? m_RelightLatencyMs : 0.0) / m_RelightMsUnit), std::size_t(1), nUnits) : std::size_t(16);
                     const std::size_t nTake = std::min(m_RelightOwed, PerFrame);
                     static const bool s_bTrace = std::getenv("XLION_GPU_TIMES") != nullptr;     // (measurement: the relight's budget at work)
                     if (s_bTrace && (Frame % 60 == 0 || m_RelightOwed == nUnits))
                     {
-                        std::printf("GIRELIGHT frame %llu: %zu of %zu units owed, %zu this frame (budget %.2f ms, %.4f ms a unit measured), epoch %u\n", (unsigned long long)Frame, m_RelightOwed, nUnits, nTake, BudgetMs, m_RelightMsUnit, m_RelightEpoch);
+                        std::printf("GIRELIGHT frame %llu: %zu of %zu units owed, %zu this frame (budget %.2f ms, latency %.2f ms, %.4f ms a unit measured), epoch %u\n", (unsigned long long)Frame, m_RelightOwed, nUnits, nTake, BudgetMs, m_RelightLatencyMs, m_RelightMsUnit, m_RelightEpoch);
                         std::fflush(stdout);
                     }
                     if (nTake > 0)
                     {
+                        if (m_bRelightTS) Window.WriteTimestamp(m_RelightTS, 0);
                         m_RelightCursor %= nUnits;
                         const std::size_t a = std::min(nTake, nUnits - m_RelightCursor);
                         (void)RelightLinks(Window, nItems, m_RelightCursor * relight_unit_v, a * relight_unit_v);
@@ -621,6 +642,7 @@ namespace xlionrender::gi
                         // the round's end: the smoothing once more over every item - a unit smoothed when its neighbours (other units)
                         // still held the old light (3.99% off at the end of a round in the test; no rays, a neighbour average)
                         if (m_RelightOwed == 0) (void)SmoothLinks(Window, nItems);
+                        if (m_bRelightTS) { Window.WriteTimestamp(m_RelightTS, 1); m_bRelightTimedFrame = true; }
                     }
                 }
                 if (SolveLinks(Window, m_LinkItems.size())) ++m_LinkSolves;
@@ -738,19 +760,25 @@ namespace xlionrender::gi
             P.resize(2 * std::size_t(std::max<std::uint32_t>(m_Data[1], 1)), -1);     // (per instance: its place, its mean or -1)
             auto& PlaceB = m_PlaceB2[m_nShows++ % 2];                  // (two: the frame before may still read its copy)
             if (!Fit(PlaceB, int(sizeof(int)), P.size()) || PlaceB.MemoryMapFrameRegion(0, int(P.size()), [&](void* p) { std::memcpy(p, P.data(), P.size() * sizeof(int)); })) return false;
-            // (the relight's freshness: the links' first bounce and items while they solve - else bound but unused)
-            const bool bFresh = m_LinkState == 2 && m_bLinkDirValid && m_LinkDirB.m_Private != nullptr && m_LinkInstFirstB.m_Private != nullptr;
-            // (the shown light's history - the blend toward the new light: a new one when the surfels' count changes, then no blend)
+            // The shown light and its target, the last complete solution (xlionrender_gi_filter_comp.glsl mode 2): new ones when the surfels'
+            // count changes (no history: the solution as it is). The target is this frame's solution unless a relight round is owed (its
+            // surfels part old, part new: the target stays the last complete one); the shown light moves toward it by one fraction for
+            // every surfel, 1 - exp(-dt / tau)
             const auto Now = std::chrono::steady_clock::now();
             float Dt = m_ShownN == m_nShown ? float(std::chrono::duration<double>(Now - m_ShownT).count()) : 0.0f;
             m_ShownT = Now;
-            if (m_ShownN != m_nShown) { if (!Local(m_ShownB, std::vector<float>(9 * m_nShown, 0.0f))) return false; m_ShownN = m_nShown; Dt = 0; }
+            if (m_ShownN != m_nShown)
+            {
+                if (!Local(m_ShownB, std::vector<float>(9 * m_nShown, 0.0f)) || !Local(m_TargetB, std::vector<float>(9 * m_nShown, 0.0f))) return false;
+                m_ShownN = m_nShown; Dt = 0;
+            }
             static const bool s_bNoBlend = std::getenv("XLION_GI_NO_BLEND") != nullptr;     // (measurement: the blend off)
             if (s_bNoBlend || !bBlend) Dt = 0;
-            Dt = std::min(Dt, 0.25f);      // (a hitch: one step, not a jump)
-            std::uint32_t DtBits; std::memcpy(&DtBits, &Dt, sizeof(DtBits));
-            xgpu::buffer* Bufs[] = { &m_DataB, &m_OwnerB, &m_ScratchB, &PlaceB, &Light, &Moments, bFresh ? &m_LinkDirB : &m_DataB, bFresh ? &m_LinkInstFirstB : &m_DataB, &m_ShownB };
-            struct { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push{ 0, int(m_nShown), 1, Base, Saturation, int(m_RelightEpoch), bFresh ? 1 : 0, int(DtBits) };
+            const bool  bComplete = Dt == 0 || !(m_LinkState == 2 && (m_RelightOwed > 0 || !m_bLinkDirValid));
+            const float A = Dt > 0 ? 1.0f - std::exp(-std::min(Dt, 0.25f) / show_tau_v) : 1.0f;     // (a hitch: one step, not a jump)
+            std::uint32_t ABits; std::memcpy(&ABits, &A, sizeof(ABits));
+            xgpu::buffer* Bufs[] = { &m_DataB, &m_OwnerB, &m_ScratchB, &PlaceB, &Light, &Moments, &m_DataB, &m_DataB, &m_ShownB, &m_TargetB };
+            struct { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push{ 0, int(m_nShown), 1, Base, Saturation, 0, 0, 0 };
             const int Groups = int((m_nShown + 63) / 64);
             static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;     // measurement: the three steps' GPU time
             if (s_bTimes && !m_ShowTimesOk) { xgpu::device D; Window.getDevice(D); m_ShowTimesOk = D.Create(m_ShowTimes, { .m_Count = 4 }) == nullptr; }
@@ -775,7 +803,7 @@ namespace xlionrender::gi
             const int nP = std::clamp(Passes, 0, 16);
             for (int p = 1; p <= nP; ++p) { Push.m_Mode = 1; Push.m_Src = (p - 1) % 2; Window.Dispatch(m_Filter, Bufs, &Push, sizeof(Push), Groups); }
             if (bT) Window.WriteTimestamp(m_ShowTimes, 2);
-            Push.m_Mode = 2; Push.m_Src = nP % 2;
+            Push.m_Mode = 2; Push.m_Src = nP % 2; Push.m_Pad1 = bComplete ? 1 : 0; Push.m_Pad2 = int(ABits);
             Window.Dispatch(m_Filter, Bufs, &Push, sizeof(Push), int((16 * m_nShown + 63) / 64));      // (16 invocations a surfel: coalesced stores)
             if (bT) Window.WriteTimestamp(m_ShowTimes, 3);
             return true;
@@ -1167,8 +1195,14 @@ namespace xlionrender::gi
         bool                                m_bRelightTS = false;
         std::vector<std::uint64_t>          m_RelightNs;
         double                              m_RelightMsUnit = 0;     // GPU ms a unit, measured (an average)
+        bool                                m_bRelightAgain = false; // the lights changed during a round: another after it
+        double                              m_RelightLatencyMs = 0;  // a budgeted frame's relight, GPU ms (a running mean): its floor whatever its size
+        bool                                m_bRelightTimedFrame = false;
+        bool                                m_bRelightLatencyFloor = true;
         std::uint32_t                       m_RelightEpoch = 1;
         xgpu::buffer                        m_ShownB;           // per shown surfel its light last shown (9 floats): the display's blend
+        xgpu::buffer                        m_TargetB;          // per shown surfel the last complete solution (9 floats): what the shown light fades toward
+        static constexpr float              show_tau_v = 0.25f; // the fade's time constant, seconds (the whole scene alike)
         std::size_t                         m_ShownN = 0;
         std::chrono::steady_clock::time_point m_ShownT{};      // the lights' epoch (a change: the next): the items' GIDir.w, the display filter's freshness
         std::size_t                         m_RelightTimedItems = 0;     // the full relight being timed (its items), 0: none

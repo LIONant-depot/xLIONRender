@@ -653,8 +653,28 @@ int main()
         {
             const std::size_t nItems = T.LinkItemCount(), Budget = 128, nRelights0 = T.Relights(), nItems0 = T.RelitItems();
             T.SetRelightBudgetMs(1e-6f);
+            T.SetRelightLatencyFloor(false);
             L.m_Points[0].m_Position = LampAt;
             std::size_t nMost = 0, nFrames = 0;
+            const auto Frames = [&](int nMax, std::size_t& Most) -> std::size_t
+            {
+                std::size_t n = 0;
+                for (int u = 0; u < nMax; ++u)
+                {
+                    const std::size_t r0 = T.RelitItems();
+                    Drain(App, T, W);
+                    while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+                    const std::uint64_t Frame = App.m_Device.getFrameIndex();
+                    T.Collect(W, Frame);
+                    W.Update(L, v3{ 0, 1.6f, -1.9f }, 1 << 30, 300 + u);
+                    T.Submit(App.m_Window, W, L, Frame, 1000.0f, v3{ 0, 1.6f, -1.9f });
+                    T.PumpLinks(App.m_Window, W, L, Frame, 64, 4, 1 << 20);
+                    { auto Cmd = App.m_Window.getCmdBuffer(); }
+                    App.m_Window.PageFlip();
+                    Most = std::max(Most, T.RelitItems() - r0); n += T.RelitItems() > r0;
+                }
+                return n;
+            };
             for (int u = 0; u < 40; ++u)
             {
                 const std::size_t r0 = T.RelitItems();
@@ -677,7 +697,17 @@ int main()
                 const auto& b = Before[k2++];
                 D2 += std::abs(e.m_X - b.m_X) + std::abs(e.m_Y - b.m_Y) + std::abs(e.m_Z - b.m_Z); S2 += b.m_X + b.m_Y + b.m_Z;
             }
+            T.SetRelightLatencyFloor(true);
+            // ... and with the latency floor (a frame's relight costs its latency at least - a few items fill a few of the GPU's units -
+            // so a frame takes what that latency buys): the same budget, the light moved again, a round in fewer frames
+            std::size_t nMostLat = 0;
+            L.m_Points[0].m_Position = LampAt + v3{ 0.3f, 0, 0 };
+            const std::size_t nFramesLat = Frames(40, nMostLat);
+            L.m_Points[0].m_Position = LampAt;
+            (void)Frames(40, nMostLat);
             T.SetRelightBudgetMs(1.0f);
+            std::printf("with the latency floor: %zu frames (at most %zu items a frame) against %zu\n", nFramesLat, nMostLat, nFrames);
+            CHECK(nFramesLat > 0 && nFramesLat < nFrames, "the latency floor does not shorten the round (%zu frames against %zu)", nFramesLat, nFrames);
             std::printf("the light moved back, %zu of %zu items relit a frame: %zu slices over %zu frames, at most %zu items a frame (%zu in all), the light %.2f%% off the original\n", Budget, nItems, T.Relights() - nRelights0, nFrames, nMost, T.RelitItems() - nItems0, 100.0 * D2 / std::max(S2, 1e-9));
             CHECK(nFrames >= (nItems + 1023) / 1024 * 8 && nMost <= Budget && T.RelitItems() - nItems0 >= nItems, "the relight was not spread over frames within its budget (%zu frames, at most %zu items a frame, %zu in all of %zu)", nFrames, nMost, T.RelitItems() - nItems0, nItems);
             CHECK(D2 < 0.01 * S2, "the sliced relight did not bring the light back (%.2f%% off)", 100.0 * D2 / std::max(S2, 1e-9));
