@@ -354,12 +354,16 @@ vec3 ReadVertex(uint R, uint M, uint Level, uint Vertex, out float W)
     }
     return Sum;
 }
+// The reflections' hits read the grid wherever a mesh has one (g_HitGridRead, set by the reflection trace): the vertex read of a big
+// triangle is its corners' surfels - a ceiling's are in the wall's corners, dark: black bands in a mirror. The solver's rays keep the
+// mesh's own choice (its leak protection)
+bool g_HitGridRead = false;
 bool Indirect(int Id, int Tri, float U, float V, out vec3 E)
 {
     const uint R = InstRec(Id), M = MeshOf(R), Level = GD[R + 1u];
     const uvec3 T = MTri(M, Tri);
     const float B[3] = float[3](1.0 - U - V, U, V);
-    if (GD[M + 17u] != 0u && GD[M + 11u] != 0u)
+    if ((GD[M + 17u] != 0u || g_HitGridRead) && GD[M + 11u] != 0u)
     {
         const vec3 P0 = MPos(M, T.x), P1 = MPos(M, T.y), P2 = MPos(M, T.z);
         return ReadPoint(Id, P0 * B[0] + P1 * B[1] + P2 * B[2], normalize(cross(P1 - P0, P2 - P0)), E);

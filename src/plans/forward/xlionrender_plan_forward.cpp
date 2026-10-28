@@ -3428,6 +3428,15 @@ namespace xlionrender
             if( pTS->getResults(s_Ns) && s_Ns.size() >= 7 && s_Ns[6] > s_Ns[0] )
             {
                 for( int k = 0; k < 6; ++k ) s_Sum[k] += (s_Ns[k + 1] - s_Ns[k]) * 1e-6;
+                // measurement (XLION_FRAME_CSV=<file>, the scorecard's game sequence): every frame's parts, for p95 / max
+                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total\n"); return f; }();
+                if( s_pCsv )
+                {
+                    std::fprintf(s_pCsv, "%llu", (unsigned long long)m_Device.getFrameIndex());
+                    for( int k = 0; k < 6; ++k ) std::fprintf(s_pCsv, ",%.4f", (s_Ns[k + 1] - s_Ns[k]) * 1e-6);
+                    std::fprintf(s_pCsv, ",%.4f\n", (s_Ns[6] - s_Ns[0]) * 1e-6);
+                    if( m_Device.getFrameIndex() % 60 == 0 ) std::fflush(s_pCsv);
+                }
                 if( ++s_n == 120 ) { std::printf("RENDERGPU environment %.2f, instances %.2f, GI update %.2f, captures %.2f, shadows+scene+tonemap %.2f, overlays+outline %.2f ms\n", s_Sum[0] / s_n, s_Sum[1] / s_n, s_Sum[2] / s_n, s_Sum[3] / s_n, s_Sum[4] / s_n, s_Sum[5] / s_n); std::fflush(stdout); s_n = 0; for( auto& v : s_Sum ) v = 0; }
             }
             Window.WriteTimestamp(*pTS, 0);

@@ -240,6 +240,7 @@ void main()
                         vec3 Albedo, Emission;
                         SurfaceAt(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Albedo, Emission);
                         vec3 Ei;
+                        g_HitGridRead = true;
                         if (!Indirect(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Ei)) Ei = Unsupported(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V);
                         const bool bSpec = (GD[R + 47u] & 128u) != 0u;      // (its triangles' specular: world::SetTriangleSpecular)
                         const uint Sb = bSpec ? GD[R + 48u] + 4u * uint(Hit.m_Tri) : 0u;

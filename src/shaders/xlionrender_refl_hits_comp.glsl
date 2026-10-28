@@ -143,7 +143,7 @@ void main()
     const uvec4 B = Hits[2u + 3u * k];
     const uint  Key = Hits[3u + 3u * k].x;
     const vec3  E = vec3(unpackHalf2x16(B.x), unpackHalf2x16(B.y).x), S = vec3(unpackHalf2x16(B.y).y, unpackHalf2x16(B.z));
-    const vec3  Ut = Push.m_Debug == 1u ? Albedo : Push.m_Debug == 2u ? vec3(1.0, 0.0, 1.0) : Emission + Albedo * E + S;
+    const vec3  Ut = Push.m_Debug == 1u ? Albedo : Push.m_Debug == 2u ? vec3(1.0, 0.0, 1.0) : Push.m_Debug == 3u ? E : Emission + Albedo * E + S;     // (3: the light alone)
     const float Wt = smoothstep(0.75 * Push.m_TexMax, Push.m_TexMax, unpackHalf2x16(B.w).y);       // (the receiver's selection weight: no seam)
     if (Key < Push.m_Half)
     {
