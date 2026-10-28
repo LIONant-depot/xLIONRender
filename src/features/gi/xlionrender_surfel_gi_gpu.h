@@ -612,7 +612,12 @@ namespace xlionrender::gi
                 if (m_ShowTimes.getResults(Ns) && Ns.size() >= 4 && Ns[3] > Ns[0])
                 {
                     for (int k = 0; k < 3; ++k) m_ShowSum[k] += (Ns[k + 1] - Ns[k]) * 1e-6;
-                    if (++m_nShowSum == 120) { std::printf("GISHOW %zu surfels: pass 0 %.2f, %d filter passes %.2f, into the rings %.2f ms\n", m_nShown, m_ShowSum[0] / 120, Passes, m_ShowSum[1] / 120, m_ShowSum[2] / 120); std::fflush(stdout); m_nShowSum = 0; for (auto& v : m_ShowSum) v = 0; }
+                    if (++m_nShowSum == 120)
+                    {
+                        std::size_t nDrawn = 0; for (std::size_t i = 0; i < P.size(); i += 2) nDrawn += P[i] >= 0;
+                        std::printf("GISHOW %zu surfels: pass 0 %.2f, %d filter passes %.2f, into the rings %.2f ms; %zu of %zu instances drawn\n", m_nShown, m_ShowSum[0] / 120, Passes, m_ShowSum[1] / 120, m_ShowSum[2] / 120, nDrawn, P.size() / 2);
+                        std::fflush(stdout); m_nShowSum = 0; for (auto& v : m_ShowSum) v = 0;
+                    }
                 }
                 Window.WriteTimestamp(m_ShowTimes, 0);
             }

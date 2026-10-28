@@ -159,20 +159,22 @@ namespace xlionrender
     static int g_nSceneBinds = 0, g_nSceneDraws = 0;
     static double g_BindMs = 0, g_DrawMs = 0;     // measurement only (XLION_FRAME_TIMES): the main scene pass's binds and cluster draws
     // Measurement only (XLION_GPU_TIMES): GPU timestamps of the GI update's parts (slots: before Submit, after it, before Show, after it)
-    namespace { struct gi_times { xgpu::timestamps m_T; bool m_bOk = false; std::vector<std::uint64_t> m_Ns; double m_Sum[3] = {}; int m_n = 0; }; }
+    namespace { struct gi_times { xgpu::timestamps m_T; bool m_bOk = false; std::vector<std::uint64_t> m_Ns; double m_Sum[6] = {}; int m_n = 0; }; }
     static gi_times* GITimes(const void* pKey, xgpu::device& Device) noexcept
     {
         static const bool s_bOn = std::getenv("XLION_GPU_TIMES") != nullptr;
         if( !s_bOn ) return nullptr;
         static std::unordered_map<const void*, gi_times> s_Map;      // ponytail: per renderer, never erased (a measurement hook)
         auto [It, bNew] = s_Map.try_emplace(pKey);
-        if( bNew ) It->second.m_bOk = Device.Create(It->second.m_T, { .m_Count = 4 }) == nullptr;
+        if( bNew ) It->second.m_bOk = Device.Create(It->second.m_T, { .m_Count = 6 }) == nullptr;
         if( !It->second.m_bOk ) return nullptr;
         auto& G = It->second;
-        if( G.m_T.getResults(G.m_Ns) && G.m_Ns.size() >= 4 && G.m_Ns[3] > G.m_Ns[0] )
+        // (slots: 0 before Submit, 4 after it, 5 after the links' pump, 1 after the probes; 2 before Show, 3 after it)
+        if( G.m_T.getResults(G.m_Ns) && G.m_Ns.size() >= 6 && G.m_Ns[3] > G.m_Ns[0] && G.m_Ns[1] >= G.m_Ns[5] && G.m_Ns[5] >= G.m_Ns[4] && G.m_Ns[4] >= G.m_Ns[0] )
         {
             for( int k = 0; k < 3; ++k ) G.m_Sum[k] += (G.m_Ns[k + 1] - G.m_Ns[k]) * 1e-6;
-            if( ++G.m_n == 120 ) { std::printf("GIGPU submit %.2f, between %.2f, show %.2f ms\n", G.m_Sum[0] / G.m_n, G.m_Sum[1] / G.m_n, G.m_Sum[2] / G.m_n); std::fflush(stdout); G.m_n = 0; for( auto& v : G.m_Sum ) v = 0; }
+            G.m_Sum[3] += (G.m_Ns[4] - G.m_Ns[0]) * 1e-6; G.m_Sum[4] += (G.m_Ns[5] - G.m_Ns[4]) * 1e-6; G.m_Sum[5] += (G.m_Ns[1] - G.m_Ns[5]) * 1e-6;
+            if( ++G.m_n == 120 ) { std::printf("GIGPU submit %.2f (the rays' slice %.2f, the links: relight + solve + ghosts %.2f, the probes %.2f), between %.2f, show %.2f ms\n", G.m_Sum[0] / G.m_n, G.m_Sum[3] / G.m_n, G.m_Sum[4] / G.m_n, G.m_Sum[5] / G.m_n, G.m_Sum[1] / G.m_n, G.m_Sum[2] / G.m_n); std::fflush(stdout); G.m_n = 0; for( auto& v : G.m_Sum ) v = 0; }
         }
         return &G;
     }
@@ -447,11 +449,17 @@ namespace xlionrender
             const auto TSubmit = std::chrono::steady_clock::now();
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 0);
             m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
+            if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 4);
             // The link solve, on by default (Tomas 2026-10-24: it is what settles the light): the links built on the GPU once the rays settled (30
             // frames), then solved every frame and the rays stop (moving objects still get them). XLION_GI_LINKS=<rays>[,settle frames[,surfels a
             // frame]] changes it; XLION_GI_LINKS=0 turns it off
             static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 64, 30, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
             if( s_Links[0] > 0 ) m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]);
+            if( auto* pT = GITimes(this, m_Device) )
+            {
+                Window.WriteTimestamp(pT->m_T, 5);
+                if( GIFrame % 600 == 0 ) { const auto C = W.FilterCounts(); std::printf("GIFILTER %zu surfels, %zu neighbor links (%.1f a surfel): a pass reads ~%.0f MB\n", C[0], C[1], double(C[1]) / double(std::max<std::size_t>(C[0], 1)), double(C[1]) * (36 + 12) / 1048576.0 + double(C[0]) * 72 / 1048576.0); std::fflush(stdout); }
+            }
             // The probe grid (skinned meshes' GI): 32 x 16 x 32 probes a meter apart around the eye, 1024 updated a frame
             static const bool s_bNoProbes = std::getenv("XLION_GI_NO_PROBES") != nullptr;     // (measurement: A/B)
             if( Scene.m_GI.m_bProbes && !s_bNoProbes ) (void)m_pGITrace->UpdateProbes(Window, Eye, Scene.m_GI.m_ProbeSpacing, { 32, 16, 32 }, 1024, GIFrame);

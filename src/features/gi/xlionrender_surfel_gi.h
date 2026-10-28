@@ -1198,7 +1198,7 @@ namespace xlionrender::gi
                         {
                             if (CornerPts[k].empty()) { Frac[k] = -1; continue; }
                             int nSee = 0;
-                            for (const v3* Q : CornerPts[k]) nSee += Sees(*Q, Pa.m_N, L[s]);
+                            for (const v3* Q : CornerPts[k]) nSee += SeesOverCurve(*Q, Pa.m_N, L[s]);
                             Frac[k] = float(nSee) / float(CornerPts[k].size());
                             Known += Frac[k]; ++nKnown;
                         }
@@ -1778,6 +1778,22 @@ namespace xlionrender::gi
                 return L < 1e-6f || !Occluded(From, D * (1.0f / L), L);
             };
             return Clear(A.m_Center + A.m_Normal * (0.02f * A.m_Radius), P) && Clear(B.m_Center + B.m_Normal * (0.02f * B.m_Radius), Q) && Clear(P, Q);
+        }
+
+        // A surface point sees a surfel over a convex curve (the read grid's lists; SameLayer's sag for the filter): the chord between them
+        // passes under a sphere's or a column's surface by its sag (half the chord times the tangent of a quarter of the normals' angle) -
+        // lifted by it, with its risers clear, the point sees the surfels around it on the curve. A wall between them still cuts it. It was
+        // Sees alone: on a 25 cm sphere a point saw only its nearest surfel or two (lists of 4.6 entries), each pixel read them alone - plates
+        bool SeesOverCurve(const v3& P, const v3& N, const surfel& S) const noexcept
+        {
+            if (Sees(P, N, S)) return true;
+            const float c = std::clamp(N.Dot(S.m_Normal), -1.0f, 1.0f);
+            if (c > 0.9999f) return false;
+            const float ch = std::sqrt(0.5f * (1 + c)), Sag = 0.5f * (S.m_Center - P).Length() * std::sqrt(std::max(0.0f, (1 - ch) / (1 + ch)));
+            const float e = 0.02f * S.m_Radius, h = e + Sag;
+            const v3 A = P + N * h, B = S.m_Center + S.m_Normal * h;
+            const auto Clear = [&](const v3& From, const v3& To) { const v3 D = To - From; const float Ln = D.Length(); return Ln < 1e-6f || !Occluded(From, D * (1.0f / Ln), Ln); };
+            return Clear(P + N * e, A) && Clear(S.m_Center + S.m_Normal * e, B) && Clear(A, B);
         }
 
         bool Sees(const v3& P, const v3& N, const surfel& S) const noexcept
@@ -2404,6 +2420,18 @@ namespace xlionrender::gi
         }
 
         bool IsAlive(int Id) const noexcept { return m_Instances[Id].m_bAlive; }
+        // (measurement, XLION_GPU_TIMES: the display filter's work) the alive instances' surfels at their levels and their neighbor links
+        std::array<std::size_t, 2> FilterCounts() const noexcept
+        {
+            std::array<std::size_t, 2> C{};
+            for (const auto& I : m_Instances)
+            {
+                if (!I.m_bAlive || !I.m_pMesh) continue;
+                const auto& Nb = I.m_pMesh->m_Neighbors[std::size_t(I.m_Level)];
+                C[0] += I.m_pMesh->m_Levels[std::size_t(I.m_Level)].size(); C[1] += Nb.m_Index.size();
+            }
+            return C;
+        }
 
         // Phase 5: an instance's transport role, over its mesh's (ASSET: the mesh's m_bBounce). A change of what it does for the others
         // (blocking, bouncing, emitting) is a change for them: the rays' scene, the surfels near it, the links and the emitters
