@@ -14,7 +14,9 @@
 //   pass 1, spatial: Temporal -> the records (what the materials read: xlionrender_environment.glsl ReflScreen) and History. The texel and
 //            8 taps on a disk of the lobe's footprint (roughness x 12 texels, at most 6; wider while the history is short), weighed by
 //            normal, depth and roughness.
-// The class, the confidence and the full-size sharp records are left as the trace wrote them (those are mirrors: not reconstructed)
+// The confidence (the coverage) is filtered with the light: the color premultiplied by it, and it - a screen trace's misses (class 4,
+// coverage 0: xlionrender_refl_ssr_comp.glsl) average into a fraction the materials blend the probes by, not a hit / miss speckle.
+// The class and the full-size sharp records are left as the trace wrote them (those are mirrors: not reconstructed)
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "xlionrender_octahedral.glsl"
@@ -41,12 +43,14 @@ float RecConf(uvec4 R)  { return unpackHalf2x16(R.y).y; }
 uint  RecClass(uvec4 R) { return (R.w >> 24) & 15u; }
 float MetaDist(uint w)  { return unpackHalf2x16(w & 0xFFFFu).x; }
 vec3  MetaNormal(uint w){ return OctDecode(vec2(float((w >> 16) & 15u), float((w >> 20) & 15u)) / 15.0 * 2.0 - 1.0); }
-uvec4 WithU(uvec4 R, vec3 U) { return uvec4(packHalf2x16(U.rg), packHalf2x16(vec2(U.b, RecConf(R))), R.z, R.w); }
+vec4  RecQ(uvec4 R)     { return vec4(RecU(R) * RecConf(R), RecConf(R)); }     // (the light premultiplied by the coverage, the coverage)
+uvec4 WithQ(uvec4 R, vec4 Q) { const vec3 U = Q.a > 1e-4 ? Q.rgb / Q.a : vec3(0.0); return uvec4(packHalf2x16(U.rg), packHalf2x16(vec2(U.b, clamp(Q.a, 0.0, 1.0))), R.z, R.w); }
 
 // This frame's records around the workgroup (its 8 x 8 texels and kNb more each side): their U and view depth (-1: none traced)
 const int kNb   = 2;                        // the neighbourhood: 5 x 5 texels
 const int kTile = 8 + 2 * kNb;
 shared vec4 s_U[kTile * kTile];
+shared float s_C[kTile * kTile];      // (their coverage)
 
 void LoadTile()
 {
@@ -55,7 +59,8 @@ void LoadTile()
     {
         const ivec2 q = clamp(Org + ivec2(int(t) % kTile, int(t) / kTile), ivec2(0), Size() - 1);
         const uvec4 R = Records[Base() + uint(q.y * Size().x + q.x)];
-        s_U[t] = vec4(RecU(R), RecClass(R) == 0u ? -1.0 : MetaDist(R.w));
+        s_U[t] = vec4(RecU(R) * RecConf(R), RecClass(R) == 0u ? -1.0 : MetaDist(R.w));
+        s_C[t] = RecConf(R);
     }
     barrier();
 }
@@ -76,23 +81,25 @@ void TemporalPass(ivec2 p)
 
     // this frame's neighbourhood (the same surface's traced texels, 5 x 5): mean and deviation, the history's clamp
     const ivec2 l = ivec2(gl_LocalInvocationID.xy) + kNb;
-    vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+    vec4 m1 = vec4(0.0), m2 = vec4(0.0);
     float k = 0.0;
     for (int y = -kNb; y <= kNb; ++y)
     for (int x = -kNb; x <= kNb; ++x)
     {
         const vec4 u = s_U[(l.y + y) * kTile + l.x + x];
         if (u.w < 0.0 || abs(u.w - MetaDist(R.w)) > 0.05 * MetaDist(R.w)) continue;
-        m1 += u.rgb; m2 += u.rgb * u.rgb; k += 1.0;
+        const vec4 q = vec4(u.rgb, s_C[(l.y + y) * kTile + l.x + x]);
+        m1 += q; m2 += q * q; k += 1.0;
     }
     m1 /= max(k, 1.0);
-    const vec3 sd = sqrt(max(m2 / max(k, 1.0) - m1 * m1, 0.0));
+    const vec4 sd = sqrt(max(m2 / max(k, 1.0) - m1 * m1, 0.0));
     // a firefly (a highlight one ray in many finds: the sun's at a hit) taken at most 4 times the neighbourhood's mean luminance - it
     // would reset the history around it and sparkle; the energy it carries is the bias this clamp trades for stability (labelled)
-    const float lm = dot(m1, vec3(0.2126, 0.7152, 0.0722)), lu = dot(RecU(R), vec3(0.2126, 0.7152, 0.0722));
-    const vec3  U  = lu > 4.0 * lm + 1e-4 ? RecU(R) * ((4.0 * lm + 1e-4) / lu) : RecU(R);
+    const vec4  Q0 = RecQ(R);
+    const float lm = dot(m1.rgb, vec3(0.2126, 0.7152, 0.0722)) / max(m1.a, 1e-3), lu = dot(Q0.rgb, vec3(0.2126, 0.7152, 0.0722)) / max(Q0.a, 1e-3);     // (per coverage: sparse hits are not fireflies)
+    const vec4  U  = lu > 4.0 * lm + 1e-4 ? vec4(Q0.rgb * ((4.0 * lm + 1e-4) / lu), Q0.a) : Q0;
 
-    vec3  H = U;
+    vec4  H = U;
     float n = 0.0, MaxMove = 1e3;
     if (F[Push.m_Slot].Params.z > 0.5)
     {
@@ -109,7 +116,7 @@ void TemporalPass(ivec2 p)
         const float dP  = Mo.w > 0.5 ? Mo.z : Cs.w;                     // (the surface's view depth last frame)
         const vec2  hp  = (Pn * 0.5 + 0.5) * vec2(Size()) - 0.5;
         const vec2  i0  = floor(hp), f = hp - i0;
-        vec3 Hs = vec3(0.0); float Ws = 0.0, Ns = 0.0;
+        vec4 Hs = vec4(0.0); float Ws = 0.0, Ns = 0.0;
         for (int t = 0; t < 4; ++t)
         {
             const ivec2 q = ivec2(i0) + ivec2(t & 1, t >> 1);
@@ -122,7 +129,7 @@ void TemporalPass(ivec2 p)
             const float dq = MetaDist(Hq.w);
             if (s > 0.5 && abs(dq - dP) > 0.03 * dP + 0.02) continue;   // (by the surface's motion: the same surface)
             const float w = ((t & 1) != 0 ? f.x : 1.0 - f.x) * ((t >> 1) != 0 ? f.y : 1.0 - f.y);
-            Hs += w * RecU(Hq); Ns += w * rf.y; Ws += w;
+            Hs += w * RecQ(Hq); Ns += w * rf.y; Ws += w;
         }
         if (Ws > 0.25) { H = Hs / Ws; n = Ns / Ws; }
     }
@@ -132,7 +139,7 @@ void TemporalPass(ivec2 p)
     H = clamp(H, m1 - g * sd, m1 + g * sd);
     const float MaxN = min(mix(6.0, 24.0, smoothstep(0.05, 0.4, Rough)), MaxMove);
     n = min(floor(n + 0.5) + 1.0, MaxN);
-    const uvec4 O = WithU(R, mix(H, U, 1.0 / n));
+    const uvec4 O = WithQ(R, mix(H, U, 1.0 / n));
     Temporal[i] = uvec4(O.x, O.y, packHalf2x16(vec2(Rough, n)), O.w);
 }
 
@@ -145,7 +152,7 @@ void SpatialPass(ivec2 p)
     const vec3  N  = MetaNormal(T.w);
     const float d  = MetaDist(T.w);
     const float r  = min(rf.x * 12.0, 6.0) * (rf.y < 4.0 ? 1.5 : 1.0);
-    vec3  S = RecU(T);
+    vec4  S = RecQ(T);
     float W = 1.0;
     if (r >= 0.75)
     {
@@ -160,11 +167,11 @@ void SpatialPass(ivec2 p)
             const float dq = MetaDist(Tq.w);
             if (abs(dq - d) > 0.05 * d) continue;
             const float w = pow(max(dot(MetaNormal(Tq.w), N), 0.0), 32.0) * exp(-abs(unpackHalf2x16(Tq.z).x - rf.x) * 20.0);
-            S += w * RecU(Tq); W += w;
+            S += w * RecQ(Tq); W += w;
         }
         S /= W;
     }
-    const uvec4 O = WithU(T, S);
+    const uvec4 O = WithQ(T, S);
     Records[Base() + i] = uvec4(O.x, O.y, Records[Base() + i].z, O.w);
     History[i] = uvec4(O.x, O.y, T.z, O.w);
 }

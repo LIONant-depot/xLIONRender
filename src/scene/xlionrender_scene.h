@@ -242,6 +242,9 @@ namespace xlionrender
         // The reflections' reconstruction (milestone D: temporal by the reflection's virtual motion, then spatial by the lobe; it accumulates,
         // so the rays change every frame while it runs). Off: the one ray a texel as traced
         bool                        m_bReflectionReconstruct = true;
+        // The screen trace (SSR: shaders/xlionrender_refl_ssr_comp.glsl) over the probes, every roughness: what is on screen reflected where
+        // it is (a character in a mirror the probes' boxes flatten onto their walls); where the BVH trace above runs, its records stay
+        bool                        m_bReflectionScreen = false;
         // The receivers up to this roughness see the hits' own material - each hit shaded by its material's capture variant (textures,
         // per-entity parameters); rougher ones its per-triangle capture, blended over the last quarter. 0: none
         float                       m_ReflectionTextureMaxRoughness = 0.3f;

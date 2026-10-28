@@ -222,6 +222,9 @@ namespace xlionrender
         float                                      m_TailTraceLength = 1.0f;                // SCREEN: the tail's unshadowed lights' screen trace (contact shadows), world units (0: none)
         int                                        m_TailTraceSteps  = 12;
         bool                                       m_bTailTraceBvh   = true;                // SCREEN: those lights' shadow ray also through the GI's BVH (P4; the opaque rigid GI meshes, off screen too)
+        int                                        m_SSRSteps        = 48;                  // reflections' screen trace (scene::m_bReflectionScreen): its steps a ray (half size), its length and thickness (world units)
+        float                                      m_SSRMaxDist      = 30.0f;
+        float                                      m_SSRThickness    = 0.15f;
         float                                      m_ReflSharpMax    = 0.1f;                // reflections: the receivers sharper than this trace at the view's full size (their own G-buffer); 0: all at half size
         int                                        m_ReflTraceBench  = 0;                   // (measurement) SCREEN, the GI on: a reflection ray a thin G-buffer texel through the GI's BVH (shaders/xlionrender_refl_trace_comp.glsl): 1 mirror, 2 roughness 0.5, 3 the materials'; checks shown as the records (with ReflectionDebug): 4 the camera's ray through the BVH against the G-buffer's depth (green agrees, red / blue 10 x the error; hits: within 1%), 5 the G-buffer's normal, 6 its N.V, 7 its F0 luminance (the motion target's w: the hits' texturing selects by it); 0 off. Init: XLION_REFL_BENCH
         // Emissive surfaces as lights (documentation/lighting_gi_interface_notice.md): the GI's emitter view (gi::world::ForEachEmitter) as
@@ -416,6 +419,10 @@ namespace xlionrender
         xgpu::shader                m_ReflDenoiseShader;            // the reflections' reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl), its frames (a ring slot each)
         xgpu::compute               m_ReflDenoise;
         xgpu::buffer                m_ReflFrames;
+        xgpu::shader                m_ReflSSRShader;                // the screen trace (SSR: xlionrender_refl_ssr_comp.glsl), its timestamps (XLION_GPU_TIMES: SSRGPU)
+        xgpu::compute               m_ReflSSR;
+        xgpu::timestamps            m_ReflSSRTimes;
+        double                      m_ReflSSRSum = 0; int m_ReflSSRSumN = 0;
         // Reflections, the hits' textures (shaders/xlionrender_refl_hits_comp.glsl): the hits binned by their draw's material and shaded by
         // the material's capture variant, a pixel each, into m_HitShadeTex (the albedo's rows, then the emission's); made on first use
         static constexpr std::uint32_t hit_width_v = 1024, hit_cap_v = 1024 * 1024, hit_max_bins_v = 4096;     // (a million hits: Police's mirror from 0.7 m at 3778 x 1600 is 0.85 million)

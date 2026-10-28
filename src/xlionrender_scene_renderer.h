@@ -443,6 +443,7 @@ namespace xlionrender
             m_Scene.m_ReflectionMaxRoughness = E.m_bGI ? std::max(E.m_ReflectionMaxRoughness, 0.0f) : 0.0f;
             m_Scene.m_ReflectionPlane        = E.m_bReflectionFloor ? xmath::fvec4{ 0, 1, 0, E.m_bReflectionFloorAuto ? std::numeric_limits<float>::quiet_NaN() : -E.m_ReflectionFloorY } : xmath::fvec4{ 0, 0, 0, 0 };
             m_Scene.m_bDebugReflection       = E.m_bReflectionDebug;
+            m_Scene.m_bReflectionScreen      = E.m_bReflectionScreen;
             m_Scene.m_ReflectionTextureMaxRoughness = std::max(E.m_ReflectionTextureMaxRoughness, 0.0f);
             m_Scene.m_ReflectionTextureMinReflectance = std::max(E.m_ReflectionTextureMinReflectance, 0.0f);
         }
@@ -462,7 +463,7 @@ namespace xlionrender
             m_Scene.m_Sky     = {};
             m_Scene.m_Ambient = { 0.15f, 0.15f, 0.17f };
             m_Scene.m_GI      = {};
-            m_Scene.m_ReflectionMaxRoughness = 0; m_Scene.m_ReflectionPlane = { 0, 0, 0, 0 }; m_Scene.m_bDebugReflection = false;
+            m_Scene.m_ReflectionMaxRoughness = 0; m_Scene.m_ReflectionPlane = { 0, 0, 0, 0 }; m_Scene.m_bDebugReflection = false; m_Scene.m_bReflectionScreen = false;
             m_Stats           = {};
             m_InstanceIds.Begin();
 

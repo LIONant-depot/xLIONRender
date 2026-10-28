@@ -107,6 +107,9 @@ namespace xlionrender
         constexpr std::uint32_t s_ReflDenoiseComp[] = {
             #include "xlionrender_refl_denoise_comp.h"
         };
+        constexpr std::uint32_t s_ReflSSRComp[] = {
+            #include "xlionrender_refl_ssr_comp.h"
+        };
         constexpr std::uint32_t s_ReflHitsComp[] = {
             #include "xlionrender_refl_hits_comp.h"
         };
@@ -634,6 +637,9 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 11, .m_nTextures = 6, .m_PushConstantsSize = 96 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflDenoiseComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflDenoise, { .m_pShader = &m_ReflDenoiseShader, .m_nBuffers = 4, .m_nTextures = 3, .m_PushConstantsSize = 16 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflSSRShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflSSRComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflSSR, { .m_pShader = &m_ReflSSRShader, .m_nBuffers = 2, .m_nTextures = 3, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflSSRTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflHitsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflHitsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflHits, { .m_pShader = &m_ReflHitsShader, .m_nBuffers = 12, .m_nTextures = 1, .m_PushConstantsSize = 52 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 64 + 16, .m_EntryCount = ring_frames_v }); Err ) return Err;

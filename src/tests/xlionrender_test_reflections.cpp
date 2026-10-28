@@ -807,6 +807,60 @@ int main()
                 std::printf("  %.1f: %.3f -> %.3f", Rho, RMAE(SC, SRef, MFloor, Floor), RMAE(ST, SRef, MFloor, Floor));
             }
             std::printf("\n");
+
+            // The screen trace (scene::m_bReflectionScreen: SSR over the probes, the BVH trace off) on the near-mirror floor: where the
+            // floor's mirror ray meets a sphere (on screen) its reflection changes - the sphere where it is, not the probes' view -, where
+            // it meets nothing (the sky: off screen) the probes stay; its coverage reconstructed (no hit / miss speckle: the floor's change
+            // a frame stays small). (Against the path-traced reference the floor's error is the lighting's - the lamp against the GI)
+            {
+                Objects[floor_v].m_Mat.m_Roughness = 0.05f;
+                Scene.m_Draws[floor_v].m_Material.m_Roughness = 0.05f;
+                Scene.m_ReflectionMaxRoughness = 0;
+                Scene.m_bReflectionJitter = true;
+                Scene.m_bReflectionReconstruct = true;
+                std::vector<std::uint8_t> MSphere(MFloor.size(), 0), MSky(MFloor.size(), 0);
+                for (int y = 0; y < size_v; ++y) for (int x = 0; x < size_v; ++x)
+                {
+                    const std::size_t i = std::size_t(y) * size_v + x;
+                    if (!MFloor[i]) continue;
+                    const v3 D = Ray(x, y, SX, SY);
+                    const auto H = World.Cast(Camera.getPosition(), D);
+                    const v3 N = World.HitNormal(H).NormalizeCopy();
+                    const v3 R = D - N * (2.0f * D.Dot(N));
+                    const auto M = World.Cast(World.HitPosition(H) + N * 1e-3f, R);
+                    if (M.m_Inst == chrome_v || M.m_Inst == gold_v) MSphere[i] = 1;
+                    else if (M.m_Inst < 0) MSky[i] = 1;
+                }
+                const auto Settled = [&](bool bScreen, rgb_image& I) -> double
+                {
+                    Scene.m_bReflectionScreen = bScreen;
+                    rgb_image A, B;
+                    for (int f = 0; f < 30; ++f) if (!App.RenderFrame(Scene, View, Camera)) return -1;
+                    if (!ReadRGB(Device, View, A)) return -1;
+                    double d = 0, n = 0;
+                    for (int f = 0; f < 4; ++f)
+                    {
+                        if (!App.RenderFrame(Scene, View, Camera) || !ReadRGB(Device, View, B)) return -1;
+                        for (std::size_t i = 0; i < MFloor.size(); ++i) if (MFloor[i]) { d += std::abs(Lum(&A[i * 3]) - Lum(&B[i * 3])); ++n; }
+                        A = B;
+                    }
+                    I = A;
+                    return d / std::max(n, 1.0);
+                };
+                rgb_image SP, SS;
+                const double FP = Settled(false, SP), FS = Settled(true, SS);
+                const auto Change = [&](const std::vector<std::uint8_t>& Mk) { double s = 0, n = 0; for (std::size_t i = 0; i < Mk.size(); ++i) if (Mk[i]) { s += std::abs(Lum(&SS[i * 3]) - Lum(&SP[i * 3])); ++n; } return std::pair{ s / std::max(n, 1.0), n }; };
+                const auto [CSphere, nSphere] = Change(MSphere);
+                const auto [CSky, nSky] = Change(MSky);
+                std::printf("the screen trace (SSR), the floor at roughness 0.05: its change where the mirror ray meets a sphere %.5f (%.0f px), meets nothing %.5f (%.0f px); change a frame %.5f -> %.5f\n", CSphere, nSphere, CSky, nSky, FP, FS);
+                DumpRGB("refl_ssr_off", SP, size_v, size_v);
+                DumpRGB("refl_ssr_on", SS, size_v, size_v);
+                CHECK(FP >= 0 && FS >= 0 && nSphere > 50 && nSky > 50, "the screen trace's floor masks (%.0f, %.0f px)", nSphere, nSky);
+                CHECK(CSphere > 4.0 * CSky, "the screen trace does not show the spheres in the floor (change %.5f there, %.5f where it meets nothing)", CSphere, CSky);
+                CHECK(FS < 0.02, "the screen trace's floor flickers (%.5f a frame)", FS);
+                Scene.m_bReflectionScreen = false;
+                Scene.m_bReflectionReconstruct = false;
+            }
             Objects[floor_v].m_Mat.m_Roughness = 0.10f;
             Scene.m_Draws[floor_v].m_Material.m_Roughness = 0.10f;
             Scene.m_ReflectionTextureMaxRoughness = 0.3f;

@@ -782,6 +782,7 @@ namespace xlionrender
         int             m_GIFilterPasses  = 4;              // the GI light's spatial filter passes (smoother with more)
         bool            m_bGIMoments      = true;           // the reads' depth-moment visibility test
         float           m_ReflectionMaxRoughness = 0.0f;    // traced reflections (they need the GI): the receivers up to this roughness; 0: off (the probes)
+        bool            m_bReflectionScreen  = true;        // the screen trace (SSR) over the probes: what is on screen reflected where it is
         bool            m_bReflectionFloor   = false;       // a floor is a planar receiver: the scene mirrored in it (exact reflections)
         bool            m_bReflectionFloorAuto = true;      // that floor: the one under the camera (else at m_ReflectionFloorY)
         float           m_ReflectionFloorY   = 0.0f;
@@ -807,6 +808,7 @@ namespace xlionrender
         , obj_member<"GIPerPixel",   &environment::m_bGIPerPixel, member_help<"Near meshes read the GI per pixel (a mesh needs no extra vertices for it); off: per vertex only (cheaper, needs dense meshes)">>
         , obj_member<"GIHalfRes",    &environment::m_bGIHalfRes, member_help<"The per-pixel GI read at half resolution, upsampled by depth and normal: a quarter of the reads (opaque surfaces; not in the GI debug views)">>
         , obj_member<"ReflectionMaxRoughness", &environment::m_ReflectionMaxRoughness, member_help<"Traced reflections (they need the GI): surfaces up to this roughness reflect the scene - a ray a pixel through the GI's geometry, its hit lit by the GI's model - instead of the reflection probes (from half of it they fade back to the probes). 0: off">>
+        , obj_member<"ReflectionScreen", &environment::m_bReflectionScreen, member_help<"Screen-space reflections over the reflection probes: what is on screen (characters, moving things, nearby objects) is reflected where it really is, at every roughness; what is off screen or hidden keeps the probes' reflection. Needs no GI">>
         , obj_member<"ReflectionFloor",  &environment::m_bReflectionFloor, member_help<"The floor at ReflectionFloorY is a mirror plane: the scene is drawn mirrored in it (everything on screen, characters included) and the floor reflects that image (with ReflectionMaxRoughness above 0)">>
         , obj_member<"ReflectionFloorAuto", &environment::m_bReflectionFloorAuto, member_help<"The reflecting floor is the one under the camera (found every frame); off: the floor at ReflectionFloorY">>
         , obj_member<"ReflectionFloorY", &environment::m_ReflectionFloorY, member_help<"The height of the reflecting floor (world Y), when ReflectionFloorAuto is off">>

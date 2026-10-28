@@ -1992,9 +1992,11 @@ namespace xlionrender
         // ago, done) into the report, cleared. m_ReflTraceBench > 0: the benchmark's rays only (mirror, roughness 0.5, the materials')
         const auto BvhR = m_pGITrace ? m_pGITrace->getBvh() : gi::gpu_trace::bvh_view{ nullptr, nullptr, nullptr, nullptr, 0, 0, true };
         Light.m_EnvParams.m_W = 0.0f;
-        if( (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData )
+        const bool bTraced = (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
+        const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0;
+        const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
+        if( bTraced )
         {
-            const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
             if( !bLights )      // (the denoiser writes this slot's frame when it runs)
             {
                 const xmath::fvec4 Params{ float(W), float(H), 0.0f, float(View.m_TailFrame & 1023u) };
@@ -2085,9 +2087,12 @@ namespace xlionrender
             Window.WriteTimestamp(m_ReflTimes, 2);
             if( bHits ) shadeReflectionHits(Window, Scene, View, BvhR, Slot, HalfKeys, std::uint32_t(2 * W * H));
             Window.WriteTimestamp(m_ReflTimes, 3);
-            // the reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then spatial;
-            // the half-size records it leaves are what the materials read
-            if( Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 )
+            Light.m_EnvParams.m_W = MaxRough;
+        }
+        if( bTraced || bScreen )
+        {
+            const bool bReconstruct = Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0;
+            if( bScreen || bReconstruct )
             {
                 const xmath::fmat4 ToPrev = View.m_bTailPrev ? View.m_TailPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) : xmath::fmat4::fromIdentity();
                 const xmath::fvec4 RP{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
@@ -2096,6 +2101,34 @@ namespace xlionrender
                     auto* pB = static_cast<std::byte*>(p);
                     std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &ToPrev, 64); std::memcpy(pB + 128, &RP, 16);
                 });
+            }
+            // the screen trace (SSR: xlionrender_refl_ssr_comp.glsl) where the BVH trace wrote nothing this frame: last frame's lit image
+            // (View.m_HDR: the scene pass has not drawn yet) at the ray's hit in this frame's thin G-buffer. Every roughness: the probes stay
+            // the base where it misses (off screen, hidden)
+            if( bScreen )
+            {
+                if( std::vector<std::uint64_t> Ns; m_ReflSSRTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
+                {
+                    m_ReflSSRSum += double(Ns[1] - Ns[0]) * 1e-6;
+                    static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                    if( ++m_ReflSSRSumN == 120 )
+                    {
+                        if( s_bTimes ) std::printf("SSRGPU %d x %d: %.3f ms (the screen trace and the reconstruction)\n", W, H, m_ReflSSRSum / m_ReflSSRSumN), std::fflush(stdout);
+                        m_ReflSSRSum = 0; m_ReflSSRSumN = 0;
+                    }
+                }
+                const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
+                    { std::uint32_t(Slot), bTraced ? 1u : 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, 1.0f, 0.0f };
+                auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
+                auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_HDR };
+                Window.WriteTimestamp(m_ReflSSRTimes, 0);
+                Window.Dispatch(m_ReflSSR, SBuffers, STextures, &SPush, sizeof(SPush), (W + 7) / 8, (H + 7) / 8);
+                Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, 1e-3f);      // (the materials read the records)
+            }
+            // the reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then spatial;
+            // the half-size records it leaves are what the materials read (REFLSPLIT's reconstruction includes the screen trace when both run)
+            if( bReconstruct )
+            {
                 auto DBuffers  = std::array<xgpu::buffer*, 4>{ &m_ReflFrames, &View.m_TailResult, &View.m_ReflTemporal, &View.m_ReflHistory };
                 auto DTextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_TailGMotion };
                 for( std::uint32_t Pass = 0; Pass < 2; ++Pass )
@@ -2104,8 +2137,8 @@ namespace xlionrender
                     Window.Dispatch(m_ReflDenoise, DBuffers, DTextures, DPush, sizeof(DPush), (W + 7) / 8, (H + 7) / 8);
                 }
             }
-            Window.WriteTimestamp(m_ReflTimes, 4);
-            Light.m_EnvParams.m_W = MaxRough;
+            if( bScreen ) Window.WriteTimestamp(m_ReflSSRTimes, 1);     // (SSRGPU: the screen trace and the reconstruction)
+            if( bTraced ) Window.WriteTimestamp(m_ReflTimes, 4);
         }
         View.m_TailPrevC2W = C2W; View.m_TailPrevW2C = W2C; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
         m_pTailRecords = &View.m_TailResult;
@@ -2715,7 +2748,7 @@ namespace xlionrender
             };
 
             // The screen tail (light_mode::SCREEN): the thin G-buffer, the tail pass and the denoiser, before the scene pass reads them
-            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
+            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || Scene.m_bReflectionScreen) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
             else if( bMain ) m_TailReport.m_bOn = false;
 
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
