@@ -1831,67 +1831,60 @@ namespace xlionrender::gi
         }
         // The surface proxies (xLION_Docs gi_surfel_proxies_plan.md; Lumen's mesh cards): per triangle its proxy - a planar patch the
         // faces of one group lie on, whatever piece or mesh part they come from (a floor of separate tiles, a wall of several meshes,
-        // a decal on it: one surface). Grown from the largest triangle not yet in one: a triangle joins when it lies within R of a member
-        // (their points), faces the seed's way (cos >= proxy_cos_v) and all its corners are within proxy_dev_v R of the seed's plane - a
-        // fixed plane: a curved surface splits into patches, never drifts. Open, of any outline (an L-shaped floor is one)
-        static constexpr float proxy_cos_v = 0.99f, proxy_dev_v = 0.1f;     // (0.95 joined faces 15 degrees apart: a surfel then stood for a face the read cannot see it from - holes, test 6c)
+        // a decal on it: one surface). A triangle's plane is bucketed (its normal in proxy_nrm_v x proxy_nrm_v octahedral cells, its
+        // offset in proxy_dev_v R steps: the faces of a bucket are coplanar within the tolerance by construction - a curved surface
+        // splits into patches, never drifts); within a bucket, the triangles whose points (corners, centroid) share a cell of R or
+        // touch neighbouring cells join one proxy. Open, of any outline (an L-shaped floor is one). Linear in the triangles: it grew a
+        // proxy by scanning every triangle of the cells around each member - quadratic in a cell's population, the Bistro's bake
+        // (2.8M triangles, R 3.1 m) stalled
+        static constexpr int   proxy_nrm_v = 64;
+        static constexpr float proxy_dev_v = 0.1f;
         std::vector<int> TriangleProxies(float Radius) const noexcept
         {
             const int nT = int(m_Tris.size());
-            std::vector<v3> Ctr(static_cast<std::size_t>(nT)), Nrm(static_cast<std::size_t>(nT));
-            std::vector<float> Area(static_cast<std::size_t>(nT));
+            std::vector<int> Up(static_cast<std::size_t>(nT));
+            for (int t = 0; t < nT; ++t) Up[std::size_t(t)] = t;
+            const auto Find  = [&](int a) { while (Up[std::size_t(a)] != a) { Up[std::size_t(a)] = Up[std::size_t(Up[std::size_t(a)])]; a = Up[std::size_t(a)]; } return a; };
+            const auto Union = [&](int a, int b) { a = Find(a); b = Find(b); if (a != b) Up[std::size_t(std::max(a, b))] = std::min(a, b); };
+            // per triangle its plane bucket; per (bucket, cell of R) the first triangle with a point there
+            std::vector<std::uint64_t> Plane(static_cast<std::size_t>(nT));
+            std::unordered_map<std::uint64_t, int> Cells;
+            Cells.reserve(std::size_t(nT) * 2);
+            const auto Mix = [](std::uint64_t h, std::uint64_t v) { return (h ^ (v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2))) * 0xC2B2AE3D27D4EB4Full; };
+            const auto CellKey = [&](std::uint64_t P, const v3& Q, int dx, int dy, int dz)
+            {
+                const auto q = [&](float v, int d) { return std::uint64_t(std::int64_t(std::floor(v / Radius)) + d); };
+                return Mix(Mix(Mix(P, q(Q.m_X, dx)), q(Q.m_Y, dy)), q(Q.m_Z, dz));
+            };
             for (int t = 0; t < nT; ++t)
             {
                 const auto& T = m_Tris[std::size_t(t)];
                 const v3 A = m_Pos[std::size_t(T[0])], B = m_Pos[std::size_t(T[1])], C = m_Pos[std::size_t(T[2])], X = (B - A).Cross(C - A);
-                Ctr[std::size_t(t)] = (A + B + C) * (1.0f / 3.0f); Area[std::size_t(t)] = 0.5f * X.Length();
-                Nrm[std::size_t(t)] = X.Length() > 1e-12f ? X.NormalizeCopy() : m_Nrm[std::size_t(T[0])];
-            }
-            // a grid of cell R over each triangle's corners and centroid (the points proximity is tested on)
-            const auto Point = [&](int t, int k) { return k < 3 ? m_Pos[std::size_t(m_Tris[std::size_t(t)][std::size_t(k)])] : Ctr[std::size_t(t)]; };
-            const auto Cell  = [&](const v3& P, int dx, int dy, int dz) { const auto q = [&](float v, int d) { return std::uint64_t(std::int64_t(std::floor(v / Radius)) + d) & 0x1FFFFF; }; return q(P.m_X, dx) | q(P.m_Y, dy) << 21 | q(P.m_Z, dz) << 42; };
-            std::unordered_map<std::uint64_t, std::vector<int>> Grid;
-            Grid.reserve(std::size_t(nT) * 2);
-            for (int t = 0; t < nT; ++t) for (int k = 0; k < 4; ++k) { auto& L = Grid[Cell(Point(t, k), 0, 0, 0)]; if (L.empty() || L.back() != t) L.push_back(t); }
-            std::vector<int> Order(static_cast<std::size_t>(nT));
-            for (int t = 0; t < nT; ++t) Order[std::size_t(t)] = t;
-            std::stable_sort(Order.begin(), Order.end(), [&](int a, int b) { return Area[std::size_t(a)] > Area[std::size_t(b)]; });
-            std::vector<int> Proxy(std::size_t(nT), -1), Queue;
-            int nProxies = 0;
-            for (const int s : Order)
-            {
-                if (Proxy[std::size_t(s)] >= 0) continue;
-                const v3 N = Nrm[std::size_t(s)]; const float D = N.Dot(Ctr[std::size_t(s)]);
-                const int id = nProxies++;
-                Proxy[std::size_t(s)] = id; Queue.assign(1, s);
-                while (!Queue.empty())
+                const v3 N = X.Length() > 1e-12f ? X.NormalizeCopy() : m_Nrm[std::size_t(T[0])];
+                const float l1 = std::abs(N.m_X) + std::abs(N.m_Y) + std::abs(N.m_Z);
+                float ox = N.m_X / l1, oy = N.m_Y / l1;
+                if (N.m_Z < 0) { const float tx = (1 - std::abs(oy)) * (ox >= 0 ? 1.0f : -1.0f), ty = (1 - std::abs(ox)) * (oy >= 0 ? 1.0f : -1.0f); ox = tx; oy = ty; }
+                const int bx = std::clamp(int((ox * 0.5f + 0.5f) * proxy_nrm_v), 0, proxy_nrm_v - 1), by = std::clamp(int((oy * 0.5f + 0.5f) * proxy_nrm_v), 0, proxy_nrm_v - 1);
+                const std::int64_t Off = std::int64_t(std::floor(N.Dot((A + B + C) * (1.0f / 3.0f)) / (proxy_dev_v * Radius)));
+                const std::uint64_t P = Mix(Mix(std::uint64_t(bx * proxy_nrm_v + by), std::uint64_t(Off)), 0x5EEDull);
+                Plane[std::size_t(t)] = P;
+                for (const v3& Q : { A, B, C, (A + B + C) * (1.0f / 3.0f) })
                 {
-                    const int t = Queue.back(); Queue.pop_back();
-                    for (int k = 0; k < 4; ++k)
-                    {
-                        const v3 P = Point(t, k);
-                        for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
-                        {
-                            const auto It = Grid.find(Cell(P, dx, dy, dz));
-                            if (It == Grid.end()) continue;
-                            for (const int u : It->second)
-                            {
-                                if (Proxy[std::size_t(u)] >= 0 || Nrm[std::size_t(u)].Dot(N) < proxy_cos_v) continue;
-                                bool bOn = true, bNear = false;
-                                for (int j = 0; j < 4; ++j)
-                                {
-                                    const v3 Q = Point(u, j);
-                                    if (j < 3) bOn = bOn && std::abs(N.Dot(Q) - D) <= proxy_dev_v * Radius;
-                                    bNear = bNear || (Q - P).Length() <= Radius;
-                                }
-                                if (!bOn || !bNear) continue;
-                                Proxy[std::size_t(u)] = id; Queue.push_back(u);
-                            }
-                        }
-                    }
+                    const auto [It, bNew] = Cells.try_emplace(CellKey(P, Q, 0, 0, 0), t);
+                    if (!bNew) Union(t, It->second);
                 }
             }
-            return Proxy;
+            // a cell's triangles to its neighbouring cells' (the same plane bucket)
+            for (int t = 0; t < nT; ++t)
+            {
+                const auto& T = m_Tris[std::size_t(t)];
+                const v3 Q = (m_Pos[std::size_t(T[0])] + m_Pos[std::size_t(T[1])] + m_Pos[std::size_t(T[2])]) * (1.0f / 3.0f);
+                if (Cells.at(CellKey(Plane[std::size_t(t)], Q, 0, 0, 0)) != t) continue;     // (one triangle a cell looks around)
+                for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+                    if (const auto It = Cells.find(CellKey(Plane[std::size_t(t)], Q, dx, dy, dz)); It != Cells.end()) Union(t, It->second);
+            }
+            for (int t = 0; t < nT; ++t) Up[std::size_t(t)] = Find(t);
+            return Up;
         }
 
         bool Sees(const v3& P, const v3& N, const surfel& S) const noexcept

@@ -808,6 +808,19 @@ int main()
             std::printf("a tiled floor (100 separate tiles) with the clutter: %d floor surfels (bare %d)\n", nTiled, nBare);
             CHECK(nTiled <= nBare * 11 / 10, "a floor of separate tiles keeps surfels per tile: %d (bare %d)", nTiled, nBare);
 
+            // ... in linear time: 500k triangles at the Bistro's R (3.1 m: ~500 triangles a cell) - growing proxies by scanning the cells
+            // around each member was quadratic in a cell's population (the Bistro's bake stalled for an hour)
+            {
+                surfel_mesh Big;
+                AddQuad(Big, { -50, 0, -50 }, { 0, 0, 100 }, { 100, 0, 0 }, 0.2f);
+                const auto T0 = std::chrono::steady_clock::now();
+                const auto Pr = Big.TriangleProxies(3.1f);
+                const double Ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+                const std::size_t nPr = std::unordered_set<int>(Pr.begin(), Pr.end()).size();
+                std::printf("proxies of a %zu-triangle floor at R 3.1: %zu proxy(ies) in %.0f ms\n", Big.m_Tris.size(), nPr, Ms);
+                CHECK(Ms < 5000 && nPr == 1, "the proxies of a big floor: %zu in %.0f ms", nPr, Ms);
+            }
+
             // the slab under a wall (a 2 m wall at x = 0, standing on it): floor points beside it read nothing of the other side
             surfel_mesh Slab;
             Floor(Slab); AddBox(Slab, { -0.05f, 0, -5 }, { 0.1f, 2.0f, 10 }, 0.5f);
