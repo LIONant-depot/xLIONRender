@@ -422,6 +422,13 @@ namespace xlionrender
                                             , .m_InnerAngle = L.m_InnerAngle, .m_OuterAngle = std::max(L.m_OuterAngle, L.m_InnerAngle), .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_bGI = L.m_bGI, .m_SourceRadius = std::max(L.m_SourceRadius, 0.0f), .m_Handle = Handle });
         }
 
+        void AddProbe(const reflection_probe_component& P, const xmath::fmat4& L2W) noexcept
+        {
+            const auto Pos = L2W * xmath::fvec3(0, 0, 0);
+            const xmath::fvec3 E{ std::max(P.m_Extents.m_X, 0.01f), std::max(P.m_Extents.m_Y, 0.01f), std::max(P.m_Extents.m_Z, 0.01f) };
+            m_Scene.m_Probes.push_back({ .m_Position = Pos, .m_BoxMin = Pos - E, .m_BoxMax = Pos + E, .m_Blend = std::max(P.m_Blend, 0.0f) });
+        }
+
         void SetEnvironment(const environment& E) noexcept
         {
             m_Scene.m_Sky     = { .m_Zenith = E.m_SkyZenith, .m_Horizon = E.m_SkyHorizon, .m_Ground = E.m_SkyGround, .m_Intensity = E.m_SkyIntensity };
@@ -435,10 +442,13 @@ namespace xlionrender
         }
 
         // A new frame's snapshot: no sun unless a LightSun says so, a dim flat ambient unless an Environment says otherwise
+        xmath::fvec3 m_GlobalProbe{ 0, 0, 0 };     // (the automatic probe of a level without one: Render)
+        bool         m_bGlobalProbe = false;
         void Begin() noexcept
         {
             m_Scene.m_Draws.clear();
             m_Scene.m_LocalLights.clear();
+            m_Scene.m_Probes.clear();
             m_Scene.m_Sun     = { .m_Intensity = 0, .m_bCastShadows = false };
             m_Scene.m_Sky     = {};
             m_Scene.m_Ambient = { 0.15f, 0.15f, 0.17f };
@@ -483,6 +493,15 @@ namespace xlionrender
             if (m_View.m_Width != W || m_View.m_Height != H)
                 if (m_Renderer.CreateView(m_View, { .m_Width = W, .m_Height = H })) return;
             m_Stats.m_Materials = int(m_Materials.size());
+            // A level with no ReflectionProbe gets one that follows the camera: moved to it once the camera is global_probe_follow_v away
+            // (a point where the player is: a fixed one - the level's bounds' centre, the first camera - was inside walls or outside),
+            // its box wide (no parallax). Captured and re-captured as any probe
+            if (m_Scene.m_Probes.empty() && !m_Scene.m_Draws.empty())
+            {
+                constexpr float global_probe_follow_v = 4.0f;
+                if (!m_bGlobalProbe || (Camera.getPosition() - m_GlobalProbe).Length() > global_probe_follow_v) { m_GlobalProbe = Camera.getPosition(); m_bGlobalProbe = true; }
+                m_Scene.m_Probes.push_back({ .m_Position = m_GlobalProbe, .m_BoxMin = m_GlobalProbe - xmath::fvec3(100.0f), .m_BoxMax = m_GlobalProbe + xmath::fvec3(100.0f), .m_Blend = 0 });
+            }
             m_Renderer.Render(Window, m_Scene, m_View, Camera, [&](xgpu::cmd_buffer& CmdBuffer) { if (pOverlay) pOverlay(CmdBuffer, pUser); });
         }
 

@@ -1200,6 +1200,16 @@ namespace xlionrender
         const int nProbes = int(Scene.m_Probes.size());
         m_ProbeStates.resize(nProbes);
         if( m_ProbeCapturing >= nProbes ) m_ProbeCapturing = -1;
+        if( static const bool s_bTrace = std::getenv("XLION_PROBE_TRACE") != nullptr; s_bTrace )     // measurement: the probes' state, every 120 frames
+        {
+            static int s_n = 0;
+            if( ++s_n % 120 == 0 )
+            {
+                int nValid = 0, nDirty = 0, nSlot = 0;
+                for( const auto& St : m_ProbeStates ) { nValid += St.m_bValid; nDirty += St.m_bDirty; nSlot += St.m_Slot >= 0; }
+                std::printf("PROBES %d in the scene, %d with a slot, %d valid, %d dirty; capturing %d (face %d)\n", nProbes, nSlot, nValid, nDirty, m_ProbeCapturing, m_ProbeNextFace); std::fflush(stdout);
+            }
+        }
         if( nProbes == 0 ) return;
 
         const auto Touches = [](const xmath::fbbox& A, const xmath::fbbox& B)

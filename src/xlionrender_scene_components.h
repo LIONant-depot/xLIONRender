@@ -708,6 +708,24 @@ namespace xlionrender
         )
     };
 
+    // A reflection probe at the entity's position (scene::reflection_probe): the renderer captures the scene around it - static and
+    // moving objects alike - and surfaces in its box reflect it, box-projected, by roughness (the rough reflections; the traced ones
+    // serve the sharp: Environment's ReflectionMaxRoughness). Captured nearest to the camera first, a few faces a frame, again when
+    // a light reaching it, an object in its box or the sky changes (Unreal's runtime captures: research/reflection_probes_competitors.md)
+    struct reflection_probe_component
+    {
+        constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "ReflectionProbe" };
+
+        xmath::fvec3    m_Extents       = { 5, 5, 5 };      // half the box (world units, around the entity): its influence and its parallax
+        float           m_Blend         = 1.0f;             // the box's faces fade it over this distance
+
+        XPROPERTY_DEF
+        ( "ReflectionProbe", reflection_probe_component
+        , obj_member<"Extents", &reflection_probe_component::m_Extents, member_help<"Half the size of its box, around the entity: the surfaces inside reflect this probe, projected onto the box (a room's walls: the box fitted to them)">>
+        , obj_member<"Blend",   &reflection_probe_component::m_Blend, member_help<"The box's faces fade the probe out over this distance (world units): no seam where two probes meet">>
+        )
+    };
+
     // A spot light at the entity's position, looking along its -Y
     struct light_spot
     {
@@ -806,6 +824,7 @@ namespace xlionrender
     XSCRIPT_REGISTER_COMPONENT(environment, "Rendering", 56)
     XSCRIPT_REGISTER_COMPONENT(skinned_mesh, "Rendering", 58)
     XSCRIPT_REGISTER_COMPONENT(animation,   "Rendering", 59)
+    XSCRIPT_REGISTER_COMPONENT(reflection_probe_component, "Rendering", 60)
     XSCRIPT_REGISTER_COMPONENT(mesh_material, "Deprecated", 57)     // (old files: the editor moves it into the Mesh, UpgradeOldMaterials; not offered to add)
 }
 
