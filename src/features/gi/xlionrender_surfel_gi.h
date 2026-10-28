@@ -1334,21 +1334,25 @@ namespace xlionrender::gi
 
             if (bRays && m_Tri4.empty()) BuildRays();
             std::vector<v3> CP, CN;
-            Candidates(Radius, CP, CN, nullptr);
+            std::vector<std::array<float, 3>> CT;
+            Candidates(Radius, CP, CN, &CT);
+            const auto TriPiece = TriangleComponents();
             std::vector<int> Order(CP.size());
             for (std::size_t i = 0; i < Order.size(); ++i) Order[i] = int(i);
             rng Shuffle(0x5EEDu);
             for (std::size_t i = Order.size(); i > 1; --i) std::swap(Order[i - 1], Order[std::size_t(Shuffle.Next() * float(i)) % i]);
             surfel_grid G{ Radius, {} };
             std::vector<surfel> Kept;
+            std::vector<int> KeptPiece;
             for (int i : Order)
             {
                 bool bTaken = false;
                 G.Near(CP[i], 1, [&](int s) { bTaken = bTaken || ((CP[i] - Kept[s].m_Center).Length() < Radius && Kept[s].m_Normal.Dot(CN[i]) > 0.8f
-                                                                && std::abs((Kept[s].m_Center - CP[i]).Dot(CN[i])) < 0.1f * Radius && (!bRays || Sees(CP[i], CN[i], Kept[s]))); });
+                                                                && std::abs((Kept[s].m_Center - CP[i]).Dot(CN[i])) < 0.1f * Radius && (!bRays || Sees(CP[i], CN[i], Kept[s]) || (!s_bThinBySightOnly && TriPiece[std::size_t(CT[std::size_t(i)][0])] == KeptPiece[std::size_t(s)] && SeesAround(CP[i], CN[i], Kept[s])))); });
                 if (bTaken) continue;
                 G.Add(CP[i], int(Kept.size()));
                 Kept.push_back({ CP[i], CN[i], Radius });
+                KeptPiece.push_back(TriPiece[std::size_t(CT[std::size_t(i)][0])]);
                 if (Kept.size() > Stop) break;
             }
             return Kept.size();
@@ -1372,9 +1376,10 @@ namespace xlionrender::gi
             // Dart throwing over weighted candidates: the kept ones become surfels of radius R
             // A candidate is taken by a kept surfel only if that one sees it: a door a few cm behind its frame gets surfels of its own
             // (the wall's past the frame's lip do not cover it - read through the lip, they faded in wedges)
-            const auto Poisson = [this](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G, std::vector<int>* pFrom = nullptr, std::size_t Max = ~std::size_t(0))
+            const auto Poisson = [this](const std::vector<v3>& P, const std::vector<v3>& N, float R, std::vector<surfel>& Out, surfel_grid& G, std::vector<int>* pFrom = nullptr, std::size_t Max = ~std::size_t(0), const std::vector<int>* pPiece = nullptr)
             {
                 Out.clear();
+                std::vector<int> OutPiece;                          // (per kept surfel its candidate's piece: TriangleComponents)
                 if (pFrom) pFrom->clear();
                 G = { R, {} };
                 std::vector<int> Order(P.size());
@@ -1384,7 +1389,7 @@ namespace xlionrender::gi
                 // ... and only if it lies in the candidate's own plane (a tenth of R off it at most): a window frame 10 cm behind blinds,
                 // tilted so its plane runs through them and seeing them through their gaps, does not take the blinds' surfels
                 const auto Takes = [&](int i, int s) { return (P[i] - Out[s].m_Center).Length() < R && Out[s].m_Normal.Dot(N[i]) > 0.8f
-                                                              && std::abs((Out[s].m_Center - P[i]).Dot(N[i])) < 0.1f * R && Sees(P[i], N[i], Out[s]); };
+                                                              && std::abs((Out[s].m_Center - P[i]).Dot(N[i])) < 0.1f * R && (Sees(P[i], N[i], Out[s]) || (pPiece && !s_bThinBySightOnly && (*pPiece)[std::size_t(i)] == OutPiece[std::size_t(s)] && SeesAround(P[i], N[i], Out[s]))); };
                 // In batches of the order (the same surfels as one at a time: taken = taken by a surfel kept before it, whichever pass looks):
                 // the surfels kept before the batch looked at in parallel (their rays: the bake's cost, single-threaded it was 16 min on the
                 // Bistro), then the batch in order against the ones it keeps itself
@@ -1412,6 +1417,7 @@ namespace xlionrender::gi
                         if (bTaken) continue;
                         G.Add(P[i], int(Out.size()));
                         Out.push_back({ P[i], N[i], R });
+                        OutPiece.push_back(pPiece ? (*pPiece)[std::size_t(i)] : -1);
                         if (pFrom) pFrom->push_back(i);
                         if (Out.size() > Max) return;
                     }
@@ -1465,12 +1471,17 @@ namespace xlionrender::gi
             std::vector<v3> CP, CN;
             std::vector<std::array<float, 3>> CT;                  // per candidate: its triangle, u, v (where its material is)
             Candidates(Radius, CP, CN, &CT);
+            std::vector<int> Piece(CP.size());
+            {
+                const auto TriPiece = TriangleComponents();
+                for (std::size_t c = 0; c < CP.size(); ++c) Piece[c] = TriPiece[std::size_t(CT[c][0])];
+            }
             Lap(0);
 
             // 2. Surfels, 3. vertex indices
             surfel_grid G0, G1;
             std::vector<int> From;
-            Poisson(CP, CN, Radius, m_Levels[0], G0, &From, MaxSurfels);
+            Poisson(CP, CN, Radius, m_Levels[0], G0, &From, MaxSurfels, &Piece);
             Lap(1);
             if (m_Levels[0].size() > MaxSurfels) return;
             // The patches (PatchDefects: Forced, from BuildReadGrid's m_EmptyParts): a surfel at each, after the others (one where one already
@@ -1794,6 +1805,49 @@ namespace xlionrender::gi
             const v3 A = P + N * h, B = S.m_Center + S.m_Normal * h;
             const auto Clear = [&](const v3& From, const v3& To) { const v3 D = To - From; const float Ln = D.Length(); return Ln < 1e-6f || !Occluded(From, D * (1.0f / Ln), Ln); };
             return Clear(P + N * e, A) && Clear(S.m_Center + S.m_Normal * e, B) && Clear(A, B);
+        }
+
+        // The bake's thinning: does a kept surfel stand for a candidate (coplanar, within R)? If it sees it (Sees), or - on its own
+        // connected piece (TriangleComponents) - past the clutter (SeesAround: any of five parallel rays clear, the centre's and four
+        // thin_sight_v of R aside along the surface). A post, a chair leg, a pole, a plant between them blocks some of the rays, a wall
+        // blocks them all: a wall standing on a floor slab that runs under it (one piece) still keeps the rooms apart; across pieces
+        // a line of sight as before (a door a few cm behind its frame is its own). It was Sees alone: anything between two candidates
+        // kept both - 7.4x the surfels the spacing asks for on the Bistro (545k of 73k at R 3.1 m). Lumen's cards are per mesh: a
+        // surface's identity is its geometry first
+        static constexpr float thin_sight_v = 1.0f / 3.0f;
+        static inline bool s_bThinBySightOnly = false;       // (measurement and tests: the old rule)
+        bool SeesAround(const v3& P, const v3& N, const surfel& S) const noexcept
+        {
+            if (Sees(P, N, S)) return true;
+            const float e = 0.02f * S.m_Radius, o = thin_sight_v * S.m_Radius;
+            const v3 T1 = (std::abs(N.m_Y) < 0.9f ? N.Cross(v3{ 0, 1, 0 }) : N.Cross(v3{ 1, 0, 0 })).NormalizeCopy(), T2 = N.Cross(T1);
+            for (const v3 T : { T1, T1 * -1.0f, T2, T2 * -1.0f })
+            {
+                const v3 A = P + N * e + T * o, D = (S.m_Center + S.m_Normal * e + T * o) - A;
+                const float L = D.Length();
+                if (L < 1e-6f || !Occluded(A, D * (1.0f / L), L)) return true;
+            }
+            return false;
+        }
+        // Per triangle its connected piece (triangles sharing a vertex position: welded across UV seams)
+        std::vector<int> TriangleComponents() const noexcept
+        {
+            std::vector<int> Up(m_Tris.size());
+            for (std::size_t t = 0; t < Up.size(); ++t) Up[t] = int(t);
+            const auto Find = [&](int a) { while (Up[std::size_t(a)] != a) { Up[std::size_t(a)] = Up[std::size_t(Up[std::size_t(a)])]; a = Up[std::size_t(a)]; } return a; };
+            std::unordered_map<std::uint64_t, int> First;      // a vertex position's first triangle
+            First.reserve(m_Pos.size());
+            for (int t = 0; t < int(m_Tris.size()); ++t)
+                for (int k = 0; k < 3; ++k)
+                {
+                    const v3& P = m_Pos[std::size_t(m_Tris[std::size_t(t)][std::size_t(k)])];
+                    std::uint32_t b[3]; std::memcpy(b, &P, sizeof(b));
+                    const std::uint64_t Key = (std::uint64_t(b[0]) * 0x9E3779B97F4A7C15ull) ^ (std::uint64_t(b[1]) * 0xC2B2AE3D27D4EB4Full) ^ (std::uint64_t(b[2]) * 0x165667B19E3779F9ull);
+                    const auto [It, bNew] = First.try_emplace(Key, t);
+                    if (!bNew) { const int a = Find(t), c = Find(It->second); if (a != c) Up[std::size_t(a)] = c; }
+                }
+            for (std::size_t t = 0; t < Up.size(); ++t) Up[t] = Find(int(t));
+            return Up;
         }
 
         bool Sees(const v3& P, const v3& N, const surfel& S) const noexcept

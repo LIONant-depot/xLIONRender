@@ -773,6 +773,63 @@ int main()
             }
         std::printf("beside a door frame: %d of %d wall points read the wall's surfels\n", nRead, nBeside);
 
+        // 6s. The bake's thinning over ground clutter (surfel_mesh::SeesAbove, TriangleComponents): a 10 m floor at R 0.5 keeps the
+        // surfels its area asks for with posts, a curb and a plant standing on it - with Sees alone each kept its own surfels around
+        // them (the Bistro: 7.4x the spacing's count). A floor slab running under a wall (one piece) still keeps the two sides apart
+        {
+            const auto AddBox = [](surfel_mesh& M, v3 Lo, v3 S, float Split)       // (no bottom face: it stands on the floor)
+            {
+                const v3 X{ S.m_X, 0, 0 }, Y{ 0, S.m_Y, 0 }, Z{ 0, 0, S.m_Z };
+                AddQuad(M, Lo + Y, Z, X, Split); AddQuad(M, Lo, Z, Y, Split); AddQuad(M, Lo + X, Y, Z, Split); AddQuad(M, Lo, Y, X, Split); AddQuad(M, Lo + Z, X, Y, Split);
+            };
+            const auto Floor = [&](surfel_mesh& M) { AddQuad(M, { -5, 0, -5 }, { 0, 0, 10 }, { 10, 0, 0 }, 0.5f); };
+            const auto Clutter = [&](surfel_mesh& M)
+            {
+                for (float x = -4; x <= 4; x += 1.0f) for (float z = -4; z <= 4; z += 2.0f) AddBox(M, { x, 0, z }, { 0.06f, 0.6f, 0.06f }, 0.1f);     // posts, chair legs
+                AddBox(M, { -4.5f, 0, 3.4f }, { 9, 0.15f, 0.2f }, 0.5f);                                                                      // a curb
+                for (const v3 O : { v3{ 1.3f, 0, -1.2f }, v3{ 1.5f, 0, -1.0f }, v3{ 1.2f, 0, -0.9f } }) AddBox(M, O, { 0.15f, 0.35f, 0.15f }, 0.1f);    // a plant's pots
+            };
+            const auto FloorSurfels = [](const surfel_mesh& M) { int n = 0; for (const auto& S : M.m_Levels[0]) n += S.m_Normal.m_Y > 0.9f && S.m_Center.m_Y < 0.01f; return n; };
+            surfel_mesh Bare, Cluttered, Old;
+            Floor(Bare); Bare.Bake(0.5f, 1.5f);
+            Floor(Cluttered); Clutter(Cluttered); Cluttered.Bake(0.5f, 1.5f);
+            Floor(Old); Clutter(Old);
+            surfel_mesh::s_bThinBySightOnly = true; Old.Bake(0.5f, 1.5f); surfel_mesh::s_bThinBySightOnly = false;
+            const int nBare = FloorSurfels(Bare), nNow = FloorSurfels(Cluttered), nOld = FloorSurfels(Old);
+            std::printf("thinning over clutter: the floor's surfels %d bare, %d with posts, a curb and a plant (%d with the sight test alone)\n", nBare, nNow, nOld);
+            CHECK(nNow <= nBare * 11 / 10 && nNow < nOld, "the clutter keeps surfels of the floor: %d bare, %d cluttered (%d the old rule)", nBare, nNow, nOld);
+
+            // the slab under a wall (a 2 m wall at x = 0, standing on it): floor points beside it read nothing of the other side
+            surfel_mesh Slab;
+            Floor(Slab); AddBox(Slab, { -0.05f, 0, -5 }, { 0.1f, 2.0f, 10 }, 0.5f);
+            Slab.Bake(0.5f, 1.5f);
+            Slab.BuildReadGrid();
+            int nPts = 0, nLeak = 0;
+            for (float z = -4; z <= 4; z += 0.25f)
+                for (float x : { -0.3f, -0.15f, 0.15f, 0.3f })
+                {
+                    const v3 P{ x, 0, z };
+                    float Wo = 0;
+                    for (auto e : Slab.ReadCellList(P, { 0, 1, 0 }))
+                        if (const auto& S = Slab.m_Levels[0][surfel_mesh::ReadEntrySurfel(e)]; S.m_Normal.m_Y > 0.9f && S.m_Center.m_X * x < 0) Wo += Slab.ReadEntryWeight(e, P, { 0, 1, 0 }, { 0, 1, 0 });
+                    ++nPts; nLeak += Wo > 1e-3f;
+                }
+            std::printf("a floor slab under a wall: %d of %d floor points beside it read the other side's floor surfels\n", nLeak, nPts);
+            CHECK(nLeak == 0, "the wall on a floor slab leaks: %d of %d points read the other side", nLeak, nPts);
+
+            // a door 3 cm back in its frame (the wall facing +x around a 1 x 2 m opening, the frame's jambs 6 cm deep): its own surfels
+            surfel_mesh Recess;
+            AddQuad(Recess, { 0, 0, -3 }, { 0, 3, 0 }, { 0, 0, 2.5f }, 0.5f); AddQuad(Recess, { 0, 0, 0.5f }, { 0, 3, 0 }, { 0, 0, 2.5f }, 0.5f);     // beside it
+            AddQuad(Recess, { 0, 2, -0.5f }, { 0, 1, 0 }, { 0, 0, 1 }, 0.5f);                                                                        // above it
+            AddQuad(Recess, { -0.03f, 0, -0.5f }, { 0, 2, 0 }, { 0, 0, 1 }, 0.25f);                                                                  // the door
+            AddBox(Recess, { -0.03f, 0, -0.56f }, { 0.06f, 2.06f, 0.06f }, 0.1f); AddBox(Recess, { -0.03f, 0, 0.5f }, { 0.06f, 2.06f, 0.06f }, 0.1f);  // the jambs
+            Recess.Bake(0.5f, 1.5f);
+            int nDoor = 0;
+            for (const auto& S : Recess.m_Levels[0]) nDoor += S.m_Normal.m_X > 0.9f && S.m_Center.m_X < -0.02f && std::abs(S.m_Center.m_Z) < 0.5f && S.m_Center.m_Y < 2;
+            std::printf("a door 3 cm back in its frame: %d surfels of its own\n", nDoor);
+            CHECK(nDoor > 0, "the door behind its frame lost its surfels to the wall's");
+        }
+
         // Defects (PatchDefects): a strip of floor between a wall and a beam lying on the floor, its surfels taken away (a strip no surfel
         // serves): BuildReadGrid lists it; baked again with it, it gets a patch surfel (after the others: m_FirstPatch) and reads it
         surfel_mesh Strip;
@@ -1391,8 +1448,9 @@ int main()
         }
         // The darts one at a time (the bake's candidates, its shuffle, its rule), the fine level and then the parents: every center and
         // normal the same, bit for bit; each surfel's parent the nearest seen one, every one tested
-        const auto Darts = [&](const std::vector<v3>& P, const std::vector<v3>& N, float R)
+        const auto Darts = [&](const std::vector<v3>& P, const std::vector<v3>& N, float R, const std::vector<int>* pPiece = nullptr)
         {
+            std::vector<int> OutPiece;      // (the bake's rule: Sees, or on the same piece SeesAround)
             std::vector<surfel> Out; surfel_grid Gd{ R, {} };
             std::vector<int> Order(P.size());
             for (std::size_t i = 0; i < Order.size(); ++i) Order[i] = int(i);
@@ -1402,9 +1460,10 @@ int main()
             {
                 bool bTaken = false;
                 Gd.Near(P[std::size_t(i)], 1, [&](int s) { bTaken = bTaken || ((P[std::size_t(i)] - Out[std::size_t(s)].m_Center).Length() < R && Out[std::size_t(s)].m_Normal.Dot(N[std::size_t(i)]) > 0.8f
-                                         && std::abs((Out[std::size_t(s)].m_Center - P[std::size_t(i)]).Dot(N[std::size_t(i)])) < 0.1f * R && M.Sees(P[std::size_t(i)], N[std::size_t(i)], Out[std::size_t(s)])); });
+                                         && std::abs((Out[std::size_t(s)].m_Center - P[std::size_t(i)]).Dot(N[std::size_t(i)])) < 0.1f * R
+                                         && (M.Sees(P[std::size_t(i)], N[std::size_t(i)], Out[std::size_t(s)]) || (pPiece && (*pPiece)[std::size_t(i)] == OutPiece[std::size_t(s)] && M.SeesAround(P[std::size_t(i)], N[std::size_t(i)], Out[std::size_t(s)])))); });
                 if (bTaken) continue;
-                Gd.Add(P[std::size_t(i)], int(Out.size())); Out.push_back({ P[std::size_t(i)], N[std::size_t(i)], R });
+                Gd.Add(P[std::size_t(i)], int(Out.size())); Out.push_back({ P[std::size_t(i)], N[std::size_t(i)], R }); OutPiece.push_back(pPiece ? (*pPiece)[std::size_t(i)] : -1);
             }
             return Out;
         };
@@ -1415,8 +1474,9 @@ int main()
                 if (std::memcmp(&A[s].m_Center, &B[s].m_Center, sizeof(v3)) || std::memcmp(&A[s].m_Normal, &B[s].m_Normal, sizeof(v3)) || A[s].m_Radius != B[s].m_Radius) return false;
             return true;
         };
-        std::vector<v3> CP, CN; M.Candidates(0.25f, CP, CN, nullptr);
-        const auto Fine = Darts(CP, CN, 0.25f);
+        std::vector<v3> CP, CN; std::vector<std::array<float, 3>> CT; M.Candidates(0.25f, CP, CN, &CT);
+        std::vector<int> Piece(CP.size()); { const auto TP = M.TriangleComponents(); for (std::size_t c = 0; c < CP.size(); ++c) Piece[c] = TP[std::size_t(CT[c][0])]; }
+        const auto Fine = Darts(CP, CN, 0.25f, &Piece);
         std::vector<v3> SP, SN; for (const auto& S : Fine) { SP.push_back(S.m_Center); SN.push_back(S.m_Normal); }
         const auto Parents = Darts(SP, SN, 0.75f);
         surfel_grid G1{ 0.75f, {} };
