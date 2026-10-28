@@ -328,6 +328,7 @@ void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in cons
 		g_GIMoments = (GIRef.y & gi_no_moments_v) == 0u;
 		g_GIPixelCap = GIPixelCap(GIRef.y);
 		g_GINoCorners = (GIRef.y & 0x01000000u) != 0u;
+		g_GIAblateLookup = (GIRef.y >> 25u) & 3u;
 		// The reflection direction in mesh space (through the two tangent frames: the world's and the mesh's), for the rough reflection's read
 		{
 			const vec3 Rw = reflect(-V, N), Tw = normalize(In.Tangent.xyz - In.Normal.xyz * dot(In.Normal.xyz, In.Tangent.xyz)), Nw = normalize(In.Normal.xyz), Bw = In.Tangent.w * cross(Nw, Tw);

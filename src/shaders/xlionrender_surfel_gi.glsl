@@ -34,6 +34,7 @@ bool       g_GIMoments           = true;        // GIVisibility's moment test (t
 const uint gi_pixel_cap_v = 32u;
 uint       g_GIPixelCap   = gi_pixel_cap_v;
 bool       g_GINoCorners  = false;      // measurement (XLION_GI_ABLATE=pixel_nocorners, GI reference bit 24): the per-pixel read without the corner weights
+uint       g_GIAblateLookup = 0u;       // measurement (XLION_GI_ABLATE=pixel_lookuponly / pixel_nolookup, bits 25-26): 1 the cell lookup alone, 2 none
 uint GIPixelCap(in const uint Ref) { const uint c = (Ref >> 16u) & 0xFFu; return c == 0u ? gi_pixel_cap_v : c == 255u ? 0xFFFFFFFFu : c; }
 uint GIDebugCode(in const uint Ref) { return Ref == gi_none_v ? 0u : ((Ref >> gi_debug_shift_v) & 3u) | ((Ref >> 10u) & 0x4u); }    // scene::gi_debug
 
@@ -366,7 +367,9 @@ GIQueryResult SurfelGIQuery(in const vec3 P, in const vec3 N, in const vec3 Nmap
     uint First, Count, Patches, nPatches;
     vec3 PatchN;
     GIQueryResult R = GIQueryResult(vec3(0.0), 0.0, false);
+    if (g_GIAblateLookup == 2u) { R.bSupported = true; R.Confidence = 1.0; return R; }     // (both: supported, black - the same path after)
     if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches)) return R;
+    if (g_GIAblateLookup == 1u) { R.bSupported = true; R.Confidence = 1.0; R.Irradiance = vec3(float(First & 1u) * 1e-30); return R; }     // (First used: the lookup kept)
     vec4 Relaxed;
     vec4 Sum = SurfelGIList(P, N, Nmap, LightOffset, Level, First, Count, PatchN, Relaxed);
     // The moments' test rejects every surfel (next to a wall's foot: their rays met the wall just past the point): its own surfels without

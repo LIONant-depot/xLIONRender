@@ -1,0 +1,1043 @@
+diff --git a/src/features/gi/xlionrender_surfel_gi.h b/src/features/gi/xlionrender_surfel_gi.h
+index b8b25d9..e45a27a 100644
+--- a/src/features/gi/xlionrender_surfel_gi.h
++++ b/src/features/gi/xlionrender_surfel_gi.h
+@@ -605,6 +605,108 @@ namespace xlionrender::gi
+         // Leak protection (the GeomStatic descriptor's GI LeakProtection): the read grid's patches split where the surface is cut (a wall
+         // across a cell: BuildReadGrid), and the solver's rays read through it (world::ReadPoint), not the hit triangle's vertices
+         bool                                        m_bLeakProtection = true;
++        // Charts (GI work order 4, gi_surfel_reconstruction_proposal.md sec. 4; BuildCharts): per triangle the sheet of surface it belongs
++        // to - triangles joined across shared (welded) edges while their faces stay within 45 degrees of the sheet's first one and of each
++        // other: a crease, an open edge, the other face of a thin wall end it. The read grid maps each cell's charts to its parts
++        // (m_bReadCharts: after a cell's part headers, the count of its charts, then per chart a word: its id | its part << 16, in id order;
++        // read_chart_ambiguous_v: its samples fell in several parts - a cut across the cell, a curved chart's patches): a point that knows its
++        // triangle finds its part by its chart (ReadCellList), not by scoring every part of the cell. The parts and their lists are the same
++        // as without charts. Ids only need to differ within a cell: the 65535th chart reuses 0 (two charts of one id: ambiguous)
++        static constexpr std::uint16_t              chart_none_v = 0xFFFFu;
++        static constexpr float                      chart_cone_v = 0.7071f;
++        std::vector<std::uint16_t>                  m_TriChart;
++        bool                                        m_bReadCharts = false;
++        // Direct addressing (work order 4, experiment A): per triangle the cells its samples fell in and the part of each - a pixel that knows
++        // its triangle goes triangle -> its cell's part, no hash probe, no map, no scoring. m_TriRead per triangle: its first entry << 3 | how
++        // many (0..4: a triangle over more cells, or none, has none - looked up as before); an entry: the cell's table slot | its part << 22 (a
++        // cell where the triangle's samples fell in several parts has none). Built with the charts (BuildReadGridAt), at load only (not packed)
++        std::vector<std::uint32_t>                  m_TriRead, m_TriReadEntries;
++        static constexpr std::uint32_t              tri_read_cells_v = 4;
++        std::array<std::size_t, 3>                  m_TriReadStats{};      // triangles with entries, over tri_read_cells_v cells, cells left out (several parts)
++        static bool GPUDirect() noexcept { static const bool s_b = [] { const char* p = std::getenv("XLION_GI_DIRECT"); return !(p && p[0] == '0'); }(); return s_b; }
++        static constexpr std::uint32_t read_chart_ambiguous_v = 0x7FFFu;
++        // A cell's head (pHead: its first word, nParts: the table's count): its part headers, then its charts' map
++        static std::uint32_t ReadHeadWords(const std::uint32_t* pHead, std::uint32_t nParts, bool bCharts) noexcept { return 4 * nParts + (bCharts ? 1 + pHead[4 * nParts] : 0u); }
++        // Do the GPU's reads use the charts (measurement, A/B: XLION_GI_CHART=0 leaves them out of the GPU's data - every read scored)
++        static bool GPUCharts() noexcept { static const bool s_b = [] { const char* p = std::getenv("XLION_GI_CHART"); return !(p && p[0] == '0'); }(); return s_b; }
++        std::uint16_t TriChart(int Tri) const noexcept { return m_bReadCharts && std::size_t(Tri) < m_TriChart.size() ? m_TriChart[std::size_t(Tri)] : chart_none_v; }
++        // ReadCellList's paths (tests, GRIDSTATS): 0 no chart asked, 1 the chart's part, 2 the chart is ambiguous in the cell, 3 it is not in
++        // the cell (2, 3: every part scored, as without one)
++        enum read_how : int { read_scored = 0, read_chart = 1, read_chart_scored = 2, read_chart_missing = 3, read_direct = 4 };
++        void BuildCharts() noexcept
++        {
++            const std::size_t nT = m_Tris.size();
++            m_TriChart.assign(nT, chart_none_v);
++            if (nT == 0 || m_Pos.empty()) return;
++            v3 Lo = m_Pos[0], Hi = m_Pos[0];
++            for (const auto& P : m_Pos) { Lo = v3::Min(Lo, P); Hi = v3::Max(Hi, P); }
++            const float Q = std::max((Hi - Lo).Length() * 1e-5f, 1e-7f);      // (the weld: modular pieces' duplicated vertices still join)
++            std::unordered_map<std::uint64_t, std::uint32_t> Weld;
++            std::vector<std::uint32_t> Wv(m_Pos.size());
++            for (std::size_t v = 0; v < m_Pos.size(); ++v)
++            {
++                const auto& P = m_Pos[v];
++                const auto K = surfel_grid::Key(int(std::floor(P.m_X / Q + 0.5f)), int(std::floor(P.m_Y / Q + 0.5f)), int(std::floor(P.m_Z / Q + 0.5f)));
++                Wv[v] = Weld.try_emplace(K, std::uint32_t(Weld.size())).first->second;
++            }
++            std::vector<v3> Fn(nT);
++            std::vector<std::pair<std::uint64_t, std::uint32_t>> Edges;
++            Edges.reserve(3 * nT);
++            for (std::size_t t = 0; t < nT; ++t)
++            {
++                const auto& T = m_Tris[t];
++                const v3 F = (m_Pos[T[1]] - m_Pos[T[0]]).Cross(m_Pos[T[2]] - m_Pos[T[0]]);
++                const float l = F.Length();
++                Fn[t] = l > 1e-20f ? F * (1.0f / l) : v3{ 0, 0, 0 };
++                if (l <= 1e-20f) continue;
++                for (int k = 0; k < 3; ++k)
++                {
++                    std::uint32_t a = Wv[std::size_t(T[k])], b = Wv[std::size_t(T[(k + 1) % 3])];
++                    if (a == b) continue;
++                    if (a > b) std::swap(a, b);
++                    Edges.push_back({ (std::uint64_t(a) << 32) | b, std::uint32_t(t) });
++                }
++            }
++            std::sort(Edges.begin(), Edges.end());
++            std::vector<std::uint32_t> First(nT + 1, 0), Adj;          // per triangle the triangles across its edges (an edge of up to 8)
++            for (int Pass = 0; Pass < 2; ++Pass)
++            {
++                for (std::size_t i = 0, j; i < Edges.size(); i = j)
++                {
++                    for (j = i; j < Edges.size() && Edges[j].first == Edges[i].first; ++j) {}
++                    if (j - i < 2 || j - i > 8) continue;
++                    for (std::size_t a = i; a < j; ++a) for (std::size_t b = i; b < j; ++b)
++                    {
++                        if (a == b) continue;
++                        if (Pass == 0) ++First[Edges[a].second + 1];
++                        else Adj[First[Edges[a].second]++] = Edges[b].second;
++                    }
++                }
++                if (Pass == 0) { for (std::size_t t = 0; t < nT; ++t) First[t + 1] += First[t]; Adj.resize(First[nT]); }
++                else { for (std::size_t t = nT; t > 0; --t) First[t] = First[t - 1]; First[0] = 0; }
++            }
++            std::uint32_t Next = 0;
++            std::vector<std::uint32_t> Stack;
++            for (std::size_t t0 = 0; t0 < nT; ++t0)
++            {
++                if (m_TriChart[t0] != chart_none_v || Fn[t0].Dot(Fn[t0]) == 0) continue;
++                const std::uint16_t Id = std::uint16_t(Next++ % 0xFFFFu);
++                const v3 Seed = Fn[t0];
++                m_TriChart[t0] = Id; Stack.assign(1, std::uint32_t(t0));
++                while (!Stack.empty())
++                {
++                    const std::uint32_t t = Stack.back(); Stack.pop_back();
++                    for (std::uint32_t k = First[t]; k < First[t + 1]; ++k)
++                    {
++                        const std::uint32_t u = Adj[k];
++                        if (m_TriChart[u] != chart_none_v || Fn[u].Dot(Seed) < chart_cone_v || Fn[u].Dot(Fn[t]) < chart_cone_v) continue;
++                        m_TriChart[u] = Id; Stack.push_back(u);
++                    }
++                }
++            }
++            m_nCharts = Next;
++        }
++        std::uint32_t                               m_nCharts = 0;     // (the last BuildCharts': before the ids wrap)
+         // Defects (geometry the GI cannot serve: a thin face beside other geometry - a strip of ceiling between a beam and a wall - that no
+         // surfel serves). BuildReadGrid lists the seen pieces of surface whose read lists nothing (a point and its normal each); the compiler
+         // can bake a surfel for each (Bake's Forced: PatchDefects). The fine surfels from m_FirstPatch on are those (0xFFFFFFFF: none)
+@@ -656,6 +758,19 @@ namespace xlionrender::gi
+                     for (std::uint32_t p = 0; p < E[3]; ++p) { const std::size_t n = m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu; nEnt += n; MaxEnt = std::max(MaxEnt, n); nPast32 += n > 32 ? n - 32 : 0; nPast16 += n > 16 ? n - 16 : 0; } }
+                 std::printf("GIGRID cells %zu (table %zu), patches/cell mean %.1f max %zu, entries/patch mean %.1f max %zu (past 32: %zu, past 16: %zu of %zu), cell %.3f, surfels %zu\n", nCells, m_ReadTable.size(),
+                             nCells ? double(nPatch) / nCells : 0.0, MaxPatch, nPatch ? double(nEnt) / nPatch : 0.0, MaxEnt, nPast32, nPast16, nEnt, m_ReadCell, m_Levels.empty() ? 0 : m_Levels[0].size()); std::fflush(stdout);
++                if (m_bReadCharts)      // the charts' maps: their length per cell, the ambiguous entries, the charts (before the ids wrap)
++                {
++                    std::size_t nMap = 0, MaxMap = 0, nAmb = 0, nOne = 0;
++                    for (const auto& E : m_ReadTable)
++                    {
++                        if (E[1] == 0xFFFFFFFFu) continue;
++                        const std::uint32_t* pC = m_ReadList.data() + E[2] + 4 * E[3];
++                        nMap += pC[0]; MaxMap = std::max<std::size_t>(MaxMap, pC[0]); nOne += pC[0] == 1;
++                        for (std::uint32_t k = 0; k < pC[0]; ++k) nAmb += (pC[1 + k] >> 16) == read_chart_ambiguous_v;
++                    }
++                    std::printf("GICHARTS %u charts, map per cell mean %.1f max %zu (cells of one chart %zu of %zu), ambiguous %zu of %zu entries; direct: %zu of %zu triangles, %zu over %u cells, %zu cells left out, %zu words\n",
++                                m_nCharts, nCells ? double(nMap) / nCells : 0.0, MaxMap, nOne, nCells, nAmb, nMap, m_TriReadStats[0], m_Tris.size(), m_TriReadStats[1], tri_read_cells_v, m_TriReadStats[2], m_TriRead.size() + m_TriReadEntries.size()); std::fflush(stdout);
++                }
+             }
+             const auto Sx = [](std::uint64_t v) { const int i = int(v & 0x1FFFFF); return i >= 0x100000 ? i - 0x200000 : i; };
+             for (const auto& E : m_ReadTable)
+@@ -691,7 +806,7 @@ namespace xlionrender::gi
+         static constexpr std::uint32_t read_packed_v = 0x8000u;
+         static std::uint32_t ReadListCount(std::uint32_t Code) noexcept { Code &= 0xFFFFu; return (Code & read_packed_v) ? (Code & 0x7Fu) + ((Code >> 7) & 0x7Fu) : Code; }
+         static void PackReadGrid(bool bPack, const std::vector<std::array<std::uint32_t, 4>>& Table, const std::vector<std::uint32_t>& List,
+-                                 std::vector<std::array<std::uint32_t, 4>>& OutTable, std::vector<std::uint32_t>& OutList) noexcept
++                                 std::vector<std::array<std::uint32_t, 4>>& OutTable, std::vector<std::uint32_t>& OutList, bool bCharts) noexcept
+         {
+             OutTable = Table; OutList.clear(); OutList.reserve(List.size());
+             std::vector<std::uint32_t> Halves, Order;           // (the cells in the lists' order: unpacked again, the same layout)
+@@ -700,9 +815,11 @@ namespace xlionrender::gi
+             for (const std::uint32_t k : Order)
+             {
+                 auto& E = OutTable[k];
+-                if (E[1] == 0xFFFFFFFFu || std::size_t(E[2]) + 4 * std::size_t(E[3]) > List.size()) continue;
++                if (E[1] == 0xFFFFFFFFu || std::size_t(E[2]) + 4 * std::size_t(E[3]) + (bCharts ? 1 : 0) > List.size()) continue;
++                const std::size_t nHead = ReadHeadWords(List.data() + E[2], E[3], bCharts);
++                if (std::size_t(E[2]) + nHead > List.size()) continue;
+                 const std::uint32_t H0 = E[2], At = std::uint32_t(OutList.size());
+-                OutList.insert(OutList.end(), List.begin() + H0, List.begin() + H0 + 4 * E[3]);
++                OutList.insert(OutList.end(), List.begin() + H0, List.begin() + H0 + std::ptrdiff_t(nHead));
+                 E[2] = At;
+                 for (std::uint32_t p = 0; p < E[3]; ++p)
+                 {
+@@ -734,7 +851,7 @@ namespace xlionrender::gi
+         // chunks' remap). ponytail: a second copy on the CPU (the Bistro: ~97 MB more); the CPU reads could walk the packed form instead
+         std::vector<std::array<std::uint32_t, 4>>   m_PackedReadTable;
+         std::vector<std::uint32_t>                  m_PackedReadList;
+-        void RefreshPackedReadGrid() noexcept { PackReadGrid(true, m_ReadTable, m_ReadList, m_PackedReadTable, m_PackedReadList); }
++        void RefreshPackedReadGrid() noexcept { PackReadGrid(true, m_ReadTable, m_ReadList, m_PackedReadTable, m_PackedReadList, m_bReadCharts); }
+         // Experiment (XLION_GI_SPARSEGRID=<ratio>): the read grid only where the triangles are coarse - a triangle whose longest edge passes
+         // Ratio x the surfels' radius keeps the cells it crosses (and their neighbors); the others' cells are emptied (no patch: the pixel
+         // reads its triangle's vertex surfels, as off the grid). The vertex read is the grid's within 2% on dense meshes (gi_render)
+@@ -765,7 +882,7 @@ namespace xlionrender::gi
+                 if (E[1] == 0xFFFFFFFFu) continue;
+                 if (!Keep.contains(std::uint64_t(E[0]) | (std::uint64_t(E[1]) << 32))) { E[2] = 0; E[3] = 0; continue; }
+                 const std::uint32_t At = std::uint32_t(List.size());
+-                List.insert(List.end(), m_ReadList.begin() + E[2], m_ReadList.begin() + E[2] + 4 * E[3]);
++                List.insert(List.end(), m_ReadList.begin() + E[2], m_ReadList.begin() + E[2] + ReadHeadWords(m_ReadList.data() + E[2], E[3], m_bReadCharts));
+                 for (std::uint32_t p = 0; p < E[3]; ++p)
+                 {
+                     const std::uint32_t First = m_ReadList[E[2] + 4 * p + 2], n = m_ReadList[E[2] + 4 * p + 3] & 0xFFFFu;
+@@ -795,11 +912,26 @@ namespace xlionrender::gi
+ 
+         // The fine surfels listed for the surface point P (normal N): its cell's patch that matches it best (facing its way, nearest its
+         // plane; as GIReadCell); empty: P is off the surface's cells
+-        std::span<const std::uint32_t> ReadCellList(const v3& P, const v3& N, v3* pPatchN = nullptr) const noexcept
++        // Chart: the point's triangle's (TriChart; chart_none_v: none) - its cell's part of that chart when it has exactly one; else (several: a
++        // cut across the cell, a curved chart's patches; none) every part scored as without one - the same part as today. pHow: which (read_how)
++        // Tri: the point's triangle (direct addressing, m_TriRead: its cell's part without a lookup; -1: none)
++        std::span<const std::uint32_t> ReadCellList(const v3& P, const v3& N, v3* pPatchN = nullptr, std::uint16_t Chart = chart_none_v, int* pHow = nullptr, int Tri = -1) const noexcept
+         {
++            if (pHow) *pHow = read_scored;
+             if (m_ReadTable.empty()) return {};
+             const auto C = ReadCellAt(P, N, m_ReadCell);
+             const auto K = ReadKey(C);
++            if (Tri >= 0 && std::size_t(Tri) < m_TriRead.size())
++                for (std::uint32_t k = 0, w = m_TriRead[std::size_t(Tri)]; k < (w & 7u); ++k)
++                {
++                    const std::uint32_t e = m_TriReadEntries[(w >> 3) + k];
++                    const auto& E = m_ReadTable[e & 0x3FFFFFu];
++                    if (E[0] != K[0] || E[1] != K[1]) continue;
++                    const std::uint32_t* Pa = m_ReadList.data() + E[2] + 4 * (e >> 22);
++                    if (pHow) *pHow = read_direct;
++                    if (pPatchN) *pPatchN = UnpackOct(Pa[0]);
++                    return { m_ReadList.data() + Pa[2], Pa[3] & 0xFFFFu };
++                }
+             const std::uint32_t Mask = std::uint32_t(m_ReadTable.size() - 1);
+             for (std::uint32_t h = ReadHash(C) & Mask, n = 0; n <= Mask; h = (h + 1) & Mask, ++n)
+             {
+@@ -813,6 +945,20 @@ namespace xlionrender::gi
+                 const float Lp[3] = { (P.m_X + Nx * (read_lift_v * m_ReadCell)) * iCell, (P.m_Y + Ny * (read_lift_v * m_ReadCell)) * iCell, (P.m_Z + Nz * (read_lift_v * m_ReadCell)) * iCell };
+                 const float Fr[3] = { Lp[0] - std::floor(Lp[0]), Lp[1] - std::floor(Lp[1]), Lp[2] - std::floor(Lp[2]) };
+                 const std::uint32_t* pList = m_ReadList.data() + E[2];
++                if (m_bReadCharts && Chart != chart_none_v)
++                {
++                    const std::uint32_t* pC = pList + 4 * E[3];
++                    std::uint32_t Part = 0xFFFFFFFFu;
++                    const auto It = std::lower_bound(pC + 1, pC + 1 + pC[0], std::uint32_t(Chart), [](std::uint32_t w, std::uint32_t c) { return (w & 0xFFFFu) < c; });     // (in chart order)
++                    if (It != pC + 1 + pC[0] && (*It & 0xFFFFu) == Chart) Part = *It >> 16;
++                    if (pHow) *pHow = Part == 0xFFFFFFFFu ? read_chart_missing : Part == read_chart_ambiguous_v ? read_chart_scored : read_chart;
++                    if (Part < E[3])
++                    {
++                        const std::uint32_t* Pa = pList + 4 * Part;
++                        if (pPatchN) *pPatchN = UnpackOct(Pa[0]);
++                        return { m_ReadList.data() + Pa[2], Pa[3] & 0xFFFFu };
++                    }
++                }
+                 for (std::uint32_t p = 0; p < E[3]; ++p)
+                 {
+                     const std::uint32_t* Pa = pList + 4 * p;
+@@ -958,6 +1104,7 @@ namespace xlionrender::gi
+         }
+         void BuildReadGrid() noexcept
+         {
++            if (m_TriChart.size() != m_Tris.size()) BuildCharts();
+             m_ReadTable.clear(); m_ReadList.clear(); m_PackedReadTable.clear(); m_PackedReadList.clear(); m_ReadMaxProbe = 0; m_ReadUnsupported = 0;
+             if (m_Levels[0].empty()) return;
+             // The cell: halved while the surface's patches alone (BuildReadGridAt's first step: no lists, no rays) are too many per cell
+@@ -990,7 +1137,7 @@ namespace xlionrender::gi
+             };
+             // A patch's connected piece: its sub-cells joined where the surface between them is not cut (a wall across the cell cuts the
+             // floor in two: each side reads only what it sees; one list for both was the light of one room on the other's floor)
+-            struct part  { v3 m_N; float m_D; std::uint16_t m_Mask; std::vector<v3> m_Pts; bool m_bSeen = true; };
++            struct part  { v3 m_N; float m_D; std::uint16_t m_Mask; std::vector<v3> m_Pts; bool m_bSeen = true; std::uint32_t m_Patch = 0; };
+             struct cell  { std::array<int, 3> m_C; std::vector<patch> m_Patches; std::vector<part> m_Parts; };
+             std::unordered_map<std::uint64_t, cell> Cells;
+             const float PlaneTol = 0.1f * Cell;
+@@ -998,10 +1145,16 @@ namespace xlionrender::gi
+             // that edge): a cell the surface only grazes - a strip of floor at a wall's foot thinner than the spacing, the rest of the cell
+             // under the wall - has no sample of its own in sight, and its patch was covered all over (an empty list: a purple line at the seam)
+             const float Edge = 1.0f / (2 * sub_v);                         // the samples' spacing, in cells
++            const bool bCharts = !bPatches && !m_TriChart.empty() && m_TriChart.size() == m_Tris.size();     // (the charts' map: m_bReadCharts)
++            const auto PatchAt = [&](cell& Ce, const v3& P, const v3& N) -> int
++            {
++                for (std::size_t k = 0; k < Ce.m_Patches.size(); ++k) { const auto& Pa = Ce.m_Patches[k]; if (Pa.m_N.Dot(N) > 0.97f && std::abs(P.Dot(Pa.m_N) - Pa.m_D) < PlaneTol) return int(k); }
++                return -1;
++            };
+             const auto PatchIn = [&](const std::array<int, 3>& C, const v3& P, const v3& N) -> patch&
+             {
+                 auto& Ce = Cells.try_emplace(surfel_grid::Key(C[0], C[1], C[2]), cell{ C, {}, {} }).first->second;
+-                for (auto& Pa : Ce.m_Patches) if (Pa.m_N.Dot(N) > 0.97f && std::abs(P.Dot(Pa.m_N) - Pa.m_D) < PlaneTol) return Pa;
++                if (const int k = PatchAt(Ce, P, N); k >= 0) return Ce.m_Patches[std::size_t(k)];
+                 Ce.m_Patches.push_back({});
+                 auto& Pa = Ce.m_Patches.back(); Pa.m_N = N; Pa.m_D = P.Dot(N);
+                 return Pa;
+@@ -1036,8 +1189,11 @@ namespace xlionrender::gi
+             // The samples in order, whether each is covered (CoveredAt's rays) asked in parallel first, then touched in order: the same grid as
+             // asking each when touched (a pure test), the rays no longer one at a time (a Bistro section's grid: minutes)
+             std::vector<std::pair<v3, v3>> Samples;
++            std::vector<std::uint16_t> SampleChart;
++            std::vector<std::uint32_t> SampleTri;
+             for (const auto& T : m_Tris)
+             {
++                const std::uint16_t Ch = bCharts ? m_TriChart[std::size_t(&T - m_Tris.data())] : chart_none_v;
+                 const v3 A = m_Pos[T[0]], B = m_Pos[T[1]], Cc = m_Pos[T[2]];
+                 const float Longest = std::max({ (B - A).Length(), (Cc - B).Length(), (A - Cc).Length() });
+                 const int   k       = std::min(4096, std::max(1, int(std::ceil(Longest / (Cell / (2 * sub_v))))));     // every sub-cell it crosses
+@@ -1046,7 +1202,7 @@ namespace xlionrender::gi
+                     const float u = float(i) / k, w = float(j) / k;
+                     v3 N = m_Nrm[T[0]] * (1 - u - w) + m_Nrm[T[1]] * u + m_Nrm[T[2]] * w;
+                     { const v3 F = (B - A).Cross(Cc - A); if (F.Length() > 1e-12f) N = (F.Dot(N) < 0 ? F * -1.0f : F).NormalizeCopy(); else N = N.NormalizeCopy(); }     // the face's (as the pixels')
+-                    Samples.push_back({ A + (B - A) * u + (Cc - A) * w, N });
++                    Samples.push_back({ A + (B - A) * u + (Cc - A) * w, N }); SampleChart.push_back(Ch); SampleTri.push_back(std::uint32_t(&T - m_Tris.data()));
+                 }
+             }
+             std::vector<char> Covered(Samples.size(), 0);
+@@ -1085,7 +1241,7 @@ namespace xlionrender::gi
+                 {
+                     const auto PartOf = [&](std::uint16_t Mask, const std::array<v3, sub_v * sub_v>& Pts)
+                     {
+-                        part R{ Pa.m_N, Pa.m_D, Mask, {} };
++                        part R{ Pa.m_N, Pa.m_D, Mask, {}, true, std::uint32_t(&Pa - Ce.m_Patches.data()) };
+                         for (int b = 0; b < sub_v * sub_v; ++b) if (Mask & (1u << b)) R.m_Pts.push_back(Pts[b]);
+                         return R;
+                     };
+@@ -1115,6 +1271,42 @@ namespace xlionrender::gi
+                 }
+             });
+ 
++            // The charts' map (bCharts): per cell, each sample's chart and the part whose sub-cells hold it (a sample in no part - covered where
++            // its patch is seen elsewhere - says nothing); a chart met in two parts of a cell is ambiguous there
++            std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> ChartMap;
++            // ... and per triangle its cells and their parts (direct addressing: TriFirst into TriCells, in triangle order - the samples are)
++            std::vector<std::uint32_t> TriFirst;
++            std::vector<std::pair<std::uint64_t, std::uint32_t>> TriCells;
++            if (bCharts) TriFirst.assign(m_Tris.size() + 1, 0);
++            std::uint32_t LastTri = 0xFFFFFFFFu;
++            if (bCharts)
++                for (std::size_t s = 0; s < Samples.size(); ++s)
++                {
++                    if (SampleTri[s] != LastTri) { for (std::uint32_t t = LastTri + 1; t <= SampleTri[s]; ++t) TriFirst[t] = std::uint32_t(TriCells.size()); LastTri = SampleTri[s]; }
++                    const auto& [P, N] = Samples[s];
++                    const auto C  = ReadCellAt(P, N, Cell);
++                    const auto Ky = surfel_grid::Key(C[0], C[1], C[2]);
++                    const auto It = Cells.find(Ky);
++                    if (It == Cells.end()) continue;
++                    auto& Ce = It->second;
++                    const int k = PatchAt(Ce, P, N);
++                    if (k < 0) continue;
++                    const auto Bit = 1u << SubCell(P, N, Ce.m_Patches[std::size_t(k)].m_N, Cell);
++                    std::uint32_t Part = 0xFFFFFFFFu;
++                    for (std::size_t q = 0; q < Ce.m_Parts.size() && Part == 0xFFFFFFFFu; ++q) if (Ce.m_Parts[q].m_Patch == std::uint32_t(k) && (Ce.m_Parts[q].m_Mask & Bit)) Part = std::uint32_t(q);
++                    if (Part == 0xFFFFFFFFu) continue;
++                    auto& Map = ChartMap[Ky];
++                    bool bFound = false;
++                    for (auto& w : Map)
++                        if ((w & 0xFFFFu) == SampleChart[s]) { bFound = true; if ((w >> 16) != Part) w = (w & 0xFFFFu) | (read_chart_ambiguous_v << 16); break; }
++                    if (!bFound) Map.push_back(SampleChart[s] | (Part << 16));
++                    bool bCell = false;
++                    for (std::size_t q = TriFirst[SampleTri[s]]; q < TriCells.size(); ++q)
++                        if (TriCells[q].first == Ky) { bCell = true; if (TriCells[q].second != Part) TriCells[q].second = 0xFFFFFFFFu; break; }
++                    if (!bCell) TriCells.push_back({ Ky, Part });
++                }
++            if (bCharts) for (std::uint32_t t = LastTri + 1; t <= std::uint32_t(m_Tris.size()); ++t) TriFirst[t] = std::uint32_t(TriCells.size());
++
+             // Per part the surfels whose reach touches its cell's box, facing its way, weighted by how much of it sees them: its points and
+             // the points of the same surface around it (the 26 neighbor cells' parts in its plane that it is joined to: their nearest points
+             // Linked). Without it a pixel of blinds read the surfels of the window frame behind them (dark blotches). The neighbors' points
+@@ -1224,12 +1416,22 @@ namespace xlionrender::gi
+             std::uint32_t Size = 1;
+             while (Size < 2 * Cells.size()) Size <<= 1;
+             m_ReadTable.assign(Size, { 0, 0xFFFFFFFFu, 0, 0 });
++            m_bReadCharts = bCharts;
++            std::unordered_map<std::uint64_t, std::uint32_t> Slot;       // (direct addressing: a cell's table slot)
+             for (std::size_t c = 0; c < Order.size(); ++c)
+             {
+                 const auto& Ce = *Order[c];
+                 const auto First = std::uint32_t(m_ReadList.size());
+                 const auto n = std::uint32_t(Ce.m_Parts.size());
+                 m_ReadList.resize(m_ReadList.size() + 4 * n);
++                if (bCharts)
++                {
++                    auto It = ChartMap.find(surfel_grid::Key(Ce.m_C[0], Ce.m_C[1], Ce.m_C[2]));
++                    std::vector<std::uint32_t> Map = It == ChartMap.end() ? std::vector<std::uint32_t>{} : std::move(It->second);
++                    std::sort(Map.begin(), Map.end(), [](std::uint32_t a, std::uint32_t b) { return (a & 0xFFFFu) < (b & 0xFFFFu); });
++                    m_ReadList.push_back(std::uint32_t(Map.size()));
++                    m_ReadList.insert(m_ReadList.end(), Map.begin(), Map.end());
++                }
+                 for (std::uint32_t p = 0; p < n; ++p)
+                 {
+                     const auto& Pa = Ce.m_Parts[p];
+@@ -1245,6 +1447,26 @@ namespace xlionrender::gi
+                 while (m_ReadTable[h][1] != 0xFFFFFFFFu) { h = (h + 1) & (Size - 1); ++nProbe; }
+                 m_ReadMaxProbe = std::max(m_ReadMaxProbe, nProbe + 1);
+                 m_ReadTable[h] = { K[0], K[1], First, n };
++                if (bCharts) Slot[surfel_grid::Key(Ce.m_C[0], Ce.m_C[1], Ce.m_C[2])] = h;
++            }
++            m_TriRead.clear(); m_TriReadEntries.clear(); m_TriReadStats = {};
++            if (bCharts)
++            {
++                m_TriRead.assign(m_Tris.size(), 0u);
++                for (std::size_t t = 0; t < m_Tris.size(); ++t)
++                {
++                    const std::uint32_t a = TriFirst[t], b = TriFirst[t + 1];
++                    if (b - a > tri_read_cells_v) { ++m_TriReadStats[1]; continue; }
++                    const std::uint32_t At = std::uint32_t(m_TriReadEntries.size());
++                    for (std::uint32_t q = a; q < b; ++q)
++                    {
++                        const auto It = Slot.find(TriCells[q].first);
++                        if (TriCells[q].second >= 1024u || It == Slot.end() || It->second >= (1u << 22)) { ++m_TriReadStats[2]; continue; }
++                        m_TriReadEntries.push_back(It->second | (TriCells[q].second << 22));
++                    }
++                    const std::uint32_t n = std::uint32_t(m_TriReadEntries.size()) - At;
++                    if (n) { m_TriRead[t] = (At << 3) | n; ++m_TriReadStats[0]; }
++                }
+             }
+             m_ReadUnsupported = Unsupported.load();
+             m_EmptyParts.clear();
+@@ -1630,7 +1852,9 @@ namespace xlionrender::gi
+         // GeomStatic compiler packs it into the resource, the renderer unpacks it at load instead of building it (seconds in Release, half
+         // a minute in Debug for the Police Station). Only what the surfels and the geometry decide: the same in both. Unpack checks the
+         // block's tag and sizes (false: build them)
+-        static constexpr std::uint32_t derived_tag_v = 0x38444947u;    // "GID8": the neighbors' angular weight (NeighborWeight). GID7: f x c, reweighted
++        static constexpr std::uint32_t derived_tag_v = 0x39444947u;    // "GID9": the parts keyed by chart (m_bReadCharts: word 1 bit 1, the charts' words
++                                                                        // after each cell's part headers, the triangles' charts at the end). GID8: none
++        static constexpr std::uint32_t derived_tag8_v = 0x38444947u;   // GID8: the neighbors' angular weight (NeighborWeight). GID7: f x c, reweighted
+         static constexpr std::uint32_t derived_tag7_v = 0x37444947u;   // at load (no rays). Before: the neighbors of a curved layer (SameLayer). GID6: the lists packed
+         static constexpr std::uint32_t derived_tag6_v = 0x36444947u;   // (PackReadGrid), its neighbors read: made again. GID5: as they are, read: unpacked
+         static constexpr std::uint32_t derived_tag5_v = 0x35444947u;   // (GID4, never released: the center as an entry; GID3: the origins as
+@@ -1640,8 +1864,8 @@ namespace xlionrender::gi
+         std::vector<std::uint32_t> PackDerived() const noexcept
+         {
+             std::vector<std::array<std::uint32_t, 4>> PTable; std::vector<std::uint32_t> PList;
+-            PackReadGrid(true, m_ReadTable, m_ReadList, PTable, PList);        // (made here: the compiler's chunks change the lists after their sort)
+-            std::vector<std::uint32_t> W{ derived_tag_v, std::uint32_t(m_bLeakProtection), m_FirstPatch, std::bit_cast<std::uint32_t>(m_ReadCell), m_ReadMaxProbe, m_ReadUnsupported
++            PackReadGrid(true, m_ReadTable, m_ReadList, PTable, PList, m_bReadCharts);        // (made here: the compiler's chunks change the lists after their sort)
++            std::vector<std::uint32_t> W{ derived_tag_v, std::uint32_t(m_bLeakProtection) | (m_bReadCharts ? 2u : 0u), m_FirstPatch, std::bit_cast<std::uint32_t>(m_ReadCell), m_ReadMaxProbe, m_ReadUnsupported
+                                         , std::uint32_t(PTable.size()), std::uint32_t(PList.size()) };
+             for (const auto& E : PTable) W.insert(W.end(), E.begin(), E.end());
+             W.insert(W.end(), PList.begin(), PList.end());
+@@ -1655,6 +1879,11 @@ namespace xlionrender::gi
+             W.push_back(std::uint32_t(m_OriginFirst.size())); W.push_back(std::uint32_t(m_OriginVert.size()));
+             W.insert(W.end(), m_OriginFirst.begin(), m_OriginFirst.end());
+             W.insert(W.end(), m_OriginVert.begin(), m_OriginVert.end());
++            if (m_bReadCharts)
++            {
++                W.push_back(std::uint32_t(m_TriChart.size()));
++                for (std::size_t t = 0; t < m_TriChart.size(); t += 2) W.push_back(m_TriChart[t] | (t + 1 < m_TriChart.size() ? std::uint32_t(m_TriChart[t + 1]) << 16 : 0u));
++            }
+             return W;
+         }
+         bool UnpackDerived(std::span<const std::uint32_t> W) noexcept
+@@ -1662,8 +1891,9 @@ namespace xlionrender::gi
+             std::size_t i = 0;
+             const auto Take = [&](std::size_t n) { const bool b = i + n <= W.size(); const std::size_t at = i; i += n; return b ? W.data() + at : nullptr; };
+             const std::uint32_t* p = Take(8);
+-            if (p == nullptr || (p[0] != derived_tag_v && p[0] != derived_tag7_v && p[0] != derived_tag6_v && p[0] != derived_tag5_v && p[0] != derived_tag3_v)) return false;
+-            const bool bPacked = p[0] == derived_tag_v || p[0] == derived_tag7_v || p[0] == derived_tag6_v;
++            if (p == nullptr || (p[0] != derived_tag_v && p[0] != derived_tag8_v && p[0] != derived_tag7_v && p[0] != derived_tag6_v && p[0] != derived_tag5_v && p[0] != derived_tag3_v)) return false;
++            const bool bPacked = p[0] == derived_tag_v || p[0] == derived_tag8_v || p[0] == derived_tag7_v || p[0] == derived_tag6_v;
++            const bool bCharts = p[0] == derived_tag_v && (p[1] & 2u) != 0;
+             const bool bTag3 = p[0] == derived_tag3_v;
+             const bool bLeak = (p[1] & 1u) != 0;
+             const std::uint32_t FirstPatch = p[2];
+@@ -1688,7 +1918,18 @@ namespace xlionrender::gi
+             if (!q) return false;
+             const std::uint32_t nOFirst = q[0], nO = q[1];
+             const std::uint32_t *pOF = Take(nOFirst), *pOV = Take(bTag3 ? 6 * std::size_t(nO) : std::size_t(nO));
+-            if (!pOF || !pOV || i != W.size()) return false;
++            if (!pOF || !pOV) return false;
++            std::vector<std::uint16_t> Charts;
++            if (bCharts)
++            {
++                const std::uint32_t* pn = Take(1);
++                if (!pn || *pn != m_Tris.size()) return false;                  // (made for other triangles)
++                const std::uint32_t* pc = Take((std::size_t(*pn) + 1) / 2);
++                if (!pc) return false;
++                Charts.resize(*pn);
++                for (std::size_t t = 0; t < Charts.size(); ++t) Charts[t] = std::uint16_t(pc[t / 2] >> (16 * (t & 1)));
++            }
++            if (i != W.size()) return false;
+             if (!bTag3) for (std::uint32_t k = 0; k < nO; ++k) if (pOV[k] >= m_Pos.size()) return false;     // (made for other vertices)
+             if (Nbs[0].m_First.size() != 0 && Nbs[0].m_First.size() != m_Levels[0].size() + 1) return false;       // made for other surfels
+             if (nOFirst != 0 && nOFirst != m_Levels[0].size() + 1) return false;
+@@ -1696,7 +1937,8 @@ namespace xlionrender::gi
+             m_ReadTable.resize(nTable);
+             for (std::uint32_t k = 0; k < nTable; ++k) m_ReadTable[k] = { pTable[4 * k], pTable[4 * k + 1], pTable[4 * k + 2], pTable[4 * k + 3] };
+             m_ReadList.assign(pList, pList + nList);
+-            if (bPacked) { auto T = m_ReadTable; auto L = m_ReadList; PackReadGrid(false, T, L, m_ReadTable, m_ReadList); }
++            m_bReadCharts = bCharts; m_TriChart = std::move(Charts);
++            if (bPacked) { auto T = m_ReadTable; auto L = m_ReadList; PackReadGrid(false, T, L, m_ReadTable, m_ReadList, bCharts); }
+             m_Neighbors = std::move(Nbs);
+             if (p[0] == derived_tag7_v)                                 // (GID7: f x c - the same neighbors, their weights made again)
+                 for (int Lv = 0; Lv < 2; ++Lv)
+@@ -1711,7 +1953,7 @@ namespace xlionrender::gi
+                             Nb.m_Weight[k] = c > 0 ? NeighborWeight(Nb.m_Weight[k] / c, c) : 0.0f;
+                         }
+                 }
+-            else if (p[0] != derived_tag_v) BuildNeighbors();          // (before GID7: a curved surface's surfels had no neighbors)
++            else if (p[0] != derived_tag_v && p[0] != derived_tag8_v) BuildNeighbors();          // (before GID7: a curved surface's surfels had no neighbors)
+             if (bTag3) BuildOrigins();                                  // (a GID3 resource: its origins made again from the vertex surfels, the same ones)
+             else { m_OriginFirst.assign(pOF, pOF + nOFirst); m_OriginVert.assign(pOV, pOV + nO); }
+             SortReadLists();
+@@ -1935,6 +2177,25 @@ namespace xlionrender::gi
+         std::span<const std::uint32_t> getGIDerived        () const noexcept { return m_Derived; }
+     };
+ 
++    // A GI buffer's clusters' first triangles (the renderer's per-pixel read: a pixel's triangle is its cluster's first + gl_PrimitiveID, in
++    // the buffer's own triangles - its charts', surfel_mesh::m_TriChart). Section < 0: the whole mesh's, the index buffer's; else a section's,
++    // the whole's triangles of its clusters in order (SectionGeometry), a cluster of another section 0xFFFFFFFF
++    template <class T_CLUSTERS> std::vector<std::uint32_t> ClusterFirstTriangles(const T_CLUSTERS& Clusters, std::span<const std::uint16_t> ClusterSection = {}, int Section = -1) noexcept
++    {
++        const std::size_t n = std::size(Clusters);
++        std::vector<std::uint32_t> Order(n), Out(n, 0xFFFFFFFFu);
++        for (std::uint32_t c = 0; c < n; ++c) Order[c] = c;
++        std::sort(Order.begin(), Order.end(), [&](std::uint32_t a, std::uint32_t b) { return Clusters[a].m_iIndex < Clusters[b].m_iIndex; });
++        std::uint32_t At = 0;
++        for (const std::uint32_t c : Order)
++        {
++            if (Section >= 0 && (c >= ClusterSection.size() || ClusterSection[c] != Section)) continue;
++            Out[c] = Section < 0 ? Clusters[c].m_iIndex / 3 : At;
++            At += Clusters[c].m_nIndices / 3;
++        }
++        return Out;
++    }
++
+     template <class T_GEOM> bool SurfelsFromXGeomStatic(surfel_mesh& M, const T_GEOM& Geom) noexcept
+     {
+         const auto Fine = Geom.getGISurfels(), Parents = Geom.getGIParents();
+@@ -2883,7 +3144,8 @@ namespace xlionrender::gi
+         //   mesh:     0 nVerts 1 pos 2 nrm 3 tris 4 vertSurfels (2 per uint, 0xFFFF none) 5 level0 (7 floats: center, normal, radius)
+         //             6 n0 7 level1 8 n1 9 parentOf 10 readTable (4 per entry) 11 its size 12 readList 13 readCell 14 originFirst
+         //             15 originPos 16 UVs (2 floats a vertex), then the triangles' material slots (none: no UVs) 17 leak protection 18..20 level 0's neighbor lists (first, index, weight: the shown
+-        //             light's filter; none) 21..23 level 1's 24, 25 per parent its children (first: n1 + 1, index: the re-level)
++        //             light's filter; none) 21..23 level 1's 24, 25 per parent its children (first: n1 + 1, index: the re-level) 26 the
++        //             triangles' charts (2 a word, surfel_mesh::m_TriChart: the read grid's charts' map; none: every read scored)
+         //   instance: 0 mesh 1 level 2 E 3 valid 4 moments (32 per surfel) 5..7 mean light 8..10 albedo 11 triAlbedo 12 surfAlbedo
+         //             13 surfEmission 14 see-through bits 15 meanScale 16..27 L2W rows 28..39 W2L rows 40 alive   (~0u: none)
+         //             G4 (the commit on the GPU): 41 fractions (9 per surfel) 42 estimators (gpu_est_v: PackEst) 43 moment counts (16)
+@@ -2896,7 +3158,7 @@ namespace xlionrender::gi
+         //             (5, 7, 8, 10..13: PackGPUSetup)
+         //   lights:   sun direction 3, sun color 3, sky 3, sky oct 48, then per point position 3, color 3, radius
+         // ponytail: the whole scene every call (G3 keeps it resident and uploads changes)
+-        static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 49, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 24;
++        static constexpr std::uint32_t gpu_mesh_v = 27, gpu_inst_v = 49, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 24;
+         static constexpr int gpu_mat_arrays_v = 6;                                                      // GPUMaterial's arrays and their record words
+         static constexpr std::uint32_t gpu_mat_words_v[gpu_mat_arrays_v] = { 11, 12, 13, 14, 45, 48 };
+         static constexpr int gpu_lanes_v = 8, gpu_group_v = 64;    // the pass: invocations per item, per group (a dispatch: GPUGroups)
+@@ -2985,6 +3247,13 @@ namespace xlionrender::gi
+                     H[24] = Words(First.data(), First.size());
+                     H[25] = Words(Index.data(), Index.size());
+                 }
++                if (M.m_bReadCharts && M.m_TriChart.size() == M.m_Tris.size() && surfel_mesh::GPUCharts())
++                {
++                    std::vector<std::uint32_t> Pairs((M.m_TriChart.size() + 1) / 2, 0u);
++                    for (std::size_t t = 0; t < M.m_TriChart.size(); ++t) Pairs[t / 2] |= std::uint32_t(M.m_TriChart[t]) << (16 * (t & 1));
++                    H[26] = Words(Pairs.data(), Pairs.size());
++                }
++                else H[26] = gpu_none_v;
+                 const std::uint32_t At = Words(H, gpu_mesh_v);
+                 Meshes[&M] = At;
+                 return At;
+@@ -3587,7 +3856,7 @@ namespace xlionrender::gi
+             const auto& I = m_Instances[H.m_Inst]; const auto& M = *I.m_pMesh; const auto& T = M.m_Tris[H.m_Tri];
+             const float B[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
+             if (M.m_bLeakProtection && !M.m_ReadTable.empty()) return ReadPoint(H.m_Inst, M.m_Pos[T[0]] * B[0] + M.m_Pos[T[1]] * B[1] + M.m_Pos[T[2]] * B[2]
+-                                                       , (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy());
++                                                       , (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy(), M.TriChart(H.m_Tri));
+             v3 Sum{ 0, 0, 0 }; float W = 0;
+             const std::size_t Cap0 = m_pReadCapture ? m_pReadCapture->size() : 0;
+             for (int k = 0; k < 3; ++k)
+@@ -3605,13 +3874,13 @@ namespace xlionrender::gi
+         // The surfels a point of an instance's surface (mesh space, its face's normal) reads: the read grid's patch for it and the weights of
+         // the GPU's per-pixel read (shaders/xlionrender_surfel_gi.glsl SurfelGIList: falloff, normal, corner weights, validity, depth
+         // moments) - the one support the solver's rays and the pixels share. The solver reads the unfiltered light (the pixels the filtered)
+-        query ReadPoint(int Id, const v3& P, const v3& N) const noexcept
++        query ReadPoint(int Id, const v3& P, const v3& N, std::uint16_t Chart = surfel_mesh::chart_none_v) const noexcept
+         {
+             // Every ray's hit: plain floats and raw pointers (a Debug build calls every v3 operator), the cheap terms first, the corner blend
+             // once (it is the same for every entry: ReadEntryWeight's), the moments' test last and only for what is still in
+             const auto& I = m_Instances[Id]; const auto& M = *I.m_pMesh;
+             v3 PatchN = N;
+-            const auto List = M.ReadCellList(P, N, &PatchN);
++            const auto List = M.ReadCellList(P, N, &PatchN, Chart);
+             if (List.empty()) return {};
+             const float Cell = M.m_ReadCell;
+             const float Lp[3] = { (P.m_X + N.m_X * (surfel_mesh::read_lift_v * Cell)) / Cell, (P.m_Y + N.m_Y * (surfel_mesh::read_lift_v * Cell)) / Cell, (P.m_Z + N.m_Z * (surfel_mesh::read_lift_v * Cell)) / Cell };
+@@ -3674,7 +3943,7 @@ namespace xlionrender::gi
+             const float B[3] = { 1 - H.m_U - H.m_V, H.m_U, H.m_V };
+             const v3 P = M.m_Pos[T[0]] * B[0] + M.m_Pos[T[1]] * B[1] + M.m_Pos[T[2]] * B[2];
+             const v3 N = (M.m_Pos[T[1]] - M.m_Pos[T[0]]).Cross(M.m_Pos[T[2]] - M.m_Pos[T[0]]).NormalizeCopy();
+-            const auto List = M.ReadCellList(P, N);
++            const auto List = M.ReadCellList(P, N, nullptr, M.TriChart(H.m_Tri));
+             float Sx = 0, Sy = 0, Sz = 0, W = 0;
+             for (std::size_t i = 0; i < std::min<std::size_t>(List.size(), fallback_cap_v); ++i)
+             {
+diff --git a/src/features/gi/xlionrender_surfel_gi_chunks.h b/src/features/gi/xlionrender_surfel_gi_chunks.h
+index d424643..abde67d 100644
+--- a/src/features/gi/xlionrender_surfel_gi_chunks.h
++++ b/src/features/gi/xlionrender_surfel_gi_chunks.h
+@@ -505,6 +505,7 @@ namespace xlionrender::gi
+             std::printf("GI section %zu: its packed structures (%u words) do not fit it (%zu surfels, %zu vertices): made again\n", k, R.m_nDerived, C.m_Levels[0].size(), C.m_Pos.size()); std::fflush(stdout);
+             C.BuildNeighbors();
+         }
++        if (std::getenv("XLION_GI_REGRID")) C.BuildReadGrid();     // measurement: the grid rebuilt at load (as SurfelsFromXGeomStatic), no recompile
+         if (pVMap) *pVMap = std::move(VMap);
+         return true;
+     }
+diff --git a/src/plans/forward/xlionrender_plan_forward.cpp b/src/plans/forward/xlionrender_plan_forward.cpp
+index b017867..48eb858 100644
+--- a/src/plans/forward/xlionrender_plan_forward.cpp
++++ b/src/plans/forward/xlionrender_plan_forward.cpp
+@@ -618,6 +618,8 @@ namespace xlionrender
+                     if( s_Px.find("pixel_nomoments") != std::string::npos ) DrawGI.second |= 0x4000u;
+                     if( s_Px.find("pixel_nolocal") != std::string::npos )   DrawGI.second |= 0x8000u;     // (mb_standard_pbr.frag: no SurfelGILocalMean)
+                     if( s_Px.find("pixel_nocorners") != std::string::npos ) DrawGI.second |= 0x01000000u; // (the per-pixel read without its corner weights)
++                    if( s_Px.find("pixel_lookuponly") != std::string::npos ) DrawGI.second |= 0x02000000u; // (the per-pixel read's cell lookup alone: then unsupported)
++                    if( s_Px.find("pixel_nolookup") != std::string::npos )  DrawGI.second |= 0x04000000u; // (the per-pixel read unsupported at once)
+                     if( s_Px.find("pixel_none") != std::string::npos )      DrawGI = { 0u, 0xFFFFFFFFu };
+                     static const std::uint32_t s_Cap = [] { const char* p = std::getenv("XLION_GI_PIXEL_CAP"); return p ? std::uint32_t(std::clamp(std::atoi(p), 0, 255)) : 0u; }();
+                     if( s_Cap && DrawGI.second != 0xFFFFFFFFu ) DrawGI.second |= s_Cap << 16;     // (xlionrender_surfel_gi.glsl GIPixelCap)
+diff --git a/src/shaders/mb_standard_pbr.frag b/src/shaders/mb_standard_pbr.frag
+index 922dd8a..c164a2d 100644
+--- a/src/shaders/mb_standard_pbr.frag
++++ b/src/shaders/mb_standard_pbr.frag
+@@ -328,6 +328,7 @@ void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in cons
+ 		g_GIMoments = (GIRef.y & gi_no_moments_v) == 0u;
+ 		g_GIPixelCap = GIPixelCap(GIRef.y);
+ 		g_GINoCorners = (GIRef.y & 0x01000000u) != 0u;
++		g_GIAblateLookup = (GIRef.y >> 25u) & 3u;
+ 		// The reflection direction in mesh space (through the two tangent frames: the world's and the mesh's), for the rough reflection's read
+ 		{
+ 			const vec3 Rw = reflect(-V, N), Tw = normalize(In.Tangent.xyz - In.Normal.xyz * dot(In.Normal.xyz, In.Tangent.xyz)), Nw = normalize(In.Normal.xyz), Bw = In.Tangent.w * cross(Nw, Tw);
+diff --git a/src/shaders/xlionrender_gi_pass_common.glsl b/src/shaders/xlionrender_gi_pass_common.glsl
+index fd7f43e..caeee40 100644
+--- a/src/shaders/xlionrender_gi_pass_common.glsl
++++ b/src/shaders/xlionrender_gi_pass_common.glsl
+@@ -245,13 +245,34 @@ uint ListEntry(uint At, uint Code, uint i)
+     const uint h = i - nF, w = GD[At + nF + (h >> 1u)];
+     return ((h & 1u) == 0u ? (w & 0xFFFFu) : (w >> 16u)) | 0xFFFF0000u;
+ }
+-// surfel_mesh::ReadCellList: the patch of P's cell that matches it best; its list (First, Count) and its normal. false: none
++// The chart of a hit's triangle (surfel_mesh::TriChart; the mesh's word 26, 0xFFFF: none): Indirect and Unsupported set g_ReadChart for
++// ReadCellList
++uint g_ReadChart = 0xFFFFu;
++uint TriChart(uint M, int Tri) { const uint c = GD[M + 26u]; return c == 0xFFFFFFFFu ? 0xFFFFu : (GD[c + uint(Tri) / 2u] >> (16u * (uint(Tri) & 1u))) & 0xFFFFu; }
++// surfel_mesh::ReadCellList: the patch of P's cell that matches it best - its chart's part when the cell's charts' map names one
++// (g_ReadChart) -; its list (First, Count) and its normal. false: none
+ bool ReadCellList(uint M, vec3 P, vec3 N, out uint First, out uint Count, out vec3 PatchN)
+ {
+     First = 0u; Count = 0u; PatchN = N;
+     const int h = ReadEntry(M, P, N);
+     if (h < 0) return false;
+     const uint Tb = GD[M + 10u] + 4u * uint(h), Lb = GD[M + 12u];
++    if (g_ReadChart != 0xFFFFu && GD[M + 26u] != 0xFFFFFFFFu)
++    {
++        const uint Mp = Lb + GD[Tb + 2u] + 4u * GD[Tb + 3u] + 1u;     // (after the cell's part headers: the count, then chart | part << 16, in chart order)
++        uint lo = 0u, hi = GD[Mp - 1u];
++        while (lo < hi) { const uint m = (lo + hi) >> 1; if ((GD[Mp + m] & 0xFFFFu) < g_ReadChart) lo = m + 1u; else hi = m; }
++        const uint w = lo < GD[Mp - 1u] ? GD[Mp + lo] : 0u;
++        const uint Part = w >> 16;
++        if ((w & 0xFFFFu) == g_ReadChart && Part < GD[Tb + 3u])         // (ambiguous: scored)
++        {
++            const uint Pa = Lb + GD[Tb + 2u] + 4u * Part;
++            bool bOk;
++            PatchN = UnpackOct(GD[Pa], bOk);
++            First = GD[Pa + 2u]; Count = GD[Pa + 3u] & 0xFFFFu;
++            return true;
++        }
++    }
+     const float Cell = GF(M + 13u), iCell = 1.0 / Cell;
+     const vec3 Lp = (P + N * (0.05 * Cell)) * iCell;
+     const vec3 Fr = Lp - floor(Lp);
+@@ -362,6 +383,7 @@ bool Indirect(int Id, int Tri, float U, float V, out vec3 E)
+     if (GD[M + 17u] != 0u && GD[M + 11u] != 0u)
+     {
+         const vec3 P0 = MPos(M, T.x), P1 = MPos(M, T.y), P2 = MPos(M, T.z);
++        g_ReadChart = TriChart(M, Tri);
+         return ReadPoint(Id, P0 * B[0] + P1 * B[1] + P2 * B[2], normalize(cross(P1 - P0, P2 - P0)), E);
+     }
+     vec3 Sum = vec3(0); float W = 0.0;
+@@ -391,6 +413,7 @@ vec3 Unsupported(int Id, int Tri, float U, float V)
+     const vec3 P0 = MPos(M, T.x), P1 = MPos(M, T.y), P2 = MPos(M, T.z);
+     const vec3 P = P0 * B[0] + P1 * B[1] + P2 * B[2], N = normalize(cross(P1 - P0, P2 - P0));
+     uint First, Count; vec3 PatchN;
++    g_ReadChart = TriChart(M, Tri);
+     if (!ReadCellList(M, P, N, First, Count, PatchN)) { g_ReadTier = 0u; return Mean; }          // the patch that matches the surface (world::Unsupported's twin)
+     const uint Lb = GD[M + 12u];
+     const uint nLight = GD[M + 6u + 2u * Level];
+diff --git a/src/shaders/xlionrender_gi_screen_frag.glsl b/src/shaders/xlionrender_gi_screen_frag.glsl
+index 2e77800..5a5e1b3 100644
+--- a/src/shaders/xlionrender_gi_screen_frag.glsl
++++ b/src/shaders/xlionrender_gi_screen_frag.glsl
+@@ -17,6 +17,7 @@
+ layout(early_fragment_tests) in;             // (only the nearest surface writes: the depth was laid first, this pass tests equal)
+ layout(std430, set = 1, binding = 11) buffer GIScreenBuffer { uvec4 GIScreen[]; };
+ layout(std430, set = 1, binding = 13) readonly buffer GIScreenPrevBuffer { uvec4 GIScreenPrev[]; };
++layout(location = 15) flat in uint InGICluster;     // (xlionrender_static_geom_body.glsl: the pixel's chart, GIPixelChart)
+ 
+ const uint screen_header_v  = 8u;
+ const uint screen_max_age_v = 3u;
+@@ -78,6 +79,8 @@ void main()
+     if (Kind != 1u)
+     {
+         const vec3 V = normalize(UBOLight.wSpaceEyePos.xyz - In.wSpacePosition.xyz);
++        g_GIChart = GIPixelChart(InGICluster, uint(gl_PrimitiveID));      // (the read finds its part by it: no scoring)
++        g_GITri   = GITriangleOf(InGICluster, uint(gl_PrimitiveID));      // (... or by its triangle: no lookup at all)
+         GIPixelGI(vec3(0.0, 0.0, 1.0), N, V, vec3(1.0), 0.0, vec3(0.0));
+         const bool  bE = g_GI.w > 0.5, bR = g_GIRefl.w > 0.5;
+         const vec3  E = bE ? g_GI.rgb : vec3(0.0), R = bR ? g_GIRefl.rgb : vec3(0.0);
+diff --git a/src/shaders/xlionrender_static_geom_body.glsl b/src/shaders/xlionrender_static_geom_body.glsl
+index 1bf0cda..3007ee8 100644
+--- a/src/shaders/xlionrender_static_geom_body.glsl
++++ b/src/shaders/xlionrender_static_geom_body.glsl
+@@ -38,6 +38,7 @@ layout(location = 11) out vec3 OutGINormal;         //   normal,
+ layout(location = 12) flat out uvec2 OutGIRef;      //   the first surfel in GILight, the GI level (xlionrender_surfel_gi.glsl gi_none_v: none)
+ layout(location = 13) out vec4 OutGITangent;        //   and the tangent (w: the binormal's sign): the normal-mapped normal in mesh space
+ layout(location = 14) out vec4 OutPrevClip;         // last frame's clip position (the screen tail's motion: the G-buffer variants read it; w 0: none)
++layout(location = 15) flat out uint OutGICluster;   // the cluster (the half-size GI read's pixel chart: GIPixelChart; the materials do not read it)
+ 
+ #ifdef XLION_GI
+ #include "xlionrender_surfel_gi.glsl"
+@@ -136,6 +137,7 @@ void main()
+     OutGIRef    = uvec2(0u, 0xFFFFFFFFu);
+ #endif
+     OutGIPos    = OutGIRef.y == 0xFFFFFFFEu ? Out.wSpacePosition.xyz : VertData.LocalPos.xyz;     // (the probe grid's read: the eye's world)
++    OutGICluster = push.clusterIndex;
+     OutGINormal = VertData.Normal.xyz;
+     OutGITangent = VertData.Tangent;
+ }
+diff --git a/src/shaders/xlionrender_surfel_gi.glsl b/src/shaders/xlionrender_surfel_gi.glsl
+index c4e4c7d..4b3a05f 100644
+--- a/src/shaders/xlionrender_surfel_gi.glsl
++++ b/src/shaders/xlionrender_surfel_gi.glsl
+@@ -34,6 +34,7 @@ bool       g_GIMoments           = true;        // GIVisibility's moment test (t
+ const uint gi_pixel_cap_v = 32u;
+ uint       g_GIPixelCap   = gi_pixel_cap_v;
+ bool       g_GINoCorners  = false;      // measurement (XLION_GI_ABLATE=pixel_nocorners, GI reference bit 24): the per-pixel read without the corner weights
++uint       g_GIAblateLookup = 0u;       // measurement (XLION_GI_ABLATE=pixel_lookuponly / pixel_nolookup, bits 25-26): 1 the cell lookup alone, 2 none
+ uint GIPixelCap(in const uint Ref) { const uint c = (Ref >> 16u) & 0xFFu; return c == 0u ? gi_pixel_cap_v : c == 255u ? 0xFFFFFFFFu : c; }
+ uint GIDebugCode(in const uint Ref) { return Ref == gi_none_v ? 0u : ((Ref >> gi_debug_shift_v) & 3u) | ((Ref >> 10u) & 0x4u); }    // scene::gi_debug
+ 
+@@ -124,6 +125,25 @@ float GIMaskDistance(in const vec3 P, in const vec3 N, in const vec3 PatchN, in
+     }
+     return Best;
+ }
++// The pixel's chart (its triangle's, GIPixelChart: the read grid's charts' map names its part in its cell; 0xFFFF: none, every part scored)
++uint g_GIChart = 0xFFFFu;
++uint g_GITri   = 0xFFFFFFFFu;       // the pixel's triangle (GITriangleOf): direct addressing, its cell's part (surfel_mesh::m_TriRead)
++// GIMesh[7]'s triangles' table (instance's PackMeshGI): the clusters' count n, per cluster its first triangle, the colors' and the charts'
++// first words (0: none). A pixel's triangle: its cluster's first + gl_PrimitiveID
++uint GITriangleOf(in const uint Cluster, in const uint Primitive)
++{
++    const uint t = GIMesh[7];
++    if (t == 0u || Cluster >= GIMesh[t]) return 0xFFFFFFFFu;
++    const uint f = GIMesh[t + 1u + Cluster];
++    return f == 0xFFFFFFFFu ? f : f + Primitive;
++}
++uint GIPixelChart(in const uint Cluster, in const uint Primitive)
++{
++    const uint Tri = GITriangleOf(Cluster, Primitive);
++    if (Tri == 0xFFFFFFFFu) return 0xFFFFu;
++    const uint c = GIMesh[GIMesh[7] + 2u + GIMesh[GIMesh[7]]];
++    return c == 0u ? 0xFFFFu : (GIMesh[c + Tri / 2u] >> (16u * (Tri & 1u))) & 0xFFFFu;
++}
+ bool GIReadCellLookup(in const vec3 P, in const vec3 N, out uint First, out uint Count, out vec3 PatchN, out uint Patches, out uint nPatches)
+ {
+     First = 0u; Count = 0u; PatchN = N; Patches = 0u; nPatches = 0u;
+@@ -134,6 +154,20 @@ bool GIReadCellLookup(in const vec3 P, in const vec3 N, out uint First, out uint
+     const uvec3 U     = uvec3(C) & 0x1FFFFFu;                       // surfel_grid::Key: 21 bits per axis
+     const uint  KeyLo = U.z | (U.y << 21);
+     const uint  KeyHi = (U.y >> 11) | (U.x << 10);
++    if (g_GITri < 0xFFFFFFFEu)          // direct addressing: the triangle's cells, the one that is the point's (surfel_mesh::ReadCellList's Tri)
++    {
++        const uint t = GIMesh[7], n = GIMesh[t], Tr = GIMesh[t + 3u + n], Te = GIMesh[t + 4u + n];
++        const uint w = Tr == 0u ? 0u : GIMesh[Tr + g_GITri];
++        for (uint k = 0u; k < (w & 7u); ++k)
++        {
++            const uint en = GIMesh[Te + (w >> 3) + k], ed = GIMesh[2] + 4u * (en & 0x3FFFFFu);
++            if (GIMesh[ed] != KeyLo || GIMesh[ed + 1u] != KeyHi) continue;
++            Patches = GIMesh[5] + GIMesh[ed + 2u]; nPatches = GIMesh[ed + 3u];
++            const uint a = Patches + 4u * (en >> 22);
++            First = GIMesh[a + 2u]; Count = GIMesh[a + 3u] & 0xFFFFu; PatchN = GIOctDecode(unpackSnorm2x16(GIMesh[a]));
++            return true;
++        }
++    }
+     uint h = ((uint(C.x) * 73856093u) ^ (uint(C.y) * 19349663u) ^ (uint(C.z) * 83492791u)) & Mask;
+     for (uint n = 0u; n < GIMesh[6]; ++n, h = (h + 1u) & Mask)        // [6]: the table's longest probe
+     {
+@@ -143,6 +177,19 @@ bool GIReadCellLookup(in const vec3 P, in const vec3 N, out uint First, out uint
+         // the cell's patch that matches the point best (surfel_mesh::ReadCellList): the one whose sub-cells hold it first (a wall across
+         // the cell splits its floor in two: the point's own side), then facing its way, then nearest its plane. Word 3: count | mask << 16
+         Patches = GIMesh[5] + GIMesh[e + 2u]; nPatches = GIMesh[e + 3u];
++        if (g_GIChart != 0xFFFFu)           // its chart's part (surfel_mesh::ReadCellList): the cell's charts' map, after its part headers
++        {
++            const uint Mp = Patches + 4u * nPatches + 1u;                 // (in chart order: a binary search)
++            uint lo = 0u, hi = GIMesh[Mp - 1u];
++            while (lo < hi) { const uint m = (lo + hi) >> 1; if ((GIMesh[Mp + m] & 0xFFFFu) < g_GIChart) lo = m + 1u; else hi = m; }
++            const uint w = lo < GIMesh[Mp - 1u] ? GIMesh[Mp + lo] : 0u;
++            if ((w & 0xFFFFu) == g_GIChart && (w >> 16) < nPatches)       // (ambiguous: scored)
++            {
++                const uint a = Patches + 4u * (w >> 16);
++                First = GIMesh[a + 2u]; Count = GIMesh[a + 3u] & 0xFFFFu; PatchN = GIOctDecode(unpackSnorm2x16(GIMesh[a]));
++                return true;
++            }
++        }
+         float Best = -1e30;
+         for (uint p = 0u; p < GIMesh[e + 3u]; ++p)
+         {
+@@ -234,9 +281,10 @@ vec3 SurfelGIWhyUnsupported(in const vec3 P, in const vec3 N, in const uint Ligh
+ bool SurfelGIIsPatch(in const uint s) { return s != 0xFFFFFFFFu && (GIMesh[GIMesh[0] + 8u * s + 7u] >> 31u) != 0u; }     // (PatchDefects: COVERAGE's yellow)
+ vec3 SurfelGITriangleColor(in const uint Cluster, in const uint Primitive)
+ {
+-    const uint t = GIMesh[7];
+-    if (t == 0u || Cluster >= GIMesh[t]) return vec3(0.0);
+-    return unpackUnorm4x8(GIMesh[t + 1u + GIMesh[t] + GIMesh[t + 1u + Cluster] + Primitive]).rgb;
++    const uint Tri = GITriangleOf(Cluster, Primitive);
++    if (Tri == 0xFFFFFFFFu) return vec3(0.0);
++    const uint c = GIMesh[GIMesh[7] + 1u + GIMesh[GIMesh[7]]];
++    return c == 0u ? vec3(0.0) : unpackUnorm4x8(GIMesh[c + Tri]).rgb;
+ }
+ vec3 SurfelDebugColor(in const uint s)
+ {
+@@ -366,7 +414,9 @@ GIQueryResult SurfelGIQuery(in const vec3 P, in const vec3 N, in const vec3 Nmap
+     uint First, Count, Patches, nPatches;
+     vec3 PatchN;
+     GIQueryResult R = GIQueryResult(vec3(0.0), 0.0, false);
++    if (g_GIAblateLookup == 2u) { R.bSupported = true; R.Confidence = 1.0; return R; }     // (both: supported, black - the same path after)
+     if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches)) return R;
++    if (g_GIAblateLookup == 1u) { R.bSupported = true; R.Confidence = 1.0; R.Irradiance = vec3(float(First & 1u) * 1e-30); return R; }     // (First used: the lookup kept)
+     vec4 Relaxed;
+     vec4 Sum = SurfelGIList(P, N, Nmap, LightOffset, Level, First, Count, PatchN, Relaxed);
+     // The moments' test rejects every surfel (next to a wall's foot: their rays met the wall just past the point): its own surfels without
+diff --git a/src/tests/xlionrender_test_surfel_gi.cpp b/src/tests/xlionrender_test_surfel_gi.cpp
+index ebc27e3..1a47ced 100644
+--- a/src/tests/xlionrender_test_surfel_gi.cpp
++++ b/src/tests/xlionrender_test_surfel_gi.cpp
+@@ -39,6 +39,63 @@ namespace
+         }
+     }
+ 
++    // The chart lookup against the scoring (work order 4, test 6s): random points of every triangle (the face's normal, a hair off the
++    // surface as the pixels'), each looked up by its triangle's chart (ReadCellList's Chart) and by scoring every part of its cell. Per point
++    // the same list or not, and how the chart path went (surfel_mesh::read_how). Where they differ, how far the scored part's normal is from
++    // the point's face (the scoring's pick was another surface's: the chart's is the right one)
++    struct chart_check { int m_nPoints = 0, m_nSame = 0, m_How[5] = {}, m_nDiffFar = 0; float m_DiffMinAngle = 180; double m_FieldDiff = 0, m_FieldMax = 0, m_ErrScored = 0, m_ErrChart = 0; int m_nRead = 0, m_nAll = 0; };
++    chart_check ChartLookup(const surfel_mesh& M, int PerTriangle = 8)
++    {
++        chart_check Out;
++        rng R(0xC4A7u);
++        for (std::size_t t = 0; t < M.m_Tris.size(); ++t)
++        {
++            const auto& T = M.m_Tris[t];
++            const v3 A = M.m_Pos[T[0]], B = M.m_Pos[T[1]], C = M.m_Pos[T[2]];
++            v3 F = (B - A).Cross(C - A);
++            if (F.Length() < 1e-12f) continue;
++            const v3 Ns = M.m_Nrm[T[0]] + M.m_Nrm[T[1]] + M.m_Nrm[T[2]];
++            const v3 N = (F.Dot(Ns) < 0 ? F * -1.0f : F).NormalizeCopy();
++            for (int k = 0; k < PerTriangle; ++k)
++            {
++                float u = R.Next(), v = R.Next();
++                if (u + v > 1) { u = 1 - u; v = 1 - v; }
++                const v3 P = A + (B - A) * u + (C - A) * v;
++                v3 Ns0 = N, Ns1 = N;
++                int How = 0;
++                const auto L0 = M.ReadCellList(P, N, &Ns0);
++                const auto L1 = M.ReadCellList(P, N, &Ns1, M.TriChart(int(t)), &How, int(t));       // (its triangle: direct addressing first)
++                ++Out.m_nPoints; ++Out.m_How[How];
++                // what each reads of a smooth field (the read's weights: kernel, normal, corners), and how far each is from the field at P
++                const auto Read = [&](std::span<const std::uint32_t> L, const v3& Pn)
++                {
++                    double S = 0, W = 0;
++                    for (const auto e : L)
++                    {
++                        const auto& Sf = M.m_Levels[0][surfel_mesh::ReadEntrySurfel(e)];
++                        const float c = Sf.m_Normal.Dot(N), f = 1.0f - (P - Sf.m_Center).Length() / (2 * Sf.m_Radius);
++                        if (c < 0.5f || f <= 0) continue;
++                        const double w = double(ReadKernel(f)) * c * M.ReadEntryWeight(e, P, N, Pn);
++                        S += w * (2.0 + Sf.m_Center.m_X + 0.5 * Sf.m_Center.m_Y - 0.7 * Sf.m_Center.m_Z); W += w;
++                    }
++                    return W > 1e-9 ? S / W : -1.0;
++                };
++                const double a = Read(L0, Ns0), b = Read(L1, Ns1), g = 2.0 + P.m_X + 0.5 * P.m_Y - 0.7 * P.m_Z;     // (g: the field itself at P)
++                if (a > 0 && b > 0) { Out.m_ErrScored += std::abs(a - g) / g; Out.m_ErrChart += std::abs(b - g) / g; ++Out.m_nAll; }
++                if (L0.data() == L1.data() && L0.size() == L1.size()) { ++Out.m_nSame; continue; }
++                if (a > 0 && b > 0)
++                {
++                    const double d = std::abs(a - b) / std::max(a, 1e-3);
++                    Out.m_FieldDiff += d; Out.m_FieldMax = std::max(Out.m_FieldMax, d); ++Out.m_nRead;
++                }
++                const float Ang = std::acos(std::clamp(Ns0.Dot(N), -1.0f, 1.0f)) * 57.2958f;
++                Out.m_DiffMinAngle = std::min(Out.m_DiffMinAngle, Ang);
++                Out.m_nDiffFar += Ang > 25.0f;
++            }
++        }
++        return Out;
++    }
++
+     // A box of size S centered on the origin (outward faces)
+     surfel_mesh Box(v3 S, float Split)
+     {
+@@ -598,6 +655,72 @@ int main()
+         }
+     }
+ 
++    // 6s. The read grid keyed by chart (gi_surfel_reconstruction_proposal.md v2.1, work order 4; surfel_mesh::BuildCharts): the charts of
++    //     simple shapes, then on each test surface the chart lookup against the scoring of every part of the cell (ChartLookup) - the same
++    //     part where the scoring found the point's own surface; a different one only where the scoring picked another surface
++    {
++        surfel_mesh Room;                                                                       // (6a's: a floor, a thin wall across it)
++        AddQuad(Room, { -2, 0, -2 }, { 0, 0, 4 }, { 4, 0, 0 }, 0.5f);
++        AddQuad(Room, { 0.1f, 0, -2 }, { 0, 1.5f, 0 }, { 0, 0, 4 }, 0.25f);
++        AddQuad(Room, { 0.2f, 0, -2 }, { 0, 0, 4 }, { 0, 1.5f, 0 }, 0.25f);
++        AddQuad(Room, { 0.1f, 1.5f, -2 }, { 0.1f, 0, 0 }, { 0, 0, 4 }, 0.25f);
++        Room.Bake(0.3f, 0.9f);
++        Room.BuildReadGrid();
++        surfel_mesh Cube = Box({ 1, 1, 1 }, 0.25f);
++        Cube.Bake(0.15f, 0.45f);
++        Cube.BuildReadGrid();
++        surfel_mesh Ball;
++        constexpr int rings_v = 32, segs_v = 48;
++        for (int j = 0; j <= rings_v; ++j)
++            for (int i = 0; i <= segs_v; ++i)
++            {
++                const float th = 3.14159265f * j / rings_v, ph = 6.28318531f * i / segs_v;
++                const v3 n{ std::sin(th) * std::cos(ph), std::cos(th), std::sin(th) * std::sin(ph) };
++                Ball.m_Pos.push_back(n * 0.25f); Ball.m_Nrm.push_back(n);
++            }
++        for (int j = 0; j < rings_v; ++j)
++            for (int i = 0; i < segs_v; ++i)
++            {
++                const int a = j * (segs_v + 1) + i, b = a + 1, c = a + segs_v + 1, d = c + 1;
++                Ball.m_Tris.push_back({ a, b, c }); Ball.m_Tris.push_back({ b, d, c });
++            }
++        Ball.Bake(0.125f, 0.375f);
++        Ball.BuildReadGrid();
++        surfel_mesh Blinds;                                                                     // (6n's)
++        for (int i = 0; i < 30; ++i) AddQuad(Blinds, { -0.5f, 0.035f * i, 0 }, { 1, 0, 0 }, { 0, 0.04f * 0.966f, -0.04f * 0.259f }, 0.05f);
++        AddQuad(Blinds, { -0.6f, -0.05f, -0.1f }, { 0, 1.2f, 0 }, { 1.2f, 0, 0 }, 0.2f);      // + the window frame 10 cm behind them
++        Blinds.Bake(0.1f, 0.3f);
++        Blinds.BuildReadGrid();
++        std::printf("charts: the room %u (a floor, a wall's 2 faces and its top), a box %u, a 25 cm sphere %u, 30 slats and a frame %u\n",
++                    Room.m_nCharts, Cube.m_nCharts, Ball.m_nCharts, Blinds.m_nCharts);
++        CHECK(Room.m_nCharts == 4 && Cube.m_nCharts == 6 && Blinds.m_nCharts == 31, "the charts of simple shapes (room %u, box %u, blinds %u)", Room.m_nCharts, Cube.m_nCharts, Blinds.m_nCharts);
++        CHECK(Ball.m_nCharts >= 7 && Ball.m_nCharts <= 100, "a sphere in %u charts", Ball.m_nCharts);     // (45 degree caps: 7 at the least; grown greedily, more)
++        for (const auto& [pM, Name] : { std::pair{ &Room, "room" }, std::pair{ &Cube, "box" }, std::pair{ &Ball, "sphere" }, std::pair{ &Blinds, "blinds" } })
++        {
++            const auto C = ChartLookup(*pM);
++            std::printf("chart lookup (%s): %d points, %.2f%% the scoring's part; by its triangle %d, the chart's part %d, ambiguous %d, missing %d; differing: %d past 25 degrees from the scored part, "
++                        "a smooth field read %.3f%% apart on average, %.2f%% at most; off the field (every point) %.3f%% by the chart, %.3f%% by the scoring; direct words %zu for %zu triangles\n",
++                        Name, C.m_nPoints, 100.0 * C.m_nSame / std::max(1, C.m_nPoints), C.m_How[4], C.m_How[1], C.m_How[2], C.m_How[3], C.m_nDiffFar,
++                        100.0 * C.m_FieldDiff / std::max(1, C.m_nRead), 100.0 * C.m_FieldMax, 100.0 * C.m_ErrChart / std::max(1, C.m_nAll), 100.0 * C.m_ErrScored / std::max(1, C.m_nAll),
++                        pM->m_TriRead.size() + pM->m_TriReadEntries.size(), pM->m_Tris.size());
++            CHECK(pM->m_bReadCharts, "the %s's grid is not keyed by chart", Name);
++            CHECK(C.m_How[3] * 50 <= C.m_nPoints, "the %s: %d of %d points' charts have no part in their cell", Name, C.m_How[3], C.m_nPoints);     // (they are scored: a cost, not an error)
++            // over every point the chart lookup reads the field about as well as the scoring (within 10%: the sphere's triangles read their own patch, 0.900% against
++            // 0.824% - the scoring picks a neighbor patch whose plane passes nearer), and never a part 25 degrees off the point's face
++            CHECK(C.m_nDiffFar == 0 && C.m_ErrChart <= 1.10 * C.m_ErrScored + 1e-9, "the %s: the chart lookup reads worse than the scoring (%.3f%% against %.3f%% off a smooth field, %d parts past 25 degrees)",
++                  Name, 100.0 * C.m_ErrChart / std::max(1, C.m_nAll), 100.0 * C.m_ErrScored / std::max(1, C.m_nAll), C.m_nDiffFar);
++            CHECK(C.m_nSame * 100 >= 60 * C.m_nPoints, "the %s: the chart lookup is the scoring's at %d of %d points", Name, C.m_nSame, C.m_nPoints);
++        }
++        // the derived block keeps the charts (GID9): packed and unpacked, the same grid and triangles' charts
++        {
++            surfel_mesh Copy = Room;
++            Copy.m_ReadTable.clear(); Copy.m_ReadList.clear(); Copy.m_TriChart.clear(); Copy.m_bReadCharts = false;
++            const bool bOk = Copy.UnpackDerived(Room.PackDerived());
++            CHECK(bOk && Copy.m_bReadCharts && Copy.m_TriChart == Room.m_TriChart && Copy.m_ReadTable == Room.m_ReadTable && Copy.m_ReadList == Room.m_ReadList,
++                  "the derived block lost the charts (unpacked %d, charts %d)", int(bOk), int(Copy.m_bReadCharts));
++        }
++    }
++
+     // 6n. Closed blinds (slats stacked tighter than a surfel, each tilted): the slats block the line along the surface between their
+     //     surfels, but lifted off it they see each other - the spatial filter blends them (else each keeps its own slat's shadowing: blotches)
+     {
+@@ -1277,8 +1400,8 @@ int main()
+         for (auto* X : { &B, &M })
+         {
+             std::vector<std::array<std::uint32_t, 4>> PT, UT; std::vector<std::uint32_t> PL, UL;
+-            surfel_mesh::PackReadGrid(true, X->m_ReadTable, X->m_ReadList, PT, PL);
+-            surfel_mesh::PackReadGrid(false, PT, PL, UT, UL);
++            surfel_mesh::PackReadGrid(true, X->m_ReadTable, X->m_ReadList, PT, PL, X->m_bReadCharts);
++            surfel_mesh::PackReadGrid(false, PT, PL, UT, UL, X->m_bReadCharts);
+             std::size_t nAllSeen = 0;
+             for (const auto& E : X->m_ReadTable) if (E[1] != 0xFFFFFFFFu) for (std::uint32_t p = 0; p < E[3]; ++p)
+             {
+diff --git a/src/xlionrender_instance.cpp b/src/xlionrender_instance.cpp
+index 8727aca..73f496d 100644
+--- a/src/xlionrender_instance.cpp
++++ b/src/xlionrender_instance.cpp
+@@ -949,8 +949,10 @@ namespace xlionrender
+ 
+     // The layout of shaders/xlionrender_surfel_gi.glsl: a header of 8 uints ([0] level 0 surfels, [1] level 1 surfels, [2] the read grid's
+     // table, [3] its mask (0: none), [4] its cell (float bits), [5] its lists, [6] its longest probe), per vertex 2 uints, the surfels, the
+-    // grid. [7]: the triangles' colors (0: none), the SURFACE_COLOR view's: the clusters' count, each cluster's first triangle, a color
+-    // per triangle (unorm 4x8) - a pixel's triangle is its cluster's first + gl_PrimitiveID. Pure: a worker can pack it (no colors)
++    // grid. [7]: the triangles' table (0: none): the clusters' count n, each cluster's first triangle (gi::ClusterFirstTriangles; 0xFFFFFFFF:
++    // not in this buffer), then the colors' first word, the charts' first word (0: none), a color per triangle (unorm 4x8: the SURFACE_COLOR
++    // view's), a chart per triangle (2 a word: the read grid's charts' map, gi::surfel_mesh::m_TriChart) - a pixel's triangle is its cluster's
++    // first + gl_PrimitiveID. Pure: a worker can pack it (no colors)
+     std::vector<std::uint32_t> PackMeshGI( const gi::surfel_mesh& Surfels, std::span<const std::uint32_t> ClusterFirstTri, std::span<const xmath::fvec3> TriColors ) noexcept
+     {
+         const std::uint32_t nVerts = std::uint32_t(Surfels.m_Pos.size());
+@@ -985,13 +987,32 @@ namespace xlionrender
+             Data[5] = std::uint32_t(Data.size());
+             Data.insert(Data.end(), Surfels.m_PackedReadList.begin(), Surfels.m_PackedReadList.end());
+         }
+-        if( !TriColors.empty() )
++        const bool bCharts = Surfels.m_bReadCharts && Surfels.m_TriChart.size() == Surfels.m_Tris.size() && gi::surfel_mesh::GPUCharts();
++        if( !ClusterFirstTri.empty() && (!TriColors.empty() || bCharts) )
+         {
+             Data[7] = std::uint32_t(Data.size());
+             Data.push_back(std::uint32_t(ClusterFirstTri.size()));
+             Data.insert(Data.end(), ClusterFirstTri.begin(), ClusterFirstTri.end());
+-            const auto U8 = [](float f) { return std::uint32_t(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f); };
+-            for( const auto& c : TriColors ) Data.push_back(U8(c.m_X) | (U8(c.m_Y) << 8) | (U8(c.m_Z) << 16) | (255u << 24));
++            const std::size_t Bases = Data.size();
++            Data.push_back(0); Data.push_back(0); Data.push_back(0); Data.push_back(0);     // (colors, charts, direct: per triangle, its entries)
++            if( !TriColors.empty() )
++            {
++                Data[Bases] = std::uint32_t(Data.size());
++                const auto U8 = [](float f) { return std::uint32_t(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f); };
++                for( const auto& c : TriColors ) Data.push_back(U8(c.m_X) | (U8(c.m_Y) << 8) | (U8(c.m_Z) << 16) | (255u << 24));
++            }
++            if( bCharts )
++            {
++                Data[Bases + 1] = std::uint32_t(Data.size());
++                const std::size_t At = Data.size();
++                Data.resize(At + (Surfels.m_TriChart.size() + 1) / 2, 0u);
++                for( std::size_t t = 0; t < Surfels.m_TriChart.size(); ++t ) Data[At + t / 2] |= std::uint32_t(Surfels.m_TriChart[t]) << (16 * (t & 1));
++                if( gi::surfel_mesh::GPUDirect() && Surfels.m_TriRead.size() == Surfels.m_Tris.size() )
++                {
++                    Data[Bases + 2] = std::uint32_t(Data.size()); Data.insert(Data.end(), Surfels.m_TriRead.begin(), Surfels.m_TriRead.end());
++                    Data[Bases + 3] = std::uint32_t(Data.size()); Data.insert(Data.end(), Surfels.m_TriReadEntries.begin(), Surfels.m_TriReadEntries.end());
++                }
++            }
+         }
+         return Data;
+     }
+@@ -1013,7 +1034,7 @@ namespace xlionrender
+             S.m_pGI    = std::make_unique<gi::surfel_mesh>(std::move(In.m_Surfels));
+             S.m_nOwned = In.m_nOwned;
+             S.m_Ghosts = std::move(In.m_Ghosts);
+-            const auto Packed = In.m_Packed.empty() ? PackMeshGI(*S.m_pGI, {}, {}) : std::move(In.m_Packed);
++            const auto Packed = In.m_Packed.empty() ? PackMeshGI(*S.m_pGI, gi::ClusterFirstTriangles(M.m_Geom.m_Clusters, ClusterSection, int(&In - Sections.data())), {}) : std::move(In.m_Packed);
+             if( auto Err = m_Device.Create(S.m_Buffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Packed.size()), .m_pData = const_cast<std::uint32_t*>(Packed.data()) }); Err ) return Err;
+         }
+         M.m_GIClusterSection     = std::move(ClusterSection);
+@@ -1023,9 +1044,7 @@ namespace xlionrender
+ 
+     xgpu::device::error* instance::buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept
+     {
+-        std::vector<std::uint32_t> First;
+-        if( !TriColors.empty() ) for( const auto& C : M.m_Geom.m_Clusters ) First.push_back(C.m_iIndex / 3);
+-        return createMeshGI(M, PackMeshGI(*M.m_pGI, First, TriColors));
++        return createMeshGI(M, PackMeshGI(*M.m_pGI, gi::ClusterFirstTriangles(M.m_Geom.m_Clusters), TriColors));
+     }
+ 
+     xgpu::device::error* instance::createMeshGI( mesh_slot& M, std::span<const std::uint32_t> Data ) noexcept
+diff --git a/src/xlionrender_scene_renderer.h b/src/xlionrender_scene_renderer.h
+index 0a7662f..9121a88 100644
+--- a/src/xlionrender_scene_renderer.h
++++ b/src/xlionrender_scene_renderer.h
+@@ -131,7 +131,7 @@ namespace xlionrender
+                             for (auto& S : L)
+                             {
+                                 if (S.m_Surfels.m_ReadTable.empty()) S.m_Surfels.BuildReadGrid();
+-                                auto Packed = PackMeshGI(S.m_Surfels, {}, {});
++                                auto Packed = PackMeshGI(S.m_Surfels, gi::ClusterFirstTriangles(Copy->getClusters(), P->m_ClusterSection, int(&S - L.data())), {});
+                                 P->m_Sections.push_back({ std::move(S.m_Surfels), std::move(Packed), S.m_nOwned, std::move(S.m_Ghosts) });
+                             }
+                             P->m_WorkerMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
+@@ -140,7 +140,7 @@ namespace xlionrender
+                         }
+                         P->m_bOk = gi::SurfelsFromXGeomStatic(P->m_Surfels, *Copy) && P->m_Surfels.m_Levels[0].size() < 0xFFFF;
+                         if (P->m_bOk && P->m_Surfels.m_ReadTable.empty()) P->m_Surfels.BuildReadGrid();
+-                        if (P->m_bOk) P->m_Packed = PackMeshGI(P->m_Surfels, {}, {});             // the GPU buffer's data too
++                        if (P->m_bOk) P->m_Packed = PackMeshGI(P->m_Surfels, gi::ClusterFirstTriangles(Copy->getClusters()), {});             // the GPU buffer's data too
+                         P->m_WorkerMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T1).count();
+                         P->m_bDone.store(true, std::memory_order_release);
+                     });

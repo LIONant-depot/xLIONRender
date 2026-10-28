@@ -505,6 +505,7 @@ namespace xlionrender::gi
             std::printf("GI section %zu: its packed structures (%u words) do not fit it (%zu surfels, %zu vertices): made again\n", k, R.m_nDerived, C.m_Levels[0].size(), C.m_Pos.size()); std::fflush(stdout);
             C.BuildNeighbors();
         }
+        if (std::getenv("XLION_GI_REGRID")) C.BuildReadGrid();     // measurement: the grid rebuilt at load (as SurfelsFromXGeomStatic), no recompile
         if (pVMap) *pVMap = std::move(VMap);
         return true;
     }
