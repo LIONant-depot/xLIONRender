@@ -63,7 +63,7 @@ namespace xlionrender::shadows
             int     m_Levels        = 10;               // level L's texel: level 0's x 2^L; the coarsest is the net
             int     m_Window        = 32;               // pages per level side kept in the table around the camera
             int     m_PinnedRadius  = 8;                // the net: the coarsest level's pages within this many of the camera's (a 16 x 16 square)
-            int     m_Budget        = 64;               // fine pages rendered a frame (the net's are not counted against it)
+            int     m_Budget        = 48;               // fine pages rendered a frame (the net's are not counted against it) - with m_NetBudget the shadows' 2 ms slice (methodology 3: ~0.03 ms a page in Bistro)
             int     m_ProtectFrames = 4;                // a page requested this many frames ago is still protected (the requests are a ring late)
             float   m_ResolutionBias = -1;              // levels added to the footprint's (-1: texels half the pixel; Unreal's ResolutionLodBiasDirectional);
                                                         // -1 measured against the clipmap and the rays (tests/xlionrender_test_vsm.cpp)
@@ -76,10 +76,15 @@ namespace xlionrender::shadows
             float   m_MaxDynamicBias = 2.0f;            // 0: off
             int     m_FadeFrames     = 8;               // the previous epoch to the current one, once the current has every page asked for
             int     m_MaxPrevFrames  = 120;             // the previous epoch goes after this many frames whatever (a rebuild that never ends)
+            // The net's pages rendered a frame (nearest the camera first) - the frame budget (methodology 3: the whole frame 16 ms; a new
+            // epoch rendered all 256 at once, 148k draws in Bistro). The previous epoch's net shows meanwhile (its own slots: NetSlots),
+            // and a new epoch waits until the previous one is gone (never a hole). 0: every page of the net at once, its old net freed
+            int     m_NetBudget      = 16;
 
             int SlotsPerRow ( void ) const noexcept { return m_PoolTexels / page_texels_v; }
             int Slots       ( void ) const noexcept { return SlotsPerRow() * ((m_PoolHeight > 0 ? m_PoolHeight : m_PoolTexels) / page_texels_v); }
             int PinnedSlots ( void ) const noexcept { return (2 * m_PinnedRadius) * (2 * m_PinnedRadius); }
+            int NetSlots    ( void ) const noexcept { return PinnedSlots() * (m_NetBudget > 0 ? 2 : 1); }      // (the net's, the previous epoch's net's)
             int TableEntries( void ) const noexcept { return m_Levels * m_Window * m_Window; }
             int TableUints  ( void ) const noexcept { return (TableEntries() + 1) / 2; }
         };
@@ -115,6 +120,7 @@ namespace xlionrender::shadows
             int m_Admitted  = 0;            //   given a slot this frame
             int m_Rejected  = 0;            //   no slot left (pressure)
             int m_Deferred  = 0;            //   waiting for the budget (absent or dirty)
+            int m_NetDeferred = 0;          //   of them the net's (setup::m_NetBudget)
             int m_Rendered  = 0;            // fine pages rendered
             int m_RenderedMover = 0;        // mover pages rendered (each frame, the movers only)
             int m_RenderedPinned = 0;       // net pages rendered (mandatory: beyond the budget)
@@ -248,6 +254,7 @@ namespace xlionrender::shadows
             const xmath::fvec3 Z = LightDir.NormalizeCopy();
             const float EpochCos = std::cos(m_Setup.m_EpochDegrees * 3.14159265f / 180.0f);
             if (m_bHasBasis && Z.Dot(m_Z) >= EpochCos && Level0Texel == m_Level0Texel) return false;
+            if (m_Setup.m_NetBudget > 0 && m_bHasPrev && Frame - m_EpochFrame <= std::uint64_t(m_Setup.m_MaxPrevFrames)) return false;     // (the last one not complete yet)
             m_PX = m_X; m_PY = m_Y; m_PZ = m_Z; m_PrevLevels = m_Levels; m_PrevLevel0Texel = m_Level0Texel;   // (the epoch now ending)
             m_bPrevUsable = m_bHasBasis;
             const xmath::fvec3 Up = std::abs(Z.m_Y) < 0.99f ? xmath::fvec3(0, 1, 0) : xmath::fvec3(1, 0, 0);
@@ -301,7 +308,7 @@ namespace xlionrender::shadows
             {
                 auto& S = m_Slots[s];
                 if (!S.m_bUsed || S.m_bPrev || S.m_bMover) continue;
-                if (!InWindow(S.m_Key) || (s < m_Setup.PinnedSlots()) != IsPinned(S.m_Key)) Free(s);
+                if (!InWindow(S.m_Key) || (s < m_Setup.NetSlots()) != IsPinned(S.m_Key)) Free(s);
             }
 
             // Caster changes: the pages under them are DIRTY now (out of the table until rendered again)
@@ -334,13 +341,23 @@ namespace xlionrender::shadows
                 }
             }
 
-            // The net: every page present and VALID, whatever the budget
+            // The net: every page present and VALID - setup::m_NetBudget of them a frame, nearest the camera first (the rest deferred: the
+            // previous epoch's net shows there meanwhile)
             {
                 const int Lc = m_Setup.m_Levels - 1, R = m_Setup.m_PinnedRadius;
+                std::vector<key> Net;
                 for (int y = m_PinY - R; y < m_PinY + R; ++y)
                 for (int x = m_PinX - R; x < m_PinX + R; ++x)
                 {
                     const key K{ Lc, x, y };
+                    const int s = Find(K);
+                    if (s < 0 || !m_Slots[s].m_bValid) Net.push_back(K);
+                }
+                std::sort(Net.begin(), Net.end(), [&](const key& a, const key& b) { return PageDistance2(a, C) < PageDistance2(b, C); });
+                int NetBudget = m_Setup.m_NetBudget > 0 && m_bHasPrev ? m_Setup.m_NetBudget : int(Net.size());     // (no previous net to show: all of it - the first)
+                for (const auto& K : Net)
+                {
+                    if (NetBudget <= 0) { ++m_Stats.m_Deferred; ++m_Stats.m_NetDeferred; continue; }
                     int s = Find(K);
                     if (s < 0)
                     {
@@ -348,7 +365,7 @@ namespace xlionrender::shadows
                         if (s < 0) continue;                    // (a net larger than its slots: setup error, counted below)
                         Assign(s, K, Frame);
                     }
-                    if (!m_Slots[s].m_bValid) { Render(s, true); ++m_Stats.m_RenderedPinned; }
+                    Render(s, true); ++m_Stats.m_RenderedPinned; --NetBudget;
                 }
             }
 
@@ -441,7 +458,7 @@ namespace xlionrender::shadows
                 if (!m_Slots[s].m_bUsed) continue;
                 if (m_Slots[s].m_bMover)       ++m_Stats.m_ResidentMover;
                 else if (m_Slots[s].m_bPrev)   ++m_Stats.m_ResidentPrev;
-                else if (s < m_Setup.PinnedSlots()) { ++m_Stats.m_ResidentPinned; m_Stats.m_PinnedNotValid += !m_Slots[s].m_bValid; }
+                else if (s < m_Setup.NetSlots()) { ++m_Stats.m_ResidentPinned; m_Stats.m_PinnedNotValid += !m_Slots[s].m_bValid; }
                 else                           ++m_Stats.m_ResidentFine;
             }
             m_Stats.m_Fade = m_bHasPrev ? m_Fade : 1.0f;
@@ -450,7 +467,7 @@ namespace xlionrender::shadows
             // without requests (an epoch's first frames, nothing in view) leaves it as it is
             if (!Requests.empty() && m_Setup.m_MaxDynamicBias > 0)
             {
-                const float Load   = float(m_Stats.m_Requested) / float(std::max(1, m_Setup.Slots() - m_Setup.PinnedSlots()));
+                const float Load   = float(m_Stats.m_Requested) / float(std::max(1, m_Setup.Slots() - m_Setup.NetSlots()));
                 const float Target = std::max(0.0f, m_DynamicBias + std::log2(std::max(Load, 1e-3f) / m_Setup.m_PoolLoadFactor));
                 if (Load > m_Setup.m_PoolLoadFactor) { m_LastOverload = Frame; m_DynamicBias += (Target - m_DynamicBias) * 0.5f; }
                 else if (Frame - m_LastOverload > 10) m_DynamicBias += (Target - m_DynamicBias) * 0.1f;
@@ -608,7 +625,7 @@ namespace xlionrender::shadows
             else if (S.m_bPrev) m_PrevMap.erase(Pack(S.m_Key));
             else                m_Map.erase(Pack(S.m_Key));
             S.m_bUsed = S.m_bValid = S.m_bPrev = S.m_bMover = false;
-            if (s >= m_Setup.PinnedSlots()) ++m_Stats.m_Evicted;
+            if (s >= m_Setup.NetSlots()) ++m_Stats.m_Evicted;
         }
 
         // A new epoch: the previous one's pages go; this one's VALID fine pages become the previous (the net and the rest go)
@@ -620,7 +637,7 @@ namespace xlionrender::shadows
                 auto& S = m_Slots[s];
                 if (!S.m_bUsed) continue;
                 if (S.m_bMover) { Free(s); continue; }
-                if (s < m_Setup.PinnedSlots() || !S.m_bValid || !m_bPrevUsable) { Free(s); continue; }
+                if ((s < m_Setup.NetSlots() && m_Setup.m_NetBudget <= 0) || !S.m_bValid || !m_bPrevUsable) { Free(s); continue; }
                 m_Map.erase(Pack(S.m_Key));
                 S.m_bPrev = true;
                 m_PrevMap[Pack(S.m_Key)] = s;
@@ -641,7 +658,7 @@ namespace xlionrender::shadows
 
         int FreePinnedSlot(void) const noexcept
         {
-            for (int s = 0; s < std::min(m_Setup.PinnedSlots(), int(m_Slots.size())); ++s) if (!m_Slots[s].m_bUsed) return s;
+            for (int s = 0; s < std::min(m_Setup.NetSlots(), int(m_Slots.size())); ++s) if (!m_Slots[s].m_bUsed) return s;
             return -1;
         }
 
@@ -649,7 +666,7 @@ namespace xlionrender::shadows
         int AdmitSlot(std::uint64_t Frame) noexcept
         {
             int Best = -1, Prev = -1;
-            for (int s = m_Setup.PinnedSlots(); s < int(m_Slots.size()); ++s)
+            for (int s = m_Setup.NetSlots(); s < int(m_Slots.size()); ++s)
             {
                 const auto& S = m_Slots[s];
                 if (!S.m_bUsed) return s;

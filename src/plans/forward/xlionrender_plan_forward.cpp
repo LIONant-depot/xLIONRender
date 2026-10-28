@@ -1357,7 +1357,7 @@ namespace xlionrender
         // The casters and what changed since the last render: new and gone casters, moved or re-materialed ones, and skinned
         // ones (old and new bounds). Draws with an instance id compare against their slot's last state (no hashing, bounds kept
         // while unchanged); draws without one go through a hash of their state.
-        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; bool m_bMover; bool m_bGPU; };     // m_BoxedBase: in m_ClusterSkip (~0: none); m_bGPU: the pairs can draw it (rigid; no masked material: found when a page renders)
+        struct draw_caster { const draw* m_pDraw; const mesh_slot* m_pMesh; xmath::fbbox m_World; std::uint32_t m_Slot; std::uint32_t m_BoxedBase; bool m_bMover; bool m_bGPU; bool m_bCut = false; };     // m_BoxedBase: in m_ClusterSkip (~0: none); m_bGPU: the pairs can draw it (rigid); m_bCut: it has masked submeshes, the CPU path draws those (found when a page renders)
         std::vector<draw_caster>                         Draws;
         std::vector<xmath::fbbox>                        Changed;
         std::vector<xmath::fbbox>                        SunStatic, SunMovers;  // the sun's pages: changes of the static casters (a static caster changed or
@@ -1624,6 +1624,7 @@ namespace xlionrender
                 {
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                     if( pMat && !MaterialVisibilityOf(pMat->m_State).m_bCastsShadow ) continue;
+                    if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) continue;     // (its cutout: the CPU path's)
                     for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                     {
                         if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
@@ -1639,13 +1640,12 @@ namespace xlionrender
             for( std::uint32_t i = 0; i < Draws.size(); ++i )
             {
                 if( !Draws[i].m_bGPU ) continue;
-                for( const auto& Sub : Draws[i].m_pMesh->m_Geom.m_Submeshes )        // (a masked material's cutout: the CPU path's material caster)
-                {
+                for( const auto& Sub : Draws[i].m_pMesh->m_Geom.m_Submeshes )        // (a masked material's cutout: the CPU path's material caster - its submeshes only;
+                {                                                                    //  the whole draw went there: 148k draws a frame in Bistro, every section had one)
                     const auto& Mats = Draws[i].m_pDraw->m_Materials;
                     auto* pMat = Sub.m_iMaterial < Mats.size() ? findMaterial(Mats[Sub.m_iMaterial]) : nullptr;
-                    if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) { Draws[i].m_bGPU = false; break; }
+                    if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) { Draws[i].m_bCut = true; break; }
                 }
-                if( !Draws[i].m_bGPU ) continue;
                 if( Touches(i) )                AddCandidates(i, false);
                 if( !Lit.empty() && TouchesLocal(i) ) AddCandidates(i, true);
             }
@@ -1662,7 +1662,7 @@ namespace xlionrender
         }
         else bPairs = false;
         if( !m_VSM.m_ToRender.empty() )
-            for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( !(bPairs && Draws[i].m_bGPU) ) AllCasters.push_back(i);
+            for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( !(bPairs && Draws[i].m_bGPU) || Draws[i].m_bCut ) AllCasters.push_back(i);
 
         // A run of the pairs: its geometry, a draw for every page its candidates pair with (the viewport set)
         const auto DrawPairs = [&]( xgpu::cmd_buffer& Cmd, bool bLocal )
@@ -1684,7 +1684,9 @@ namespace xlionrender
         };
 
         // Draws the casters that pass Keep with W2C into the current viewport
-        // Draws the casters of Indices that pass Keep with W2C into the current viewport
+        // Draws the casters of Indices that pass Keep with W2C into the current viewport; a sun page (pSunPage): each cluster against its
+        // light-space rect too (a caster's box - a Bistro section's - passed every page: the cutout clusters were 52M triangles a frame)
+        const shadows::vsm::page_to_render* pSunPage = nullptr;
         const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, std::span<const std::uint32_t> Indices, const auto& Keep )
         {
             auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();     // absolute world: the instances' origin as is
@@ -1721,6 +1723,7 @@ namespace xlionrender
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                     const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
                     if( !Vis.m_bCastsShadow ) continue;
+                    if( bPairs && Draws[i].m_bGPU && Vis.m_Opacity != material_visibility::opacity::MASKED ) continue;     // (the pairs drew it)
                     auto* pCut = Vis.m_Opacity == material_visibility::opacity::MASKED ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
                     auto* pInstance = pCut ? pCut : &m_ShadowInstance[bSkin ? 2 : 1];
                     if( pInstance->m_Private.get() != pBound || &G != pBoundGeom )
@@ -1755,6 +1758,7 @@ namespace xlionrender
                     {
                         if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
                         const auto& C = G.m_Clusters[c];
+                        if( pSunPage && !bSkin && !shadows::RectOverlaps(m_VSM.Bounds(C.m_BBox.TransformCopy(D.m_L2W)), pSunPage->m_MinX, pSunPage->m_MinY, pSunPage->m_Size) ) continue;
                         if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot, 0u, MaterialBase, G.m_PrevBones });
                         else        Cmd.setPushConstants(details::push_static_geom{ c, Draws[i].m_Slot, 0u, 0xFFFFFFFFu, MaterialBase });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
@@ -1783,7 +1787,9 @@ namespace xlionrender
                 Cmd.setBuffer(m_FullscreenVB);
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);
+                pSunPage = &P;
                 DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
+                pSunPage = nullptr;
             }
             if( !m_VSM.m_ToRender.empty() && bPairs )      // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
             {
@@ -1806,7 +1812,7 @@ namespace xlionrender
             if( !bLightCasters[std::size_t(P.m_Light)] )
             {
                 bLightCasters[std::size_t(P.m_Light)] = 1;
-                for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( !(bPairs && Draws[i].m_bGPU) && shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius) ) C.push_back(i);
+                for( std::uint32_t i = 0; i < Draws.size(); ++i ) if( (!(bPairs && Draws[i].m_bGPU) || Draws[i].m_bCut) && shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius) ) C.push_back(i);
             }
             Viewport(Cmd, LocalX + P.m_AtlasX, P.m_AtlasY, shadows::local_pages::page_texels_v);
             Cmd.setPipelineInstance(m_ShadowClearInstance);
@@ -3460,7 +3466,7 @@ namespace xlionrender
             {
                 for( int k = 0; k < 6; ++k ) s_Sum[k] += (s_Ns[k + 1] - s_Ns[k]) * 1e-6;
                 // measurement (XLION_FRAME_CSV=<file>, the scorecard's game sequence): every frame's parts, for p95 / max
-                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands\n"); return f; }();
+                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands,shadow_pass,probes_planar\n"); return f; }();
                 if( s_pCsv )
                 {
                     std::fprintf(s_pCsv, "%llu", (unsigned long long)m_Device.getFrameIndex());
@@ -3469,8 +3475,8 @@ namespace xlionrender
                     const auto& G = getLastGPUTimes();
                     const auto& Pg = m_VSMReport.m_Pages;     // (the sun's pages rendered this frame: the fine ones, the net's; a new epoch)
                     const auto& Sd = m_ShadowDrawStats;     // (the shadow pass's commands this frame: the CPU path's draws, the pairs' indirect ones)
-                    std::fprintf(s_pCsv, ",%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%lld,%d,%d,%d,%d,%d\n", (s_Ns[6] - s_Ns[0]) * 1e-6, G.m_ShadowMs, G.m_SceneMs, G.m_ToneMapMs, Pg.m_Rendered, Pg.m_RenderedPinned, Pg.m_Epochs
-                                , Sd.m_CpuDraws, (long long)Sd.m_CpuTris, Sd.m_CpuCasters, Sd.m_IndirectDraws, Sd.m_IndirectMax, Sd.m_PageClears, m_PairsReport.m_nCandidates);
+                    std::fprintf(s_pCsv, ",%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%lld,%d,%d,%d,%d,%d,%.4f,%.4f\n", (s_Ns[6] - s_Ns[0]) * 1e-6, G.m_ShadowMs, G.m_SceneMs, G.m_ToneMapMs, Pg.m_Rendered, Pg.m_RenderedPinned, Pg.m_Epochs
+                                , Sd.m_CpuDraws, (long long)Sd.m_CpuTris, Sd.m_CpuCasters, Sd.m_IndirectDraws, Sd.m_IndirectMax, Sd.m_PageClears, m_PairsReport.m_nCandidates, m_SplitShadowMs, m_SplitProbesMs);
                     if( m_Device.getFrameIndex() % 60 == 0 ) std::fflush(s_pCsv);
                 }
                 if( ++s_n == 120 ) { std::printf("RENDERGPU environment %.2f, instances %.2f, GI update %.2f, captures %.2f, shadows+scene+tonemap %.2f, overlays+outline %.2f ms\n", s_Sum[0] / s_n, s_Sum[1] / s_n, s_Sum[2] / s_n, s_Sum[3] / s_n, s_Sum[4] / s_n, s_Sum[5] / s_n); std::fflush(stdout); s_n = 0; for( auto& v : s_Sum ) v = 0; }
@@ -3495,9 +3501,17 @@ namespace xlionrender
         const auto T1 = clock::now();
         if( pTS ) Window.WriteTimestamp(*pTS, 4);
         Window.WriteTimestamp(m_Timestamps, 0);                 // GPU: the shadow passes start here (after the instance copy)
+        // measurement (XLION_FRAME_CSV): the shadows alone, the probes and planar after them ("shadows" above runs to the scene pass: the
+        // screen tail too - the frame budget's categories, methodology 3)
+        static std::unordered_map<const void*, xgpu::timestamps> s_SplitTS;     // ponytail: per renderer, never erased (a measurement hook)
+        xgpu::timestamps* pSplit = nullptr;
+        if( pTS ) { auto [It, bNew] = s_SplitTS.try_emplace(this); if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_SplitTS.erase(It); else pSplit = &It->second; }
+        if( pSplit ) Window.WriteTimestamp(*pSplit, 0);
         renderShadows(Window, Scene, Eye, ProjScale);
+        if( pSplit ) Window.WriteTimestamp(*pSplit, 1);
         updateProbes(Window, Scene, Eye);
         renderPlanar(Window, Scene, View, Camera);
+        if( pSplit ) { Window.WriteTimestamp(*pSplit, 2); static std::vector<std::uint64_t> s_SplitNs; if( pSplit->getResults(s_SplitNs) && s_SplitNs.size() >= 3 && s_SplitNs[2] >= s_SplitNs[0] ) { m_SplitShadowMs = (s_SplitNs[1] - s_SplitNs[0]) * 1e-6; m_SplitProbesMs = (s_SplitNs[2] - s_SplitNs[1]) * 1e-6; } }
         const auto T2 = clock::now();
 
         updateBudget();

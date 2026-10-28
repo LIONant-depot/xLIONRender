@@ -99,12 +99,13 @@ int main()
     // Requests: admitted, rendered within the budget, then reused
     const auto& L0 = V.m_Levels[0];
     std::vector<vsm::key> Req;
-    for (int i = 0; i < 100; ++i) Req.push_back({ 0, L0.m_OriginX + i % 32, L0.m_OriginY + i / 32 });
+    const int nReq = 2 * V.getSetup().m_Budget - 4;         // (two frames of the budget: the first full, the rest the next)
+    for (int i = 0; i < nReq; ++i) Req.push_back({ 0, L0.m_OriginX + i % 32, L0.m_OriginY + i / 32 });
     CHECK(Frame(V, 3, Req), "requests");
-    CHECK(V.m_Stats.m_Requested == 100 && V.m_Stats.m_Rendered == V.getSetup().m_Budget && V.m_Stats.m_Deferred == 100 - V.getSetup().m_Budget
+    CHECK(V.m_Stats.m_Requested == nReq && V.m_Stats.m_Rendered == V.getSetup().m_Budget && V.m_Stats.m_Deferred == nReq - V.getSetup().m_Budget
          , "budget: requested %d rendered %d deferred %d", V.m_Stats.m_Requested, V.m_Stats.m_Rendered, V.m_Stats.m_Deferred);
-    CHECK(Frame(V, 4, Req) && V.m_Stats.m_Reused == V.getSetup().m_Budget && V.m_Stats.m_Rendered == 100 - V.getSetup().m_Budget, "the rest next frame (reused %d rendered %d)", V.m_Stats.m_Reused, V.m_Stats.m_Rendered);
-    CHECK(Frame(V, 5, Req) && V.m_Stats.m_Reused == 100 && V.m_Stats.m_Rendered == 0, "settled: reused %d rendered %d", V.m_Stats.m_Reused, V.m_Stats.m_Rendered);
+    CHECK(Frame(V, 4, Req) && V.m_Stats.m_Reused == V.getSetup().m_Budget && V.m_Stats.m_Rendered == nReq - V.getSetup().m_Budget, "the rest next frame (reused %d rendered %d)", V.m_Stats.m_Reused, V.m_Stats.m_Rendered);
+    CHECK(Frame(V, 5, Req) && V.m_Stats.m_Reused == nReq && V.m_Stats.m_Rendered == 0, "settled: reused %d rendered %d", V.m_Stats.m_Reused, V.m_Stats.m_Rendered);
 
     // A caster change: the pages under it leave the table at once (DIRTY), come back when rendered again
     {
@@ -123,7 +124,7 @@ int main()
     {
         vsm S;
         S.Init({ .m_PoolTexels = 2048, .m_Levels = 6, .m_PinnedRadius = 4, .m_Budget = 1000 });         // 256 slots: 64 net, 192 fine
-        const int Fine = S.getSetup().Slots() - S.getSetup().PinnedSlots();
+        const int Fine = S.getSetup().Slots() - S.getSetup().NetSlots();       // (the net's slots and its previous epoch's: setup::m_NetBudget)
         CHECK(Frame(S, 1, {}), "small pool net");
         std::vector<vsm::key> Many;
         const auto& O = S.m_Levels[0];
@@ -152,15 +153,37 @@ int main()
         for (const auto& K : Other) CHECK(S.Generation(S.Find(K)) > 1, "a reused slot kept its generation");
     }
 
-    // A new light direction: a new epoch, every page goes, the net is rendered again; requests decoded with an older epoch are dropped
+    // A new light direction: a new epoch, every page goes, the net is rendered again - setup::m_NetBudget pages a frame (the frame budget:
+    // all 256 at once made a moving sun's frame 148k draws in Bistro), the previous epoch's net kept meanwhile; requests decoded with an
+    // older epoch are dropped
     {
         const auto Old = V.Snapshot();
+        const int  NB  = std::min(Pinned, V.getSetup().m_NetBudget);
         CHECK(Frame(V, 20, {}, {}, { 0, 0, 0 }, { -0.5f, -1, 0.1f }), "epoch frame");
-        CHECK(V.m_Stats.m_Epochs == 1 && V.m_Stats.m_RenderedPinned == Pinned && TableCount(V) == Pinned, "epoch: %d, net rendered %d, table %d", V.m_Stats.m_Epochs, V.m_Stats.m_RenderedPinned, TableCount(V));
+        CHECK(V.m_Stats.m_Epochs == 1 && V.m_Stats.m_RenderedPinned == NB && TableCount(V) == NB && V.m_Stats.m_ResidentPrev >= Pinned - NB
+             , "epoch: %d, net rendered %d (budget %d), table %d, previous epoch's pages %d", V.m_Stats.m_Epochs, V.m_Stats.m_RenderedPinned, NB, TableCount(V), V.m_Stats.m_ResidentPrev);
         std::vector<std::uint32_t> Bits(std::size_t(V.getSetup().TableUints()) * 2 / 32 + 1, 0xFFFFFFFFu);
         std::vector<vsm::key> Decoded;
         V.DecodeRequests(Bits, Old, Decoded);
         CHECK(Decoded.empty(), "requests of an old epoch decoded (%zu)", Decoded.size());
+    }
+
+    // ... the new net completes over frames, never more than the budget a frame, and the sun turning on meanwhile opens no epoch until the
+    // last one is complete (a partial epoch kept as the previous one would leave holes: the net has no coarser level under it)
+    {
+        vsm N;
+        N.Init({});
+        const int P = N.getSetup().PinnedSlots(), NB = N.getSetup().m_NetBudget;
+        CHECK(Frame(N, 1, {}) && N.m_Stats.m_RenderedPinned == P, "the first net at once: %d of %d", N.m_Stats.m_RenderedPinned, P);
+        int nFrames = 0, nMost = 0, nEpochs = 0;
+        for (std::uint64_t f = 2; f < 40 && (f == 2 || N.m_Stats.m_NetDeferred > 0); ++f, ++nFrames)
+        {
+            const float a = 0.02f * float(f);           // (each frame past setup::m_EpochDegrees from the frame before)
+            CHECK(Frame(N, f, {}, {}, { 0, 0, 0 }, { -0.5f + a, -1, 0.1f }), "net round frame %llu", (unsigned long long)f);
+            nMost = std::max(nMost, N.m_Stats.m_RenderedPinned); nEpochs += N.m_Stats.m_Epochs;
+        }
+        std::printf("the net after a new epoch: %d frames (budget %d a frame, at most %d), %d epoch(s) opened while the sun kept turning\n", nFrames, NB, nMost, nEpochs);
+        CHECK(nMost <= NB && nFrames <= (P + NB - 1) / NB && nEpochs == 1, "the net's round: %d frames, at most %d pages a frame (budget %d), %d epochs", nFrames, nMost, NB, nEpochs);
     }
 
     // Decoding: a request bit maps to the page of the window that made it, even after the window moved
@@ -491,7 +514,16 @@ int main()
         Scene.m_Sun.m_Direction      = Dir0;
         Camera.LookAt(xmath::fvec3{ 0, 6.0f, -9.0f }, xmath::fvec3{ 0, 0, 1.0f });
         Renderer.DestroyView(Hi);
-        CHECK(Settle(12), "settle back on the near view");
+        // (settled: no previous epoch, nothing deferred - the sun back to its direction is an epoch held until the low sun's completes,
+        //  each a round of the net's budget and the cross-fade)
+        int nSettle = 0;
+        for (; nSettle < 120; ++nSettle)
+        {
+            CHECK(Settle(1), "settle back on the near view");
+            const auto& Pg = Renderer.getVSMReport().m_Pages;
+            if (nSettle >= 2 && Pg.m_ResidentPrev == 0 && Pg.m_Deferred == 0 && Pg.m_Epochs == 0) break;
+        }
+        CHECK(nSettle < 120 && Settle(2), "the near view did not settle (%d frames)", nSettle);
     }
 
 
@@ -504,8 +536,9 @@ int main()
         CHECK(nDiff == 0, "a still scene changes between frames on %d pixels", nDiff);
     }
 
-    // Invariant 4 and B5 (a stress result): the sun turning 1.5 degree a frame about the vertical (~0.6 degree between the directions, over setup::m_EpochDegrees) - each frame a new epoch, every
-    // page invalid at once, the net rendered again first (whatever the budget), the fine pages by demand; never a hole
+    // Invariant 4 and B5 (a stress result): the sun turning 1.5 degree a frame about the vertical (~0.6 degree between the directions, over setup::m_EpochDegrees) - a new epoch
+    // once the last is complete, every page invalid at once, the net rendered again within its budget a frame (the previous epoch's shows
+    // meanwhile), the fine pages by demand; never a hole
     {
         const xmath::fvec3 Dir0 = Scene.m_Sun.m_Direction;
         const auto Turn = [&](float Degrees)
@@ -543,7 +576,8 @@ int main()
                 Turn(Yaw);
                 CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateVSM(), "moving sun frame %d (invariant 1)", f);
                 const auto& R = Renderer.getVSMReport();
-                CHECK(R.m_Pages.m_Epochs == 0 || (R.m_Pages.m_RenderedPinned == nNet && R.m_Pages.m_PinnedNotValid == 0), "frame %d: an epoch, the net rendered %d of %d", f, R.m_Pages.m_RenderedPinned, nNet);
+                // (the net: within its budget a frame - the previous epoch's shows meanwhile; was all of it at an epoch: the frame budget)
+                CHECK(R.m_Pages.m_RenderedPinned <= std::min(nNet, Renderer.getVSM().getSetup().m_NetBudget), "frame %d: the net rendered %d (budget %d)", f, R.m_Pages.m_RenderedPinned, Renderer.getVSM().getSetup().m_NetBudget);
                 CHECK(R.m_Counters[3] == 0, "the moving sun left pixels with no level (%u)", R.m_Counters[3]);
                 MaxRendered = std::max(MaxRendered, R.m_Pages.m_Rendered);
                 CHECK(ReadHDR(Device, View, Now), "read moving frame %d", f);

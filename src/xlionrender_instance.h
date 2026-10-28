@@ -717,6 +717,7 @@ namespace xlionrender
         struct prev_caster { xmath::fbbox m_World; std::uint64_t m_First; };       // (m_First: the shadow pass the key first appeared in)
         std::unordered_map<std::uint64_t, prev_caster> m_PrevCasters;   // last frame's casters (key -> world bounds), to find what changed
         int                                     m_nShadowTilesRendered = 0;
+        double                                  m_SplitShadowMs = 0, m_SplitProbesMs = 0;     // (measurement: the shadow passes alone, the probes + planar - XLION_FRAME_CSV)
         struct { int m_CpuDraws, m_CpuCasters, m_IndirectDraws, m_IndirectMax, m_PageClears; std::int64_t m_CpuTris; } m_ShadowDrawStats{};     // (measurement: the shadow pass's commands a frame - XLION_FRAME_CSV)
         bool                                    m_bShadowAtlasReady    = false;         // stands in for the shadow map until shadows exist
         xgpu::buffer                m_LightUBO;
