@@ -480,7 +480,27 @@ namespace xlionrender
             // The probe grid (skinned meshes' GI): 32 x 16 x 32 probes a meter apart around the eye, 1024 updated a frame
             static const bool s_bNoProbes = std::getenv("XLION_GI_NO_PROBES") != nullptr;     // (measurement: A/B)
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 4);
-            if( Scene.m_GI.m_bProbes && !s_bNoProbes && !m_pGITrace->isRelighting() ) (void)m_pGITrace->UpdateProbes(Window, Eye, Scene.m_GI.m_ProbeSpacing, { 32, 16, 32 }, 1024, GIFrame);
+            if( Scene.m_GI.m_bProbes && !s_bNoProbes && !m_pGITrace->isRelighting() )
+            {
+                // the grid's readers: the drawn meshes without surfels of their own (skinned, moving) - their probes every frame, the rest
+                // 64 a frame (a full pass ~4 s)
+                std::vector<gi::v3> Focus;
+                for( const auto& D : Scene.m_Draws )
+                {
+                    if( D.m_Instance != 0 && getGIId(D.m_Instance) >= 0 ) continue;
+                    const auto* pM = findMesh(D.m_Mesh);
+                    if( pM == nullptr ) continue;
+                    const auto& B = pM->m_bCluster ? pM->m_Geom.m_BBox : pM->m_BBox;
+                    xmath::fvec3 Lo{ 1e30f, 1e30f, 1e30f }, Hi{ -1e30f, -1e30f, -1e30f };
+                    for( int c = 0; c < 8; ++c )
+                    {
+                        const xmath::fvec3 P = D.m_L2W * xmath::fvec3{ (c & 1) ? B.m_Max.m_X : B.m_Min.m_X, (c & 2) ? B.m_Max.m_Y : B.m_Min.m_Y, (c & 4) ? B.m_Max.m_Z : B.m_Min.m_Z };
+                        Lo = xmath::fvec3::Min(Lo, P); Hi = xmath::fvec3::Max(Hi, P);
+                    }
+                    Focus.push_back(Lo); Focus.push_back(Hi);
+                }
+                (void)m_pGITrace->UpdateProbes(Window, Eye, Scene.m_GI.m_ProbeSpacing, { 32, 16, 32 }, Focus, 192, 64, GIFrame);
+            }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 1);
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 1);
             if( (m_bGIToCPU && !m_bGIToCPUAsked) || (!m_GIDumpPath.empty() && !m_bGIDumpAsked) )     // the GPU's light back into the world (the next Collect)

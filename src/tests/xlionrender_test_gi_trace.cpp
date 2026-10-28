@@ -450,7 +450,7 @@ int main()
             for (int f = 0; f < 6; ++f)
             {
                 while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
-                CHECK(G.UpdateProbes(App.m_Window, v3{ 0, 0, 0 }, 0.25f, { 8, 8, 8 }, 512, std::uint64_t(f)), "UpdateProbes");
+                CHECK(G.UpdateProbes(App.m_Window, v3{ 0, 0, 0 }, 0.25f, { 8, 8, 8 }, {}, 0, 512, std::uint64_t(f)), "UpdateProbes");
                 { auto Cmd = App.m_Window.getCmdBuffer(); }
                 App.m_Window.PageFlip();
             }
@@ -463,6 +463,15 @@ int main()
             App.m_Window.PageFlip();
             const auto P = G.ReadProbes();
             CHECK(P.size() >= 16 + 16 * 512, "ReadProbes (%zu words)", P.size());
+            // the readers' focus: a box at a point takes its cell and the ones around it (27 probes), none of the round robin's
+            {
+                const v3 Pt[2] = { v3{ 0.1f, 0.1f, 0.1f }, v3{ 0.1f, 0.1f, 0.1f } };
+                while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+                CHECK(G.UpdateProbes(App.m_Window, v3{ 0, 0, 0 }, 0.25f, { 8, 8, 8 }, Pt, 192, 0, 7), "UpdateProbes (a focus)");
+                { auto Cmd = App.m_Window.getCmdBuffer(); }
+                App.m_Window.PageFlip();
+                CHECK(G.ProbesUpdated() == 27, "probe grid: a point's focus updated %zu probes, not its 27", G.ProbesUpdated());
+            }
             const auto Slot = [&](int x, int y, int z) { const int lx = ((x % 8) + 8) % 8, ly = ((y % 8) + 8) % 8, lz = ((z % 8) + 8) % 8; return 16 + 16 * std::size_t(lx + 8 * (ly + 8 * lz)); };
             const auto E = [&](std::size_t b, const v3& n)      // its irradiance toward n (SurfelGIProbes' formula)
             {
@@ -492,7 +501,7 @@ int main()
                 while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
                 We.Update(L, v3{ 0, 0, 0 }, 1 << 20, 1);
                 (void)Ge.Submit(App.m_Window, We, L, 1, 1000.0f, v3{ 0, 0, 0 });
-                const bool bUpdated = Ge.UpdateProbes(App.m_Window, v3{ 0, 0, 0 }, 0.25f, { 8, 8, 8 }, 512, 1);
+                const bool bUpdated = Ge.UpdateProbes(App.m_Window, v3{ 0, 0, 0 }, 0.25f, { 8, 8, 8 }, {}, 0, 512, 1);
                 { auto Cmd = App.m_Window.getCmdBuffer(); }
                 App.m_Window.PageFlip();
                 CHECK(!bUpdated, "probe grid: updated over an empty scene");

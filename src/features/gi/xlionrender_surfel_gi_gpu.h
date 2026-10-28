@@ -41,7 +41,7 @@ namespace xlionrender::gi
                 && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 15, 32)) || true)
                 && (S.m_Solve.empty() || (m_bSolve = Make(m_Shader[11], m_SolveC, S.m_Solve, 7, 16)) || true)
                 && (S.m_Ghosts.empty() || (m_bGhosts = Make(m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true)
-                && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 6, 32)) || true);
+                && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
@@ -321,7 +321,10 @@ namespace xlionrender::gi
         // robin), each from the scene's GI as a ray's hit sees it. For what has no surfels of its own (skinned meshes: the material's
         // SurfelGIProbes reads ProbeBuffer, bound as their GIMesh). The header is written every frame (the grid moves with the eye; the
         // scene pass's positions are the eye's: its header carries it). After Submit
-        bool UpdateProbes(xgpu::window& Window, const v3& Eye, float Spacing, std::array<int, 3> Dim, int PerFrame, std::uint64_t Frame) noexcept
+        // Focus (world boxes, lo / hi): the readers' - the meshes without surfels of their own (Lily) -: their probes (each box's cells and
+        // one around: the reads' trilinear) first, nearest the eye first, up to FocusMax a frame; then Background slots of the rest, round
+        // robin (what appears later finds a lit grid). The grid's 16k probes at 1024 a frame cost 1.45 ms of the GI's 2 (Bistro)
+        bool UpdateProbes(xgpu::window& Window, const v3& Eye, float Spacing, std::array<int, 3> Dim, std::span<const v3> Focus, int FocusMax, int Background, std::uint64_t Frame) noexcept
         {
             if (!m_bProbes || m_Data.empty() || m_Scene.m_bEmpty || Spacing <= 0) return false;     // (an empty scene's BVH is a placeholder: its root walked off the buffers)
             const std::size_t n = std::size_t(Dim[0]) * Dim[1] * Dim[2];
@@ -334,13 +337,36 @@ namespace xlionrender::gi
             if (!Fit(HB, int(sizeof(std::uint32_t)), probe_header_v) || HB.MemoryMapFrameRegion(0, int(probe_header_v), [&](void* p) { std::memcpy(p, H.data(), sizeof(H)); })) return false;
             const xgpu::buffer::copy C{ 0, 0, int(probe_header_v) };
             Window.CopyBuffer(HB, m_ProbeB, std::span{ &C, 1 });
-            const int Count = std::min(PerFrame, int(n));
-            const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(m_ProbeCursor % n), int(Frame), Count, 0, 0 };
-            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ProbeB };
-            Window.Dispatch(m_ProbesC, B, &Push, sizeof(Push), Count);
-            m_ProbeCursor = (m_ProbeCursor + std::size_t(Count)) % n;
+            // this frame's slots: the focus' cells (a cell's slot: its world cell modulo the grid), nearest first, then the round robin's
+            const auto Slot = [&](int x, int y, int z) { const int c[3] = { x, y, z }; std::uint32_t s = 0, m = 1; for (int k = 0; k < 3; ++k) { const int d = Dim[std::size_t(k)]; s += std::uint32_t(((c[k] % d) + d) % d) * m; m *= std::uint32_t(d); } return s; };
+            const int G0[3] = { int(H[0]), int(H[1]), int(H[2]) };
+            std::vector<std::pair<float, std::uint32_t>> Near;
+            for (std::size_t b = 0; b + 1 < Focus.size(); b += 2)
+            {
+                const v3& Lo = Focus[b]; const v3& Hi = Focus[b + 1];
+                const int a[3] = { int(std::floor(Lo.m_X / Spacing)) - 1, int(std::floor(Lo.m_Y / Spacing)) - 1, int(std::floor(Lo.m_Z / Spacing)) - 1 };
+                const int e[3] = { int(std::floor(Hi.m_X / Spacing)) + 1, int(std::floor(Hi.m_Y / Spacing)) + 1, int(std::floor(Hi.m_Z / Spacing)) + 1 };
+                for (int z = a[2]; z <= e[2]; ++z) for (int y = a[1]; y <= e[1]; ++y) for (int x = a[0]; x <= e[0]; ++x)
+                {
+                    if (x < G0[0] || y < G0[1] || z < G0[2] || x >= G0[0] + Dim[0] || y >= G0[1] + Dim[1] || z >= G0[2] + Dim[2]) continue;     // (outside the grid)
+                    const v3 C{ float(x) * Spacing - Eye.m_X, float(y) * Spacing - Eye.m_Y, float(z) * Spacing - Eye.m_Z };
+                    Near.push_back({ C.Dot(C), Slot(x, y, z) });
+                }
+            }
+            std::sort(Near.begin(), Near.end());
+            std::vector<std::uint32_t> List;
+            for (const auto& [d, s] : Near) { if (int(List.size()) >= FocusMax) break; if (List.empty() || std::find(List.begin(), List.end(), s) == List.end()) List.push_back(s); }
+            for (int k = 0; k < Background; ++k) { List.push_back(std::uint32_t(m_ProbeCursor)); m_ProbeCursor = (m_ProbeCursor + 1) % n; }
+            if (List.empty()) return true;
+            auto& LB = m_ProbeListB2[Frame % 2];
+            if (!Fit(LB, int(sizeof(std::uint32_t)), List.size()) || LB.MemoryMapFrameRegion(0, int(List.size()), [&](void* p) { std::memcpy(p, List.data(), List.size() * 4); })) return false;
+            const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, int(Frame), int(List.size()), 0, 0 };
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ProbeB, &LB };
+            Window.Dispatch(m_ProbesC, B, &Push, sizeof(Push), int(List.size()));
+            m_nProbesUpdated = List.size();
             return true;
         }
+        std::size_t   ProbesUpdated(void) const noexcept { return m_nProbesUpdated; }     // (tests: the probes the last UpdateProbes dispatched)
         xgpu::buffer* ProbeBuffer(void) noexcept { return m_bProbes && m_ProbeB.m_Private ? &m_ProbeB : nullptr; }
         // (tests) The probe buffer copied out (a frame after its update), then read (a frame after this one)
         bool CopyProbesOut(xgpu::window& Window) noexcept
@@ -1221,7 +1247,8 @@ namespace xlionrender::gi
         std::array<double, 3>               m_CpuTrace{}; int m_nCpuTrace = 0;       // (XLION_GI_CPU_TRACE)
         xgpu::compute                       m_GhostsC;          // GI sections: the ghosts take their owners' set (xlionrender_gi_ghosts_comp.glsl)
         xgpu::compute                       m_ProbesC;          // the probe grid (UpdateProbes)
-        xgpu::buffer                        m_ProbeB, m_ProbeHdrB2[2], m_ProbeReadB;
+        xgpu::buffer                        m_ProbeB, m_ProbeHdrB2[2], m_ProbeReadB, m_ProbeListB2[2];     // (the list: this frame's slots)
+        std::size_t                         m_nProbesUpdated = 0;
         std::size_t                         m_ProbeCursor = 0;
         bool                                m_bProbes = false;
         xgpu::buffer                        m_GhostB;

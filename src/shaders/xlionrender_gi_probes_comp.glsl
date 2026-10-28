@@ -10,6 +10,7 @@
 layout(local_size_x = 64) in;
 
 layout(std430, set = 0, binding = 5) buffer probes_b { uint GP[]; };
+layout(std430, set = 0, binding = 6) readonly buffer list_b { uint GList[]; };     // this frame's slots, a workgroup each (the readers' near the eye first, then a round robin)
 layout(push_constant) uniform push_t { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push;
 #include "xlionrender_gi_pass_common.glsl"
 
@@ -25,7 +26,7 @@ void main()
 {
     g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
     const uint lid = gl_LocalInvocationID.x;
-    const uint p = uint(Push.m_First + int(gl_WorkGroupID.x)) % uint(max(Push.m_nProbes, 1));
+    const uint p = GList[gl_WorkGroupID.x] % uint(max(Push.m_nProbes, 1));
     const ivec3 Org = ivec3(int(GP[0]), int(GP[1]), int(GP[2])), Dim = ivec3(int(GP[4]), int(GP[5]), int(GP[6]));
     const float Sp = uintBitsToFloat(GP[3]);
     // the slot's cell in the grid now: the one of the grid's cells that lands on this slot
