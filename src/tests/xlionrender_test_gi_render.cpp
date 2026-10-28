@@ -547,6 +547,22 @@ int main()
         std::printf("lone mesh LIGHT view: middle %.3f %.3f %.3f, max %.3f (the ambient / pi %.3f)\n", c[0], c[1], c[2], Max, 0.7f / 3.14159f);
         CHECK(c[0] < 1.0 && Max < 4.0f, "the lone mesh's LIGHT view is saturated (%.3f, max %.3f)", c[0], Max);
 
+        // The relight's sun from the GI's sun shadow map (drawn for this sun) against the shadow rays: the same light within 5%
+        {
+            const bool bMap = Renderer.isGISunMapValid();
+            Renderer.setGISunRays(true);
+            Lone.m_Sun.m_Direction = { 0.31f, -1.0f, 0.4f };       // (a sun change: a relight, by rays)
+            for (int f = 0; f < 60; ++f) CHECK(App.RenderFrame(Lone, View, Cam), "Render the lone mesh, rays");
+            const auto r = Mean(ReadRGB(Device, View, W, H), W, H, 0.3f, 0.3f, 0.7f, 0.7f);
+            Renderer.setGISunRays(false);
+            Lone.m_Sun.m_Direction = { 0.3f, -1.0f, 0.4f };
+            for (int f = 0; f < 60; ++f) CHECK(App.RenderFrame(Lone, View, Cam), "Render the lone mesh, the map");
+            const auto m = Mean(ReadRGB(Device, View, W, H), W, H, 0.3f, 0.3f, 0.7f, 0.7f);
+            std::printf("the GI's sun shadow map: drawn %d; LIGHT %.4f by the map, %.4f by rays\n", int(bMap && Renderer.isGISunMapValid()), m[0], r[0]);
+            CHECK(bMap && Renderer.isGISunMapValid(), "the GI's sun shadow map was not drawn for the sun");
+            CHECK(std::abs(double(m[0]) - double(r[0])) < 0.05 * std::max(double(r[0]), 1e-3), "the sun shadow map's GI differs from the rays' (%.4f against %.4f)", m[0], r[0]);
+        }
+
         // No read supports it (its vertices list no surfel, no per-pixel read): the mesh's mean light, not black (a scene lit by its GI
         // would be black there), and COVERAGE says unsupported (magenta)
         auto Unread = MakeSurfels(Prim, 0.5f, 1.5f);

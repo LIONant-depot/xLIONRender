@@ -104,6 +104,8 @@ namespace xlionrender
                       int                     DumpGIFrames( const char* pPath ) const                       noexcept;
         // A mesh's GI was made ready on the main thread (scene_renderer::MeshOf): its time goes into this frame's record
                       void                    NoteGILoad( double Ms )                                       noexcept { m_GILoadMsAcc += Ms; }
+                      bool                    isGISunMapValid( void ) const                                 noexcept { return m_bGISunMapValid; }     // the GI's sun shadow map is the sun's (renderShadows)
+                      void                    setGISunRays( bool b )                                        noexcept { m_bGISunRays = b; }     // the relight's sun by shadow rays, not the map
                       int                     getGIId( std::uint64_t Instance ) const                       noexcept { const auto It = m_GIIds.find(std::uint32_t(Instance)); return It == m_GIIds.end() ? -1 : It->second; }    // a draw's instance in getGIWorld (-1: none)
                       int                     getGISectionId( std::uint64_t Instance, int Section ) const   noexcept { const auto It = m_GISecIds.find((std::uint64_t(std::uint32_t(Instance)) << 16) | std::uint64_t(Section)); return It == m_GISecIds.end() ? -1 : It->second; }    // (GI sections: a draw's section's)
                       bool                    isGICapturing( void ) const                                   noexcept { return !m_GICaptures.empty(); }
@@ -570,6 +572,17 @@ namespace xlionrender
         double                      m_GISteadyNoProbesMs = -1;      // the same without the probe grid's update (a relight frame skips it)
         int                         m_GIQuietFrames = 0;            // frames since a relight was owed (the timestamps read are a few frames old)
         std::vector<std::uint64_t>  m_GISliceNs;
+        // The GI's sun shadow map (renderShadows): the whole level's GI geometry from the sun, ortho over its light-space box, drawn when the
+        // sun turns or that box changes; the relight's sun visibility reads it (gi::gpu_trace::SetSunMap). XLION_GI_SUN_RAYS: shadow rays
+        static constexpr int        gi_sun_map_v = 2048;
+        bool                        m_bGISunRays = std::getenv("XLION_GI_SUN_RAYS") != nullptr;     // (tests, measurement: the shadow rays instead)
+        xgpu::texture               m_GISunMap;
+        xgpu::renderpass            m_GISunPass;
+        bool                        m_bGISunMapMade = false, m_bGISunMapTried = false, m_bGISunMapValid = false;
+        xmath::fmat4                m_GISunW2C = xmath::fmat4::fromIdentity();
+        float                       m_GISunTexel = 0, m_GISunDepthPerMeter = 0;
+        std::array<float, 9>        m_GISunKey{};                   // (the sun's direction and the box it was drawn for)
+        xgpu::timestamps            m_GISunTimes;                   // (its draw's GPU time: GISUNMAP with XLION_GPU_TIMES)
         std::unique_ptr<gi::gpu_trace> m_pGITrace;              // G3: the GI's trace on the GPU (scene::gi_settings::m_bGPUTrace)
         bool                        m_bGITraceFailed = false;   // its Init failed: the CPU traces
         bool                        m_bGIToCPU = false, m_bGIToCPUAsked = false;     // the GPU turned off: its light read back first (updateGI)

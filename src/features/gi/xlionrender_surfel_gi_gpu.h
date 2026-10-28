@@ -28,17 +28,20 @@ namespace xlionrender::gi
         bool Init(xgpu::device& Device, const shaders& S) noexcept
         {
             m_pDevice = &Device;
-            const auto Make = [&](xgpu::shader& Sh, xgpu::compute& C, std::span<const std::uint32_t> W, int nBuffers, int Push)
+            const auto Make = [&](xgpu::shader& Sh, xgpu::compute& C, std::span<const std::uint32_t> W, int nBuffers, int Push, int nTextures = 0)
             {
                 const auto Raw = xgpu::shader::setup::raw_data{ std::span{ reinterpret_cast<const std::int32_t*>(W.data()), W.size() } };
-                return !Device.Create(Sh, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw }) && !Device.Create(C, { .m_pShader = &Sh, .m_nBuffers = nBuffers, .m_PushConstantsSize = std::size_t(Push) });
+                return !Device.Create(Sh, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw }) && !Device.Create(C, { .m_pShader = &Sh, .m_nBuffers = nBuffers, .m_nTextures = nTextures, .m_PushConstantsSize = std::size_t(Push) });
             };
+            // (the links' sun shadow map until the renderer gives one: a texel, never read - SunInfo.x 0)
+            const std::uint8_t Texel[4] = { 255, 255, 255, 255 };
+            if (Device.Create(m_SunMapDummy, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_AllFacesData = { reinterpret_cast<const std::byte*>(Texel), 4 }, .m_isGamma = false })) return false;
             return Make(m_Shader[0], m_Pass, S.m_Pass, 8, 16) && Make(m_Shader[1], m_Scatter, S.m_Scatter, 2, 16) && Make(m_Shader[2], m_Commit, S.m_Commit, 5, 16)
                 && Make(m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make(m_Shader[4], m_Filter, S.m_Filter, 10, 32) && Make(m_Shader[5], m_Expand, S.m_Expand, 4, 32)
                 && Make(m_Shader[6], m_Means, S.m_Means, 2, 16) && Make(m_Shader[7], m_Cube, S.m_Cube, 2, 16) && Make(m_Shader[8], m_Migrate, S.m_Migrate, 3, 16)
                 && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 })
                 && ((m_bRelightTS = Device.Create(m_RelightTS, { .m_Count = 2 }) == nullptr) || true)
-                && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 15, 32)) || true)
+                && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 16, 32, 1)) || true)
                 && (S.m_Solve.empty() || (m_bSolve = Make(m_Shader[11], m_SolveC, S.m_Solve, 7, 16)) || true)
                 && (S.m_Ghosts.empty() || (m_bGhosts = Make(m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true)
                 && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true);
@@ -238,7 +241,7 @@ namespace xlionrender::gi
             const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(Items.size()), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First), 0, {} };
             if (!LinkAux()) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
-            Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int(Count));
+            Window.Dispatch(m_LinksC, LinkBuffers(B), LinkTextures(), &Push, sizeof(Push), int(Count));
             return true;
         }
         // (tests) The links and hit clusters (device-local) copied out for ReadLinks: in a frame after the build's, read after this one
@@ -267,9 +270,9 @@ namespace xlionrender::gi
             const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(End), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First), 1, { s_NoLamps, Stride, 0 } };
             if (!LinkAux()) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
-            Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), nGroups);
+            Window.Dispatch(m_LinksC, LinkBuffers(B), LinkTextures(), &Push, sizeof(Push), nGroups);
             const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Smooth{ int(End), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First), 4, { 0, Stride, int(m_RelightEpoch) } };
-            Window.Dispatch(m_LinksC, B, &Smooth, sizeof(Smooth), nGroups);
+            Window.Dispatch(m_LinksC, LinkBuffers(B), LinkTextures(), &Smooth, sizeof(Smooth), nGroups);
             m_bLinkDirValid = true;
             ++m_nRelights; m_nRelitItems += nThreads;
             if (std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS relit %zu items, %u lamps in the GPU data\n", nItems, m_Data.size() > 3 ? m_Data[3] : 0u); std::fflush(stdout); }     // (measurement)
@@ -281,7 +284,7 @@ namespace xlionrender::gi
             if (!m_bLinks || !m_bSolve || nItems == 0 || !LinkAux()) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
             const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Smooth{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, 4, { 0, 1, int(m_RelightEpoch) } };
-            Window.Dispatch(m_LinksC, B, &Smooth, sizeof(Smooth), int((nItems + 63) / 64));
+            Window.Dispatch(m_LinksC, LinkBuffers(B), LinkTextures(), &Smooth, sizeof(Smooth), int((nItems + 63) / 64));
             return true;
         }
         // The links' D and items copied once into device-local buffers (the links and their hit clusters are built there): every frame's
@@ -439,7 +442,7 @@ namespace xlionrender::gi
                 if (!Local(m_LinkChangedB, Changed) || !Fit(m_LinkFlagB, int(sizeof(std::uint32_t)), nItems)) return;
                 const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, 3, {} };
                 xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
-                Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int((nItems + 63) / 64));
+                Window.Dispatch(m_LinksC, LinkBuffers(B), LinkTextures(), &Push, sizeof(Push), int((nItems + 63) / 64));
                 m_LocalFrame = Frame; m_LocalState = 1;
                 return;
             }
@@ -459,7 +462,7 @@ namespace xlionrender::gi
                 const std::size_t n = std::min(std::size_t(PerFrame), m_LocalList.size() - m_LocalCursor);
                 const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(nItems), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(m_LocalCursor), 2, {} };
                 xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
-                if (n) Window.Dispatch(m_LinksC, B, &Push, sizeof(Push), int(n));
+                if (n) Window.Dispatch(m_LinksC, LinkBuffers(B), LinkTextures(), &Push, sizeof(Push), int(n));
                 m_LocalCursor += n;
                 if (m_LocalCursor >= m_LocalList.size()) { m_LocalState = 3; m_LocalFrame = Frame; }
                 return;
@@ -483,6 +486,19 @@ namespace xlionrender::gi
         std::size_t LinkItemCount(void) const noexcept { return m_LinkItems.size(); }
         std::size_t RelitItems(void) const noexcept { return m_nRelitItems; }     // (the relight's items so far: its budget a frame)
         void        SetRelightBudgetMs(float Ms) noexcept { m_RelightBudgetMs = std::max(Ms, 0.0f); }     // the lights' relight a frame, GPU ms
+        // The GI's sun shadow map (the renderer's: the whole level from the sun), what the relight's sun visibility reads; nullptr: shadow
+        // rays. W2C: world -> its clip (x, y -1..1, z 0..1); Texel: a texel's world size. Its matrix in a host-visible buffer, written when it changes
+        // bHold: the map is not the sun's yet (drawn later this frame): a sun change's relight waits a frame for it
+        void        SetSunMap(const xgpu::texture* pMap, const xmath::fmat4& W2C, float Texel, float DepthPerMeter, bool bHold = false) noexcept
+        {
+            m_pSunMap = pMap; m_bSunMapHold = bHold;
+            std::array<float, 20> D{};
+            if (pMap) { std::memcpy(D.data(), &W2C, 64); D[16] = 1.0f; D[17] = Texel; D[18] = DepthPerMeter; }
+            if (D == m_SunMapData && m_SunMapB.m_Private) return;
+            m_SunMapData = D;
+            if (!Fit(m_SunMapB, int(sizeof(float)), D.size())) return;
+            (void)m_SunMapB.MemoryMapFrameRegion(0, int(D.size()), [&](void* p) { std::memcpy(p, D.data(), sizeof(D)); });
+        }
         void        SetRelightLatencyFloor(bool b) noexcept { m_bRelightLatencyFloor = b; }     // (tests: the budget alone, no latency floor)
         bool        isRelighting() const noexcept { return m_RelightOwed > 0 || !m_bLinkDirValid; }      // a round of the relight owed (its GPU time on top of the steady GI)
         // Experiment D in a renderer (XLION_GI_LINKS): after Settle frames of the ray solver (the reads' validity and moments), the links of
@@ -625,7 +641,7 @@ namespace xlionrender::gi
                     if (RelightLinks(Window, nItems)) { m_LinkDirKey = DirKey; m_RelightOwed = 0; }
                     if (m_bRelightTS) { Window.WriteTimestamp(m_RelightTS, 1); m_RelightTimedItems = nItems; }
                 }
-                else if (!s_bNoRelight && nUnits > 0)
+                else if (!s_bNoRelight && nUnits > 0 && !(m_bSunMapHold && DirKey != m_LinkDirKey))
                 {
                     // a change: a round; a change during one: the round goes on (its end is the display's next complete solution: a
                     // restart would never end under a moving sun), another round after it
@@ -1225,6 +1241,17 @@ namespace xlionrender::gi
         double                              m_RelightLatencyMs = 0;  // a budgeted frame's relight, GPU ms (a running mean): its floor whatever its size
         bool                                m_bRelightTimedFrame = false;
         bool                                m_bRelightLatencyFloor = true;
+        const xgpu::texture*                m_pSunMap = nullptr;     // (SetSunMap)
+        bool                                m_bSunMapHold = false;
+        xgpu::texture                       m_SunMapDummy;
+        xgpu::buffer                        m_SunMapB;
+        std::array<float, 20>               m_SunMapData{};
+        std::array<xgpu::buffer*, 16> LinkBuffers(xgpu::buffer* const (&B)[15]) noexcept
+        {
+            if (!m_SunMapB.m_Private) { (void)Fit(m_SunMapB, int(sizeof(float)), 20); (void)m_SunMapB.MemoryMapFrameRegion(0, 20, [&](void* p) { std::memset(p, 0, 80); }); }
+            std::array<xgpu::buffer*, 16> A{}; std::copy(B, B + 15, A.begin()); A[15] = &m_SunMapB; return A;
+        }
+        std::array<const xgpu::texture*, 1> LinkTextures() const noexcept { return { m_pSunMap ? m_pSunMap : &m_SunMapDummy }; }
         std::uint32_t                       m_RelightEpoch = 1;
         xgpu::buffer                        m_ShownB;           // per shown surfel its light last shown (9 floats): the display's blend
         xgpu::buffer                        m_TargetB;          // per shown surfel the last complete solution (9 floats): what the shown light fades toward

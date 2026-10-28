@@ -79,7 +79,37 @@ void LinkEmit(int Inst, int s, float w)
     TailAdd(uint(Inst), c);                   // (the table full around it: the tail)
 }
 #define GI_EMIT(Inst, s, w) LinkEmit(Inst, s, w)
+// The GI's sun shadow map (instance::renderGISunMap: the whole level from the sun, drawn when it moves): the relight's sun visibility from
+// it, not a shadow ray each hit - the sun's ray was 98% of the relight (Bistro: 8.3 ms a full relight, 0.19 without). SunInfo.x 0: rays
+layout(std430, set = 0, binding = 15) readonly buffer sunmap_b { mat4 SunW2C; vec4 SunInfo; };     // y: a texel's world size, z: depth a meter (1 / the range)
+layout(set = 1, binding = 0) uniform sampler2D GISunMap;
+float SunMapVis(vec3 O, vec3 N, vec3 L);
+#define GI_SUN_VIS(O, N, L) SunMapVis(O, N, L)
 #include "xlionrender_gi_pass_common.glsl"
+
+// Outside the map (a point the level's box missed): the ray. The point is pushed off its surface by half a texel along its normal (the
+// casters' depth bias does the rest; 1.5 texels along the normal and toward the sun leaked light past near occluders: Bistro +3.6 of 255
+// against the rays, their noise 1.1), 2 x 2 texels, bilinear (soft over a texel)
+float SunMapVis(vec3 O, vec3 N, vec3 L)
+{
+    if (SunInfo.x < 0.5) return Occluded(O, L, 1e30) ? 0.0 : 1.0;
+    const float t = SunInfo.y;
+    const vec4  C = SunW2C * vec4(O + N * (0.5 * t), 1.0);
+    const float Bias = 0.0;     // (the casters' pipelines carry a depth bias of their own: constant 2, slope 4)
+    const vec2  uv = C.xy * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) || C.z < 0.0 || C.z > 1.0) return Occluded(O, L, 1e30) ? 0.0 : 1.0;
+    const vec2  Sz = vec2(textureSize(GISunMap, 0));
+    const vec2  q = uv * Sz - 0.5, f = fract(q);
+    const ivec2 i0 = ivec2(floor(q));
+    float v = 0.0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 p = clamp(i0 + ivec2(k & 1, k >> 1), ivec2(0), ivec2(Sz) - 1);
+        const float lit = texelFetch(GISunMap, p, 0).r >= C.z - Bias ? 1.0 : 0.0;
+        v += lit * ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
+    }
+    return v;
+}
 
 float Lum(vec3 c) { return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z; }
 // gi::PackRGB9E5, step for step (the same bits): a link's weight in 32 bits (9 bits a channel, a shared exponent)

@@ -464,6 +464,12 @@ namespace xlionrender
                 if( m_GISteadyMs >= 0 ) m_pGITrace->SetRelightBudgetMs(std::max(float(m_GISliceMs - (m_pGITrace->isRelighting() ? m_GISteadyNoProbesMs : m_GISteadyMs)), 0.1f));
                 Window.WriteTimestamp(m_GISliceTS, 0);
             }
+            // the relight's sun visibility: the GI's sun shadow map (renderShadows draws it later this frame: a sun that turned waits for it)
+            {
+                const xmath::fvec3 Z = Scene.m_Sun.m_Direction.NormalizeCopy();
+                const bool bSame = m_GISunKey[0] == Z.m_X && m_GISunKey[1] == Z.m_Y && m_GISunKey[2] == Z.m_Z;
+                m_pGITrace->SetSunMap(m_bGISunMapValid && bSame ? &m_GISunMap : nullptr, m_GISunW2C, m_GISunTexel, m_GISunDepthPerMeter, m_bGISunMapMade && !bSame && !m_bGISunRays);
+            }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 0);
             m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 4);
@@ -1814,6 +1820,73 @@ namespace xlionrender
             Cmd.setViewport(float(X), float(Y), float(S), float(S));
             Cmd.setScissor(X, Y, S, S);
         };
+
+        // The GI's sun shadow map: the relight's sun visibility (xlionrender_gi_links_comp.glsl SunMapVis) - a shadow ray a hit was 98% of
+        // the relight (Bistro: 8.3 ms a full relight, 0.19 without it). Lumen traces these rays (divergence ledger); a map over the whole
+        // level (the camera's virtual pages miss what is off screen), 2048 x 2048 along the sun, drawn only when the sun turns or the GI's
+        // geometry's box changes. The relight waits for it (gpu_trace: a sun change relights when the map is the new sun's)
+        if( m_pGITrace && Scene.m_GI.m_bEnable && !m_bGISunRays && Scene.m_Sun.m_Direction.Dot(Scene.m_Sun.m_Direction) > 1e-12f )
+        {
+            xmath::fvec3 Lo{ 1e30f, 1e30f, 1e30f }, Hi{ -1e30f, -1e30f, -1e30f };
+            std::vector<std::uint32_t> GICasters;
+            for( std::uint32_t i = 0; i < Draws.size(); ++i )
+            {
+                const auto& D = *Draws[i].m_pDraw;
+                if( D.m_Instance == 0 || getGIId(D.m_Instance) < 0 ) continue;      // (what the GI's BVH holds: the rays' casters)
+                GICasters.push_back(i);
+                Lo = xmath::fvec3::Min(Lo, Draws[i].m_World.m_Min); Hi = xmath::fvec3::Max(Hi, Draws[i].m_World.m_Max);
+            }
+            const xmath::fvec3 Z = Scene.m_Sun.m_Direction.NormalizeCopy();
+            const std::array<float, 9> Key{ Z.m_X, Z.m_Y, Z.m_Z, Lo.m_X, Lo.m_Y, Lo.m_Z, Hi.m_X, Hi.m_Y, Hi.m_Z };
+            if( !m_bGISunMapTried )
+            {
+                m_bGISunMapTried = true;
+                m_bGISunMapMade = !m_Device.Create(m_GISunMap, { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = gi_sun_map_v, .m_Height = gi_sun_map_v, .m_isGamma = false });
+                if( m_bGISunMapMade )
+                {
+                    auto Attachments = std::array{ xgpu::renderpass::attachment{ m_GISunMap } };
+                    m_bGISunMapMade = !m_Device.Create(m_GISunPass, { .m_Attachments = Attachments }) && !m_Device.Create(m_GISunTimes, { .m_Count = 2 });
+                }
+            }
+            if( m_bGISunMapMade && !GICasters.empty() && Key != m_GISunKey )
+            {
+                // the light's basis (as the virtual pages': x, y across, z along the light) and the box's extent in it
+                const xmath::fvec3 Up = std::abs(Z.m_Y) < 0.99f ? xmath::fvec3{ 0, 1, 0 } : xmath::fvec3{ 1, 0, 0 };
+                const xmath::fvec3 X = Up.Cross(Z).NormalizeCopy(), Y = Z.Cross(X);
+                float Mn[3] = { 1e30f, 1e30f, 1e30f }, Mx[3] = { -1e30f, -1e30f, -1e30f };
+                for( int c = 0; c < 8; ++c )
+                {
+                    const xmath::fvec3 P{ (c & 1) ? Hi.m_X : Lo.m_X, (c & 2) ? Hi.m_Y : Lo.m_Y, (c & 4) ? Hi.m_Z : Lo.m_Z };
+                    const float v[3] = { P.Dot(X), P.Dot(Y), P.Dot(Z) };
+                    for( int k = 0; k < 3; ++k ) { Mn[k] = std::min(Mn[k], v[k]); Mx[k] = std::max(Mx[k], v[k]); }
+                }
+                const float Ext = std::max(Mx[0] - Mn[0], Mx[1] - Mn[1]) * 1.01f + 0.1f, Cx = 0.5f * (Mn[0] + Mx[0]), Cy = 0.5f * (Mn[1] + Mx[1]);
+                const float ZMin = Mn[2] - 0.1f, ZRange = Mx[2] - Mn[2] + 0.2f;
+                const float SX = 2.0f / Ext, SZ = 1.0f / ZRange;
+                xmath::fmat4 M = xmath::fmat4::fromZero();
+                M(0, 0) = X.m_X * SX; M(0, 1) = X.m_Y * SX; M(0, 2) = X.m_Z * SX; M(0, 3) = -Cx * SX;
+                M(1, 0) = Y.m_X * SX; M(1, 1) = Y.m_Y * SX; M(1, 2) = Y.m_Z * SX; M(1, 3) = -Cy * SX;
+                M(2, 0) = Z.m_X * SZ; M(2, 1) = Z.m_Y * SZ; M(2, 2) = Z.m_Z * SZ; M(2, 3) = -ZMin * SZ;
+                M(3, 3) = 1.0f;
+                static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                if( s_bTimes )
+                    if( std::vector<std::uint64_t> Ns; m_GISunTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
+                        std::printf("GISUNMAP the last draw %.3f ms (%zu casters, %.1f m a texel)\n", double(Ns[1] - Ns[0]) * 1e-6, GICasters.size(), double(Ext) / gi_sun_map_v), std::fflush(stdout);
+                Window.WriteTimestamp(m_GISunTimes, 0);
+                {
+                    auto SunCmd = Window.StartRenderPass(m_GISunPass);
+                    SunCmd.setViewport(0.0f, 0.0f, float(gi_sun_map_v), float(gi_sun_map_v));
+                    SunCmd.setScissor(0, 0, gi_sun_map_v, gi_sun_map_v);
+                    const bool bPairsWas = bPairs; bPairs = false;      // (the pairs draw the camera's pages only: every caster by the CPU path here)
+                    DrawCasters(SunCmd, M, GICasters, [](std::uint32_t) { return true; });
+                    bPairs = bPairsWas;
+                }
+                Window.WriteTimestamp(m_GISunTimes, 1);
+                m_GISunW2C = M; m_GISunTexel = Ext / float(gi_sun_map_v); m_GISunDepthPerMeter = SZ; m_GISunKey = Key;
+            }
+            m_bGISunMapValid = m_bGISunMapMade && Key == m_GISunKey;
+        }
+        else m_bGISunMapValid = false;
 
         auto Cmd = Window.StartRenderPass(m_ShadowPass);
 
