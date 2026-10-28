@@ -439,7 +439,7 @@ namespace xlionrender
         {
             m_Scene.m_Sky     = { .m_Zenith = E.m_SkyZenith, .m_Horizon = E.m_SkyHorizon, .m_Ground = E.m_SkyGround, .m_Intensity = E.m_SkyIntensity };
             m_Scene.m_Ambient = E.m_Ambient;
-            m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget, .m_bPerPixel = E.m_bGIPerPixel, .m_Debug = E.m_GIDebug, .m_RaysPerSurfel = E.m_GIRaysPerSurfel, .m_FilterPasses = E.m_GIFilterPasses, .m_bMoments = E.m_bGIMoments, .m_bHalfRes = E.m_bGIHalfRes, .m_EmissiveScale = E.m_GIEmissiveScale, .m_bEmitterLights = E.m_bGIEmitterLights };
+            m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget, .m_bPerPixel = E.m_bGIPerPixel, .m_Debug = E.m_GIDebug, .m_RaysPerSurfel = E.m_GIRaysPerSurfel, .m_FilterPasses = E.m_GIFilterPasses, .m_bMoments = E.m_bGIMoments, .m_bHalfRes = E.m_bGIHalfRes, .m_EmissiveScale = E.m_GIEmissiveScale, .m_bShowBlend = true, .m_bEmitterLights = E.m_bGIEmitterLights };     // (m_bShowBlend: a game's and an editor's view - never a jump)
             m_Scene.m_ReflectionMaxRoughness = E.m_bGI ? std::max(E.m_ReflectionMaxRoughness, 0.0f) : 0.0f;
             m_Scene.m_ReflectionPlane        = E.m_bReflectionFloor ? xmath::fvec4{ 0, 1, 0, E.m_bReflectionFloorAuto ? std::numeric_limits<float>::quiet_NaN() : -E.m_ReflectionFloorY } : xmath::fvec4{ 0, 0, 0, 0 };
             m_Scene.m_bDebugReflection       = E.m_bReflectionDebug;

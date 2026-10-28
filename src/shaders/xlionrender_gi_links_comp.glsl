@@ -118,8 +118,9 @@ void main()
     }
     if (Push.m_Mode == 1)           // the direct light at each item's surfel (world::Direct at its center): what its links' weights carry
     {
-        const int kd = Push.m_First + int(gl_GlobalInvocationID.x);
+        const int kd = Push.m_First + int(gl_GlobalInvocationID.x) * max(Push.m_Pad1, 1);     // (m_Pad1: a stride - the relight's strata, every 8th item)
         if (kd >= Push.m_nItems) return;
+        g_DirectNoLamps = Push.m_Pad0 == 1;                         // (measurement)
         const int Id = GIItems[kd].m_Ids.x, sd = GIItems[kd].m_Ids.y;
         const uint Rd = InstRec(Id);
         if (GD[Rd + 40u] == 0u || GD[Rd + 1u] != 0u) { GIDir[kd] = vec4(0.0); return; }
@@ -142,7 +143,7 @@ void main()
     }
     if (Push.m_Mode == 4)
     {
-        const int kd = Push.m_First + int(gl_GlobalInvocationID.x);
+        const int kd = Push.m_First + int(gl_GlobalInvocationID.x) * max(Push.m_Pad1, 1);     // (m_Pad1: a stride - the relight's strata, every 8th item)
         if (kd >= Push.m_nItems) return;
         const int Id = GIItems[kd].m_Ids.x, sd = GIItems[kd].m_Ids.y;
         const uint Rd = InstRec(Id), Md = MeshOf(Rd), Nf = GD[Md + 18u];
@@ -156,7 +157,7 @@ void main()
                 F += GIDirTmp[First + GD[Ni + q]].xyz * w; W += w;
             }
         }
-        GIDir[kd] = vec4(F / W, 0.0);
+        GIDir[kd] = vec4(F / W, uintBitsToFloat(uint(Push.m_Pad2)));     // (w: the lights' epoch it was relit in - the display filter's freshness)
         return;
     }
     const uint lid = gl_LocalInvocationID.x;

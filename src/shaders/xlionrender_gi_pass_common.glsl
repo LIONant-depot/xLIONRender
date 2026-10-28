@@ -131,6 +131,7 @@ bool Occluded(vec3 O, vec3 D, float TMax)       // world::Occluded: the first hi
     g_GIBvhSeeThrough = true; g_GIBvhAnyHit = false;
     return H.m_Inst >= 0;
 }
+bool g_DirectNoLamps = false;       // (measurement: the links' relight without the lamps - XLION_GI_RELIGHT_NO_LAMPS)
 vec3 Direct(vec3 P, vec3 N)
 {
     const uint Lt = GD[2];
@@ -139,7 +140,7 @@ vec3 Direct(vec3 P, vec3 N)
     const vec3 SunD = GV(Lt), SunC = GV(Lt + 3u);
     const float cs = -dot(N, SunD);
     if (cs > 0.0 && (SunC.x + SunC.y + SunC.z) > 0.0 && !Occluded(O, SunD * -1.0, 1e30)) E += SunC * cs;
-    const uint nP = GD[3];
+    const uint nP = g_DirectNoLamps ? 0u : GD[3];
     for (uint i = 0u; i < nP; ++i)
     {
         const uint b = Lt + 57u + 12u * i;              // (12 words a light: position, color, radius, the spot's direction, cos outer, cos inner)

@@ -647,17 +647,17 @@ int main()
         // and relit by a difference, the Police level's old lamp spot stayed 64% too bright; built again, the Bistro waited 6 s)
         CHECK(T.LinkBuilds() == nBuildsBefore && T.LinkState() == 2 && T.Relights() > nRelightsBefore, "a light moved: the links were built again (%zu builds, %zu relights, state %d)", T.LinkBuilds() - nBuildsBefore, T.Relights() - nRelightsBefore, T.LinkState());
 
-        // ... over frames, a budget a frame (the Bistro relit all its 545k surfels in the frame the sun moved: 75 ms): the light moved back
-        // with a fifth of the items a frame relit - a round of slices, each frame's no more than the budget - and the room's light is
-        // where it was before the move
+        // ... over frames, a GPU-time budget a frame (the Bistro relit all its 545k surfels in the frame the sun moved: 75 ms): the light
+        // moved back with a budget near 0 ms - one unit a frame (a stratum: every 8th item of a 1024-item chunk, at most 128) - and the
+        // room's light is where it was before the move
         {
-            const std::size_t nItems = T.LinkItemCount(), Budget = nItems / 5 + 1, nRelights0 = T.Relights();
-            T.SetRelightPerFrame(Budget);
+            const std::size_t nItems = T.LinkItemCount(), Budget = 128, nRelights0 = T.Relights(), nItems0 = T.RelitItems();
+            T.SetRelightBudgetMs(1e-6f);
             L.m_Points[0].m_Position = LampAt;
-            std::size_t nMost = 0;
+            std::size_t nMost = 0, nFrames = 0;
             for (int u = 0; u < 40; ++u)
             {
-                const std::size_t r0 = T.Relights();
+                const std::size_t r0 = T.RelitItems();
                 Drain(App, T, W);
                 while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
                 const std::uint64_t Frame = App.m_Device.getFrameIndex();
@@ -667,7 +667,7 @@ int main()
                 T.PumpLinks(App.m_Window, W, L, Frame, 64, 4, 1 << 20);
                 { auto Cmd = App.m_Window.getCmdBuffer(); }
                 App.m_Window.PageFlip();
-                nMost = std::max(nMost, T.Relights() - r0);
+                nMost = std::max(nMost, T.RelitItems() - r0); nFrames += T.RelitItems() > r0;
             }
             Sync(App, T, W);
             double D2 = 0, S2 = 0; std::size_t k2 = 0;
@@ -677,9 +677,9 @@ int main()
                 const auto& b = Before[k2++];
                 D2 += std::abs(e.m_X - b.m_X) + std::abs(e.m_Y - b.m_Y) + std::abs(e.m_Z - b.m_Z); S2 += b.m_X + b.m_Y + b.m_Z;
             }
-            T.SetRelightPerFrame(16384);
-            std::printf("the light moved back, %zu of %zu items relit a frame: %zu slices (at most %zu a frame), the light %.2f%% off the original\n", Budget, nItems, T.Relights() - nRelights0, nMost, 100.0 * D2 / std::max(S2, 1e-9));
-            CHECK(T.Relights() - nRelights0 >= 5 && nMost <= 2, "the relight was not spread over frames (%zu slices, at most %zu a frame)", T.Relights() - nRelights0, nMost);
+            T.SetRelightBudgetMs(1.0f);
+            std::printf("the light moved back, %zu of %zu items relit a frame: %zu slices over %zu frames, at most %zu items a frame (%zu in all), the light %.2f%% off the original\n", Budget, nItems, T.Relights() - nRelights0, nFrames, nMost, T.RelitItems() - nItems0, 100.0 * D2 / std::max(S2, 1e-9));
+            CHECK(nFrames >= (nItems + 1023) / 1024 * 8 && nMost <= Budget && T.RelitItems() - nItems0 >= nItems, "the relight was not spread over frames within its budget (%zu frames, at most %zu items a frame, %zu in all of %zu)", nFrames, nMost, T.RelitItems() - nItems0, nItems);
             CHECK(D2 < 0.01 * S2, "the sliced relight did not bring the light back (%.2f%% off)", 100.0 * D2 / std::max(S2, 1e-9));
         }
 
