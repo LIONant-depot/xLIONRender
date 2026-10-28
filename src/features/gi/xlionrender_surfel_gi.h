@@ -1874,6 +1874,20 @@ namespace xlionrender::gi
                     if (!bNew) Union(t, It->second);
                 }
             }
+            // ... and a connected piece's triangles (sharing a vertex position, welded across UV seams) one surface too: the buckets split
+            // a piece whose faces' normals vary a little (the Bistro's: 469k surfels by the buckets alone, 421k by the pieces alone)
+            {
+                std::unordered_map<std::uint64_t, int> First;
+                First.reserve(m_Pos.size());
+                for (int t = 0; t < nT; ++t)
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const v3& Q = m_Pos[std::size_t(m_Tris[std::size_t(t)][std::size_t(k)])];
+                        std::uint32_t b[3]; std::memcpy(b, &Q, sizeof(b));
+                        const auto [It, bNew] = First.try_emplace(Mix(Mix(Mix(0x9E37ull, b[0]), b[1]), b[2]), t);
+                        if (!bNew) Union(t, It->second);
+                    }
+            }
             // a cell's triangles to its neighbouring cells' (the same plane bucket)
             for (int t = 0; t < nT; ++t)
             {
