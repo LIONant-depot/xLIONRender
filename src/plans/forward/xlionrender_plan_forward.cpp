@@ -1265,7 +1265,7 @@ namespace xlionrender
             if( St.m_Slot < 0 ) continue;
             const float K[] = { Pr.m_Position.m_X, Pr.m_Position.m_Y, Pr.m_Position.m_Z, Pr.m_BoxMin.m_X, Pr.m_BoxMin.m_Y, Pr.m_BoxMin.m_Z, Pr.m_BoxMax.m_X, Pr.m_BoxMax.m_Y, Pr.m_BoxMax.m_Z };
             const std::uint64_t Key = Hash(1469598103934665603ull, K, sizeof(K)) | 1;
-            if( Key != St.m_Key ) { St.m_Key = Key; St.m_bValid = false; St.m_bDirty = true; if( m_ProbeCapturing == i ) m_ProbeNextFace = 0; }
+            if( Key != St.m_Key ) { St.m_Key = Key; St.m_bValid = false; St.m_bDirty = true; if( m_ProbeCapturing == i ) m_ProbeNextFace = 0; if( std::getenv("XLION_PROBE_TRACE") ) std::printf("PROBEMOVE %d at frame %llu\n", i, (unsigned long long)m_Device.getFrameIndex()); }
 
             const xmath::fbbox Box{ Pr.m_BoxMin, Pr.m_BoxMax };
             for( const auto& C : m_FrameChanged ) if( Touches(C, Box) ) { St.m_bDirty = true; break; }
