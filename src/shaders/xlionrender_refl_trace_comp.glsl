@@ -247,6 +247,9 @@ void main()
                         vec3 Ed, Sy;
                         DirectAndSpecular(Py, Ny, -L, bSpec ? GV(Sb) : vec3(0.04), bSpec ? GF(Sb + 3u) : 1.0, bSpec, Ed, Sy);
                         if (EmitterDirectExternal()) Ed += EmitterIrradianceAt(Py, Ny, h);
+                        // the hit's own reflection of its surroundings, fully rough (Unreal's EnvBRDFApproxFullyRough at Lumen's hits: the
+                        // specular color x 0.45 as more diffuse): a metal hit (albedo ~0) was black in a mirror - only its lights' highlights
+                        Sy += (bSpec ? GV(Sb) : vec3(0.04)) * 0.45 * (1.0 / gi_pi_v) * (Ed + Ei);
                         Lr = Emission / max(GF(5u), 1e-6) + Albedo * (1.0 / gi_pi_v) * (Ed + Ei) + Sy;     // (the emission as the surface shows it: SurfaceAt's carries the GI's emissive scale)
                         // the receiver's visible reflectance (its F0's luminance from the G-buffer's motion w; the split sum's directional
                         // albedo, Karis' fit) times its sharpness: the hits worth the material's own texels
