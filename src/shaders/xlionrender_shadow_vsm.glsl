@@ -16,6 +16,7 @@ const int   kVSMPageTexels   = 128;
 const float kVSMNormalOffset = 1.5;
 const float kVSMDepthBias    = 1.0;
 const float kVSMDepthRange   = 4.0;
+const float kVSMLevelBand    = 0.1;     // the share of a level (in its footprint's log2) that cross-fades into the next
 const float kVSMMaxSlopeBias = 8.0;     // texels of depth: the receiver plane's bias at most (Unreal clamps it too: flickering lit pixels)     // vsm::depth_range_v: a level's depth half range, in its window's extents
 
 // The pages' debug views (VSMParams2.w): 2 the level per pixel (a colour a level, page borders darker), 3 the footprint against the
@@ -230,7 +231,8 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     const float Foot = g_VSMFoot;
     const int   nLevels = int(UBOLight.VSMParams.z);
     const int   Mode    = int(UBOLight.VSMParams2.w);
-    const int   First   = clamp(int(floor(log2(Foot / UBOLight.VSMParams.y) + UBOLight.VSMParams3.x)), 0, nLevels - 1);
+    const float Lx      = log2(Foot / UBOLight.VSMParams.y) + UBOLight.VSMParams3.x;
+    const int   First   = clamp(int(floor(Lx)), 0, nLevels - 1);
     const vec3  NL      = mat3(UBOLight.W2Light) * Ng;                                  // the receiver plane in light space: z per x, y
     const vec2  Slope   = -NL.xy / max(abs(NL.z), 1e-3) * sign(NL.z + 1e-9);
     const float Grazing = 1.0 + 1.0 * (1.0 - abs(NL.z));                              // the normal offset grows as the surface turns from the light
@@ -240,7 +242,9 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     // Contact-hardening (a sun with a disc, VSMParams3.y: tan of half its angle): the blocker search a few levels coarser (VSMParams3.z of
     // them, their pages asked for by the request pass), the penumbra's half-width - the distance to the blockers x tan - and the 4 x 4
     // filter at the level whose taps span it (two levels blended): sharp at the contact, wider and smooth with the distance, no noise
-    float Lf = float(First);
+    // The last kVSMLevelBand of a level cross-fades into the next (CSM's cascade blend): no line where the level steps - it popped as the
+    // camera moved (Tomas). The contact-hardening's level below replaces it where it is wider
+    float Lf = float(First) + (int(floor(Lx)) == First && First + 1 < nLevels ? clamp((fract(Lx) - (1.0 - kVSMLevelBand)) / kVSMLevelBand, 0.0, 1.0) : 0.0);
     if (UBOLight.VSMParams3.y > 0.0)
     {
         const int Top = min(First + int(UBOLight.VSMParams3.z), nLevels - 1);
@@ -252,7 +256,8 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
             if (D < 0.0) continue;                                                     // (no page there, or no blocker: a finer level)
             {
                 const float Penumbra = D * UBOLight.VSMParams3.y;                       // world units, half the width
-                Lf = clamp(float(First) + log2(max(Penumbra, 1e-9) / (1.5 * UBOLight.VSMParams.y * float(1 << First))), float(First), float(min(First + int(UBOLight.VSMParams3.z), nLevels - 1)));
+                const float Lb = Lf;            // (no finer than the pixel's level, its band's cross-fade kept: First alone stepped at a boundary)
+                Lf = clamp(float(First) + log2(max(Penumbra, 1e-9) / (1.5 * UBOLight.VSMParams.y * float(1 << First))), Lb, max(Lb, float(min(First + int(UBOLight.VSMParams3.z), nLevels - 1))));
             }
             break;
         }

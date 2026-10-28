@@ -15,6 +15,7 @@ const int kMaxLevels   = 12;
 const int kPageTexels  = 128;
 const int kCounters    = 32;        // after the bits: 0 pixels, 1 fine, 2 coarser, 3 none, 4 boundary-crossing, 5-16 per level, 17-24 log2(footprint / texel) + 4
 const float kDepthRange = 4.0;      // vsm::depth_range_v
+const float kLevelBand  = 0.1;      // xlionrender_shadow_vsm.glsl kVSMLevelBand: the levels' cross-fade (its pages asked for too)
 // After the counters, per table entry: the largest z and the largest 1 - z of its pixels (z in 0..1 over the level's depth range, as
 // float bits: ordered as uints) - a later epoch moves the request into its own basis with them (vsm::Remap)
 
@@ -131,6 +132,19 @@ void main()
             // (rounded up to 1/256: still conservative, and after a few pixels most find the page's range holding theirs: no atomic)
             const uint  Z = floatBitsToUint(max(ceil(z * 256.0) / 256.0, 1e-7)), InvZ = floatBitsToUint(max(ceil((1.0 - z) * 256.0) / 256.0, 1e-7));
             for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y), Z, InvZ);
+            // The level band (xlionrender_shadow_vsm.glsl kVSMLevelBand): the last share of a level cross-fades into the next - its taps too
+            const float Lx = log2(Foot / t0) + F[Push.m_Frame].P0.w;
+            if (l == int(floor(Lx)) && l + 1 < nLevels && fract(Lx) > 1.0 - kLevelBand)
+            {
+                const float T1  = t0 * float(2 << l);
+                const ivec2 L1  = ivec2(floor(L.xy / T1 - 0.5)) - 3;
+                const ivec2 BLo = ivec2(floor(vec2(L1) / float(kPageTexels))), BHi = ivec2(floor(vec2(L1 + 7) / float(kPageTexels)));
+                const vec4  Lv1 = F[Push.m_Frame].Levels[l + 1];
+                const float H1  = Lv1.z * F[Push.m_Frame].P0.z * kDepthRange;
+                const float z1  = clamp((L.z - (Lv1.w - H1)) / (2.0 * H1), 0.0, 1.0);
+                const uint  Z1 = floatBitsToUint(max(ceil(z1 * 256.0) / 256.0, 1e-7)), InvZ1 = floatBitsToUint(max(ceil((1.0 - z1) * 256.0) / 256.0, 1e-7));
+                for (int y = BLo.y; y <= BHi.y; ++y) for (int x = BLo.x; x <= BHi.x; ++x) Request(l + 1, ivec2(x, y), Z1, InvZ1);
+            }
             // Contact-hardening (a sun with a disc, xlionrender_shadow_vsm.glsl): the blocker search and the wide penumbrae read the coarser
             // levels' taps too (the quad's lanes share them)
             for (int k = q + 1; k <= int(Push.m_Pad0) && l + k < nLevels; k += 4)

@@ -441,6 +441,37 @@ int main()
         const auto& C = Renderer.getVSMReport().m_Counters;
         std::printf("far view (1536): %u pixels by their level %.2f%%; pages requested %d; request pass %.3f ms\n", C[0], Pct(C[1], C[0]), Renderer.getVSMReport().m_Pages.m_Requested, Renderer.getVSMReport().m_RequestGpuMs);
         if (Measure("far view (1536)", FUnlit, FLit, false, hires_v, { 0.13, 13.08, 35.9, 272, 54 })) return 1;
+
+        // B13, the level boundaries (Tomas: "between the levels there is a clear pop"): the camera still, the resolution bias stepped by
+        // 0.02 - every level boundary sweeps across the ground as the camera's distance would sweep it. A pixel the boundary passes steps
+        // from one level's filter to the next's at once (a pop) unless the levels cross-fade (kVSMLevelBand); per step, the pixels whose
+        // shadow changed by more than 0.15
+        {
+            auto        Setup = Renderer.getVSM().getSetup();
+            const float B0    = Setup.m_ResolutionBias;
+            std::vector<float> Prev, Cur;
+            int nPop = 0, nLit = 0; float Worst = 0;
+            for (int s = 0; s <= 10; ++s)
+            {
+                Setup.m_ResolutionBias = B0 + 0.02f * float(s);
+                Renderer.configureVSM(Setup);
+                for (int k = 0; k < 40; ++k) CHECK(App.RenderFrame(Scene, Hi, Camera) && Renderer.validateVSM(), "bias step %d", s);     // (re-initialized: every page again)
+                CHECK(ReadHDR(Device, Hi, Cur), "bias step %d read", s);
+                if (s > 0)
+                    for (std::size_t i = 0; i < Cur.size(); ++i)
+                    {
+                        if (FUnlit[i] <= 1e-4f) continue;
+                        const float d = std::abs(std::clamp(Cur[i] / FUnlit[i], 0.0f, 1.0f) - std::clamp(Prev[i] / FUnlit[i], 0.0f, 1.0f));
+                        nPop += d > 0.15f; Worst = std::max(Worst, d); nLit += s == 1;
+                    }
+                std::swap(Prev, Cur);
+            }
+            Setup.m_ResolutionBias = B0;
+            Renderer.configureVSM(Setup);
+            std::printf("level boundaries (far view, the bias stepped 10 x 0.02): %d pixel steps past 0.15 (of %d pixels a step), the largest %.2f\n", nPop, nLit, Worst);
+            // (2026-10-28: without the band 328 pixel steps, the largest 0.68 - the soft sun's level was clamped at the step; with it 16, 0.20)
+            CHECK(nPop < 50 && Worst < 0.35f, "the shadow pops where a level boundary passes: %d pixel steps past 0.15, the largest %.2f", nPop, Worst);
+        }
     }
 
     // A low sun (the static geom preview's default: 20 degrees up) on the ground and a pole, a small model's tile (the radius / 2:
