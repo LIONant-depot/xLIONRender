@@ -492,7 +492,7 @@ int main()
         //     one frame, a constant kept; a single lobe there and back, its loss), then the sphere under one directional light (each surfel's
         //     3 colors that light's cosine to its lobes) filtered both ways, against the light's own colors. Measured 2026-10-28: 0.503
         //     transferred, 0.473 component by component - both the filter's spatial blur on a curved surface, not its frames (a target of
-        //     the work order's steps 3-4; this comparison becomes their gate)
+        //     the work order's steps 3-4; this comparison becomes their gate). Step 4's angular filter weight (6r): 0.180 and 0.181
         {
             const auto Transfer = [](const basis& From, const basis& To) { return std::array{ BasisWeights(From, To[0]), BasisWeights(From, To[1]), BasisWeights(From, To[2]) }; };
             const v3 N1 = v3{ 0.1f, 0.95f, 0.2f }.NormalizeCopy(), N2 = v3{ 0.6f, 0.75f, 0.1f }.NormalizeCopy();
@@ -544,6 +544,57 @@ int main()
             const double eT = Filter(true), eP = Filter(false);
             std::printf("a sphere under one directional light, its filtered lobes against the light's own: %.3f transferred, %.3f added component by component (mean relative error: the filter's blur)\n", eT, eP);
             CHECK(eT < 1.0 && eP < 1.0, "the filtered lobes lost the light (%.3f, %.3f)", eT, eP);
+        }
+
+        // 6r. The filter on a curved surface (work order 4: its support follows the surface, surfel_mesh::NeighborWeight): the sphere's
+        //     lobes under one directional light (6q's field, plus an ambient: no lobe exactly 0), each with 30% noise, filtered 4 passes (the
+        //     setup's) with the baked weights and with the normals' cosine alone (as before), against the clean field. Measured 2026-10-28:
+        //     unfiltered 0.255, the cosine 0.303 (worse than none: a directional light spread over the sphere), the angular weight 0.157
+        {
+            const v3 Dl = v3{ 0.3f, 0.8f, 0.5f }.NormalizeCopy();
+            const auto& L0 = Ball.m_Levels[0];
+            std::vector<float> Clean(3 * L0.size()), Noisy(3 * L0.size());
+            rng R(11);
+            for (std::size_t s = 0; s < L0.size(); ++s)
+            {
+                const basis D = BasisDirs(L0[s].m_Normal);
+                for (int i = 0; i < 3; ++i)
+                {
+                    const float v = std::max(D[std::size_t(i)].Dot(Dl), 0.0f) + 0.15f;
+                    const float g = (R.Next() + R.Next() + R.Next() + R.Next() - 2.0f) * 1.732f;     // (about a unit normal)
+                    Clean[3 * s + std::size_t(i)] = v; Noisy[3 * s + std::size_t(i)] = v * (1.0f + 0.3f * g);
+                }
+            }
+            const auto Filter = [&](bool bCosine)
+            {
+                std::vector<float> Cur = Noisy, Next(Cur.size());
+                for (int p = 0; p < 4; ++p)
+                {
+                    for (std::size_t s = 0; s < L0.size(); ++s)
+                    {
+                        float Sum[3] = { Cur[3 * s], Cur[3 * s + 1], Cur[3 * s + 2] }, Wt = 1;
+                        for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k)
+                        {
+                            const std::size_t j = Nb.m_Index[k];
+                            const float c = L0[s].m_Normal.Dot(L0[j].m_Normal);
+                            const float w = bCosine ? Nb.m_Weight[k] / surfel_mesh::NeighborWeight(1.0f, c) * c : Nb.m_Weight[k];
+                            for (int i = 0; i < 3; ++i) Sum[i] += w * Cur[3 * j + std::size_t(i)];
+                            Wt += w;
+                        }
+                        for (int i = 0; i < 3; ++i) Next[3 * s + std::size_t(i)] = Sum[i] / Wt;
+                    }
+                    std::swap(Cur, Next);
+                }
+                double e = 0, r = 0;
+                for (std::size_t q = 0; q < Clean.size(); ++q) { e += std::abs(Cur[q] - Clean[q]); r += Clean[q]; }
+                return e / r;
+            };
+            double e0 = 0, r = 0;
+            for (std::size_t q = 0; q < Clean.size(); ++q) { e0 += std::abs(Noisy[q] - Clean[q]); r += Clean[q]; }
+            e0 /= r;
+            const double eW = Filter(false), eC = Filter(true);
+            std::printf("the filter on a 25 cm sphere, noisy lobes against the clean ones: unfiltered %.3f, the angular weight %.3f, the cosine alone %.3f\n", e0, eW, eC);
+            CHECK(eW < 0.75 * e0 && eW < eC, "the filter does not follow the curved surface (%.3f filtered, %.3f unfiltered, %.3f the cosine alone)", eW, e0, eC);
         }
     }
 

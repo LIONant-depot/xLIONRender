@@ -1585,6 +1585,14 @@ namespace xlionrender::gi
             }
         }
 
+        // A display filter neighbor's weight: linear in distance over 2 radii, times an angular falloff of the normals' cosine c,
+        // exp(-(1 - c) / filter_angle_v) - 1 on a plane (as it was), e^-1 at 14 degrees: on a curved surface the filter's support follows
+        // the surface's curvature (gi_surfel_reconstruction_proposal.md, work order 4: a 25 cm sphere's neighbors are 26 degrees apart, and
+        // 4 passes of c alone spread a directional light over the sphere - its noisy lobes came out farther from the clean ones than they
+        // went in, 0.303 against 0.255; with it 0.157, test 6r)
+        static constexpr float filter_angle_v = 0.03f;
+        static float NeighborWeight(float f, float c) noexcept { return f * std::exp(-(1.0f - c) / filter_angle_v); }
+
         void BuildNeighbors() noexcept
         {
             BuildOrigins();
@@ -1606,7 +1614,7 @@ namespace xlionrender::gi
                         if (c < 0.8f) return;
                         const float f = 1.0f - (L[n].m_Center - L[s].m_Center).Length() / (2 * L[s].m_Radius);
                         if (f <= 0 || !SameLayer(L[s], L[n])) return;
-                        Per[s].push_back({ std::uint32_t(n), f * c });      // linear: a neighbor counts (squared, the read's falloff, it barely did)
+                        Per[s].push_back({ std::uint32_t(n), NeighborWeight(f, c) });      // linear: a neighbor counts (squared, the read's falloff, it barely did)
                     });
                 }, Lv == 0 ? 0.1f : 0.9f, Lv == 0 ? 0.9f : 1.0f);
                 Nb.m_First.assign(L.size() + 1, 0);
@@ -1622,7 +1630,8 @@ namespace xlionrender::gi
         // GeomStatic compiler packs it into the resource, the renderer unpacks it at load instead of building it (seconds in Release, half
         // a minute in Debug for the Police Station). Only what the surfels and the geometry decide: the same in both. Unpack checks the
         // block's tag and sizes (false: build them)
-        static constexpr std::uint32_t derived_tag_v = 0x37444947u;    // "GID7": the neighbors of a curved layer (SameLayer). GID6: the lists packed
+        static constexpr std::uint32_t derived_tag_v = 0x38444947u;    // "GID8": the neighbors' angular weight (NeighborWeight). GID7: f x c, reweighted
+        static constexpr std::uint32_t derived_tag7_v = 0x37444947u;   // at load (no rays). Before: the neighbors of a curved layer (SameLayer). GID6: the lists packed
         static constexpr std::uint32_t derived_tag6_v = 0x36444947u;   // (PackReadGrid), its neighbors read: made again. GID5: as they are, read: unpacked
         static constexpr std::uint32_t derived_tag5_v = 0x35444947u;   // (GID4, never released: the center as an entry; GID3: the origins as
                                                                         // positions and normals, read: made again;
@@ -1653,8 +1662,8 @@ namespace xlionrender::gi
             std::size_t i = 0;
             const auto Take = [&](std::size_t n) { const bool b = i + n <= W.size(); const std::size_t at = i; i += n; return b ? W.data() + at : nullptr; };
             const std::uint32_t* p = Take(8);
-            if (p == nullptr || (p[0] != derived_tag_v && p[0] != derived_tag6_v && p[0] != derived_tag5_v && p[0] != derived_tag3_v)) return false;
-            const bool bPacked = p[0] == derived_tag_v || p[0] == derived_tag6_v;
+            if (p == nullptr || (p[0] != derived_tag_v && p[0] != derived_tag7_v && p[0] != derived_tag6_v && p[0] != derived_tag5_v && p[0] != derived_tag3_v)) return false;
+            const bool bPacked = p[0] == derived_tag_v || p[0] == derived_tag7_v || p[0] == derived_tag6_v;
             const bool bTag3 = p[0] == derived_tag3_v;
             const bool bLeak = (p[1] & 1u) != 0;
             const std::uint32_t FirstPatch = p[2];
@@ -1689,7 +1698,20 @@ namespace xlionrender::gi
             m_ReadList.assign(pList, pList + nList);
             if (bPacked) { auto T = m_ReadTable; auto L = m_ReadList; PackReadGrid(false, T, L, m_ReadTable, m_ReadList); }
             m_Neighbors = std::move(Nbs);
-            if (p[0] != derived_tag_v) BuildNeighbors();               // (before GID7: a curved surface's surfels had no neighbors)
+            if (p[0] == derived_tag7_v)                                 // (GID7: f x c - the same neighbors, their weights made again)
+                for (int Lv = 0; Lv < 2; ++Lv)
+                {
+                    auto& Nb = m_Neighbors[Lv];
+                    const auto& L = m_Levels[Lv];
+                    if (Nb.m_First.size() != L.size() + 1) continue;
+                    for (std::size_t s = 0; s < L.size(); ++s)
+                        for (std::uint32_t k = Nb.m_First[s]; k < Nb.m_First[s + 1]; ++k)
+                        {
+                            const float c = L[s].m_Normal.Dot(L[Nb.m_Index[k]].m_Normal);
+                            Nb.m_Weight[k] = c > 0 ? NeighborWeight(Nb.m_Weight[k] / c, c) : 0.0f;
+                        }
+                }
+            else if (p[0] != derived_tag_v) BuildNeighbors();          // (before GID7: a curved surface's surfels had no neighbors)
             if (bTag3) BuildOrigins();                                  // (a GID3 resource: its origins made again from the vertex surfels, the same ones)
             else { m_OriginFirst.assign(pOF, pOF + nOFirst); m_OriginVert.assign(pOV, pOV + nO); }
             SortReadLists();
