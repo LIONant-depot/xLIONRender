@@ -306,6 +306,12 @@ namespace xlionrender
                 (void)m_Renderer.SetOutlineProxy(*pMesh, PosNrm, Idx, Center, Half);
             }
 #endif
+            for (int c = 0; c < 8; ++c)       // (the frame's world bounds: the fallback probe's anchor)
+            {
+                const xmath::fvec3 K{ (c & 1) ? pGeom->m_BBox.m_Max.m_X : pGeom->m_BBox.m_Min.m_X, (c & 2) ? pGeom->m_BBox.m_Max.m_Y : pGeom->m_BBox.m_Min.m_Y, (c & 4) ? pGeom->m_BBox.m_Max.m_Z : pGeom->m_BBox.m_Min.m_Z };
+                const auto W = L2W * K;
+                m_FrameLo = xmath::fvec3::Min(m_FrameLo, W); m_FrameHi = xmath::fvec3::Max(m_FrameHi, W);
+            }
             draw D{ .m_Mesh = *pMesh, .m_L2W = L2W, .m_UserID = Entity
                   , .m_Instance = std::uint64_t(m_InstanceIds.Of(Entity)) | (std::uint64_t(Mesh.m_GIRole) << draw_gi_role_shift_v)
                   , .m_EntityParams = pMaterial ? pMaterial->Params() : entity_params{} };
@@ -442,13 +448,16 @@ namespace xlionrender
         }
 
         // A new frame's snapshot: no sun unless a LightSun says so, a dim flat ambient unless an Environment says otherwise
-        xmath::fvec3 m_GlobalProbe{ 0, 0, 0 };     // (the automatic probe of a level without one: Render)
+        xmath::fvec3 m_GlobalProbe{ 0, 0, 0 }, m_GlobalLo{ 0, 0, 0 }, m_GlobalHi{ 0, 0, 0 };     // (the automatic probe of a level without one: Render)
         bool         m_bGlobalProbe = false;
+        xmath::fvec3 m_FrameLo{ 1e30f, 1e30f, 1e30f }, m_FrameHi{ -1e30f, -1e30f, -1e30f };     // (this frame's drawn bounds)
+        void RecaptureGlobalProbe() noexcept { m_bGlobalProbe = false; }     // the level's automatic probe anchored again (its bounds now)
         void Begin() noexcept
         {
             m_Scene.m_Draws.clear();
             m_Scene.m_LocalLights.clear();
             m_Scene.m_Probes.clear();
+            m_FrameLo = xmath::fvec3(1e30f); m_FrameHi = xmath::fvec3(-1e30f);
             m_Scene.m_Sun     = { .m_Intensity = 0, .m_bCastShadows = false };
             m_Scene.m_Sky     = {};
             m_Scene.m_Ambient = { 0.15f, 0.15f, 0.17f };
@@ -493,14 +502,13 @@ namespace xlionrender
             if (m_View.m_Width != W || m_View.m_Height != H)
                 if (m_Renderer.CreateView(m_View, { .m_Width = W, .m_Height = H })) return;
             m_Stats.m_Materials = int(m_Materials.size());
-            // A level with no ReflectionProbe gets one that follows the camera: moved to it once the camera is global_probe_follow_v away
-            // (a point where the player is: a fixed one - the level's bounds' centre, the first camera - was inside walls or outside),
-            // its box wide (no parallax). Captured and re-captured as any probe
-            if (m_Scene.m_Probes.empty() && !m_Scene.m_Draws.empty())
+            // A level with no ReflectionProbe gets one, anchored once (the reference's fixed global capture: divergence ledger #5): at the
+            // centre of the level's drawn bounds, its box those bounds; again only when asked (RecaptureGlobalProbe). Captured and
+            // re-captured on change as any probe. (It followed the camera: each re-anchor's capture was followed by a 0.3-0.6 s GPU spike)
+            if (m_Scene.m_Probes.empty() && !m_Scene.m_Draws.empty() && m_FrameLo.m_X <= m_FrameHi.m_X)
             {
-                constexpr float global_probe_follow_v = 4.0f;
-                if (!m_bGlobalProbe || (Camera.getPosition() - m_GlobalProbe).Length() > global_probe_follow_v) { m_GlobalProbe = Camera.getPosition(); m_bGlobalProbe = true; }
-                m_Scene.m_Probes.push_back({ .m_Position = m_GlobalProbe, .m_BoxMin = m_GlobalProbe - xmath::fvec3(100.0f), .m_BoxMax = m_GlobalProbe + xmath::fvec3(100.0f), .m_Blend = 0 });
+                if (!m_bGlobalProbe) { m_GlobalProbe = (m_FrameLo + m_FrameHi) * 0.5f; m_GlobalLo = m_FrameLo; m_GlobalHi = m_FrameHi; m_bGlobalProbe = true; }
+                m_Scene.m_Probes.push_back({ .m_Position = m_GlobalProbe, .m_BoxMin = m_GlobalLo, .m_BoxMax = m_GlobalHi, .m_Blend = 0 });
             }
             m_Renderer.Render(Window, m_Scene, m_View, Camera, [&](xgpu::cmd_buffer& CmdBuffer) { if (pOverlay) pOverlay(CmdBuffer, pUser); });
         }
