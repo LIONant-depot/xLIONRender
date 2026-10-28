@@ -1499,6 +1499,72 @@ int main()
             std::printf("  the solver from scratch: within 1%% of the converged world after %d updates (64 rays a surfel each: %zu rays; the compile cast %zu once)\n",
                         Updates + 1, std::size_t(Updates + 1) * 64 * n, T.m_nRays);
         }
+
+        // The compiled links' row sums (a surfel's albedo times the share of its rays that land on a surfel): under 1 a row, or the
+        // bounces add light (the energy tests below hold for any operator whose rows and columns sum under 1)
+        {
+            v3 Max{ 0, 0, 0 };
+            for (std::size_t r = 0; r < n; ++r)
+            {
+                v3 Sum{ 0, 0, 0 };
+                for (std::uint32_t k = T.m_First[r]; k < T.m_First[r + 1]; ++k) Sum = Sum + T.m_W[k];
+                Max = v3{ std::max(Max.m_X, Sum.m_X), std::max(Max.m_Y, Sum.m_Y), std::max(Max.m_Z, Sum.m_Z) };
+            }
+            std::printf("compiled transport: the largest row sum %.3f %.3f %.3f\n", Max.m_X, Max.m_Y, Max.m_Z);
+            CHECK(Max.m_X < 1 && Max.m_Y < 1 && Max.m_Z < 1, "a compiled row sums over 1 (%.3f %.3f %.3f): the bounces add light", Max.m_X, Max.m_Y, Max.m_Z);
+        }
+    }
+
+    // 6k2. The solver's energy (gi_surfel_reconstruction_proposal.md v2.1, work order 3): a synthetic operator, 64 rows on a ring each
+    //      reading its 4 nearest with weight rho / 4 (rows and columns sum to rho; rho per channel 0.5, 0.8, 0.95), against the closed forms -
+    //      the steady state d / (1 - rho) from E = 0, with the source off a total that falls by rho an iteration from any start, and at
+    //      rho = 1 a total kept. (No revision id on the links yet: they are compiled at load from the meshes they read, never stored)
+    {
+        const std::size_t n = 64;
+        const auto Ring = [&](const v3& Rho, const v3& d)
+        {
+            world::transport T;
+            T.m_First.push_back(0);
+            for (std::size_t r = 0; r < n; ++r)
+            {
+                for (const int o : { -2, -1, 1, 2 }) { T.m_Col.push_back(std::uint32_t((r + n + std::size_t(o + int(n))) % n)); T.m_W.push_back(Rho * 0.25f); }
+                T.m_First.push_back(std::uint32_t(T.m_Col.size()));
+                T.m_D.push_back(d);
+            }
+            return T;
+        };
+        const auto Total = [](const std::vector<v3>& E) { v3 t{ 0, 0, 0 }; for (const auto& e : E) t = t + e; return t; };
+        const v3 Rho{ 0.5f, 0.8f, 0.95f }, d{ 0.2f, 0.3f, 0.1f };
+
+        std::vector<v3> E;
+        world::SolveTransport(Ring(Rho, d), E, 600);
+        float SteadyErr = 0;
+        for (const auto& e : E)
+            for (int c = 0; c < 3; ++c) { const float r = (&Rho.m_X)[c], want = (&d.m_X)[c] / (1 - r); SteadyErr = std::max(SteadyErr, std::abs((&e.m_X)[c] - want) / want); }
+
+        rng R(7);
+        std::vector<v3> E0(n);
+        for (auto& e : E0) e = v3{ R.Next(), R.Next(), R.Next() };
+        const auto Decay = [&](const v3& Rh, int Its)
+        {
+            const auto T = Ring(Rh, v3{ 0, 0, 0 });
+            std::vector<v3> Ec = E0;
+            float Worst = 0;
+            for (int it = 0; it < Its; ++it)
+            {
+                const v3 a = Total(Ec);
+                world::SolveTransport(T, Ec, 1);
+                const v3 b = Total(Ec);
+                for (int c = 0; c < 3; ++c) Worst = std::max(Worst, std::abs((&b.m_X)[c] / (&a.m_X)[c] - (&Rh.m_X)[c]));
+            }
+            return Worst;
+        };
+        const float DecayErr = Decay(Rho, 20), KeepErr = Decay(v3{ 1, 1, 1 }, 200);
+        std::printf("solver energy (a synthetic ring): steady state off d/(1-rho) by %.2e, source off a total falling by rho off by %.2e an iteration, rho = 1 its total kept to %.2e\n",
+                    SteadyErr, DecayErr, KeepErr);
+        CHECK(SteadyErr < 1e-4f, "the steady state is not d / (1 - rho) (off by %.2e)", SteadyErr);
+        CHECK(DecayErr < 1e-4f, "with the source off the total does not fall by rho an iteration (off by %.2e)", DecayErr);
+        CHECK(KeepErr < 1e-4f, "at rho = 1 the total is not kept (off by %.2e)", KeepErr);
     }
 
     // 6l. GI chunks (documentation/gi_chunks_plan.md): a room as one mesh (6 x 6 m, 2.5 m high), its clusters 1 m tiles, baked whole and
