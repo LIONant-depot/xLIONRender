@@ -45,7 +45,12 @@ namespace xlionrender
                 auto& S = m_Slots[It->second];
                 S.m_LastSeen = Frame;
                 const bool bMoved   = std::memcmp(&S.m_L2W, &L2W, sizeof(L2W)) != 0;
-                const bool bMatEdit = std::memcmp(&S.m_Material, &Mat, sizeof(Mat)) != 0;
+                // (by its fields: a memcmp read the padding after the bools - garbage of the caller's stack, a "changed" caster now and then
+                // while the camera moved: every shadow page under it dirty, all the shadows gone a few frames, Tomas)
+                const auto  Same3   = [](const xmath::fvec3& a, const xmath::fvec3& b) { return a.m_X == b.m_X && a.m_Y == b.m_Y && a.m_Z == b.m_Z; };
+                const auto& M0      = S.m_Material;
+                const bool bMatEdit = !(Same3(M0.m_BaseColor, Mat.m_BaseColor) && M0.m_Metallic == Mat.m_Metallic && M0.m_Roughness == Mat.m_Roughness && M0.m_AO == Mat.m_AO
+                                     && M0.m_F0 == Mat.m_F0 && Same3(M0.m_Emissive, Mat.m_Emissive) && M0.m_bCastShadows == Mat.m_bCastShadows && M0.m_bEditorGrid == Mat.m_bEditorGrid);
                 const bool bEntEdit = std::memcmp(&S.m_Entity, &Ent, sizeof(Ent)) != 0;
                 // last frame's transform (the screen tail's motion): the one it had before it moved this frame; once it stopped, written
                 // again as this frame's (else it would keep moving in the shaders)
