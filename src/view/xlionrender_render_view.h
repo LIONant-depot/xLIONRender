@@ -52,7 +52,7 @@ namespace xlionrender
         // camera-centered world to clip and eye, and whether the last buffer holds a frame of this size
         xgpu::buffer            m_GIScreenPrev, m_GIScreenHeader, m_GIScreenCounters;     // (the counters: host visible, an entry a ring frame)
         // The ambient occlusion on that grid (xlionrender_ao_comp.glsl): this frame's and last frame's (vec2 a pixel: the AO, the distance)
-        xgpu::buffer            m_AO, m_AOPrev;
+        xgpu::buffer            m_AO, m_AOPrev, m_AORaw;      // (m_AORaw: this frame's unfiltered)
         bool                    m_bAOPrev           = false;
         xmath::fmat4            m_GIScreenPrevW2C;
         xmath::fvec3            m_GIScreenPrevEye;

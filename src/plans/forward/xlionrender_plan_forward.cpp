@@ -2717,7 +2717,6 @@ namespace xlionrender
                         pH[0] = std::uint32_t(View.m_GIScreenWidth); pH[1] = std::uint32_t(View.m_GIScreenHeight);
                         pH[2] = View.m_GIScreenFrame; pH[3] = (bTemporal && View.m_bGIScreenPrev ? 1u : 0u) | (RateLog2 << 1);
                         pH[28] = std::uint32_t(GIScreenDivisor());      // (entry 7.x: the read's resolution divisor - the upsample's, mb_standard_pbr.frag)
-                        pH[29] = bAO ? 1u : 0u;                         // (7.y: the ambient occlusion follows the pixels)
                         std::memcpy(pH + 4, &View.m_GIScreenPrevW2C, sizeof(float) * 16);        // (entries 1-4: its columns, as the UBO's mat4)
                         const float M[3] = { Move[0], Move[1], Move[2] };
                         std::memcpy(pH + 20, M, sizeof(M));
@@ -2956,55 +2955,61 @@ namespace xlionrender
                 if( s_bGatherSplit )
                 {
                     auto [It, bNew] = s_GatherSplit.try_emplace(this);
-                    if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_GatherSplit.erase(It);
+                    if( bNew && m_Device.Create(It->second, { .m_Count = 4 }) ) s_GatherSplit.erase(It);
                     else pGS = &It->second;
                 }
                 if( pGS )
                 {
                     static std::vector<std::uint64_t> s_Ns;
-                    static double s_Cls = 0, s_Read = 0; static int s_n = 0;
-                    if( pGS->getResults(s_Ns) && s_Ns.size() >= 3 && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
+                    static double s_AOms = 0, s_Cls = 0, s_Read = 0; static int s_n = 0;
+                    if( pGS->getResults(s_Ns) && s_Ns.size() >= 4 && s_Ns[3] >= s_Ns[2] && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
                     {
-                        s_Cls += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Read += double(s_Ns[2] - s_Ns[1]) * 1e-6;
-                        if( ++s_n == 120 ) { std::printf("SCREENSPLIT gather: classification %.3f, GI read %.3f ms (%d passes)\n", s_Cls / s_n, s_Read / s_n, int(m_GatherBuffers.size())); std::fflush(stdout); s_n = 0; s_Cls = s_Read = 0; }
+                        s_AOms += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Cls += double(s_Ns[2] - s_Ns[1]) * 1e-6; s_Read += double(s_Ns[3] - s_Ns[2]) * 1e-6;
+                        if( ++s_n == 120 ) { std::printf("SCREENSPLIT gather: AO %.3f, classification %.3f, GI read %.3f ms (%d passes)\n", s_AOms / s_n, s_Cls / s_n, s_Read / s_n, int(m_GatherBuffers.size())); std::fflush(stdout); s_n = 0; s_AOms = s_Cls = s_Read = 0; }
                     }
                 }
-                // The ambient occlusion first (xlionrender_ao_comp.glsl): from the G-buffer, on the gather's grid, into the GI screen buffer
-                // after its pixels - the materials' indirect light by it (mb_standard_pbr.frag SurfelGIScreen), the GI on or off. Last
-                // frame's becomes the history
+                // The ambient occlusion first (xlionrender_ao_comp.glsl): from the G-buffer, on the gather's grid, an "AO only" entry into
+                // each pixel of the GI screen buffer - the gather multiplies its irradiance by the AO where it has GI, the materials' upsample
+                // takes the AO entries' (mb_standard_pbr.frag SurfelGIScreen): the GI on or off, no extra read. Last frame's: the history
+                if( pGS ) Window.WriteTimestamp(*pGS, 0);
                 if( bAO )
                 {
                     std::swap(View.m_AO, View.m_AOPrev);
                     const float* pM = reinterpret_cast<const float*>(&W2C);      // (column major: the clip y row's scale, P11 - the view's rotation keeps it)
                     const float  P11 = std::sqrt(pM[1] * pM[1] + pM[5] * pM[5] + pM[9] * pM[9]);
-                    const details::push_ao Push{ std::uint32_t(View.m_GIScreenWidth), std::uint32_t(View.m_GIScreenHeight), std::uint32_t(GIScreenDivisor()), View.m_GIScreenFrame
-                                               , Scene.m_GI.m_AORadius, Scene.m_GI.m_AOThickness, 0.5f * float(View.m_GIScreenHeight) * P11, m_GatherTableBase, View.m_bAOPrev ? 1u : 0u, 0.2f };
-                    auto Buffers  = std::array<xgpu::buffer*, 4>{ &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AOPrev, &View.m_AO };
+                    // (two dispatches: the raw AO, then its 4 x 4 filter - the pattern's rotations summed: each frame good on its own - and a third
+                    // of the way from the history)
+                    details::push_ao Push{ std::uint32_t(View.m_GIScreenWidth), std::uint32_t(View.m_GIScreenHeight), std::uint32_t(GIScreenDivisor()), 0u
+                                         , Scene.m_GI.m_AORadius, Scene.m_GI.m_AOThickness, 0.5f * float(View.m_GIScreenHeight) * P11, m_GatherTableBase, 0u, 0.33f };     // (no history: each frame good on its own - HypeHype's; moving looks as still)
+                    auto Buffers  = std::array<xgpu::buffer*, 5>{ &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AOPrev, &View.m_AO, &View.m_AORaw };
                     auto Textures = std::array<const xgpu::texture*, 2>{ &View.m_Depth, &View.m_GPreNormal };
-                    Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), (View.m_GIScreenWidth + 7) / 8, (View.m_GIScreenHeight + 7) / 8);
+                    const int GX = (View.m_GIScreenWidth + 7) / 8, GY = (View.m_GIScreenHeight + 7) / 8;
+                    Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
+                    Push.m_Mode = 1u;
+                    Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                 }
                 View.m_bAOPrev = bAO;
                 {
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
-                    if( pGS ) GCmd.WriteTimestamp(*pGS, 0);
-                    const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()) };
-                    std::array<xgpu::buffer*, 7> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable };
+                    if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
+                    const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()), bAO ? 1u : 0u };
+                    std::array<xgpu::buffer*, 8> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO };
                     GCmd.setPipelineInstance(View.m_GIClassifyInstance, std::span{ Buffers });
                     GCmd.setPushConstants(Push);
                     GCmd.setBuffer(m_FullscreenVB);
                     GCmd.setBuffer(m_FullscreenIB);
                     GCmd.Draw(3);
-                    if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
+                    if( pGS ) GCmd.WriteTimestamp(*pGS, 2);
                     for( std::size_t k = 0; k < m_GatherBuffers.size(); ++k )
                     {
                         Buffers[1] = const_cast<xgpu::buffer*>(m_GatherBuffers[k]);
                         GCmd.setPipelineInstance(View.m_GIGatherInstance, std::span{ Buffers });
-                        GCmd.setPushConstants(details::push_gi_gather{ m_GatherTableBase, std::uint32_t(k), Push.m_Div });
+                        GCmd.setPushConstants(details::push_gi_gather{ m_GatherTableBase, std::uint32_t(k), Push.m_Div, Push.m_AO });
                         GCmd.setBuffer(m_FullscreenVB);
                         GCmd.setBuffer(m_FullscreenIB);
                         GCmd.Draw(3);
                     }
-                    if( pGS ) GCmd.WriteTimestamp(*pGS, 2);
+                    if( pGS ) GCmd.WriteTimestamp(*pGS, 3);
                 }
                 const xgpu::buffer::copy C{ 6, int(m_Device.getFrameIndex() % ring_frames_v), 1 };     // (its counters into this frame's slot, as the geometry read's)
                 Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });

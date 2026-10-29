@@ -17,7 +17,7 @@ layout(push_constant) uniform gather_push
     uint TableBase;
     uint Buffer;        // this pass's GI buffer (its depth: (Buffer + 1) / 65536)
     uint Div;           // the read's resolution divisor
-    uint Pad;
+    uint AO;            // 1: the ambient occlusion is on (binding 20, the pixels' AO entries: xlionrender_ao_comp.glsl)
 } push;
 
 struct gather_sample

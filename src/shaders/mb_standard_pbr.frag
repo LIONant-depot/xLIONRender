@@ -285,21 +285,23 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
     const vec2  i0 = floor(hp), f = hp - i0;
     vec4 Se = vec4(0.0), Sr = vec4(0.0);
     float Best = -1.0; uvec4 BestQ = uvec4(0u);
-    const bool bAO = GIMesh[29] != 0u;      // (header entry 7.y: the ambient occlusion is in the buffer, after the pixels: xlionrender_ao_comp.glsl)
     vec2 Sa = vec2(0.0);
     for (int k = 0; k < 4; ++k)
     {
         const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1u, H - 1u));
         const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
-        if (bAO)                // (its own guide, the distance: it is there without the GI)
-        {
-            const vec2  A  = unpackHalf2x16(GIMesh[4u * (8u + W * H) + uint(P.y) * W + uint(P.x)]);
-            const float wa = A.y > 0.0 ? max(0.0, 1.0 - abs(A.y - Dist) / max(0.05 * Dist, 1e-3)) : 0.0;
-            Sa += vec2(A.x, 1.0) * wb * wa * wa;
-        }
         const uint  a = 4u * (8u + uint(P.y) * W + uint(P.x));     // (after the header: xlionrender_gi_gather_frag.glsl)
         const uvec4 Q = uvec4(GIMesh[a], GIMesh[a + 1u], GIMesh[a + 2u], GIMesh[a + 3u]);
-        if ((Q.w & (1u << 30)) == 0u) continue;
+        if ((Q.w & (1u << 30)) == 0u)
+        {
+            // an "AO only" entry (xlionrender_ao_comp.glsl: no GI there - the GI's entries carry their AO in the irradiance): its AO, by distance
+            if ((Q.w & 0xF0000000u) == 0x30000000u)
+            {
+                const float wa = max(0.0, 1.0 - abs(unpackHalf2x16(Q.y).y - Dist) / max(0.05 * Dist, 1e-3));
+                Sa += vec2(unpackHalf2x16(Q.x).x, 1.0) * wb * wa * wa;
+            }
+            continue;
+        }
         const float d = unpackHalf2x16(Q.y).y;
         const vec2  o = vec2(float((Q.w >> 16) & 63u), float((Q.w >> 22) & 63u)) / 63.0 * 2.0 - 1.0;     // (6 + 6 bits: xlionrender_gi_gather_frag.glsl)
         vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y));

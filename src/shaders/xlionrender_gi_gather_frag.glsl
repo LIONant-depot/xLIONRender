@@ -14,6 +14,22 @@ struct InstanceData { vec4 Rows[3]; vec4 Material[3]; vec4 PrevRows[3]; };     /
 layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer { InstanceData Instances[]; } instances;
 layout(std430, set = 1, binding = 11) buffer GIScreenBuffer { uvec4 GIScreen[]; };
 layout(std430, set = 1, binding = 13) readonly buffer GIScreenPrevBuffer { uvec4 GIScreenPrev[]; };
+layout(std430, set = 1, binding = 20) readonly buffer AOBuffer { vec2 AOData[]; };    // the ambient occlusion on this grid (xlionrender_ao_comp.glsl): AO, distance
+
+// The AO at this pixel, its 3 x 3 neighbours weighed by their distance's match (the denoiser's spatial pass: edge-aware)
+float GatherAO(in const ivec2 P, in const uint W, in const uint H, in const float Dist)
+{
+    float S = 0.0, Wt = 0.0;
+    for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x)
+    {
+        const ivec2 q = clamp(P + ivec2(x, y), ivec2(0), ivec2(int(W) - 1, int(H) - 1));
+        const vec2  A = AOData[uint(q.y) * W + uint(q.x)];
+        if (A.y <= 0.0) continue;
+        const float w = max(0.0, 1.0 - abs(A.y - Dist) / (0.02 * Dist + 0.01)) * ((x == 0 && y == 0) ? 2.0 : 1.0);
+        S += A.x * w; Wt += w;
+    }
+    return Wt > 1e-4 ? S / Wt : 1.0;
+}
 
 const uint screen_header_v  = 8u;
 const uint screen_max_age_v = 3u;
@@ -53,6 +69,7 @@ void main()
     // Kind: 0 fresh by the pattern, 1 reprojected, 2 rejected (fresh), 3 too old (fresh)
     uint  Kind = 0u;
     uvec4 Out  = uvec4(0u);
+    bool  bKeep = false;
     const uint Rate = 1u << ((Hd.w >> 1) & 3u);
     const uint Tile = uint(((P.x >> 3) & 1) | (((P.y >> 3) & 1) << 1));
     if ((Hd.w & 1u) != 0u && (Tile % Rate) != (Hd.z % Rate))
@@ -103,12 +120,14 @@ void main()
             if (!Q.bSupported || Q.Confidence < 0.25) g_GIRefl = vec4(0.0);
         }
         if (E.w < 0.5 && (Ref & 0x8000u) == 0u) E = vec4(SurfelGILocalMean(Pm, GFace, Offset, Ref & 0xFFu), 1.0);
+        if (push.AO != 0u) E.rgb *= GatherAO(P, W, H, Dist);      // (a fresh read only: a reprojected one carries last frame's)
         const bool bE = E.w > 0.5, bR = g_GIRefl.w > 0.5;
+        bKeep = !bE && !bR;           // (no GI here: the AO's own entry stays)
         const vec3 Rr = bR ? g_GIRefl.rgb : vec3(0.0);
         Out = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, Dist)), packHalf2x16(Rr.rg),
                     (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFFu) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u));
     }
-    if (bIn) GIScreen[screen_header_v + uint(P.y) * W + uint(P.x)] = Out;
+    if (bIn && !(bKeep && push.AO != 0u)) GIScreen[screen_header_v + uint(P.y) * W + uint(P.x)] = Out;
 
     const uvec4 Mine = bIn ? uvec4(Kind == 0u ? 1u : 0u, Kind == 1u ? 1u : 0u, Kind == 2u ? 1u : 0u, Kind == 3u ? 1u : 0u) : uvec4(0u);
     const uvec4 Sum  = subgroupAdd(Mine);

@@ -246,13 +246,13 @@ namespace xlionrender::details
         std::uint32_t   m_TableBase;        // this frame's region of the table (uints)
         std::uint32_t   m_Buffer;           // the pass's GI buffer (its depth: (m_Buffer + 1) / 65536)
         std::uint32_t   m_Div;              // the read's resolution divisor
-        std::uint32_t   m_Pad = 0;
+        std::uint32_t   m_AO = 0;           // 1: the ambient occlusion is on (render_view::m_AO; the pixels' AO entries)
     };
 
     // xlionrender_ao_comp.glsl push_t
     struct push_ao
     {
-        std::uint32_t   m_W, m_H, m_Div, m_Frame;
+        std::uint32_t   m_W, m_H, m_Div, m_Mode;      // (Mode 0: the raw AO, 1: its 4 x 4 filter and the history)
         float           m_Radius, m_Thickness, m_PixelsPerUnit;
         std::uint32_t   m_TableBase, m_bPrev;
         float           m_Blend;
