@@ -2588,6 +2588,15 @@ namespace xlionrender
                 const auto& St = pMat->m_State;
                 return !(St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided || !St.m_bDepthWrite || !St.m_bDepthTest || St.m_bWireframe);
             };
+            // ... and a masked one too (the ivy): on the half-resolution read as if solid - its cutout is the full-resolution pass's, whose
+            // upsample keeps the most alike of the 4 (never the per-pixel walk again: 5.9 of Bistro's 13.7 ms). XLION_GI_SCREEN_MASKED=0: off
+            static const bool s_bScreenMasked = [] { const char* p = std::getenv("XLION_GI_SCREEN_MASKED"); return !(p && p[0] == '0'); }();
+            const auto ScreenOk = [&]( const material_slot* pMat )
+            {
+                if( Opaque(pMat) ) return true;
+                const auto& St = pMat->m_State;
+                return s_bScreenMasked && St.m_Blend == material_state::blend::MASKED && !St.m_bDoubleSided && St.m_bDepthWrite && St.m_bDepthTest && !St.m_bWireframe;
+            };
             // The GI read at half resolution (scene::gi_settings::m_bHalfRes; XLION_GI_HALFRES=0/1 overrides): the main view, no GI debug view. The rigid
             // opaque clusters' depth into the view's half-size target, then the GI draws' own read at it (the material's: GIPixelGI, with
             // the surface's normal) into the view's buffer; the scene pass's GI draws below upsample it (SurfelGIScreen) instead of reading
@@ -2663,7 +2672,7 @@ namespace xlionrender
                         const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
                         for( const auto& Sub : G.m_Submeshes )
                         {
-                            if( !Opaque(Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr) ) continue;
+                            if( !ScreenOk(Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr) ) continue;
                             for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                             {
                                 if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
@@ -2767,7 +2776,7 @@ namespace xlionrender
                 const auto  GI     = iDraw < m_DrawGI.size() && !bNoGI ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                 const bool  bSections0 = !bNoGI && bRigid && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == pMesh->m_Geom.m_Clusters.size();
                 // read at half resolution (the pass above): the buffer as its GI buffer, gi_screen_v as its level - one buffer for every section
-                const bool  bScreenSub = bScreen && bRigid && Opaque(pMat) && (bSections0 ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu);
+                const bool  bScreenSub = bScreen && bRigid && ScreenOk(pMat) && (bSections0 ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu);
                 // a blended draw (glass) reads the probe grid - 8 probes, O(1) - not the surfels a pixel: no prepass under it, each layer paid
                 // the walk (Bistro: 22 of its 33 ms scene pass). Frostbite's GIBS lights what is outside its deferred path from a probe volume,
                 // Lumen's translucency from a volume too. XLION_GI_BLEND_PIXEL=1: the per-pixel read, as before (measurement)
