@@ -36,6 +36,7 @@
 
 #include "features/shadows/xlionrender_shadow_clipmap.h"
 #include <algorithm>
+#include <chrono>
 #include <bit>
 #include <span>
 #include <unordered_map>
@@ -135,6 +136,7 @@ namespace xlionrender::shadows
             float m_DynamicBias  = 0;       // the resolution bias dynamic resolution adds now (ResolutionBias())
             int   m_Remapped     = 0;       // requests of an older epoch moved into this one (pages, after the move)
             int   m_ResidentPrev = 0;       // the previous epoch's pages still resident
+            float m_SecMs[7]     = {};      // (measurement) Update by part: windows, out of window, dirty, net, requests, movers, the rest
             float m_Fade         = 1;       // the current epoch's weight against the previous one (1: the current only)
             int   m_Recentred    = 0;       // levels whose depth range moved this frame (their pages gone): never two at once (Update)
         };
@@ -280,12 +282,15 @@ namespace xlionrender::shadows
             OpenEpoch(LightDir, Level0Texel, Frame);
             m_ToRender.clear();
             m_Stats = {};
+            m_AdmitFailFrame = ~0ull;                   // (a new Update: its frees may have made room)
             m_Stats.m_Epochs = m_FrameEpochs; m_Stats.m_Remapped = m_FrameRemapped; m_FrameEpochs = m_FrameRemapped = 0;
             m_Frame = Frame;
             const xmath::fvec3 Z = LightDir.NormalizeCopy();
 
             m_Stats.m_EpochMismatchDegrees = std::acos(std::clamp(Z.Dot(m_Z), -1.0f, 1.0f)) * 180.0f / 3.14159265f;
 
+            using sec_clk = std::chrono::steady_clock; auto SecT = sec_clk::now(); int SecN = 0;
+            const auto Sec = [&] { const auto t = sec_clk::now(); m_Stats.m_SecMs[SecN++] = std::chrono::duration<float, std::milli>(t - SecT).count(); SecT = t; };
             // The windows; a level whose depth range moves loses its pages
             const xmath::fvec3 C = ToLight(Camera);
             for (int L = 0; L < m_Setup.m_Levels; ++L)
@@ -308,6 +313,7 @@ namespace xlionrender::shadows
             m_PinX = int(std::floor(C.m_X / m_Levels[m_Setup.m_Levels - 1].m_PageSize));
             m_PinY = int(std::floor(C.m_Y / m_Levels[m_Setup.m_Levels - 1].m_PageSize));
 
+            Sec();
             // Pages out of their window, or a net page out of the net, go
             for (int s = 0; s < int(m_Slots.size()); ++s)
             {
@@ -316,6 +322,7 @@ namespace xlionrender::shadows
                 if (!InWindow(S.m_Key) || (s < m_Setup.NetSlots()) != IsPinned(S.m_Key)) Free(s);
             }
 
+            Sec();
             // Caster changes: the pages under them are DIRTY now (out of the table until rendered again)
             if (!ChangedWorld.empty() || !bCache)
             {
@@ -346,6 +353,7 @@ namespace xlionrender::shadows
                 }
             }
 
+            Sec();
             // The net: every page present and VALID - setup::m_NetBudget of them a frame, nearest the camera first (the rest deferred: the
             // previous epoch's net shows there meanwhile)
             {
@@ -374,6 +382,7 @@ namespace xlionrender::shadows
                 }
             }
 
+            Sec();
             // The requests: touched (protected), admitted by priority (coarser levels first, then nearer pages), rendered within the budget
             std::vector<key> Want;
             Want.reserve(Requests.size());
@@ -410,6 +419,7 @@ namespace xlionrender::shadows
                 ++m_Stats.m_Rendered;
             }
 
+            Sec();
             // The movers' pages: every page asked for (and of the net) a mover overlaps, the movers drawn into it this frame; the others go
             {
                 std::vector<lbox> Movers;
@@ -449,6 +459,7 @@ namespace xlionrender::shadows
                 m_DynMap = std::move(Keep);
             }
 
+            Sec();
             // The cross-fade: once this epoch has every page asked for (none deferred or rejected), toward it over m_FadeFrames; then the
             // previous epoch's pages go
             if (m_bHasPrev)
@@ -467,6 +478,7 @@ namespace xlionrender::shadows
                 else                           ++m_Stats.m_ResidentFine;
             }
             m_Stats.m_Fade = m_bHasPrev ? m_Fade : 1.0f;
+            Sec();
 
             // Dynamic resolution (as Unreal's FVirtualShadowMapArrayCacheManager: down fast, up after 10 frames that fit, slowly); a frame
             // without requests (an epoch's first frames, nothing in view) leaves it as it is
@@ -669,7 +681,16 @@ namespace xlionrender::shadows
         }
 
         // A fine slot: a free one, else the least recently requested page that is neither requested lately nor rendered this frame
+        // (a failed admission holds for the rest of the frame - nothing frees a slot between two admissions: each rejected request scanned
+        // the whole pool again, ~1900 x 4096 slots while the sun turned, up to 9 ms of Update in Bistro)
         int AdmitSlot(std::uint64_t Frame) noexcept
+        {
+            if (m_AdmitFailFrame == Frame) return -1;
+            const int Got = AdmitSlotScan(Frame);
+            if (Got < 0) m_AdmitFailFrame = Frame;
+            return Got;
+        }
+        int AdmitSlotScan(std::uint64_t Frame) noexcept
         {
             int Best = -1, Prev = -1;
             for (int s = m_Setup.NetSlots(); s < int(m_Slots.size()); ++s)
@@ -704,6 +725,7 @@ namespace xlionrender::shadows
         std::vector<std::uint64_t>              m_RenderedFrame;
         float                                   m_DetailBias = 0;   // the detail distance's levels finer (SetDetailDistance)
         std::unordered_map<std::uint64_t, int>  m_Map;
+        std::uint64_t                           m_AdmitFailFrame = ~0ull;      // (AdmitSlot)
         std::unordered_map<std::uint64_t, int>  m_PrevMap;
         std::unordered_map<std::uint64_t, int>  m_DynMap;               // this frame's mover pages
         std::uint64_t                           m_EpochFrame = 0;

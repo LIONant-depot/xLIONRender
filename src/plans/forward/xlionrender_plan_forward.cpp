@@ -1590,6 +1590,12 @@ namespace xlionrender
             ShCpu.Lap();
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
+            if( s_bShCpu )      // (measurement: vsm::Update by part, the largest of 120 frames - SHADOWCPU's line)
+            {
+                static float s_SecMax[7] = {}; static int s_SecN = 0;
+                for( int k = 0; k < 7; ++k ) s_SecMax[k] = std::max(s_SecMax[k], m_VSM.m_Stats.m_SecMs[k]);
+                if( ++s_SecN == 120 ) { std::printf("VSMUPDATE max of 120 frames: windows %.3f, out %.3f, dirty %.3f, net %.3f, requests %.3f, movers %.3f, rest %.3f ms\n", s_SecMax[0], s_SecMax[1], s_SecMax[2], s_SecMax[3], s_SecMax[4], s_SecMax[5], s_SecMax[6]); std::fflush(stdout); s_SecN = 0; for( auto& v : s_SecMax ) v = 0; }
+            }
             {   static const bool s_bE = std::getenv("XLION_GPU_TIMES") != nullptr;      // (measurement: a frame that dropped many pages - the dropout hunt)
                 const auto& St = m_VSM.m_Stats;
                 if( s_bE && (St.m_Dirtied > 32 || St.m_Recentred || St.m_Epochs || St.m_Evicted > 32 || St.m_Deferred > 64) )
