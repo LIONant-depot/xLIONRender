@@ -249,13 +249,19 @@ float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint Move
     return VSMBlockerDistanceEp(Level, L, MoverBase, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w));
 }
 
-// The pixel's light-space footprint (the level's choice), from the screen derivatives: set by the material in uniform control flow,
-// before a branch that skips the shadow (a surface facing away from the sun)
+// The pixel's footprint (the level's choice): its distance to the eye times the pixel's angle, as Unreal's clipmap level (its distance to
+// the clipmap's origin: VirtualShadowMapProjectionCommon.ush CalcAbsoluteClipmapLevel) - not the light-space derivatives: a wall turned
+// from the sun stretched them, its shadow took a coarse level close to the eye (switches near, a blurred wall; Unreal's crisp at 12 m,
+// Tomas). The request pass computes the same (xlionrender_vsm_request_comp.glsl). Set by the material in uniform control flow
 float g_VSMFoot = 1e-9;
 void VSMFootprint(in const vec3 World)
 {
-    const vec3 L = (UBOLight.W2Light * vec4(World, 1.0)).xyz;
-    g_VSMFoot = max(max(length(dFdx(L.xy)), length(dFdy(L.xy))), 1e-9);
+    const vec3  L = (UBOLight.W2Light * vec4(World, 1.0)).xyz;
+    const vec3  V = World - UBOLight.CameraPos.xyz;
+    const vec3  D = normalize(V);
+    // the light-space derivatives, at most twice the distance's (the distance's alone: 10 x the pages - the ground seen at a grazing angle -
+    // and leaks under a low sun)
+    g_VSMFoot = max(min(max(length(dFdx(L.xy)), length(dFdy(L.xy))), 2.0 * length(V) * max(length(dFdx(D)), length(dFdy(D)))), 1e-9);
 }
 
 float ShadowVSM(in const vec3 World, in const vec3 Ng)
@@ -277,7 +283,9 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     // filter at the level whose taps span it (two levels blended): sharp at the contact, wider and smooth with the distance, no noise
     // The last kVSMLevelBand of a level cross-fades into the next (CSM's cascade blend): no line where the level steps - it popped as the
     // camera moved (Tomas). The contact-hardening's level below replaces it where it is wider
-    float Lf = float(First) + (int(floor(Lx)) == First && First + 1 < nLevels ? clamp((fract(Lx) - (1.0 - kVSMLevelBand)) / kVSMLevelBand, 0.0, 1.0) : 0.0);
+    // (the band: the sun's ShadowLevelBlend, VSMParams2.y; a smooth curve over it - Unreal's long, smooth blends, Tomas)
+    const float Band = UBOLight.VSMParams2.y > 0.0 ? UBOLight.VSMParams2.y : kVSMLevelBand;
+    float Lf = float(First) + (int(floor(Lx)) == First && First + 1 < nLevels ? smoothstep(0.0, 1.0, clamp((fract(Lx) - (1.0 - Band)) / Band, 0.0, 1.0)) : 0.0);
     float Pen = 0.0;            // the penumbra's half-width the disc spans (0: the 4 x 4 alone)
     if (UBOLight.VSMParams3.y > 0.0)
     {

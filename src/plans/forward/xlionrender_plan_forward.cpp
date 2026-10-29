@@ -841,7 +841,7 @@ namespace xlionrender
         Window.CopyBuffer(m_VSMZeros, m_VSMReq, std::span{ &Z, 1 });
         Window.WriteTimestamp(m_VSMTimes, 0);
         // (each pixel's own level, and the contact-hardening's coarser levels shared by each 2 x 2 quad's lanes)
-        const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(vsmTableBase()), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), std::uint32_t(m_VSMSoftLevels), 0u };
+        const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(vsmTableBase()), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), std::uint32_t(m_VSMSoftLevels), std::bit_cast<std::uint32_t>(m_VSMLevelBand) };     // (m_Pad1: the levels' blend)
         auto Buffers  = std::array<xgpu::buffer*, 3>{ &m_VSMFrames, &m_VSMReq, &m_CellRing };
         auto Textures = std::array<const xgpu::texture*, 1>{ &View.m_Depth };
         Window.Dispatch(m_VSMRequest, Buffers, Textures, Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
@@ -1558,6 +1558,10 @@ namespace xlionrender
                 }
             }
             // (the static pages see the static casters' changes only - every change when the movers are not split; the movers have pages of their own)
+            m_VSM.SetDetailDistance(Sun.m_ShadowDetailDistance);
+            { static const bool s_bT = std::getenv("XLION_GPU_TIMES") != nullptr;      // (measurement: the sun's shadow detail reaching the renderer)
+              if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d\n", Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine), std::fflush(stdout); }
+            m_VSMLevelBand = std::clamp(Sun.m_ShadowLevelBlend, 0.01f, 0.95f);
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
         }
@@ -1621,7 +1625,7 @@ namespace xlionrender
         const int LocalW = m_LocalPages.getSetup().m_PoolTexels;
         if( bPairs && (!m_VSM.m_ToRender.empty() || !m_LocalPages.m_ToRender.empty()) )
         {
-            const float AW = float(sunAtlasWidth()), AH = float(shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize), T = float(shadows::vsm::page_texels_v);
+            const float AW = float(sunAtlasWidth()), AH = float(2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize), T = float(shadows::vsm::page_texels_v);
             std::vector<shadow_pairs::page> Pages;
             Pages.reserve(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
             bool bAny[2] = {};
@@ -1910,7 +1914,7 @@ namespace xlionrender
             }
             if( !m_VSM.m_ToRender.empty() && bPairs )      // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
             {
-                const int AW = sunAtlasWidth(), AH = shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;
+                const int AW = sunAtlasWidth(), AH = 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;     // (the pool twice as tall: instance::Init)
                 Cmd.setViewport(0.0f, 0.0f, float(AW), float(AH));
                 Cmd.setScissor(0, 0, AW, AH);
                 DrawPairs(Cmd, false);
@@ -2488,7 +2492,7 @@ namespace xlionrender
                 Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.getSetup().m_ResolutionBias };     // the local lights' pages
                 const auto& VS = m_VSM.getSetup();
                 Light.m_VSMParams  = bVSM ? xmath::fvec4{ 1.0f, m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };
-                Light.m_VSMParams2 = { float(VS.m_Window), float(shadows::vsm::page_texels_v), float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
+                Light.m_VSMParams2 = { float(VS.m_Window), m_VSMLevelBand, float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
                 for( int i = 0; i < shadows::vsm::max_levels_v; ++i )
                 {
                     const auto& Lv = m_VSM.m_Levels[i];
@@ -2742,11 +2746,29 @@ namespace xlionrender
             {
                 const auto* pMesh  = findMesh(Scene.m_Draws[iDraw].m_Mesh);
                 const bool  bRigid = pMesh->m_Geom.m_Kind != geom_kind::SKIN;
-                const auto  GI     = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
-                const bool  bSections0 = bRigid && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == pMesh->m_Geom.m_Clusters.size();
+                static const bool s_bBlendNone = [] { const char* p = std::getenv("XLION_GI_ABLATE"); return p && std::string_view(p).find("blend_none") != std::string_view::npos; }();     // (measurement: the blended draws without GI)
+                const bool  bNoGI  = s_bBlendNone && pMat && pMat->m_State.m_Blend != material_state::blend::OFF;
+                const auto  GI     = iDraw < m_DrawGI.size() && !bNoGI ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
+                const bool  bSections0 = !bNoGI && bRigid && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == pMesh->m_Geom.m_Clusters.size();
                 // read at half resolution (the pass above): the buffer as its GI buffer, gi_screen_v as its level - one buffer for every section
                 const bool  bScreenSub = bScreen && bRigid && Opaque(pMat) && (bSections0 ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu);
                 const bool  bSections = bSections0 && !bScreenSub;
+                // measurement (XLION_GPU_TIMES): why a main-view GI draw misses the half-resolution read - GIHALFMISS every 240 frames
+                static const bool s_bHalfMiss = std::getenv("XLION_GPU_TIMES") != nullptr;
+                if( s_bHalfMiss && bMain && bScreen )
+                {
+                    static int s_n[8] = {}; static std::uint64_t s_Frame = 0;
+                    const auto* pSt = pMat ? &pMat->m_State : nullptr;
+                    const int Why = bScreenSub ? 0 : !bRigid ? 1 : (pSt && pSt->m_Blend != material_state::blend::OFF) ? 2 : (pSt && pSt->m_bDoubleSided) ? 3
+                                  : (pSt && (!pSt->m_bDepthWrite || !pSt->m_bDepthTest || pSt->m_bWireframe)) ? 4 : (bSections0 ? 5 : 6);
+                    ++s_n[Why];
+                    if( m_Device.getFrameIndex() != s_Frame && m_Device.getFrameIndex() % 240 == 0 )
+                    {
+                        std::printf("GIHALFMISS draws: half-res %d; missed: skinned %d, blended %d, double-sided %d, depth/wire %d, sections without GI %d, no GI buffer %d\n", s_n[0], s_n[1], s_n[2], s_n[3], s_n[4], s_n[5], s_n[6]);
+                        std::fflush(stdout); for( auto& v : s_n ) v = 0;
+                    }
+                    s_Frame = m_Device.getFrameIndex();
+                }
                 // a rigid mesh without surfels of its own reads the probe grid as well (its GI buffer: the grid; its level: gi_probes_v)
                 const bool  bRigidProbes = bRigid && Probes && !pMesh->m_pGI;
                 return [=, this, &View]( std::uint32_t c, std::uint32_t Slot, std::uint32_t MaterialBase ) -> std::pair<xgpu::buffer*, details::push_static_geom>

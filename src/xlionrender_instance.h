@@ -575,6 +575,7 @@ namespace xlionrender
         // The GI's sun shadow map (renderShadows): the whole level's GI geometry from the sun, ortho over its light-space box, drawn when the
         // sun turns or that box changes; the relight's sun visibility reads it (gi::gpu_trace::SetSunMap). XLION_GI_SUN_RAYS: shadow rays
         static constexpr int        gi_sun_map_v = 2048;
+        float                       m_VSMLevelBand = 0.1f;          // the sun's shadow-level blend this frame (scene's sun_light::m_ShadowLevelBlend: the request pass and the shading)
         bool                        m_bGISunRays = std::getenv("XLION_GI_SUN_RAYS") != nullptr;     // (tests, measurement: the shadow rays instead)
         xgpu::texture               m_GISunMap;
         xgpu::renderpass            m_GISunPass;

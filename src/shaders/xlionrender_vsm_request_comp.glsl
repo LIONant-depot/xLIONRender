@@ -50,6 +50,7 @@ bool World(ivec2 p, out vec3 L)
 // The light-space positions, the workgroup's 8 x 8 pixels and one more around (w 0: none - the sky, off the view):
 // a pixel's and its 4 neighbours' read once for the group (each pixel rebuilt 5 of them: 0.14 of Bistro's 0.44 ms)
 shared vec4 s_L[10 * 10];
+
 float TileFootprint(ivec2 l, ivec2 Step, vec3 L)
 {
     const vec4 A = s_L[(l.y + Step.y) * 10 + l.x + Step.x], B = s_L[(l.y - Step.y) * 10 + l.x - Step.x];
@@ -103,9 +104,21 @@ void main()
     {
         const float t0 = F[Push.m_Frame].P0.x;
         const int   nLevels = int(F[Push.m_Frame].P0.y);
-        const float fx = TileFootprint(l, ivec2(1, 0), L), fy = TileFootprint(l, ivec2(0, 1), L);
-        float Foot = max(fx < 1e29 ? fx : 0.0, fy < 1e29 ? fy : 0.0);         // the shading's max(|dFdx|, |dFdy|) of the light-space xy
-        if (Foot <= 0.0) Foot = t0;                                             // (an isolated pixel: no neighbour to measure with)
+        // the shading's footprint (xlionrender_shadow_vsm.glsl VSMFootprint): the distance to the eye times the pixel's angle
+        float Foot;
+        {
+            const ivec2 pp = ivec2(gl_WorkGroupID.xy) * 8 + ivec2(gl_LocalInvocationID.xy);
+            const vec2  N0 = (vec2(pp) + 0.5) / vec2(Push.m_W, Push.m_H) * 2.0 - 1.0;
+            const vec4  A  = F[Push.m_Frame].C2W * vec4(N0, 1.0, 1.0), B = F[Push.m_Frame].C2W * vec4(N0 + vec2(2.0 / float(Push.m_W), 0.0), 1.0, 1.0);
+            const vec4  C  = F[Push.m_Frame].C2W * vec4(N0 + vec2(0.0, 2.0 / float(Push.m_H)), 1.0, 1.0);
+            const vec3  Da = normalize(A.xyz / A.w), Db = normalize(B.xyz / B.w), Dc = normalize(C.xyz / C.w);
+            const float d  = texelFetch(Depth, pp, 0).r;
+            const vec4  W  = F[Push.m_Frame].C2W * vec4(N0, d, 1.0);
+            const float fx = TileFootprint(l, ivec2(1, 0), L), fy = TileFootprint(l, ivec2(0, 1), L);
+            float Fl = max(fx < 1e29 ? fx : 0.0, fy < 1e29 ? fy : 0.0);            // the light-space derivatives (as the shading's)
+            if (Fl <= 0.0) Fl = t0;                                                 // (an isolated pixel: no neighbour to measure with)
+            Foot = max(min(Fl, 2.0 * length(W.xyz / W.w) * max(length(Db - Da), length(Dc - Da))), 1e-9);
+        }
         int Level = clamp(int(floor(log2(Foot / t0) + F[Push.m_Frame].P0.w)), 0, nLevels - 1);
         atomicAdd(s_Count[0], 1u);
         atomicAdd(s_Count[17 + clamp(int(floor(log2(Foot / (t0 * float(1 << Level))))) + 4, 0, 7)], 1u);
@@ -137,7 +150,7 @@ void main()
             // (the request's footprint is the depth tiles', the shading's its own derivatives': near a level's ends they differ - the shading
             // wanting a level whose pages nobody asked for fell back to a coarser one, a hard seam along the pages' edges while moving, Tomas.
             // A margin each way: the next level from 0.3 below its start, the finer one up to 0.3 above it - below)
-            if (l == int(floor(Lx)) && l + 1 < nLevels && fract(Lx) > 1.0 - max(kLevelBand, 0.3))
+            if (l == int(floor(Lx)) && l + 1 < nLevels && fract(Lx) > 1.0 - max(uintBitsToFloat(Push.m_Pad1) > 0.0 ? uintBitsToFloat(Push.m_Pad1) : kLevelBand, 0.3))
             {
                 const float T1  = t0 * float(2 << l);
                 const ivec2 L1  = ivec2(floor(L.xy / T1 - 0.5)) - 3;

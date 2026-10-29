@@ -479,7 +479,8 @@ namespace xlionrender::shadows
         }
 
         // The resolution bias of this frame's request pass and shading: the setup's and dynamic resolution's
-        float ResolutionBias(void) const noexcept { return m_Setup.m_ResolutionBias + m_DynamicBias; }
+        float ResolutionBias(void) const noexcept { return m_Setup.m_ResolutionBias - m_DetailBias + m_DynamicBias; }
+        void  SetDetailDistance(float Scale) noexcept { m_DetailBias = std::log2(std::max(Scale, 1.0f)); }     // (scene's sun_light::m_ShadowDetailDistance: levels finer)
 
         // The page table of this frame: per entry (level-major, then the toroidal row, column) a 16-bit slot + 1 of a VALID page, 0 none;
         // two entries a uint (even index: low half)
@@ -697,6 +698,7 @@ namespace xlionrender::shadows
         std::uint64_t                           m_LastOverload = 0;
         std::vector<slot>                       m_Slots;
         std::vector<std::uint64_t>              m_RenderedFrame;
+        float                                   m_DetailBias = 0;   // the detail distance's levels finer (SetDetailDistance)
         std::unordered_map<std::uint64_t, int>  m_Map;
         std::unordered_map<std::uint64_t, int>  m_PrevMap;
         std::unordered_map<std::uint64_t, int>  m_DynMap;               // this frame's mover pages

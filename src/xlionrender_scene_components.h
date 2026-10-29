@@ -672,7 +672,9 @@ namespace xlionrender
         bool            m_bCastShadows  = true;
         float           m_ShadowTileSize = 4.0f;           // world size of a level-0 shadow tile; the clipmap levels double it
         bool            m_bGI           = true;             // in the GI's lights (its bounce); off: direct light only
-        float           m_SourceAngle   = 0.5357f;          // the sun's disc, degrees across (scene's sun_light::m_SourceAngle): contact-hardening
+        float           m_SourceAngle   = 0.2f;             // the sun's disc, degrees across (scene's sun_light::m_SourceAngle; Tomas' choice 0.2, the real sun 0.53): contact-hardening
+        float           m_ShadowDetailDistance = 2.0f;      // how many times farther each shadow level keeps its detail (Tomas' choice: 2) (scene's sun_light::m_ShadowDetailDistance)
+        float           m_ShadowLevelBlend = 0.95f;         // the share of a shadow level that cross-fades into the next (Tomas' choice: the longest, 0.95) (scene's sun_light::m_ShadowLevelBlend)
 
         XPROPERTY_DEF
         ( "LightSun", light_sun
@@ -681,6 +683,8 @@ namespace xlionrender
         , obj_member<"CastShadows",    &light_sun::m_bCastShadows>
         , obj_member<"ShadowTileSize", &light_sun::m_ShadowTileSize, member_help<"World size of the finest shadow tile: smaller is sharper near the camera">>
         , obj_member<"GI",             &light_sun::m_bGI, member_help<"Bounce light (global illumination). Off: direct light only, no bounce and no GI cost - for short-lived or fast lights such as bullets">>
+        , obj_member<"ShadowLevelBlend", &light_sun::m_ShadowLevelBlend, member_help<"How long the blend between two shadow levels is: the share of a level over which it fades smoothly into the next (longer: no visible switch while moving; the shadow softens over more of the distance)">>
+        , obj_member<"ShadowDetailDistance", &light_sun::m_ShadowDetailDistance, member_help<"How far the sharp shadow levels reach: each level switches to the next coarser one this many times farther away (more shadow pages to render and keep). 1: the minimum detail">>
         , obj_member<"SourceAngle",    &light_sun::m_SourceAngle, member_ui<float>::scroll_bar<0.0f, 10.0f>, member_help<"The sun's disc, degrees across (the real sun: about 0.53). Shadows are sharp where the caster touches the ground and soften with the distance to it; 0: hard shadows">>
         )
     };

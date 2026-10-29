@@ -411,7 +411,7 @@ namespace xlionrender
         void AddSun(const light_sun& L, const xmath::fmat4& L2W) noexcept
         {
             if (m_Stats.m_bSun++) return;               // one sun: the first
-            m_Scene.m_Sun = { .m_Direction = DownOf(L2W), .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_ShadowTileSize = std::max(L.m_ShadowTileSize, 0.01f), .m_bGI = L.m_bGI, .m_SourceAngle = std::max(L.m_SourceAngle, 0.0f) };
+            m_Scene.m_Sun = { .m_Direction = DownOf(L2W), .m_Color = L.m_Color, .m_Intensity = L.m_Intensity, .m_bCastShadows = L.m_bCastShadows, .m_ShadowTileSize = std::max(L.m_ShadowTileSize, 0.01f), .m_bGI = L.m_bGI, .m_SourceAngle = std::max(L.m_SourceAngle, 0.0f), .m_ShadowLevelBlend = std::clamp(L.m_ShadowLevelBlend, 0.01f, 0.95f), .m_ShadowDetailDistance = std::max(L.m_ShadowDetailDistance, 1.0f) };
         }
 
         // (Handle: the light's entity - its identity across frames)

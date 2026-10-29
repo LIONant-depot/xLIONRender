@@ -347,7 +347,9 @@ namespace xlionrender
         // The shadow atlas: every lit pipeline samples it in slot 0
         {
             const int Clipmap = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, Local = ShadowSetup.m_LocalAtlasSize;
-            if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = 2 * Clipmap + Local, .m_Height = std::max(Clipmap, Local), .m_isGamma = false }); Err ) return Err;
+            // (the sun's pool twice as tall: 4096 slots, Unreal's r.Shadow.Virtual.MaxPhysicalPages - the levels' detail far out (the sun's
+            // ShadowDetailDistance) needs the pages; with 2048 the dynamic resolution took it back, Tomas: "they don't do anything"; +64 MB)
+            if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = 2 * Clipmap + Local, .m_Height = std::max(2 * Clipmap, Local), .m_isGamma = false }); Err ) return Err;
         }
 
         // The environment probe's textures (filled by updateEnvironment)
@@ -608,7 +610,7 @@ namespace xlionrender
         // (2048 slots) Every page asked for rendered in its frame while the sun is still, as Unreal's virtual shadow maps do (the finest pages
         // near the camera came last, a frame or more late while moving - a sharp patch overtaking a blurred one, Tomas); a new epoch (the sun
         // moved: every page again) keeps the budget, the previous epoch bridging it
-        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, .m_SteadyBudget = 128 });     // (~4 ms at most: a cut after a rebuild cost 12)
+        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = 2 * shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, .m_Window = 128, .m_SteadyBudget = 128 });     // (128 pages a level side: Unreal's clipmap levels' 16k texels - with 32 the fine levels ended 4, 8, 16 m from the eye, the walls beyond on coarse levels whatever the bias, Tomas)     // (~4 ms at most: a cut after a rebuild cost 12)
         if( const char* p = std::getenv("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
         {
             using usage = xgpu::buffer::setup::usage;
