@@ -174,8 +174,9 @@ void main()
                     for (int y = FLo.y; y <= FHi.y; ++y) for (int x = FLo.x; x <= FHi.x; ++x) Request(l - 1, ivec2(x, y), Z0, InvZ0);
             }
             // Contact-hardening (a sun with a disc, xlionrender_shadow_vsm.glsl): the blocker search and the wide penumbrae read the coarser
-            // levels' taps too (the quad's lanes share them)
-            for (int k = q + 1; k <= int(Push.m_Pad0) && l + k < nLevels; k += 4)
+            // levels' taps too (the quad's lanes share them). The next coarser one always: a level losing its pages (its depth range moved,
+            // vsm::Update) falls back one level, not to the net (Unreal marks coarser pages too)
+            for (int k = q + 1; k <= max(int(Push.m_Pad0), 1) && l + k < nLevels; k += 4)
             {
                 const int   lk  = l + k;
                 const float Tk  = t0 * float(1 << lk);

@@ -223,6 +223,22 @@ int main()
         CHECK(Reach >= Farthest, "the depth range reaches %.0f texels past the camera, a pixel can be %.0f away", Reach, Farthest);
     }
 
+    // The camera walking along the light: the levels' depth ranges move, never two the same frame (Tomas: every shadow gone a few frames
+    // where they all moved at once - only the net left)
+    {
+        vsm W;
+        W.Init({});
+        CHECK(Frame(W, 1, {}), "walk: first frame");
+        const float Step = W.DepthHalfRange(0) * vsm::depth_recenter_v / 16;
+        int Moves = 0, Worst = 0;
+        for (int i = 1; i <= 16 * 64; ++i)
+        {
+            CHECK(Frame(W, std::uint64_t(1 + i), {}, {}, W.m_Z * (Step * float(i))), "walk frame %d", i);
+            Moves += W.m_Stats.m_Recentred; Worst = std::max(Worst, W.m_Stats.m_Recentred);
+        }
+        CHECK(Moves > 64 && Worst == 1, "walking along the light: %d depth range moves, %d levels at once", Moves, Worst);
+    }
+
     std::printf("P1a-0 (CPU): addressing, net, budget, dirty pages, pressure, slot reuse (B13), epochs, decoding, windows, depth reach: ok\n");
 
     //------------------------------------------------------------------------------------------------------------------------------

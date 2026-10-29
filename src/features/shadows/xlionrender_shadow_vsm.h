@@ -136,6 +136,7 @@ namespace xlionrender::shadows
             int   m_Remapped     = 0;       // requests of an older epoch moved into this one (pages, after the move)
             int   m_ResidentPrev = 0;       // the previous epoch's pages still resident
             float m_Fade         = 1;       // the current epoch's weight against the previous one (1: the current only)
+            int   m_Recentred    = 0;       // levels whose depth range moved this frame (their pages gone): never two at once (Update)
         };
 
         // A request's depth range (the request pass: per table entry, the largest of z and of 1 - z, z in 0..1 over its level's range)
@@ -293,10 +294,13 @@ namespace xlionrender::shadows
                 Lv.m_PageSize = PageSize(L);
                 Lv.m_OriginX  = int(std::floor(C.m_X / Lv.m_PageSize)) - m_Setup.m_Window / 2;
                 Lv.m_OriginY  = int(std::floor(C.m_Y / Lv.m_PageSize)) - m_Setup.m_Window / 2;
-                const float Half = DepthHalfRange(L);
-                if (!m_bDepthSet[L] || std::abs(C.m_Z - Lv.m_DepthCenter) > Half * depth_recenter_v)
+                // (each level's centres a half step off its grid: level L moves at odd multiples of Q0 x 2^(L-1), so no two levels lose
+                // their pages the same frame - on one grid, crossing Q0 x 2^k dropped levels 0..k at once: every shadow gone a few frames, Tomas)
+                const float Q = DepthHalfRange(L) * depth_recenter_v, Phase = 0.5f * Q;
+                if (!m_bDepthSet[L] || std::abs(C.m_Z - Lv.m_DepthCenter) > Q)
                 {
-                    Lv.m_DepthCenter = std::round(C.m_Z / (Half * depth_recenter_v)) * (Half * depth_recenter_v);
+                    Lv.m_DepthCenter = std::round((C.m_Z - Phase) / Q) * Q + Phase;
+                    if (m_bDepthSet[L]) ++m_Stats.m_Recentred;
                     m_bDepthSet[L] = true;
                     for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bUsed && !m_Slots[s].m_bPrev && !m_Slots[s].m_bMover && m_Slots[s].m_Key.m_Level == L) Free(s);
                 }
