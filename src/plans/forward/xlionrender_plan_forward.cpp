@@ -1734,6 +1734,7 @@ namespace xlionrender
         // Draws the casters of Indices that pass Keep with W2C into the current viewport; a sun page (pSunPage): each cluster against its
         // light-space rect too (a caster's box - a Bistro section's - passed every page: the cutout clusters were 52M triangles a frame)
         const shadows::vsm::page_to_render* pSunPage = nullptr;
+        bool bOpaqueCut = false;        // (the GI's sun map: masked submeshes drawn whole - the GI's rays block on them alike; their cutout's fragment cost 49 ms a map in Bistro)
         const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, std::span<const std::uint32_t> Indices, const auto& Keep )
         {
             auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();     // absolute world: the instances' origin as is
@@ -1771,7 +1772,7 @@ namespace xlionrender
                     const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
                     if( !Vis.m_bCastsShadow ) continue;
                     if( bPairs && Draws[i].m_bGPU && Vis.m_Opacity != material_visibility::opacity::MASKED ) continue;     // (the pairs drew it)
-                    auto* pCut = Vis.m_Opacity == material_visibility::opacity::MASKED ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
+                    auto* pCut = Vis.m_Opacity == material_visibility::opacity::MASKED && !bOpaqueCut ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
                     auto* pInstance = pCut ? pCut : &m_ShadowInstance[bSkin ? 2 : 1];
                     if( pInstance->m_Private.get() != pBound || &G != pBoundGeom )
                     {
@@ -1878,7 +1879,9 @@ namespace xlionrender
                     SunCmd.setViewport(0.0f, 0.0f, float(gi_sun_map_v), float(gi_sun_map_v));
                     SunCmd.setScissor(0, 0, gi_sun_map_v, gi_sun_map_v);
                     const bool bPairsWas = bPairs; bPairs = false;      // (the pairs draw the camera's pages only: every caster by the CPU path here)
+                    bOpaqueCut = true;
                     DrawCasters(SunCmd, M, GICasters, [](std::uint32_t) { return true; });
+                    bOpaqueCut = false;
                     bPairs = bPairsWas;
                 }
                 Window.WriteTimestamp(m_GISunTimes, 1);

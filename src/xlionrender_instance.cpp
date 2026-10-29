@@ -605,10 +605,10 @@ namespace xlionrender
 
         // The sun's virtual shadow pages (features/shadows/xlionrender_shadow_vsm.h): the pool is the clipmap's part of the atlas; the request
         // pass, its frame data (a ring slot each), its bits and counters (zeroed by a copy, copied back to a ring slot)
-        // (2048 slots) Every page asked for rendered in its frame, as Unreal's virtual shadow maps do (no page budget: the finest pages near the
-        // camera came last, a frame or more late while moving - a sharp patch overtaking a blurred one, Tomas); the pool's overflow falls back
-        // to the coarser level, as theirs
-        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, .m_Budget = 4096 });
+        // (2048 slots) Every page asked for rendered in its frame while the sun is still, as Unreal's virtual shadow maps do (the finest pages
+        // near the camera came last, a frame or more late while moving - a sharp patch overtaking a blurred one, Tomas); a new epoch (the sun
+        // moved: every page again) keeps the budget, the previous epoch bridging it
+        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, .m_SteadyBudget = 128 });     // (~4 ms at most: a cut after a rebuild cost 12)
         if( const char* p = std::getenv("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
         {
             using usage = xgpu::buffer::setup::usage;

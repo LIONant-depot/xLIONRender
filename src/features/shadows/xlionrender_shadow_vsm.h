@@ -80,6 +80,7 @@ namespace xlionrender::shadows
             // epoch rendered all 256 at once, 148k draws in Bistro). The previous epoch's net shows meanwhile (its own slots: NetSlots),
             // and a new epoch waits until the previous one is gone (never a hole). 0: every page of the net at once, its old net freed
             int     m_NetBudget      = 16;
+            int     m_SteadyBudget   = 0;                // fine pages a frame while no new epoch is rebuilding (the camera moving, the sun still): 0 as m_Budget; the renderer's: all of them, in their frame as Unreal's (late pages popped in while moving, Tomas) - a new epoch keeps m_Budget (every page again: 46 ms at once in Bistro)
 
             int SlotsPerRow ( void ) const noexcept { return m_PoolTexels / page_texels_v; }
             int Slots       ( void ) const noexcept { return SlotsPerRow() * ((m_PoolHeight > 0 ? m_PoolHeight : m_PoolTexels) / page_texels_v); }
@@ -388,7 +389,7 @@ namespace xlionrender::shadows
                 if (a.m_Level != b.m_Level) return a.m_Level > b.m_Level;
                 return PageDistance2(a, C) < PageDistance2(b, C);
             });
-            int Budget = m_Setup.m_Budget;
+            int Budget = m_bHasPrev || m_Setup.m_SteadyBudget <= 0 ? m_Setup.m_Budget : m_Setup.m_SteadyBudget;     // (a previous epoch bridges a rebuild: the budget)
             for (const auto& K : Want)
             {
                 if (Budget <= 0) { ++m_Stats.m_Deferred; continue; }
