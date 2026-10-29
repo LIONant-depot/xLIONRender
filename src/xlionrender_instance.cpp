@@ -51,6 +51,15 @@ namespace xlionrender
         constexpr std::uint32_t s_GPrePassFrag[] = {
             #include "xlionrender_gprepass_frag.h"
         };
+        constexpr std::uint32_t s_GIGatherVert[] = {
+            #include "xlionrender_gi_gather_vert.h"
+        };
+        constexpr std::uint32_t s_GIClassifyFrag[] = {
+            #include "xlionrender_gi_classify_frag.h"
+        };
+        constexpr std::uint32_t s_GIGatherFrag[] = {
+            #include "xlionrender_gi_gather_frag.h"
+        };
         constexpr std::uint32_t s_GIScreenFrag[] = {
             #include "xlionrender_gi_screen_frag.h"
         };
@@ -220,6 +229,8 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_GPrePipeline));
         m_Device.Destroy(std::move(m_GPreRecordsInstance));
         m_Device.Destroy(std::move(m_GPreRecordsPipeline));
+        m_Device.Destroy(std::move(m_GIClassifyPipeline));
+        m_Device.Destroy(std::move(m_GIGatherPipeline));
         m_Device.Destroy(std::move(m_GIScreenDepthInstance));
         m_Device.Destroy(std::move(m_GIScreenDepthPipeline));
         ReleaseBuffer(m_StaticGeomUBO);
@@ -563,6 +574,35 @@ namespace xlionrender
                     if( auto Err = Device.Create(m_GPreInstance, { .m_PipeLine = m_GPrePipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
                     if( auto Err = Device.Create(m_GPreRecordsPipeline, Rec); Err ) return Err;
                     if( auto Err = Device.Create(m_GPreRecordsInstance, { .m_PipeLine = m_GPreRecordsPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+                }
+                {   // the GI gather from it (xlionrender_gi_gather_common.glsl): full-screen at the half-size depth, the G-buffer in the material
+                    // slots 1-3; set 1: the instances, a GI buffer (5) and the light rings (6, 7), the half-size buffer (11), last frame's (13), the table (19)
+                    xgpu::shader GatherVert, ClassifyFrag, GatherFrag;
+                    if( auto Err = Device.Create(GatherVert,   { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GIGatherVert) }); Err ) return Err;
+                    if( auto Err = Device.Create(ClassifyFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIClassifyFrag) }); Err ) return Err;
+                    if( auto Err = Device.Create(GatherFrag,   { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIGatherFrag) }); Err ) return Err;
+                    using ub = xgpu::pipeline::uniform_binds;
+                    auto GatherBinds = std::array
+                    { ub{ .m_BindIndex = 1,  .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
+                    , ub{ .m_BindIndex = 5,  .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
+                    , ub{ .m_BindIndex = 6,  .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
+                    , ub{ .m_BindIndex = 7,  .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
+                    , ub{ .m_BindIndex = 11, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
+                    , ub{ .m_BindIndex = 13, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
+                    , ub{ .m_BindIndex = 19, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
+                    };
+                    auto ClassifyShaders = std::array<const xgpu::shader*, 2>{ &ClassifyFrag, &GatherVert };
+                    auto GatherShaders   = std::array<const xgpu::shader*, 2>{ &GatherFrag, &GatherVert };
+                    xgpu::pipeline::setup Classify{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = ClassifyShaders, .m_PushConstantsSize = sizeof(details::push_gi_gather), .m_UniformBinds = GatherBinds, .m_Samplers = Samplers };
+                    Classify.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+                    Classify.m_Blend.m_ColorWriteMask = 0;
+                    Classify.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
+                    xgpu::pipeline::setup Gather = Classify;
+                    Gather.m_Shaders = GatherShaders;
+                    Gather.m_DepthStencil.m_DepthCompare      = xgpu::pipeline::depth_stencil::depth_compare::EQUAL;
+                    Gather.m_DepthStencil.m_bDepthWriteEnable = false;
+                    if( auto Err = Device.Create(m_GIClassifyPipeline, Classify); Err ) return Err;
+                    if( auto Err = Device.Create(m_GIGatherPipeline, Gather); Err ) return Err;
                 }
                 xgpu::shader ScreenFrag;
                 if( auto Err = Device.Create(ScreenFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIScreenFrag) }); Err ) return Err;
@@ -1575,6 +1615,14 @@ namespace xlionrender
         // in no attachment layout: nothing drew)
         auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId }, xgpu::renderpass::attachment{ View.m_Depth } };
         if( auto Err = m_Device.Create(View.m_GPrePass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GPrePassLoad, { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
+        {   // the GI gather reading them (slot 0: the white texture - no shadows there)
+            auto Textures = std::array<xgpu::texture*, 4>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId };
+            auto Bindings = LitBindings(Textures, false);
+            if( auto Err = m_Device.Create(View.m_GIClassifyInstance, { .m_PipeLine = m_GIClassifyPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+            if( auto Err = m_Device.Create(View.m_GIGatherInstance,   { .m_PipeLine = m_GIGatherPipeline,   .m_SamplersBindings = Bindings }); Err ) return Err;
+            if( auto Err = m_Device.Create(View.m_GIGatherTable, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * gather_table_uints_v }); Err ) return Err;
+        }
         return createCullTargets(View);     // (the scene pass then loads the depth: m_ScenePassLoad)
     }
 
@@ -1743,8 +1791,12 @@ namespace xlionrender
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));
         if( View.m_ScenePassLoad.m_Private )   m_Device.Destroy(std::move(View.m_ScenePassLoad));
         if( View.m_GPrePass.m_Private )        m_Device.Destroy(std::move(View.m_GPrePass));
+        if( View.m_GPrePassLoad.m_Private )    m_Device.Destroy(std::move(View.m_GPrePassLoad));
         if( View.m_GPreNormal.m_Private )      m_Device.Destroy(std::move(View.m_GPreNormal));
         if( View.m_GPreId.m_Private )          m_Device.Destroy(std::move(View.m_GPreId));
+        if( View.m_GIClassifyInstance.m_Private ) m_Device.Destroy(std::move(View.m_GIClassifyInstance));
+        if( View.m_GIGatherInstance.m_Private )   m_Device.Destroy(std::move(View.m_GIGatherInstance));
+        if( View.m_GIGatherTable.m_Private )      ReleaseBuffer(View.m_GIGatherTable);
         if( View.m_HiZ.m_Private )             ReleaseBuffer(View.m_HiZ);
         if( View.m_OutputPass.m_Private )      m_Device.Destroy(std::move(View.m_OutputPass));
         if( View.m_OverlayPass.m_Private )     m_Device.Destroy(std::move(View.m_OverlayPass));

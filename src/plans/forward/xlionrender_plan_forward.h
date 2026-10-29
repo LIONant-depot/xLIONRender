@@ -240,6 +240,15 @@ namespace xlionrender::details
         xmath::fvec4    m_Params;           // x: the intensity, yz: the size of the view
     };
 
+    // xlionrender_gi_gather_common.glsl gather_push
+    struct push_gi_gather
+    {
+        std::uint32_t   m_TableBase;        // this frame's region of the table (uints)
+        std::uint32_t   m_Buffer;           // the pass's GI buffer (its depth: (m_Buffer + 1) / 65536)
+        std::uint32_t   m_Div;              // the read's resolution divisor
+        std::uint32_t   m_Pad = 0;
+    };
+
     // xlionrender_tonemap_frag.glsl
     struct push_tonemap
     {

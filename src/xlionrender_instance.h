@@ -399,8 +399,11 @@ namespace xlionrender
         // XLION_GI_SCREEN_DIV overrides (2..16)
         static int                  GIScreenDivisor( void ) noexcept { static const int s = [] { const char* p = std::getenv("XLION_GI_SCREEN_DIV"); const int d = p ? std::atoi(p) : 2; return d >= 2 && d <= 16 ? d : 2; }(); return s; }     // (half: Tomas - the others do it at half; the single geometry pass is the fix)
         void                        destroyGIScreenTargets( render_view& View ) noexcept;
-        xgpu::device::error*        createCullTargets   ( render_view& View ) noexcept;
-        xgpu::device::error*        createGPreTargets   ( render_view& View ) noexcept;      // render_view::m_GPrePass, its targets (the first time)      // render_view::m_ScenePassLoad, m_HiZ (the first time)
+        xgpu::device::error*        createCullTargets   ( render_view& View ) noexcept;      // render_view::m_ScenePassLoad, m_HiZ (the first time)
+        xgpu::device::error*        createGPreTargets   ( render_view& View ) noexcept;      // render_view::m_GPrePass, its targets, the GI gather's (the first time)
+        // The GI gather's table, a ring frame's region (xlionrender_gi_gather_common.glsl). ponytail: fixed, 4 MB - its slots' firsts and the
+        // visible GI instances' clusters (Bistro ~1.6k): past it the rest gather no GI (GATHERFULL printed); grow it per frame if a scene needs
+        static constexpr int        gather_table_uints_v = 1 << 20;
         void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        renderPlanar    ( xgpu::window& Window, const scene& Scene, const render_view& Main, const xgpu::tools::view& Camera ) noexcept;
         void                        prefilterInto   ( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept;
@@ -513,7 +516,11 @@ namespace xlionrender
         xgpu::pipeline              m_DepthPrepassPipeline;
         xgpu::pipeline_instance     m_DepthPrepassInstance;
         xgpu::pipeline              m_GPrePipeline, m_GPreRecordsPipeline;     // the G-buffer prepass: the CPU path's, the records' (GPU culling)
-        xgpu::pipeline_instance     m_GPreInstance, m_GPreRecordsInstance;        // The GI read at half resolution (render_view::m_GIScreenPass): the same vertex shader and layout + the buffer it writes (binding 11),
+        xgpu::pipeline_instance     m_GPreInstance, m_GPreRecordsInstance;
+        // The GI gather from it (xlionrender_gi_gather_common.glsl; its instances are the views': render_view::m_GIClassifyInstance ...):
+        // the classification (each half-size pixel's GI buffer as its depth), the passes (one a GI buffer, tested EQUAL)
+        xgpu::pipeline              m_GIClassifyPipeline, m_GIGatherPipeline;
+        // The GI read at half resolution (render_view::m_GIScreenPass): the same vertex shader and layout + the buffer it writes (binding 11),
         // the material's GI read in the fragment (xlionrender_gi_screen_frag.glsl), at the depth the prepass wrote, no color
         xgpu::pipeline              m_GIScreenPipeline;
         xgpu::pipeline_instance     m_GIScreenInstance;
@@ -651,6 +658,11 @@ namespace xlionrender
         std::vector<details::push_static_geom>      m_ScreenRecords;
         std::vector<details::draw_indexed_indirect> m_ScreenCommands;
         std::vector<screen_run>                     m_ScreenRuns;
+        // The GI gather's (renderScenePass, bGather): this frame's table (xlionrender_gi_gather_common.glsl), its region's first uint in the
+        // view's ring, the GI buffers its passes read (a pass each, by index)
+        std::vector<std::uint32_t>                  m_GatherTable;
+        std::uint32_t                               m_GatherTableBase = 0;
+        std::vector<const xgpu::buffer*>            m_GatherBuffers;
         // GPU culling (features/cull): the main view's opaque rigid clusters with a material, culled into runs of indirect draws - a run a bind
         // state (records pipeline, material, geometry, GI buffer), a prepass run a geometry (m_pInstance null). XLION_NO_GPU_CULL=1: the CPU path
         struct cull_run { xgpu::pipeline_instance* m_pInstance; material_slot* m_pMat; const cluster_geom* m_pGeom; xgpu::buffer* m_pGI; std::uint32_t m_First = 0, m_Max = 0; };

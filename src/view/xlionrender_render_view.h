@@ -68,6 +68,11 @@ namespace xlionrender
         xgpu::texture           m_GPreNormal;           // R16G16_SFLOAT
         xgpu::texture           m_GPreId;               // R32G32_SFLOAT (exact integers): 0 nothing
         xgpu::renderpass        m_GPrePass;
+        xgpu::renderpass        m_GPrePassLoad;         // (GPU occlusion's pass 2: the G-buffer loaded again after the Hi-Z)
+        // The GI gather from them (xlionrender_gi_gather_common.glsl): its classification's and passes' instances (this view's G-buffer
+        // bound), the table (a region a ring frame: instance::gather_table_uints_v)
+        xgpu::pipeline_instance m_GIClassifyInstance, m_GIGatherInstance;
+        xgpu::buffer            m_GIGatherTable;
         // The screen tail (instance::renderTail, the main view in light_mode::SCREEN; documentation/lighting_p3_design.md "The decision"),
         // made the first time: the thin G-buffer at half size - the octahedral normal and roughness (10-10-10-2; the materials' G-buffer
         // variants draw into it) and its depth -, its pass; the tail pass's two targets (demodulated diffuse and specular, 11-11-10 floats),

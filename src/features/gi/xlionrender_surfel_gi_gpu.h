@@ -35,7 +35,8 @@ namespace xlionrender::gi
             };
             // (the links' sun shadow map until the renderer gives one: a texel, never read - SunInfo.x 0)
             const std::uint8_t Texel[4] = { 255, 255, 255, 255 };
-            if (Device.Create(m_SunMapDummy, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_AllFacesData = { reinterpret_cast<const std::byte*>(Texel), 4 }, .m_isGamma = false })) return false;
+            const auto Mips = std::array{ xgpu::texture::setup::mip_size{ 4 } };      // (without its mip sizes nothing is uploaded: the image stays undefined - a validation error each use)
+            if (Device.Create(m_SunMapDummy, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips, .m_AllFacesData = { reinterpret_cast<const std::byte*>(Texel), 4 }, .m_isGamma = false })) return false;
             return Make(m_Shader[0], m_Pass, S.m_Pass, 8, 16) && Make(m_Shader[1], m_Scatter, S.m_Scatter, 2, 16) && Make(m_Shader[2], m_Commit, S.m_Commit, 5, 16)
                 && Make(m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make(m_Shader[4], m_Filter, S.m_Filter, 10, 32) && Make(m_Shader[5], m_Expand, S.m_Expand, 4, 32)
                 && Make(m_Shader[6], m_Means, S.m_Means, 2, 16) && Make(m_Shader[7], m_Cube, S.m_Cube, 2, 16) && Make(m_Shader[8], m_Migrate, S.m_Migrate, 3, 16)

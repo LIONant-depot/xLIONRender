@@ -2664,8 +2664,17 @@ namespace xlionrender
             // the surface's normal) into the view's buffer; the scene pass's GI draws below upsample it (SurfelGIScreen) instead of reading
             // the surfels each pixel - a quarter of the reads
             static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
+            static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
+            // The G-buffer prepass (gi_gbuffer_gather_plan.md; XLION_GPREPASS=1 while it is not the default): the opaque prepass in a pass of
+            // its own writing each pixel's normal and submesh instance too; the scene pass loads its depth. (No occlusion yet: its second pass
+            // would draw into the scene pass.) With the half-resolution read on, the GI gathers from it (bGather): no geometry drawn for the GI
+            static const int s_GPre = [] { const char* p = std::getenv("XLION_GPREPASS"); return p ? std::atoi(p) : 0; }();     // (2: a test - the G-buffer pass, then the scene pass cleared and its own prepass as before)
+            static const bool s_bGPre = s_GPre > 0;
+            const bool bGPre   = s_bGPre && bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
+            // (gathered, the read is the pixels' only: with it off - the vertex read alone - no half-resolution read, the scene pass's own vertex read)
             const bool bScreen = bMain && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
-                              && !(bPlan && m_bBoxesOnly) && createGIScreenTargets(View) == nullptr;
+                              && !(bPlan && m_bBoxesOnly) && !(bGPre && s_GPre == 1 && !Scene.m_GI.m_bPerPixel) && createGIScreenTargets(View) == nullptr;
+            const bool bGather = bGPre && bScreen && s_GPre == 1;
             if( pPre ) Window.WriteTimestamp(*pPre, 1);
             const auto PreCpu0 = std::chrono::steady_clock::now();     // (measurement: the half-res block's CPU, PRESCENE)
             if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
@@ -2716,6 +2725,63 @@ namespace xlionrender
                     Window.CopyBuffer(View.m_GIScreenHeader, View.m_GIScreenBuffer, std::span{ &C, 1 });
                 }
                 View.m_GIScreenPrevW2C = W2C; View.m_GIScreenPrevEye = Eye; View.m_bGIScreenPrev = true; ++View.m_GIScreenFrame;
+                if( bGather )
+                {
+                    // The gather's table (xlionrender_gi_gather_common.glsl): every visible rigid GI instance's clusters - their GI reference
+                    // and GI buffer, the passes' list of buffers (GatherBuffers); the passes run after the G-buffer prepass, below
+                    m_GatherTable.assign(20, 0u);
+                    {
+                        const xmath::fmat4 C2W = W2C.Inverse();
+                        std::memcpy(m_GatherTable.data(), &C2W, sizeof(float) * 16);
+                        const xmath::fvec3 Off = m_Origin - Eye;
+                        const float O[3] = { Off[0], Off[1], Off[2] };
+                        std::memcpy(m_GatherTable.data() + 16, O, sizeof(O));
+                    }
+                    m_GatherBuffers.clear();
+                    std::uint32_t nSlots = 0;
+                    for( const auto& Vis : m_Visible ) if( Vis.m_pMesh->m_bCluster && m_DrawSlot[Vis.m_iDraw] != instance_slots::none_v ) nSlots = std::max(nSlots, m_DrawSlot[Vis.m_iDraw] + 1u);
+                    m_GatherTable[19] = nSlots;
+                    m_GatherTable.resize(20 + std::size_t(nSlots), 0u);
+                    const auto BufferIndex = [&]( const xgpu::buffer* p ) -> std::uint32_t
+                    {
+                        for( std::size_t k = 0; k < m_GatherBuffers.size(); ++k ) if( m_GatherBuffers[k] == p ) return std::uint32_t(k);     // ponytail: linear, a few buffers (Bistro's sections ~30); a map if a scene has hundreds
+                        m_GatherBuffers.push_back(p);
+                        return std::uint32_t(m_GatherBuffers.size() - 1);
+                    };
+                    bool bFull = false;
+                    for( const auto& Vis : m_Visible )
+                    {
+                        const std::size_t iDraw = Vis.m_iDraw;
+                        const auto*       pMesh = Vis.m_pMesh;
+                        const std::uint32_t Slot = m_DrawSlot[iDraw];
+                        if( !pMesh->m_bCluster || Slot == instance_slots::none_v || pMesh->m_Geom.m_Kind == geom_kind::SKIN ) continue;
+                        const auto& G = pMesh->m_Geom;
+                        const bool bSections = !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
+                        const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
+                        if( !(bSections ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu) ) continue;
+                        if( m_GatherTable.size() + 4 * G.m_Clusters.size() > std::size_t(gather_table_uints_v) ) { bFull = true; continue; }
+                        m_GatherTable[20 + Slot] = std::uint32_t(m_GatherTable.size());
+                        for( std::uint32_t c = 0; c < std::uint32_t(G.m_Clusters.size()); ++c )
+                        {
+                            std::pair<std::uint32_t, std::uint32_t> R = GI;
+                            const xgpu::buffer* pBuf = &pMesh->m_GIBuffer;
+                            if( bSections )
+                            {
+                                const std::uint16_t k = pMesh->m_GIClusterSection[c];
+                                R    = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
+                                pBuf = &pMesh->m_GISections[k].m_Buffer;
+                            }
+                            m_GatherTable.insert(m_GatherTable.end(), { R.first, R.second, R.second == 0xFFFFFFFFu ? 0u : BufferIndex(pBuf), 0u });
+                        }
+                    }
+                    if( bFull && m_Device.getFrameIndex() % 240 == 0 ) { std::printf("GATHERFULL the GI gather's table is full (%d uints): instances left without GI\n", gather_table_uints_v); std::fflush(stdout); }
+                    m_GatherTableBase = std::uint32_t(m_Device.getFrameIndex() % ring_frames_v) * std::uint32_t(gather_table_uints_v);
+                    (void)View.m_GIGatherTable.MemoryMapFrameRegion(int(m_GatherTableBase), int(m_GatherTable.size()), [&](void* p) { std::memcpy(p, m_GatherTable.data(), m_GatherTable.size() * sizeof(std::uint32_t)); });
+                    m_GIStats.m_nScreenDraws = int(m_GatherBuffers.size());          // (its passes: a full-screen draw a GI buffer)
+                    m_GIStats.m_nScreenCalls = int(m_GatherBuffers.size()) + 1;      // (+ the classification)
+                }
+                else
+                {       // (the geometry passes: until the gather replaces them for good)
                 // Its draws: a record (the cluster's push constants) and a command a cluster, in runs of one bind state - phase 0 a run a
                 // geometry, phase 1 a run a geometry and GI buffer - each run one indirect draw (this frame's region of the view's buffers)
                 m_ScreenRecords.clear(); m_ScreenCommands.clear(); m_ScreenRuns.clear();
@@ -2824,6 +2890,7 @@ namespace xlionrender
                     const xgpu::buffer::copy C{ 6, CSlot, 1 };
                     Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });
                 }
+                }
             }
 
             // a skinned mesh's GI: the probe grid (no surfels of its own; the dummy: none). ponytail: the main view's only (its header carries
@@ -2884,14 +2951,7 @@ namespace xlionrender
             if( pPre ) { Window.WriteTimestamp(*pPre, 2); s_PreCpuMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - PreCpu0).count(); }
             // GPU culling (features/cull, documentation/gpu_cluster_culling.md): the main view's opaque rigid clusters with a material, a
             // candidate each, in runs (a bind state each; a prepass run a geometry), culled here - outside the pass - into their runs' commands
-            static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
-            // The G-buffer prepass (gi_gbuffer_gather_plan.md, stage 1; XLION_GPREPASS=1 while the GI does not read it yet): the opaque prepass
-            // in a pass of its own writing each pixel's normal and submesh instance too; the scene pass loads its depth. (No occlusion yet:
-            // its second pass would draw into the scene pass)
-            static const int s_GPre = [] { const char* p = std::getenv("XLION_GPREPASS"); return p ? std::atoi(p) : 0; }();     // (2: a test - the G-buffer pass, then the scene pass cleared and its own prepass as before)
-            static const bool s_bGPre = s_GPre > 0;
-            const bool bGPre = s_bGPre && bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
-            static const bool s_bNoGPUCull      = std::getenv("XLION_NO_GPU_CULL") != nullptr;
+            static const bool s_bNoGPUCull     = std::getenv("XLION_NO_GPU_CULL") != nullptr;
             static const bool s_bNoGPUOcclusion = std::getenv("XLION_NO_GPU_OCCLUSION") != nullptr;
             m_CullCandidates.clear(); m_CullMatrices.clear(); m_CullRuns.clear(); m_CullRunOf.clear(); m_CullSub.clear();
             m_CullSubBase.assign(Scene.m_Draws.size(), ~0u);
@@ -2975,7 +3035,7 @@ namespace xlionrender
                     const bool bCut = Jump.Dot(Jump) > 4.0f || Fwd(W2C).Dot(m_CullPrevFwd) < 0.7071f;
                     m_CullPrevEye = Eye; m_CullPrevFwd = Fwd(W2C);
                     m_pCull->Begin(m_Device.getFrameIndex());
-                    bOcclude = bPass2 = !bGPre && m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
+                    bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
                     m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
                     static const bool s_bCullTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
                     if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
@@ -2994,6 +3054,57 @@ namespace xlionrender
             if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || Scene.m_bReflectionScreen) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
             else if( bMain ) m_TailReport.m_bOn = false;
             if( pPre ) Window.WriteTimestamp(*pPre, 4);
+
+            // The GI gather (bGather), between the G-buffer prepass and the scene pass: at half size, the classification (each pixel's GI
+            // buffer as its depth), then a full-screen pass a GI buffer tested EQUAL - into the buffer the scene pass upsamples
+            const auto GatherGI = [&]
+            {
+                // Measurement only (XLION_GPU_TIMES): its start, the classification's end, its end - SCREENSPLIT as the geometry read's (the
+                // tools wait for its "GI read")
+                static const bool s_bGatherSplit = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static std::unordered_map<const void*, xgpu::timestamps> s_GatherSplit;      // ponytail: per renderer, never erased (a measurement hook)
+                xgpu::timestamps* pGS = nullptr;
+                if( s_bGatherSplit )
+                {
+                    auto [It, bNew] = s_GatherSplit.try_emplace(this);
+                    if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_GatherSplit.erase(It);
+                    else pGS = &It->second;
+                }
+                if( pGS )
+                {
+                    static std::vector<std::uint64_t> s_Ns;
+                    static double s_Cls = 0, s_Read = 0; static int s_n = 0;
+                    if( pGS->getResults(s_Ns) && s_Ns.size() >= 3 && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
+                    {
+                        s_Cls += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Read += double(s_Ns[2] - s_Ns[1]) * 1e-6;
+                        if( ++s_n == 120 ) { std::printf("SCREENSPLIT gather: classification %.3f, GI read %.3f ms (%d passes)\n", s_Cls / s_n, s_Read / s_n, int(m_GatherBuffers.size())); std::fflush(stdout); s_n = 0; s_Cls = s_Read = 0; }
+                    }
+                }
+                {
+                    auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
+                    if( pGS ) GCmd.WriteTimestamp(*pGS, 0);
+                    const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()) };
+                    std::array<xgpu::buffer*, 7> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable };
+                    GCmd.setPipelineInstance(View.m_GIClassifyInstance, std::span{ Buffers });
+                    GCmd.setPushConstants(Push);
+                    GCmd.setBuffer(m_FullscreenVB);
+                    GCmd.setBuffer(m_FullscreenIB);
+                    GCmd.Draw(3);
+                    if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
+                    for( std::size_t k = 0; k < m_GatherBuffers.size(); ++k )
+                    {
+                        Buffers[1] = const_cast<xgpu::buffer*>(m_GatherBuffers[k]);
+                        GCmd.setPipelineInstance(View.m_GIGatherInstance, std::span{ Buffers });
+                        GCmd.setPushConstants(details::push_gi_gather{ m_GatherTableBase, std::uint32_t(k), Push.m_Div });
+                        GCmd.setBuffer(m_FullscreenVB);
+                        GCmd.setBuffer(m_FullscreenIB);
+                        GCmd.Draw(3);
+                    }
+                    if( pGS ) GCmd.WriteTimestamp(*pGS, 2);
+                }
+                const xgpu::buffer::copy C{ 6, int(m_Device.getFrameIndex() % ring_frames_v), 1 };     // (its counters into this frame's slot, as the geometry read's)
+                Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });
+            };
 
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
             CmdPass.emplace(Window.StartRenderPass(bGPre ? View.m_GPrePass : View.m_ScenePass));
@@ -3126,11 +3237,18 @@ namespace xlionrender
                 static const bool s_bMaskedPrepass = [] { const char* p = std::getenv("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
                 bool bCutLight = false;
                 const void* pPrepassBound = nullptr;
-                // (Mode 0: all of it; with the G-buffer prepass 1: the opaque ones into it, then 2: the masked ones in the scene pass - their
-                // cutout is their material's fragment, which writes no normal nor instance: ponytail, the GI gathers none for them yet)
+                // (Mode 0: all of it; with the G-buffer prepass 1: all of it into the G-buffer - a masked one's cutout writes its normal and
+                // instance (the material compiler's XLION_GPRE_OUT) -, then 2: the scene pass starts (XLION_GPREPASS=2: all of it again there))
                 for( int Mode = bGPre ? 1 : 0; Mode <= (bGPre ? 2 : 0); ++Mode )
                 {
-                if( Mode == 2 ) { CmdPass.reset(); CmdPass.emplace(Window.StartRenderPass(s_GPre == 2 ? View.m_ScenePass : View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; if( s_GPre == 2 ) { bGPrePass = false; PrepassCulled(0); } }
+                if( Mode == 2 && bOcclude )        // (GPU occlusion with the G-buffer: its Hi-Z from the G-buffer's depth, pass 2's prepass into it too)
+                {
+                    CmdPass.reset();
+                    m_pCull->Occlude(Window, View.m_Depth, View.m_HiZ, View.m_Width, View.m_Height);
+                    CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
+                    PrepassCulled(1);
+                }
+                if( Mode == 2 ) { CmdPass.reset(); if( bGather ) GatherGI(); CmdPass.emplace(Window.StartRenderPass(s_GPre == 2 ? View.m_ScenePass : View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; if( s_GPre == 2 ) { bGPrePass = false; PrepassCulled(0); } }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
@@ -3156,7 +3274,7 @@ namespace xlionrender
                             }
                             else if( St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided ) continue;
                         }
-                        if( (Mode == 1 && pCut) || (Mode == 2 && !pCut && s_GPre != 2) ) continue;
+                        if( Mode == 2 && s_GPre != 2 ) continue;        // (everything in the G-buffer: the masked ones' cutout writes its normal and instance too, mb_standard_pbr.frag XLION_GPRE_OUT)
                         if( pCut )
                         {
                             if( !bCutLight )            // (this render's lighting block, its cutout flag set: renderTail wrote its part already)
@@ -3203,7 +3321,7 @@ namespace xlionrender
 
             // GPU culling's second pass: the depth laid so far (the clusters seen last frame, the CPU path's) into the Hi-Z pyramid, every other
             // cluster in the view tested against it; the visible ones' depth too, in the pass loaded again - then the shading of both passes
-            if( bOcclude )
+            if( bOcclude && !bGPre )        // (with the G-buffer prepass: done before the scene pass, above)
             {
                 CmdPass.reset();        // (the pass ends: the copy and the cull run outside it)
                 m_pCull->Occlude(Window, View.m_Depth, View.m_HiZ, View.m_Width, View.m_Height);

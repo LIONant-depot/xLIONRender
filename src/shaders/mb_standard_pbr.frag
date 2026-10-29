@@ -66,6 +66,18 @@ layout(location = 0) in VaryingFull In;
 layout(location = 14) in vec4 InPrevClip;      // the G-buffer variant: last frame's clip position (the vertex shaders'; w 0: none)
 layout(location = 1) out vec4 OutGMotion;      // its second target: last frame's ndc xy, clip w, 1 (0: the camera's reprojection)
 #endif
+#if !defined(XLION_LDR_OUTPUT) && !defined(XLION_GBUFFER_OUTPUT) && !defined(XLION_TAIL_SCREEN)
+// The G-buffer prepass (xLIONRender gi_gbuffer_gather: a masked material's cutout drawn into it): the world normal (octahedral) and the
+// submesh instance (slot + 1, cluster; the compiler's push constants XMAT_PUSH_*) - xlionrender_gprepass_frag.glsl's targets 1 and 2.
+// Elsewhere nothing is attached there: discarded. The graph's cutout calls XLION_GPRE_OUT() before it returns
+layout(location = 1) out vec2 OutGPreNormal;
+layout(location = 2) out vec2 OutGPreId;
+#define XLION_GPRE_OUT() { const vec3 gpn_ = normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0); vec2 gpo_ = gpn_.xy / (abs(gpn_.x) + abs(gpn_.y) + abs(gpn_.z)); \
+    if (gpn_.z < 0.0) gpo_ = (1.0 - abs(gpo_.yx)) * vec2(gpo_.x >= 0.0 ? 1.0 : -1.0, gpo_.y >= 0.0 ? 1.0 : -1.0); \
+    OutGPreNormal = gpo_; OutGPreId = vec2(float(XMAT_PUSH_INSTANCE + 1u), float(XMAT_PUSH_CLUSTER)); }
+#else
+#define XLION_GPRE_OUT()
+#endif
 #if !defined(XLION_LDR_OUTPUT) && !defined(XLION_TAIL_SCREEN)
 layout(location = 9) in vec4 InGI;     // xLIONRender surfel GI: sum(w E), sum(w) from the vertex shader (0 without GI) - divided here, into g_GI
 #ifndef XLION_NO_GI_PIXEL
