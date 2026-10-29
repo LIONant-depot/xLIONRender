@@ -2518,6 +2518,25 @@ namespace xlionrender
     void instance::renderScenePass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept
     {
         m_pTailRecords = nullptr;
+        // Measurement only (XLION_GPU_TIMES): what runs before the scene pass - the GI's half resolution read, GPU culling, the screen tail
+        // (PRESCENE: the largest of 120 frames each; the sun turning added ~3.8 ms there, 2026-10-29)
+        static std::unordered_map<const void*, xgpu::timestamps> s_Pre;      // ponytail: per renderer, never erased (a measurement hook)
+        xgpu::timestamps* pPre = nullptr;
+        if( bMain && std::getenv("XLION_GPU_TIMES") )
+        {
+            auto [It, bNew] = s_Pre.try_emplace(this);
+            if( bNew && m_Device.Create(It->second, { .m_Count = 5 }) ) s_Pre.erase(It);
+            else pPre = &It->second;
+        }
+        if( pPre )
+        {
+            static std::vector<std::uint64_t> s_Ns; static double s_Max[4] = {}; static int s_n = 0;
+            if( pPre->getResults(s_Ns) && s_Ns.size() >= 5 && s_Ns[4] >= s_Ns[3] && s_Ns[3] >= s_Ns[2] && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
+                for( int k = 0; k < 4; ++k ) s_Max[k] += double(s_Ns[k + 1] - s_Ns[k]) * 1e-6;
+            if( ++s_n == 120 ) { std::printf("PRESCENE mean of 120 frames: setup (lights, cells, GI) %.3f, GI half-res %.3f, GPU cull %.3f, screen tail %.3f ms; half-res pixels fresh %d reprojected %d rejected %d aged %d\n", s_Max[0] / 120, s_Max[1] / 120, s_Max[2] / 120, s_Max[3] / 120
+                                             , m_GIStats.m_nScreenFresh, m_GIStats.m_nScreenReprojected, m_GIStats.m_nScreenRejected, m_GIStats.m_nScreenAged); std::fflush(stdout); s_n = 0; for( auto& v : s_Max ) v = 0; }
+            Window.WriteTimestamp(*pPre, 0);
+        }
         details::ubo_lighting* pLight = nullptr;       // (this render's lighting block: the screen tail sets its part, renderTail)
         const xmath::fmat4 ToEye = xmath::fmat4::fromTranslation(-Eye);
         // Scene -> HDR
@@ -2646,24 +2665,7 @@ namespace xlionrender
             static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
             const bool bScreen = bMain && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
                               && !(bPlan && m_bBoxesOnly) && createGIScreenTargets(View) == nullptr;
-            // Measurement only (XLION_GPU_TIMES): what runs before the scene pass - the GI's half resolution read, GPU culling, the screen tail
-            // (PRESCENE: the largest of 120 frames each; the sun turning added ~3.8 ms there, 2026-10-29)
-            static std::unordered_map<const void*, xgpu::timestamps> s_Pre;      // ponytail: per renderer, never erased (a measurement hook)
-            xgpu::timestamps* pPre = nullptr;
-            if( bMain && std::getenv("XLION_GPU_TIMES") )
-            {
-                auto [It, bNew] = s_Pre.try_emplace(this);
-                if( bNew && m_Device.Create(It->second, { .m_Count = 4 }) ) s_Pre.erase(It);
-                else pPre = &It->second;
-            }
-            if( pPre )
-            {
-                static std::vector<std::uint64_t> s_Ns; static double s_Max[3] = {}; static int s_n = 0;
-                if( pPre->getResults(s_Ns) && s_Ns.size() >= 4 && s_Ns[3] >= s_Ns[2] && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
-                    for( int k = 0; k < 3; ++k ) s_Max[k] = std::max(s_Max[k], double(s_Ns[k + 1] - s_Ns[k]) * 1e-6);
-                if( ++s_n == 120 ) { std::printf("PRESCENE max of 120 frames: GI half-res %.3f, GPU cull %.3f, screen tail %.3f ms\n", s_Max[0], s_Max[1], s_Max[2]); std::fflush(stdout); s_n = 0; s_Max[0] = s_Max[1] = s_Max[2] = 0; }
-                Window.WriteTimestamp(*pPre, 0);
-            }
+            if( pPre ) Window.WriteTimestamp(*pPre, 1);
             if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
             if( bMain && !bScreen ) View.m_bGIScreenPrev = false;      // (a frame without it: nothing to reproject from)
             if( bScreen )
@@ -2876,7 +2878,7 @@ namespace xlionrender
                 };
             };
 
-            if( pPre ) Window.WriteTimestamp(*pPre, 1);
+            if( pPre ) Window.WriteTimestamp(*pPre, 2);
             // GPU culling (features/cull, documentation/gpu_cluster_culling.md): the main view's opaque rigid clusters with a material, a
             // candidate each, in runs (a bind state each; a prepass run a geometry), culled here - outside the pass - into their runs' commands
             static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
@@ -2978,11 +2980,11 @@ namespace xlionrender
                 return m_CullSubBase[iDraw] != ~0u && m_CullSub[m_CullSubBase[iDraw] + std::size_t(&Sub - G.m_Submeshes.data())] != 0;
             };
 
-            if( pPre ) Window.WriteTimestamp(*pPre, 2);
+            if( pPre ) Window.WriteTimestamp(*pPre, 3);
             // The screen tail (light_mode::SCREEN): the thin G-buffer, the tail pass and the denoiser, before the scene pass reads them
             if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || Scene.m_bReflectionScreen) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
             else if( bMain ) m_TailReport.m_bOn = false;
-            if( pPre ) Window.WriteTimestamp(*pPre, 3);
+            if( pPre ) Window.WriteTimestamp(*pPre, 4);
 
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
             CmdPass.emplace(Window.StartRenderPass(View.m_ScenePass));
