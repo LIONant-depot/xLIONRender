@@ -1392,6 +1392,23 @@ namespace xlionrender
     // Before the scene pass, which samples the atlas.
     void instance::renderShadows( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
     {
+        // Measurement only (XLION_GPU_TIMES): its CPU time by part - the pages' choice, the casters (light bounds, pairs), the recording -
+        // SHADOWCPU, the largest of 120 frames (the sun turning added ~3.8 ms of GPU idle before the scene pass, 2026-10-30)
+        static const bool s_bShCpu = std::getenv("XLION_GPU_TIMES") != nullptr;
+        static double s_ShMax[4] = {}; static int s_ShFrames = 0;
+        struct sh_cpu
+        {
+            using clk = std::chrono::steady_clock;
+            bool m_bOn; clk::time_point m_T[5]; int m_n = 0;
+            void Lap( void ) noexcept { if( m_bOn && m_n < 4 ) m_T[++m_n] = clk::now(); }
+            ~sh_cpu()
+            {
+                if( !m_bOn ) return;
+                while( m_n < 4 ) m_T[++m_n] = clk::now();
+                for( int k = 0; k < 4; ++k ) s_ShMax[k] = std::max(s_ShMax[k], std::chrono::duration<double, std::milli>(m_T[k + 1] - m_T[k]).count());
+                if( ++s_ShFrames == 120 ) { std::printf("SHADOWCPU max of 120 frames: changes + decode %.3f, vsm::Update %.3f, casters %.3f, recording %.3f ms\n", s_ShMax[0], s_ShMax[1], s_ShMax[2], s_ShMax[3]); std::fflush(stdout); s_ShFrames = 0; s_ShMax[0] = s_ShMax[1] = s_ShMax[2] = s_ShMax[3] = 0; }
+            }
+        } ShCpu{ s_bShCpu, { std::chrono::steady_clock::now() } };
         if( !m_bShadowAtlasReady )
         {
             auto Cmd = Window.StartRenderPass(m_ShadowClearPass);      // the atlas's first use: cleared to far, so it can be loaded and sampled
@@ -1570,6 +1587,7 @@ namespace xlionrender
             { static const bool s_bT = std::getenv("XLION_GPU_TIMES") != nullptr;      // (measurement: the sun's shadow detail reaching the renderer)
               if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d\n", Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine), std::fflush(stdout); }
             m_VSMLevelBand = std::clamp(Sun.m_ShadowLevelBlend, 0.01f, 0.95f);
+            ShCpu.Lap();
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
             {   static const bool s_bE = std::getenv("XLION_GPU_TIMES") != nullptr;      // (measurement: a frame that dropped many pages - the dropout hunt)
@@ -1609,6 +1627,7 @@ namespace xlionrender
         m_VSMRenderTimed[m_Device.getFrameIndex() % ring_frames_v] = !m_VSM.m_ToRender.empty();
         if( m_nShadowTilesRendered == 0 ) return;
 
+        ShCpu.Lap();
         // The casters culled in light space (only when a page renders): their light-space boxes, kept from frame to frame - a draw's again when
         // its world box changes, all when the light's basis does (an epoch). The CPU path's casters (all of them without the pairs)
         auto&                       LightBounds = m_CasterLight;
@@ -1911,6 +1930,7 @@ namespace xlionrender
         }
         else m_bGISunMapValid = false;
 
+        ShCpu.Lap();
         auto Cmd = Window.StartRenderPass(m_ShadowPass);
 
             // The sun's virtual pages: each in its slot of the atlas, cleared, its casters (light-space rect test)
@@ -2507,7 +2527,8 @@ namespace xlionrender
                 Light.m_ShadowLevels = {};           // (the clipmap's: reserved, zero - the compiled materials' layout keeps them)
                 Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.getSetup().m_ResolutionBias };     // the local lights' pages
                 const auto& VS = m_VSM.getSetup();
-                Light.m_VSMParams  = bVSM ? xmath::fvec4{ 1.0f, m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };
+                static const int s_DiscTaps = [] { const char* p = std::getenv("XLION_VSM_DISC_TAPS"); return p ? std::atoi(p) : 0; }();      // (measurement: overrides the sun's)
+                Light.m_VSMParams  = bVSM ? xmath::fvec4{ float(std::clamp(s_DiscTaps > 0 ? s_DiscTaps : Scene.m_Sun.m_ShadowDiscTaps, 1, 16)), m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };     // (x: the disc's taps; 0: no sun shadow)
                 static const float s_Band = [] { const char* p = std::getenv("XLION_VSM_BAND"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement: the levels' blend band)
                 static const bool  s_bNoDisc = std::getenv("XLION_VSM_NO_DISC") != nullptr;                                                         // (measurement: no contact-hardening)
                 Light.m_VSMParams2 = { float(VS.m_Window), s_Band > 0.0f ? s_Band : m_VSMLevelBand, float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
@@ -2606,6 +2627,24 @@ namespace xlionrender
             static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
             const bool bScreen = bMain && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
                               && !(bPlan && m_bBoxesOnly) && createGIScreenTargets(View) == nullptr;
+            // Measurement only (XLION_GPU_TIMES): what runs before the scene pass - the GI's half resolution read, GPU culling, the screen tail
+            // (PRESCENE: the largest of 120 frames each; the sun turning added ~3.8 ms there, 2026-10-29)
+            static std::unordered_map<const void*, xgpu::timestamps> s_Pre;      // ponytail: per renderer, never erased (a measurement hook)
+            xgpu::timestamps* pPre = nullptr;
+            if( bMain && std::getenv("XLION_GPU_TIMES") )
+            {
+                auto [It, bNew] = s_Pre.try_emplace(this);
+                if( bNew && m_Device.Create(It->second, { .m_Count = 4 }) ) s_Pre.erase(It);
+                else pPre = &It->second;
+            }
+            if( pPre )
+            {
+                static std::vector<std::uint64_t> s_Ns; static double s_Max[3] = {}; static int s_n = 0;
+                if( pPre->getResults(s_Ns) && s_Ns.size() >= 4 && s_Ns[3] >= s_Ns[2] && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
+                    for( int k = 0; k < 3; ++k ) s_Max[k] = std::max(s_Max[k], double(s_Ns[k + 1] - s_Ns[k]) * 1e-6);
+                if( ++s_n == 120 ) { std::printf("PRESCENE max of 120 frames: GI half-res %.3f, GPU cull %.3f, screen tail %.3f ms\n", s_Max[0], s_Max[1], s_Max[2]); std::fflush(stdout); s_n = 0; s_Max[0] = s_Max[1] = s_Max[2] = 0; }
+                Window.WriteTimestamp(*pPre, 0);
+            }
             if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
             if( bMain && !bScreen ) View.m_bGIScreenPrev = false;      // (a frame without it: nothing to reproject from)
             if( bScreen )
@@ -2818,6 +2857,7 @@ namespace xlionrender
                 };
             };
 
+            if( pPre ) Window.WriteTimestamp(*pPre, 1);
             // GPU culling (features/cull, documentation/gpu_cluster_culling.md): the main view's opaque rigid clusters with a material, a
             // candidate each, in runs (a bind state each; a prepass run a geometry), culled here - outside the pass - into their runs' commands
             static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
@@ -2919,9 +2959,11 @@ namespace xlionrender
                 return m_CullSubBase[iDraw] != ~0u && m_CullSub[m_CullSubBase[iDraw] + std::size_t(&Sub - G.m_Submeshes.data())] != 0;
             };
 
+            if( pPre ) Window.WriteTimestamp(*pPre, 2);
             // The screen tail (light_mode::SCREEN): the thin G-buffer, the tail pass and the denoiser, before the scene pass reads them
             if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || Scene.m_bReflectionScreen) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
             else if( bMain ) m_TailReport.m_bOn = false;
+            if( pPre ) Window.WriteTimestamp(*pPre, 3);
 
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
             CmdPass.emplace(Window.StartRenderPass(View.m_ScenePass));

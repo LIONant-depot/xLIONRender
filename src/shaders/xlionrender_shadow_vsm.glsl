@@ -194,9 +194,10 @@ float ShadowVSMDisc(in const int Level, in const vec3 World, in const vec3 Ng, i
     const float a0 = float(h & 0xFFFFu) * (6.2831853 / 65536.0);
     float S = 0.0, W = 0.0;
     g_VSMSmallTap = UBOLight.VSMParams2.w == 0.0;                                      // (the tests' table-check mode keeps the 4 x 4)
-    for (int k = 0; k < kVSMDiscTaps; ++k)
+    const int nTaps = clamp(int(UBOLight.VSMParams.x), 1, 16);                         // (the sun's m_ShadowDiscTaps; kVSMDiscTaps its default)
+    for (int k = 0; k < nTaps; ++k)
     {
-        const float a = a0 + float(k) * 2.39996323, r = R * sqrt((float(k) + 0.5) / float(kVSMDiscTaps));     // (Vogel's disc)
+        const float a = a0 + float(k) * 2.39996323, r = R * sqrt((float(k) + 0.5) / float(nTaps));     // (Vogel's disc)
         vec3 o = (Ax * cos(a) + Ay * sin(a)) * r;
         if (abs(nz) > 0.2) o -= Az * (dot(o, Ng) / nz);                                // (along the receiver's plane)
         const float v = ShadowVSMAt(Level, World + o, Ng, Slope, SlopeP, Grazing);
