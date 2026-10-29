@@ -82,6 +82,7 @@ bool VSMMoverBase(in const int Level, in const ivec2 Page, in const uint MoverBa
 
 // One level of an epoch (Lv: its level's window and depth centre, Texel0: its level 0 texel, TableBase: its table, MoverBase: the
 // movers' table + 1, 0: none): 1 lit .. 0 shadowed, or -1 when a tap's page is not there
+bool g_VSMSmallTap = false;     // (ShadowVSMDisc's taps: the 2 x 2 bilinear - 8 taps of the 4 x 4 were 5.7 of Bistro's 11.4 ms scene pass)
 float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, in const vec4 Lv, in const float Texel0, in const uint TableBase, in const uint MoverBase)
 {
     const float Texel = Texel0 * float(1 << Level);
@@ -97,6 +98,24 @@ float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, i
     if (!VSMInWindow(Lv, PLo) || !VSMInWindow(Lv, PHi)) return -1.0;
 
     const float Row = UBOLight.VSMParams2.z;                                           // slots per row of the pool
+    if (g_VSMSmallTap)          // (a disc's tap: the 2 x 2 bilinear, one gather - the disc's spread is the filter; inside one page, else the 4 x 4)
+    {
+        const ivec2 L1 = Lo + 1, Q = ivec2(floor(vec2(L1) / float(kVSMPageTexels))), Q1 = ivec2(floor(vec2(L1 + 1) / float(kVSMPageTexels)));
+        if (Q == Q1)
+        {
+            const uint E = VSMEntry(Level, Q, TableBase);
+            if (E == 0u) return -1.0;
+            const ivec2 Base = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - Q * kVSMPageTexels;
+            ivec2 MBase;
+            vec4 G = VSMGather(Base + L1);
+            if (VSMMoverBase(Level, Q, MoverBase, MBase)) G = min(G, VSMGather(MBase + L1));
+            const vec2  dT = vec2(L1) - U;                                             // (texel (0,0)'s offset from the point, in texels)
+            const float D0 = Depth - Bias;
+            const vec4  Ref = vec4(D0) - min(2.0 * max(vec4(0.0), vec4(dot(SlopeT, dT + vec2(0, 1)), dot(SlopeT, dT + vec2(1, 1)), dot(SlopeT, dT + vec2(1, 0)), dot(SlopeT, dT))), vec4(MaxB));
+            const vec4  Lt = vec4(greaterThanEqual(G, Ref));                           // (gather order: (0,1) (1,1) (1,0) (0,0))
+            return mix(mix(Lt.w, Lt.z, f.x), mix(Lt.x, Lt.y, f.x), f.y);
+        }
+    }
     const vec4  Wx  = vec4(1.0 - f.x, 1.0, 1.0, f.x), Wy = vec4(1.0 - f.y, 1.0, 1.0, f.y);
     float Lit = 0.0;
     if (PLo == PHi && UBOLight.VSMParams2.w == 0.0)                                     // (w: every tap through the table - the tests' check)
@@ -174,6 +193,7 @@ float ShadowVSMDisc(in const int Level, in const vec3 World, in const vec3 Ng, i
     h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15;
     const float a0 = float(h & 0xFFFFu) * (6.2831853 / 65536.0);
     float S = 0.0, W = 0.0;
+    g_VSMSmallTap = UBOLight.VSMParams2.w == 0.0;                                      // (the tests' table-check mode keeps the 4 x 4)
     for (int k = 0; k < kVSMDiscTaps; ++k)
     {
         const float a = a0 + float(k) * 2.39996323, r = R * sqrt((float(k) + 0.5) / float(kVSMDiscTaps));     // (Vogel's disc)
@@ -183,6 +203,7 @@ float ShadowVSMDisc(in const int Level, in const vec3 World, in const vec3 Ng, i
         if (v < 0.0) continue;
         S += v; W += 1.0;
     }
+    g_VSMSmallTap = false;
     return W > 0.0 ? S / W : -1.0;
 }
 

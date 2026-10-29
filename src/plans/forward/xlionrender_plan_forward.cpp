@@ -2506,13 +2506,15 @@ namespace xlionrender
                 Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.getSetup().m_ResolutionBias };     // the local lights' pages
                 const auto& VS = m_VSM.getSetup();
                 Light.m_VSMParams  = bVSM ? xmath::fvec4{ 1.0f, m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };
-                Light.m_VSMParams2 = { float(VS.m_Window), m_VSMLevelBand, float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
+                static const float s_Band = [] { const char* p = std::getenv("XLION_VSM_BAND"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement: the levels' blend band)
+                static const bool  s_bNoDisc = std::getenv("XLION_VSM_NO_DISC") != nullptr;                                                         // (measurement: no contact-hardening)
+                Light.m_VSMParams2 = { float(VS.m_Window), s_Band > 0.0f ? s_Band : m_VSMLevelBand, float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
                 for( int i = 0; i < shadows::vsm::max_levels_v; ++i )
                 {
                     const auto& Lv = m_VSM.m_Levels[i];
                     Light.m_VSMLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
                 }
-                Light.m_VSMParams3 = { m_VSM.ResolutionBias(), std::tan(std::max(L.m_SourceAngle, 0.0f) * 0.5f * 3.14159265f / 180.0f), float(m_VSMSoftLevels)
+                Light.m_VSMParams3 = { m_VSM.ResolutionBias(), s_bNoDisc ? 0.0f : std::tan(std::max(L.m_SourceAngle, 0.0f) * 0.5f * 3.14159265f / 180.0f), float(m_VSMSoftLevels)
                                      , m_VSM.HasMovers() ? float(vsmTableBase() + 2 * VS.TableUints() + 1) : 0.0f };     // w: the movers' table + 1 (0: none)
                 Light.m_VSMPrevW2Light = xmath::fmat4::fromIdentity();
                 {
@@ -2920,17 +2922,17 @@ namespace xlionrender
             if( s_bSplit && bMain )
             {
                 auto [It, bNew] = s_Split.try_emplace(this);
-                if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_Split.erase(It);
+                if( bNew && m_Device.Create(It->second, { .m_Count = 4 }) ) s_Split.erase(It);
                 else pSplit = &It->second;
             }
             if( pSplit )
             {
                 static std::vector<std::uint64_t> s_Ns;
-                static double s_Pre = 0, s_Shade = 0; static int s_n = 0;
-                if( pSplit->getResults(s_Ns) && s_Ns.size() >= 3 && s_Ns[2] > s_Ns[1] && s_Ns[1] > s_Ns[0] )
+                static double s_Pre = 0, s_Shade = 0, s_Blend = 0; static int s_n = 0;
+                if( pSplit->getResults(s_Ns) && s_Ns.size() >= 4 && s_Ns[2] >= s_Ns[3] && s_Ns[3] >= s_Ns[1] && s_Ns[1] > s_Ns[0] )
                 {
-                    s_Pre += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Shade += double(s_Ns[2] - s_Ns[1]) * 1e-6;
-                    if( ++s_n == 120 ) { std::printf("SCENESPLIT prepass %.3f, the rest (shading, sky, blended) %.3f ms\n", s_Pre / s_n, s_Shade / s_n); std::fflush(stdout); s_n = 0; s_Pre = s_Shade = 0; }
+                    s_Pre += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Shade += double(s_Ns[3] - s_Ns[1]) * 1e-6; s_Blend += double(s_Ns[2] - s_Ns[3]) * 1e-6;
+                    if( ++s_n == 120 ) { std::printf("SCENESPLIT prepass %.3f, shading + sky %.3f, blended %.3f ms\n", s_Pre / s_n, s_Shade / s_n, s_Blend / s_n); std::fflush(stdout); s_n = 0; s_Pre = s_Shade = s_Blend = 0; }
                 }
                 Cmd.WriteTimestamp(*pSplit, 0);
             }
@@ -3188,6 +3190,7 @@ namespace xlionrender
                 }
             }
 
+            if( pSplit ) Cmd.WriteTimestamp(*pSplit, 3);
             // The blended ones, over everything (ponytail: sorted per submesh by its draw's box center; per-pixel order would need OIT)
             std::sort(Blended.begin(), Blended.end(), [](const blended_draw& a, const blended_draw& b) { return a.m_Priority != b.m_Priority ? a.m_Priority < b.m_Priority : a.m_Distance > b.m_Distance; });
             pBound = nullptr;
