@@ -247,6 +247,10 @@ namespace xlionrender
         for( auto& I : m_EnvDownsampleInstance ) m_Device.Destroy(std::move(I));
         for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline, &m_EnvDownsamplePipeline, &m_EnvCubemapPipeline } ) m_Device.Destroy(std::move(*p));
         for( auto* p : { &m_EnvAtlasPass, &m_EnvDFGPass } )                                 m_Device.Destroy(std::move(*p));
+        // (the GI's sun map: its pass was left to the members' destruction, after the device - an access violation in the renderpass's
+        // deleter on every close with GI on, Tomas)
+        if( m_GISunPass.m_Private ) m_Device.Destroy(std::move(m_GISunPass));
+        if( m_GISunMap.m_Private )  m_Device.Destroy(std::move(m_GISunMap));
         for( auto& P : m_EnvSourcePass ) m_Device.Destroy(std::move(P));
         for( auto* p : { &m_EnvAtlas, &m_EnvDFG } )                                         m_Device.Destroy(std::move(*p));
         m_GICaptures.clear();
