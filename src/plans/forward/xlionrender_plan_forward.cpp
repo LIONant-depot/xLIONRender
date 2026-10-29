@@ -1444,6 +1444,7 @@ namespace xlionrender
                                    || C.m_Mesh.m_Generation != D.m_Mesh.m_Generation || C.m_MaterialsHash != MHash || C.m_BoxedHash != BoxedHash;
                 if( bChanged )
                 {
+                    m_ChangeWhy[0] += m_DrawChanged[iDraw] != 0; m_ChangeWhy[1] += !C.m_bValid; m_ChangeWhy[2] += C.m_Mesh.m_Index != D.m_Mesh.m_Index || C.m_Mesh.m_Generation != D.m_Mesh.m_Generation; m_ChangeWhy[3] += C.m_MaterialsHash != MHash;
                     if( C.m_bValid ) Changed.push_back(C.m_World);
                     if( C.m_bValid && Pass - C.m_ChangedPass >= static_frames_v ) SunStatic.push_back(C.m_World);    // (a static caster starts moving)
                     C = { WorldOf(*pMesh, D), D.m_Mesh, MHash, BoxedHash, Pass, true, Pass };
@@ -1452,7 +1453,7 @@ namespace xlionrender
                 C.m_Seen = Pass;
                 World    = C.m_World;
                 bMover   = bSkin || Pass - C.m_ChangedPass < static_frames_v;
-                if( !bSkin && Pass - C.m_ChangedPass == static_frames_v ) SunStatic.push_back(World);             // (a mover settles)
+                if( !bSkin && Pass - C.m_ChangedPass == static_frames_v ) SunStatic.push_back(World), ++m_ChangeWhy[5];             // (a mover settles)
                 m_CasterSlots.push_back(Slot);
             }
             else
@@ -1466,10 +1467,10 @@ namespace xlionrender
                 const auto It = m_PrevCasters.find(Key);
                 const std::uint64_t First = It == m_PrevCasters.end() ? Pass : It->second.m_First;
                 Now.emplace(Key, prev_caster{ World, First });
-                if( It == m_PrevCasters.end() || bSkin ) Changed.push_back(World);
+                if( It == m_PrevCasters.end() || bSkin ) Changed.push_back(World), ++m_ChangeWhy[7];
                 if( It != m_PrevCasters.end() && bSkin ) Changed.push_back(It->second.m_World);
                 bMover = bSkin || Pass - First < static_frames_v;
-                if( !bSkin && Pass - First == static_frames_v ) SunStatic.push_back(World);                       // (a mover settles)
+                if( !bSkin && Pass - First == static_frames_v ) SunStatic.push_back(World), ++m_ChangeWhy[6];                       // (a mover settles)
             }
             m_DrawWorld[iDraw] = World;
             if( !m_bShadowSplitMovers ) bMover = false;
@@ -1488,7 +1489,7 @@ namespace xlionrender
             auto& C = m_SlotCasters[Slot];
             if( C.m_bValid && C.m_Seen != Pass )
             {
-                Changed.push_back(C.m_World);
+                Changed.push_back(C.m_World); ++m_ChangeWhy[4];
                 if( Pass - C.m_ChangedPass >= static_frames_v ) SunStatic.push_back(C.m_World);                   // (a static caster went)
                 C.m_bValid = false;
             }
@@ -1559,11 +1560,24 @@ namespace xlionrender
             }
             // (the static pages see the static casters' changes only - every change when the movers are not split; the movers have pages of their own)
             m_VSM.SetDetailDistance(Sun.m_ShadowDetailDistance);
+            {   // (measurement: a frame whose pixels found no page at any level - lit where they should be shadowed: VSMNONE)
+                static const bool s_bN = std::getenv("XLION_GPU_TIMES") != nullptr;
+                const auto& C = m_VSMReport.m_Counters;
+                if( s_bN && C[0] && double(C[3]) > 0.005 * double(C[0]) )
+                    std::printf("VSMNONE frame %llu: %.1f%% of the pixels without a page (coarser %.1f%%); pages requested %d rendered %d net %d rejected %d deferred %d resident %d, epoch %d, dynamic %.2f\n", (unsigned long long)m_Device.getFrameIndex(), 100.0 * C[3] / C[0], 100.0 * C[2] / C[0]
+                               , m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_RenderedPinned, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine, int(m_VSM.HasPrevious()), m_VSM.m_Stats.m_DynamicBias), std::fflush(stdout);
+            }
             { static const bool s_bT = std::getenv("XLION_GPU_TIMES") != nullptr;      // (measurement: the sun's shadow detail reaching the renderer)
               if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d\n", Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine), std::fflush(stdout); }
             m_VSMLevelBand = std::clamp(Sun.m_ShadowLevelBlend, 0.01f, 0.95f);
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
+            {   static const bool s_bE = std::getenv("XLION_GPU_TIMES") != nullptr;      // (measurement: a frame that dropped many pages - the dropout hunt)
+                const auto& St = m_VSM.m_Stats;
+                if( s_bE && (St.m_Dirtied > 32 || St.m_Recentred || St.m_Epochs || St.m_Evicted > 32 || St.m_Deferred > 64) )
+                    std::printf("VSMEVENT frame %llu: dirtied %d (changed boxes %zu), recentred %d, epochs %d, evicted %d, rendered %d, deferred %d, rejected %d, requested %d, resident %d, dynamic bias %.2f; why: slot moved %d new %d mesh %d materials %d gone %d settled %d hashed settled %d hashed new %d\n", (unsigned long long)m_Device.getFrameIndex(), St.m_Dirtied, (m_bShadowSplitMovers ? SunStatic : Changed).size(), St.m_Recentred, St.m_Epochs, St.m_Evicted, St.m_Rendered, St.m_Deferred, St.m_Rejected, St.m_Requested, St.m_ResidentFine, St.m_DynamicBias, m_ChangeWhy[0], m_ChangeWhy[1], m_ChangeWhy[2], m_ChangeWhy[3], m_ChangeWhy[4], m_ChangeWhy[5], m_ChangeWhy[6], m_ChangeWhy[7]), std::fflush(stdout);
+                m_ChangeWhy = {};
+            }
         }
         else m_VSM.Invalidate();            // the casters changing meanwhile reach no page: all of them when it casts again
         // The local lights' pages: this ring slot's last request pass (a ring ago: done; its light slots' generations), then the frame's pages
@@ -2752,7 +2766,12 @@ namespace xlionrender
                 const bool  bSections0 = !bNoGI && bRigid && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == pMesh->m_Geom.m_Clusters.size();
                 // read at half resolution (the pass above): the buffer as its GI buffer, gi_screen_v as its level - one buffer for every section
                 const bool  bScreenSub = bScreen && bRigid && Opaque(pMat) && (bSections0 ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu);
-                const bool  bSections = bSections0 && !bScreenSub;
+                // a blended draw (glass) reads the probe grid - 8 probes, O(1) - not the surfels a pixel: no prepass under it, each layer paid
+                // the walk (Bistro: 22 of its 33 ms scene pass). Frostbite's GIBS lights what is outside its deferred path from a probe volume,
+                // Lumen's translucency from a volume too. XLION_GI_BLEND_PIXEL=1: the per-pixel read, as before (measurement)
+                static const bool s_bBlendPixel = std::getenv("XLION_GI_BLEND_PIXEL") != nullptr;
+                const bool  bBlendProbes = !s_bBlendPixel && bRigid && Probes && pMat && pMat->m_State.m_Blend != material_state::blend::OFF;
+                const bool  bSections = bSections0 && !bScreenSub && !bBlendProbes;
                 // measurement (XLION_GPU_TIMES): why a main-view GI draw misses the half-resolution read - GIHALFMISS every 240 frames
                 static const bool s_bHalfMiss = std::getenv("XLION_GPU_TIMES") != nullptr;
                 if( s_bHalfMiss && bMain && bScreen )
@@ -2770,7 +2789,7 @@ namespace xlionrender
                     s_Frame = m_Device.getFrameIndex();
                 }
                 // a rigid mesh without surfels of its own reads the probe grid as well (its GI buffer: the grid; its level: gi_probes_v)
-                const bool  bRigidProbes = bRigid && Probes && !pMesh->m_pGI;
+                const bool  bRigidProbes = bRigid && Probes && (!pMesh->m_pGI || bBlendProbes);
                 return [=, this, &View]( std::uint32_t c, std::uint32_t Slot, std::uint32_t MaterialBase ) -> std::pair<xgpu::buffer*, details::push_static_geom>
                 {
                     if( bScreenSub ) return { &View.m_GIScreenBuffer, { c, Slot, 0u, 0xFFFFFFFDu, MaterialBase } };      // (xlionrender_surfel_gi.glsl gi_screen_v)
@@ -2780,7 +2799,7 @@ namespace xlionrender
                         const auto SGI = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                         return { const_cast<xgpu::buffer*>(&pMesh->m_GISections[k].m_Buffer), { c, Slot, SGI.first, SGI.second, MaterialBase, pMesh->m_GIClusterVertexDelta[c] } };
                     }
-                    xgpu::buffer* const pBuf = pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : bRigidProbes ? Probes : const_cast<xgpu::buffer*>(&m_GIDummy);
+                    xgpu::buffer* const pBuf = bRigidProbes ? Probes : pMesh->m_pGI ? const_cast<xgpu::buffer*>(&pMesh->m_GIBuffer) : const_cast<xgpu::buffer*>(&m_GIDummy);
                     return { pBuf, { c, Slot, GI.first, bRigidProbes ? 0xFFFFFFFEu : GI.second, MaterialBase } };     // (0xFFFFFFFE: xlionrender_surfel_gi.glsl gi_probes_v)
                 };
             };
@@ -3013,8 +3032,7 @@ namespace xlionrender
                 PrepassCulled(0);
                 if( bPass2 && !bOcclude ) PrepassCulled(1);     // (frozen: both lists now)
                 pBound = nullptr;
-                const cluster_geom* pPrepassGeom = nullptr;
-                for( const auto& Vis : m_Visible )
+                const cluster_geom* pPrepassGeom = nullptr;                for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
                     const auto&       D     = Scene.m_Draws[iDraw];

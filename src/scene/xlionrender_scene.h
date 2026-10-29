@@ -213,7 +213,9 @@ namespace xlionrender
         bool            m_bProbes       = true;     // the probe grid: the GI of what has no surfels of its own (skinned meshes), around the eye
         float           m_ProbeSpacing  = 1.0f;     // its probes' spacing (32 x 16 x 32 of them)
         float           m_GPUBudgetMs   = 2.0f;     // the GPU time a frame's GI slice may take (its rays: the measured rays per ms times this); 0: no limit, every batch (m_RayBudget) in one slice
-        float           m_PixelsPerSurfel = 256;    // the screen area (pixels) an instance needs per fine surfel: below it the GI holds its parent surfels, whatever its shape
+        float           m_PixelsPerSurfel = 0;      // the screen area (pixels) an instance needs per fine surfel: below it the GI holds its parent surfels, whatever its shape
+                                                    // (0: never - the fine surfels at every distance. A whole instance switching put a tree's leaves on their parents,
+                                                    // several leaves' mean, a few metres away at 256 and still too early at 16, Tomas; the read's cost is per pixel)
         float           m_Saturation    = 1;        // the shown GI light's saturation (1: as solved; luminance kept): the filter and the coarse surfels average its colors toward grey
         float           m_EmissiveScale = 100;      // self-illuminated materials are lights with no light entity, their emission a texture color (0..1): the GI takes it this many times brighter (their look on screen stays)
         bool            m_bShowBlend    = false;    // the shown GI light moves toward the new one over time (two speeds, frame-rate independent: Tomas, "never a jump"); off: as solved - the tests' steady states (the editors and the game turn it on)

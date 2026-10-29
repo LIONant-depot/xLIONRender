@@ -504,8 +504,7 @@ namespace xlionrender
         // The depth prepass (renderScenePass): the rigid clusters' depth, through the same vertex shader (the same positions) and no color,
         // before their shading - which then runs once a pixel, at the depth it wrote (LESS_OR_EQUAL). Its layout is m_StaticGeomPipeline's
         xgpu::pipeline              m_DepthPrepassPipeline;
-        xgpu::pipeline_instance     m_DepthPrepassInstance;
-        // The GI read at half resolution (render_view::m_GIScreenPass): the same vertex shader and layout + the buffer it writes (binding 11),
+        xgpu::pipeline_instance     m_DepthPrepassInstance;        // The GI read at half resolution (render_view::m_GIScreenPass): the same vertex shader and layout + the buffer it writes (binding 11),
         // the material's GI read in the fragment (xlionrender_gi_screen_frag.glsl), at the depth the prepass wrote, no color
         xgpu::pipeline              m_GIScreenPipeline;
         xgpu::pipeline_instance     m_GIScreenInstance;
@@ -529,6 +528,7 @@ namespace xlionrender
         int                         m_nSlotsWritten         = 0;        // persistent slots written this frame (getSlotsWritten)
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
         std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
+        std::array<int, 8>          m_ChangeWhy{};          // (measurement, VSMEVENT: why casters changed this frame - slot moved, new, mesh, materials, gone, settled, hashed settled, hashed new)
 
         // Material parameters (plugins/xmaterial.plugin/documentation/material_contract.md, section 0): every material's block in one
         // device-local buffer (set 1 binding 9), a range per material; a new block goes into this frame's ring region (packed: the
