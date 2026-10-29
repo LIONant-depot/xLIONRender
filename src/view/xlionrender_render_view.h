@@ -63,6 +63,11 @@ namespace xlionrender
         // the Hi-Z), and the Hi-Z pyramid (gpu_cull::HiZFloats floats)
         xgpu::renderpass        m_ScenePassLoad;
         xgpu::buffer            m_HiZ;
+        // The G-buffer prepass (instance::createGPreTargets, the main view's; gi_gbuffer_gather_plan.md): the opaque depth with each pixel's
+        // world normal (octahedral) and submesh instance (slot + 1, cluster) - the GI gathers from them; the scene pass loads its depth
+        xgpu::texture           m_GPreNormal;           // R16G16_SFLOAT
+        xgpu::texture           m_GPreId;               // R32G32_SFLOAT (exact integers): 0 nothing
+        xgpu::renderpass        m_GPrePass;
         // The screen tail (instance::renderTail, the main view in light_mode::SCREEN; documentation/lighting_p3_design.md "The decision"),
         // made the first time: the thin G-buffer at half size - the octahedral normal and roughness (10-10-10-2; the materials' G-buffer
         // variants draw into it) and its depth -, its pass; the tail pass's two targets (demodulated diffuse and specular, 11-11-10 floats),

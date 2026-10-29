@@ -397,9 +397,10 @@ namespace xlionrender
         // The GI screen read's resolution: 1 / this of the view's - a quarter (Bistro moving run, frame p95: half 15.9, quarter 13.7, an
         // eighth 12.7 ms; the scorecard's GI views alike, 0.08% / 0.23% of pixels over 8 levels; Lumen's screen probes: 1 a 16 x 16).
         // XLION_GI_SCREEN_DIV overrides (2..16)
-        static int                  GIScreenDivisor( void ) noexcept { static const int s = [] { const char* p = std::getenv("XLION_GI_SCREEN_DIV"); const int d = p ? std::atoi(p) : 4; return d >= 2 && d <= 16 ? d : 4; }(); return s; }
+        static int                  GIScreenDivisor( void ) noexcept { static const int s = [] { const char* p = std::getenv("XLION_GI_SCREEN_DIV"); const int d = p ? std::atoi(p) : 2; return d >= 2 && d <= 16 ? d : 2; }(); return s; }     // (half: Tomas - the others do it at half; the single geometry pass is the fix)
         void                        destroyGIScreenTargets( render_view& View ) noexcept;
-        xgpu::device::error*        createCullTargets   ( render_view& View ) noexcept;      // render_view::m_ScenePassLoad, m_HiZ (the first time)
+        xgpu::device::error*        createCullTargets   ( render_view& View ) noexcept;
+        xgpu::device::error*        createGPreTargets   ( render_view& View ) noexcept;      // render_view::m_GPrePass, its targets (the first time)      // render_view::m_ScenePassLoad, m_HiZ (the first time)
         void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        renderPlanar    ( xgpu::window& Window, const scene& Scene, const render_view& Main, const xgpu::tools::view& Camera ) noexcept;
         void                        prefilterInto   ( xgpu::window& Window, xgpu::renderpass& Pass, float OriginX, float OriginY ) noexcept;
@@ -510,7 +511,9 @@ namespace xlionrender
         // The depth prepass (renderScenePass): the rigid clusters' depth, through the same vertex shader (the same positions) and no color,
         // before their shading - which then runs once a pixel, at the depth it wrote (LESS_OR_EQUAL). Its layout is m_StaticGeomPipeline's
         xgpu::pipeline              m_DepthPrepassPipeline;
-        xgpu::pipeline_instance     m_DepthPrepassInstance;        // The GI read at half resolution (render_view::m_GIScreenPass): the same vertex shader and layout + the buffer it writes (binding 11),
+        xgpu::pipeline_instance     m_DepthPrepassInstance;
+        xgpu::pipeline              m_GPrePipeline, m_GPreRecordsPipeline;     // the G-buffer prepass: the CPU path's, the records' (GPU culling)
+        xgpu::pipeline_instance     m_GPreInstance, m_GPreRecordsInstance;        // The GI read at half resolution (render_view::m_GIScreenPass): the same vertex shader and layout + the buffer it writes (binding 11),
         // the material's GI read in the fragment (xlionrender_gi_screen_frag.glsl), at the depth the prepass wrote, no color
         xgpu::pipeline              m_GIScreenPipeline;
         xgpu::pipeline_instance     m_GIScreenInstance;

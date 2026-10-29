@@ -48,6 +48,9 @@ namespace xlionrender
         constexpr std::uint32_t s_DepthFrag[] = {
             #include "xlionrender_depth_frag.h"
         };
+        constexpr std::uint32_t s_GPrePassFrag[] = {
+            #include "xlionrender_gprepass_frag.h"
+        };
         constexpr std::uint32_t s_GIScreenFrag[] = {
             #include "xlionrender_gi_screen_frag.h"
         };
@@ -213,6 +216,10 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_DepthPrepassPipeline));
         m_Device.Destroy(std::move(m_GIScreenInstance));
         m_Device.Destroy(std::move(m_GIScreenPipeline));
+        m_Device.Destroy(std::move(m_GPreInstance));
+        m_Device.Destroy(std::move(m_GPrePipeline));
+        m_Device.Destroy(std::move(m_GPreRecordsInstance));
+        m_Device.Destroy(std::move(m_GPreRecordsPipeline));
         m_Device.Destroy(std::move(m_GIScreenDepthInstance));
         m_Device.Destroy(std::move(m_GIScreenDepthPipeline));
         ReleaseBuffer(m_StaticGeomUBO);
@@ -542,6 +549,20 @@ namespace xlionrender
                     Setup.m_Blend.m_ColorWriteMask = 0;
                     if( auto Err = Device.Create(m_GIScreenDepthPipeline, Setup); Err ) return Err;
                     if( auto Err = Device.Create(m_GIScreenDepthInstance, { .m_PipeLine = m_GIScreenDepthPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+                }
+                {   // the G-buffer prepass (gi_gbuffer_gather_plan.md): the prepass's vertex shaders, the normal and the submesh instance written
+                    xgpu::shader GPreFrag;
+                    if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPrePassFrag) }); Err ) return Err;
+                    std::vector<xgpu::pipeline::uniform_binds> RecBinds(UniformBinds.begin(), UniformBinds.end());
+                    RecBinds.push_back(RecordsBind);
+                    auto CpuShaders = std::array<const xgpu::shader*, 2>{ &GPreFrag, &Vert };
+                    auto RecShaders = std::array<const xgpu::shader*, 2>{ &GPreFrag, &RecordsVert };
+                    xgpu::pipeline::setup Cpu{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = CpuShaders, .m_PushConstantsSize = sizeof(details::push_static_geom), .m_UniformBinds = UniformBinds, .m_Samplers = Samplers };
+                    xgpu::pipeline::setup Rec{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = RecShaders, .m_PushConstantsSize = sizeof(details::push_static_geom), .m_UniformBinds = RecBinds, .m_Samplers = Samplers };
+                    if( auto Err = Device.Create(m_GPrePipeline, Cpu); Err ) return Err;
+                    if( auto Err = Device.Create(m_GPreInstance, { .m_PipeLine = m_GPrePipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+                    if( auto Err = Device.Create(m_GPreRecordsPipeline, Rec); Err ) return Err;
+                    if( auto Err = Device.Create(m_GPreRecordsInstance, { .m_PipeLine = m_GPreRecordsPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
                 }
                 xgpu::shader ScreenFrag;
                 if( auto Err = Device.Create(ScreenFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIScreenFrag) }); Err ) return Err;
@@ -1545,6 +1566,18 @@ namespace xlionrender
         View.m_MaskWidth = View.m_MaskHeight = 0;
     }
 
+    xgpu::device::error* instance::createGPreTargets( render_view& View ) noexcept
+    {
+        if( View.m_GPrePass.m_Private ) return nullptr;
+        if( auto Err = m_Device.Create(View.m_GPreNormal, { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GPreId,     { .m_Format = xgpu::texture::format::R32G32_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
+        // (the HDR target first, cleared here: the scene pass then loads it as it loads the depth - loaded without a clear this frame it was
+        // in no attachment layout: nothing drew)
+        auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId }, xgpu::renderpass::attachment{ View.m_Depth } };
+        if( auto Err = m_Device.Create(View.m_GPrePass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
+        return createCullTargets(View);     // (the scene pass then loads the depth: m_ScenePassLoad)
+    }
+
     xgpu::device::error* instance::createCullTargets( render_view& View ) noexcept
     {
         if( View.m_HiZ.m_Private ) return nullptr;
@@ -1709,6 +1742,9 @@ namespace xlionrender
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));
         if( View.m_ScenePassLoad.m_Private )   m_Device.Destroy(std::move(View.m_ScenePassLoad));
+        if( View.m_GPrePass.m_Private )        m_Device.Destroy(std::move(View.m_GPrePass));
+        if( View.m_GPreNormal.m_Private )      m_Device.Destroy(std::move(View.m_GPreNormal));
+        if( View.m_GPreId.m_Private )          m_Device.Destroy(std::move(View.m_GPreId));
         if( View.m_HiZ.m_Private )             ReleaseBuffer(View.m_HiZ);
         if( View.m_OutputPass.m_Private )      m_Device.Destroy(std::move(View.m_OutputPass));
         if( View.m_OverlayPass.m_Private )     m_Device.Destroy(std::move(View.m_OverlayPass));

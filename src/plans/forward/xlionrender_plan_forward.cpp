@@ -2885,6 +2885,12 @@ namespace xlionrender
             // GPU culling (features/cull, documentation/gpu_cluster_culling.md): the main view's opaque rigid clusters with a material, a
             // candidate each, in runs (a bind state each; a prepass run a geometry), culled here - outside the pass - into their runs' commands
             static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
+            // The G-buffer prepass (gi_gbuffer_gather_plan.md, stage 1; XLION_GPREPASS=1 while the GI does not read it yet): the opaque prepass
+            // in a pass of its own writing each pixel's normal and submesh instance too; the scene pass loads its depth. (No occlusion yet:
+            // its second pass would draw into the scene pass)
+            static const int s_GPre = [] { const char* p = std::getenv("XLION_GPREPASS"); return p ? std::atoi(p) : 0; }();     // (2: a test - the G-buffer pass, then the scene pass cleared and its own prepass as before)
+            static const bool s_bGPre = s_GPre > 0;
+            const bool bGPre = s_bGPre && bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
             static const bool s_bNoGPUCull      = std::getenv("XLION_NO_GPU_CULL") != nullptr;
             static const bool s_bNoGPUOcclusion = std::getenv("XLION_NO_GPU_OCCLUSION") != nullptr;
             m_CullCandidates.clear(); m_CullMatrices.clear(); m_CullRuns.clear(); m_CullRunOf.clear(); m_CullSub.clear();
@@ -2969,7 +2975,7 @@ namespace xlionrender
                     const bool bCut = Jump.Dot(Jump) > 4.0f || Fwd(W2C).Dot(m_CullPrevFwd) < 0.7071f;
                     m_CullPrevEye = Eye; m_CullPrevFwd = Fwd(W2C);
                     m_pCull->Begin(m_Device.getFrameIndex());
-                    bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
+                    bOcclude = bPass2 = !bGPre && m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
                     m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
                     static const bool s_bCullTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
                     if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
@@ -2990,7 +2996,7 @@ namespace xlionrender
             if( pPre ) Window.WriteTimestamp(*pPre, 4);
 
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
-            CmdPass.emplace(Window.StartRenderPass(View.m_ScenePass));
+            CmdPass.emplace(Window.StartRenderPass(bGPre ? View.m_GPrePass : View.m_ScenePass));
             auto& Cmd = *CmdPass;
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
             // Measurement only (XLION_GPU_TIMES): the main view's scene pass split - its start, the depth prepass's end, its end (SCENESPLIT)
@@ -3016,6 +3022,7 @@ namespace xlionrender
             }
 
             // A GPU culled run's draws in a pass (0: pass 1, 1: pass 2)
+            bool bGPrePass = bGPre;        // (the culled prepass runs into the G-buffer pass)
             const auto DrawCulled = [&]( std::size_t r, int Pass )
             {
                 const auto& R = m_CullRuns[r];
@@ -3029,7 +3036,7 @@ namespace xlionrender
                     const auto& R = m_CullRuns[r];
                     if( R.m_pInstance ) continue;
                     std::array<xgpu::buffer*, 10> Buffers{ R.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &m_pCull->m_Records };
-                    Cmd.setPipelineInstance(m_GIScreenDepthInstance, std::span{ Buffers });     // (the depth prepass's pipeline reading the records)
+                    Cmd.setPipelineInstance(bGPrePass ? m_GPreRecordsInstance : m_GIScreenDepthInstance, std::span{ Buffers });     // (the depth prepass's pipeline reading the records)
                     Cmd.setDynamicUBO(m_LightUBO, 1);
                     Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                     BindClusterStreams(Cmd, *R.m_pGeom);
@@ -3119,6 +3126,11 @@ namespace xlionrender
                 static const bool s_bMaskedPrepass = [] { const char* p = std::getenv("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
                 bool bCutLight = false;
                 const void* pPrepassBound = nullptr;
+                // (Mode 0: all of it; with the G-buffer prepass 1: the opaque ones into it, then 2: the masked ones in the scene pass - their
+                // cutout is their material's fragment, which writes no normal nor instance: ponytail, the GI gathers none for them yet)
+                for( int Mode = bGPre ? 1 : 0; Mode <= (bGPre ? 2 : 0); ++Mode )
+                {
+                if( Mode == 2 ) { CmdPass.reset(); CmdPass.emplace(Window.StartRenderPass(s_GPre == 2 ? View.m_ScenePass : View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; if( s_GPre == 2 ) { bGPrePass = false; PrepassCulled(0); } }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
@@ -3144,6 +3156,7 @@ namespace xlionrender
                             }
                             else if( St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided ) continue;
                         }
+                        if( (Mode == 1 && pCut) || (Mode == 2 && !pCut && s_GPre != 2) ) continue;
                         if( pCut )
                         {
                             if( !bCutLight )            // (this render's lighting block, its cutout flag set: renderTail wrote its part already)
@@ -3166,7 +3179,7 @@ namespace xlionrender
                         else if( &G != pPrepassGeom || pPrepassBound != nullptr )
                         {
                             std::array<xgpu::buffer*, 9> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
-                            Cmd.setPipelineInstance(m_DepthPrepassInstance, std::span{ Buffers });
+                            Cmd.setPipelineInstance(bGPre && Mode == 1 ? m_GPreInstance : m_DepthPrepassInstance, std::span{ Buffers });
                             Cmd.setDynamicUBO(m_LightUBO, 1);
                             Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                             BindClusterStreams(Cmd, G);
@@ -3181,6 +3194,7 @@ namespace xlionrender
                             Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                         }
                     }
+                }
                 }
                 if( bCutLight ) m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;      // (the shading's block again: the next binds take the latest entry)
             }
