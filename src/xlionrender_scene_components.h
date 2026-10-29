@@ -672,7 +672,7 @@ namespace xlionrender
         bool            m_bCastShadows  = true;
         float           m_ShadowTileSize = 4.0f;           // world size of a level-0 shadow tile; the clipmap levels double it
         bool            m_bGI           = true;             // in the GI's lights (its bounce); off: direct light only
-        float           m_SourceAngle   = 0.2f;             // the sun's disc, degrees across (scene's sun_light::m_SourceAngle; Tomas' choice 0.2, the real sun 0.53): contact-hardening
+        float           m_SourceAngle   = 0.4f;             // the sun's disc, degrees across (scene's sun_light::m_SourceAngle; Tomas' choice 0.4, the real sun 0.53): contact-hardening
         float           m_ShadowDetailDistance = 2.0f;      // how many times farther each shadow level keeps its detail (Tomas' choice: 2) (scene's sun_light::m_ShadowDetailDistance)
         float           m_ShadowLevelBlend = 0.95f;         // the share of a shadow level that cross-fades into the next (Tomas' choice: the longest, 0.95) (scene's sun_light::m_ShadowLevelBlend)
 
