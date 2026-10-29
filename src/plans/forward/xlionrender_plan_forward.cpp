@@ -1395,18 +1395,23 @@ namespace xlionrender
         // Measurement only (XLION_GPU_TIMES): its CPU time by part - the pages' choice, the casters (light bounds, pairs), the recording -
         // SHADOWCPU, the largest of 120 frames (the sun turning added ~3.8 ms of GPU idle before the scene pass, 2026-10-30)
         static const bool s_bShCpu = std::getenv("XLION_GPU_TIMES") != nullptr;
-        static double s_ShMax[4] = {}; static int s_ShFrames = 0;
+        static double s_ShMax[5] = {}; static int s_ShFrames = 0, s_ShBusy = 0;
         struct sh_cpu
         {
             using clk = std::chrono::steady_clock;
-            bool m_bOn; clk::time_point m_T[5]; int m_n = 0;
-            void Lap( void ) noexcept { if( m_bOn && m_n < 4 ) m_T[++m_n] = clk::now(); }
+            bool m_bOn; clk::time_point m_T[6]; int m_n = 0;
+            void Lap( void ) noexcept { if( m_bOn && m_n < 5 ) m_T[++m_n] = clk::now(); }
             ~sh_cpu()
             {
                 if( !m_bOn ) return;
-                while( m_n < 4 ) m_T[++m_n] = clk::now();
-                for( int k = 0; k < 4; ++k ) s_ShMax[k] = std::max(s_ShMax[k], std::chrono::duration<double, std::milli>(m_T[k + 1] - m_T[k]).count());
-                if( ++s_ShFrames == 120 ) { std::printf("SHADOWCPU max of 120 frames: changes + decode %.3f, vsm::Update %.3f, casters %.3f, recording %.3f ms\n", s_ShMax[0], s_ShMax[1], s_ShMax[2], s_ShMax[3]); std::fflush(stdout); s_ShFrames = 0; s_ShMax[0] = s_ShMax[1] = s_ShMax[2] = s_ShMax[3] = 0; }
+                while( m_n < 5 ) m_T[++m_n] = clk::now();
+                double d[5], t = 0; for( int k = 0; k < 5; ++k ) t += d[k] = std::chrono::duration<double, std::milli>(m_T[k + 1] - m_T[k]).count();
+                if( t > 0.5 ) { for( int k = 0; k < 5; ++k ) s_ShMax[k] += d[k]; ++s_ShBusy; }       // (the frames with page work: their mean)
+                if( ++s_ShFrames == 120 )
+                {
+                    if( s_ShBusy ) std::printf("SHADOWCPU mean of %d busy frames: changes + decode %.3f, vsm::Update %.3f, after it (local pages, table) %.3f, casters %.3f, recording %.3f ms\n", s_ShBusy, s_ShMax[0] / s_ShBusy, s_ShMax[1] / s_ShBusy, s_ShMax[2] / s_ShBusy, s_ShMax[3] / s_ShBusy, s_ShMax[4] / s_ShBusy), std::fflush(stdout);
+                    s_ShFrames = s_ShBusy = 0; for( auto& v : s_ShMax ) v = 0;
+                }
             }
         } ShCpu{ s_bShCpu, { std::chrono::steady_clock::now() } };
         if( !m_bShadowAtlasReady )
@@ -1590,13 +1595,14 @@ namespace xlionrender
             ShCpu.Lap();
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
+            ShCpu.Lap();
             if( s_bShCpu )      // (measurement: vsm::Update by part, the largest of 120 frames - SHADOWCPU's line)
             {
                 static float s_SecMax[7] = {}; static int s_SecN = 0;
                 for( int k = 0; k < 7; ++k ) s_SecMax[k] = std::max(s_SecMax[k], m_VSM.m_Stats.m_SecMs[k]);
                 if( ++s_SecN == 120 ) { std::printf("VSMUPDATE max of 120 frames: windows %.3f, out %.3f, dirty %.3f, net %.3f, requests %.3f, movers %.3f, rest %.3f ms\n", s_SecMax[0], s_SecMax[1], s_SecMax[2], s_SecMax[3], s_SecMax[4], s_SecMax[5], s_SecMax[6]); std::fflush(stdout); s_SecN = 0; for( auto& v : s_SecMax ) v = 0; }
             }
-            {   static const bool s_bE = std::getenv("XLION_GPU_TIMES") != nullptr;      // (measurement: a frame that dropped many pages - the dropout hunt)
+            {   static const bool s_bE = std::getenv("XLION_VSM_EVENTS") != nullptr;     // (its own switch: a print and flush most frames while the sun turns, ms of them - not with the GPU times)      // (measurement: a frame that dropped many pages - the dropout hunt)
                 const auto& St = m_VSM.m_Stats;
                 if( s_bE && (St.m_Dirtied > 32 || St.m_Recentred || St.m_Epochs || St.m_Evicted > 32 || St.m_Deferred > 64) )
                     std::printf("VSMEVENT frame %llu: dirtied %d (changed boxes %zu), recentred %d, epochs %d, evicted %d, rendered %d, deferred %d, rejected %d, requested %d, resident %d, dynamic bias %.2f; why: slot moved %d new %d mesh %d materials %d gone %d settled %d hashed settled %d hashed new %d\n", (unsigned long long)m_Device.getFrameIndex(), St.m_Dirtied, (m_bShadowSplitMovers ? SunStatic : Changed).size(), St.m_Recentred, St.m_Epochs, St.m_Evicted, St.m_Rendered, St.m_Deferred, St.m_Rejected, St.m_Requested, St.m_ResidentFine, St.m_DynamicBias, m_ChangeWhy[0], m_ChangeWhy[1], m_ChangeWhy[2], m_ChangeWhy[3], m_ChangeWhy[4], m_ChangeWhy[5], m_ChangeWhy[6], m_ChangeWhy[7]), std::fflush(stdout);
@@ -1778,6 +1784,7 @@ namespace xlionrender
         // light-space rect too (a caster's box - a Bistro section's - passed every page: the cutout clusters were 52M triangles a frame)
         const shadows::vsm::page_to_render* pSunPage = nullptr;
         bool bOpaqueCut = false;        // (the GI's sun map: masked submeshes drawn whole - the GI's rays block on them alike; their cutout's fragment cost 49 ms a map in Bistro)
+        std::vector<std::vector<decltype(m_VSM.Bounds(xmath::fbbox{}))>> ClusterLight(Draws.size());     // (DrawCasters: a draw's clusters in light space, this frame)
         const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, std::span<const std::uint32_t> Indices, const auto& Keep )
         {
             auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();     // absolute world: the instances' origin as is
@@ -1851,7 +1858,13 @@ namespace xlionrender
                     {
                         if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
                         const auto& C = G.m_Clusters[c];
-                        if( pSunPage && !bSkin && !shadows::RectOverlaps(m_VSM.Bounds(C.m_BBox.TransformCopy(D.m_L2W)), pSunPage->m_MinX, pSunPage->m_MinY, pSunPage->m_Size) ) continue;
+                        if( pSunPage && !bSkin )
+                        {
+                            // (its clusters' light-space boxes once a frame, not once a page: 2-4 ms of recording a frame while the sun turned, Bistro)
+                            auto& CL = ClusterLight[i];
+                            if( CL.size() != G.m_Clusters.size() ) { CL.resize(G.m_Clusters.size()); for( std::size_t k = 0; k < CL.size(); ++k ) CL[k] = m_VSM.Bounds(G.m_Clusters[k].m_BBox.TransformCopy(D.m_L2W)); }
+                            if( !shadows::RectOverlaps(CL[c], pSunPage->m_MinX, pSunPage->m_MinY, pSunPage->m_Size) ) continue;
+                        }
                         if( bSkin ) Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[i].m_Slot, 0u, MaterialBase, G.m_PrevBones });
                         else        Cmd.setPushConstants(details::push_static_geom{ c, Draws[i].m_Slot, 0u, 0xFFFFFFFFu, MaterialBase });
                         Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
