@@ -16,7 +16,7 @@ const int   kVSMPageTexels   = 128;
 const float kVSMNormalOffset = 1.5;
 const float kVSMDepthBias    = 1.0;
 const float kVSMDepthRange   = 4.0;
-const float kVSMLevelBand    = 0.4;     // the share of a level (in its footprint's log2) that cross-fades into the next (0.1 left a hard seam where the finer level took over while moving: Tomas)
+const float kVSMLevelBand    = 0.1;     // the share of a level (in its footprint's log2) that cross-fades into the next (0.4 made the seam longer, not softer: Tomas - the two levels' filters must match, ShadowVSM)
 const float kVSMMaxSlopeBias = 8.0;     // texels of depth: the receiver plane's bias at most (Unreal clamps it too: flickering lit pixels)     // vsm::depth_range_v: a level's depth half range, in its window's extents
 
 // The pages' debug views (VSMParams2.w): 2 the level per pixel (a colour a level, page borders darker), 3 the footprint against the
@@ -158,6 +158,34 @@ float ShadowVSMAt(in const int Level, in const vec3 World, in const vec3 Ng, in 
     return S;
 }
 
+// The penumbra at a fine level: a disc of taps (each the 4 x 4 filter) R world units wide - the coarser level whose 4 x 4 alone spans R
+// switched resolution with the blocker distance inside a shadow's edge, a sharp version overtaken by a blurred one while moving (Tomas).
+// Unreal's SMRT samples its finest level over the sun's disc likewise (rays, TSR averaging their noise); without a TAA the disc's rotation
+// is fixed per point (a hash of its place on the finest grid: no flicker). Each tap moved along the receiver's plane
+const int kVSMDiscTaps = 8;
+float ShadowVSMDisc(in const int Level, in const vec3 World, in const vec3 Ng, in const vec2 Slope, in const vec2 SlopeP, in const float Grazing, in const float R)
+{
+    const vec3  Ax = vec3(UBOLight.W2Light[0][0], UBOLight.W2Light[1][0], UBOLight.W2Light[2][0]);     // the light's x, y, z in world
+    const vec3  Ay = vec3(UBOLight.W2Light[0][1], UBOLight.W2Light[1][1], UBOLight.W2Light[2][1]);
+    const vec3  Az = vec3(UBOLight.W2Light[0][2], UBOLight.W2Light[1][2], UBOLight.W2Light[2][2]);
+    const float nz = dot(Az, Ng);
+    const ivec3 Cell = ivec3(floor(World / max(UBOLight.VSMParams.y, 1e-6)));
+    uint h = uint(Cell.x) * 73856093u ^ uint(Cell.y) * 19349663u ^ uint(Cell.z) * 83492791u;
+    h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15;
+    const float a0 = float(h & 0xFFFFu) * (6.2831853 / 65536.0);
+    float S = 0.0, W = 0.0;
+    for (int k = 0; k < kVSMDiscTaps; ++k)
+    {
+        const float a = a0 + float(k) * 2.39996323, r = R * sqrt((float(k) + 0.5) / float(kVSMDiscTaps));     // (Vogel's disc)
+        vec3 o = (Ax * cos(a) + Ay * sin(a)) * r;
+        if (abs(nz) > 0.2) o -= Az * (dot(o, Ng) / nz);                                // (along the receiver's plane)
+        const float v = ShadowVSMAt(Level, World + o, Ng, Slope, SlopeP, Grazing);
+        if (v < 0.0) continue;
+        S += v; W += 1.0;
+    }
+    return W > 0.0 ? S / W : -1.0;
+}
+
 // Contact-hardening's blocker search (the current epoch): the 4 x 4 texels of a level around the point, the light-space distance from the
 // receiver to the mean of those nearer the light than it. -2: the level's pages are not there; -1: no blocker
 float VSMBlockerDistanceEp(in const int Level, in const vec3 L, in const uint MoverBase, in const vec4 LvIn, in const float Texel0, in const uint TableBase)
@@ -250,6 +278,7 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     // The last kVSMLevelBand of a level cross-fades into the next (CSM's cascade blend): no line where the level steps - it popped as the
     // camera moved (Tomas). The contact-hardening's level below replaces it where it is wider
     float Lf = float(First) + (int(floor(Lx)) == First && First + 1 < nLevels ? clamp((fract(Lx) - (1.0 - kVSMLevelBand)) / kVSMLevelBand, 0.0, 1.0) : 0.0);
+    float Pen = 0.0;            // the penumbra's half-width the disc spans (0: the 4 x 4 alone)
     if (UBOLight.VSMParams3.y > 0.0)
     {
         const int Top = min(First + int(UBOLight.VSMParams3.z), nLevels - 1);
@@ -277,6 +306,9 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
                 const float Penumbra = D * UBOLight.VSMParams3.y;                       // world units, half the width
                 const float Lb = Lf;            // (no finer than the pixel's level, its band's cross-fade kept: First alone stepped at a boundary)
                 Lf = clamp(float(First) + log2(max(Penumbra, 1e-9) / (1.5 * UBOLight.VSMParams.y * float(1 << First))), Lb, max(Lb, float(min(First + int(UBOLight.VSMParams3.z), nLevels - 1))));
+                // (wider than the pixel's level's 4 x 4: the disc, at most two levels coarser than the pixel's - the resolution stays)
+                const float Ld = max(Lb, Lf - 2.0);
+                if (Lf > Ld + 1e-3) { Lf = Ld; Pen = Penumbra; }
             }
             break;
         }
@@ -285,12 +317,31 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     const float t  = Lf - float(L0);
     for (int Level = L0; Level < nLevels; ++Level)
     {
-        float S = ShadowVSMAt(Level, World, Ng, Slope, SlopeP, Grazing);
+        float S = Pen > 0.0 ? ShadowVSMDisc(Level, World, Ng, Slope, SlopeP, Grazing, Pen) : ShadowVSMAt(Level, World, Ng, Slope, SlopeP, Grazing);
         if (S < 0.0) continue;
         if (t > 0.0 && Level == L0 && Level + 1 < nLevels)
         {
-            const float S1 = ShadowVSMAt(Level + 1, World, Ng, Slope, SlopeP, Grazing);
-            if (S1 >= 0.0) S = mix(S, S1, t);
+            // the blend of two levels filtered alike (Tomas: "the issue is the blending"): each level's 4 x 4 spans its own texels, the
+            // coarse one twice as wide - mixing a sharp and a soft image showed. Across the band the fine level's filter widens with the
+            // blend (4 of its filters spread over up to half a coarse texel along the light's plane): at the band's end it is as wide as
+            // the coarse one's, and the mix between them is between two equally soft images
+            const float S1 = Pen > 0.0 ? ShadowVSMDisc(Level + 1, World, Ng, Slope, SlopeP, Grazing, Pen) : ShadowVSMAt(Level + 1, World, Ng, Slope, SlopeP, Grazing);
+            if (S1 >= 0.0 && Pen > 0.0) S = mix(S, S1, t);
+            else if (S1 >= 0.0)
+            {
+                const vec3  Ax = vec3(UBOLight.W2Light[0][0], UBOLight.W2Light[1][0], UBOLight.W2Light[2][0]);
+                const vec3  Ay = vec3(UBOLight.W2Light[0][1], UBOLight.W2Light[1][1], UBOLight.W2Light[2][1]);
+                const float d  = t * 0.5 * UBOLight.VSMParams.y * float(2 << Level);       // (half the coarse level's texel, times the blend)
+                float Sw = 0.0, nw = 0.0;
+                for (int k = 0; k < 4; ++k)
+                {
+                    const vec2  o  = vec2((k & 1) != 0 ? 1.0 : -1.0, (k & 2) != 0 ? 1.0 : -1.0) * (0.5 * d);
+                    const float Sk = ShadowVSMAt(Level, World + Ax * o.x + Ay * o.y, Ng, Slope, SlopeP, Grazing);
+                    if (Sk >= 0.0) { Sw += Sk; nw += 1.0; }
+                }
+                if (nw > 0.0) S = mix(S, Sw / nw, t);
+                S = mix(S, S1, t);
+            }
         }
         if (Mode >= 2)
         {

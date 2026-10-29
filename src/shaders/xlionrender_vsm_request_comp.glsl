@@ -134,7 +134,10 @@ void main()
             for (int y = RLo.y; y <= RHi.y; ++y) for (int x = RLo.x; x <= RHi.x; ++x) Request(l, ivec2(x, y), Z, InvZ);
             // The level band (xlionrender_shadow_vsm.glsl kVSMLevelBand): the last share of a level cross-fades into the next - its taps too
             const float Lx = log2(Foot / t0) + F[Push.m_Frame].P0.w;
-            if (l == int(floor(Lx)) && l + 1 < nLevels && fract(Lx) > 1.0 - kLevelBand)
+            // (the request's footprint is the depth tiles', the shading's its own derivatives': near a level's ends they differ - the shading
+            // wanting a level whose pages nobody asked for fell back to a coarser one, a hard seam along the pages' edges while moving, Tomas.
+            // A margin each way: the next level from 0.3 below its start, the finer one up to 0.3 above it - below)
+            if (l == int(floor(Lx)) && l + 1 < nLevels && fract(Lx) > 1.0 - max(kLevelBand, 0.3))
             {
                 const float T1  = t0 * float(2 << l);
                 const ivec2 L1  = ivec2(floor(L.xy / T1 - 0.5)) - 3;
@@ -144,6 +147,18 @@ void main()
                 const float z1  = clamp((L.z - (Lv1.w - H1)) / (2.0 * H1), 0.0, 1.0);
                 const uint  Z1 = floatBitsToUint(max(ceil(z1 * 256.0) / 256.0, 1e-7)), InvZ1 = floatBitsToUint(max(ceil((1.0 - z1) * 256.0) / 256.0, 1e-7));
                 for (int y = BLo.y; y <= BHi.y; ++y) for (int x = BLo.x; x <= BHi.x; ++x) Request(l + 1, ivec2(x, y), Z1, InvZ1);
+            }
+            if (l == int(floor(Lx)) && l > 0 && fract(Lx) < 0.3)
+            {
+                const float T0  = t0 * float(1 << (l - 1));
+                const ivec2 L0  = ivec2(floor(L.xy / T0 - 0.5)) - 3;
+                const ivec2 FLo = ivec2(floor(vec2(L0) / float(kPageTexels))), FHi = ivec2(floor(vec2(L0 + 7) / float(kPageTexels)));
+                const vec4  Lv0 = F[Push.m_Frame].Levels[l - 1];
+                const float H0  = Lv0.z * F[Push.m_Frame].P0.z * kDepthRange;
+                const float z0  = clamp((L.z - (Lv0.w - H0)) / (2.0 * H0), 0.0, 1.0);
+                const uint  Z0 = floatBitsToUint(max(ceil(z0 * 256.0) / 256.0, 1e-7)), InvZ0 = floatBitsToUint(max(ceil((1.0 - z0) * 256.0) / 256.0, 1e-7));
+                if (InWindow(l - 1, FLo) && InWindow(l - 1, FHi))
+                    for (int y = FLo.y; y <= FHi.y; ++y) for (int x = FLo.x; x <= FHi.x; ++x) Request(l - 1, ivec2(x, y), Z0, InvZ0);
             }
             // Contact-hardening (a sun with a disc, xlionrender_shadow_vsm.glsl): the blocker search and the wide penumbrae read the coarser
             // levels' taps too (the quad's lanes share them)
