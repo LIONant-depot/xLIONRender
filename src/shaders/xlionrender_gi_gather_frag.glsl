@@ -1,5 +1,5 @@
 #version 450
-// The GI gather (gi_gbuffer_gather_plan.md, stage 2): xlionrender_gi_screen_frag.glsl's read without its geometry - a full-screen pass a
+// The GI gather (gi_gbuffer_gather_plan.md, stage 2): the half-resolution GI read without geometry - a full-screen pass a
 // GI buffer, at half size, on the pixels the classification gave it (xlionrender_gi_gather_vert.glsl: tested EQUAL). The surface from
 // the G-buffer prepass (xlionrender_gi_gather_common.glsl): its position from the depth, into mesh space through its instance's
 // transform; its normal; its GI reference from the table. The read is mb_standard_pbr.frag GIPixelGI's per-pixel one (the surfels, then
@@ -50,7 +50,7 @@ void main()
     const uvec2 Oq = uvec2(clamp(o * 0.5 + 0.5, 0.0, 1.0) * 63.0 + 0.5);
     const uint  Guide = (Oq.x << 16) | (Oq.y << 22);
 
-    // Kind: 0 fresh by the pattern, 1 reprojected, 2 rejected (fresh), 3 too old (fresh) - as xlionrender_gi_screen_frag.glsl
+    // Kind: 0 fresh by the pattern, 1 reprojected, 2 rejected (fresh), 3 too old (fresh)
     uint  Kind = 0u;
     uvec4 Out  = uvec4(0u);
     const uint Rate = 1u << ((Hd.w >> 1) & 3u);

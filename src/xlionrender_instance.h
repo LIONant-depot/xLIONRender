@@ -520,10 +520,6 @@ namespace xlionrender
         // The GI gather from it (xlionrender_gi_gather_common.glsl; its instances are the views': render_view::m_GIClassifyInstance ...):
         // the classification (each half-size pixel's GI buffer as its depth), the passes (one a GI buffer, tested EQUAL)
         xgpu::pipeline              m_GIClassifyPipeline, m_GIGatherPipeline;
-        // The GI read at half resolution (render_view::m_GIScreenPass): the same vertex shader and layout + the buffer it writes (binding 11),
-        // the material's GI read in the fragment (xlionrender_gi_screen_frag.glsl), at the depth the prepass wrote, no color
-        xgpu::pipeline              m_GIScreenPipeline;
-        xgpu::pipeline_instance     m_GIScreenInstance;
         // Both phases of that pass draw in indirect runs: their vertex shader reads each draw's push constants from the view's record
         // buffer (xlionrender_static_geom_gi_records_vert.glsl, binding 12); the depth phase's pipeline is m_DepthPrepassPipeline's with it
         xgpu::pipeline              m_GIScreenDepthPipeline;
@@ -651,14 +647,9 @@ namespace xlionrender
         std::vector<xmath::fbbox>   m_DrawWorld;            // per scene draw: its world bounds this frame (computed with the shadow casters)
         struct visible_draw { const mesh_slot* m_pMesh; std::uint32_t m_Material; std::uint32_t m_iDraw; };
         std::vector<visible_draw>   m_Visible;              // this view's visible draws, sorted by state
-        // The half-resolution GI pass's draws (renderScenePass): a record and a command a cluster, the runs that share a bind state
-        static constexpr int        screen_header_v         = 8;        // the half-resolution GI buffers' header entries (xlionrender_gi_screen_frag.glsl)
-        static constexpr int        screen_draws_v          = 1 << 16;  // ponytail: a frame's cap (both phases); past it the rest of the pass is not drawn
-        struct screen_run { int m_Phase; const cluster_geom* m_pGeom; const xgpu::buffer* m_pGI; int m_First, m_Count; };
-        std::vector<details::push_static_geom>      m_ScreenRecords;
-        std::vector<details::draw_indexed_indirect> m_ScreenCommands;
-        std::vector<screen_run>                     m_ScreenRuns;
-        // The GI gather's (renderScenePass, bGather): this frame's table (xlionrender_gi_gather_common.glsl), its region's first uint in the
+        // The half-resolution GI read's header (renderScenePass)
+        static constexpr int        screen_header_v         = 8;        // the half-resolution GI buffers' header entries (xlionrender_gi_gather_frag.glsl)
+        // The GI gather's (renderScenePass): this frame's table (xlionrender_gi_gather_common.glsl), its region's first uint in the
         // view's ring, the GI buffers its passes read (a pass each, by index)
         std::vector<std::uint32_t>                  m_GatherTable;
         std::uint32_t                               m_GatherTableBase = 0;

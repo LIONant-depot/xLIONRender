@@ -2660,23 +2660,17 @@ namespace xlionrender
                 const auto& St = pMat->m_State;
                 return s_bScreenMasked && St.m_Blend == material_state::blend::MASKED && !St.m_bDoubleSided && St.m_bDepthWrite && St.m_bDepthTest && !St.m_bWireframe;
             };
-            // The GI read at half resolution (scene::gi_settings::m_bHalfRes; XLION_GI_HALFRES=0/1 overrides): the main view, no GI debug view. The rigid
-            // opaque clusters' depth into the view's half-size target, then the GI draws' own read at it (the material's: GIPixelGI, with
-            // the surface's normal) into the view's buffer; the scene pass's GI draws below upsample it (SurfelGIScreen) instead of reading
-            // the surfels each pixel - a quarter of the reads
-            static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
             static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
-            // The G-buffer prepass (gi_gbuffer_gather_plan.md): the prepass in a pass of its own writing each pixel's normal and submesh instance
-            // too (a masked one's through its cutout); the scene pass loads its depth. With the half-resolution read on, the GI gathers from it
-            // (bGather): no geometry drawn for the GI - the geometry read drew the masked as solid quads, their GI over what is behind (Tomas's
-            // hedge). XLION_GPREPASS=0: the geometry read (measurement, to be removed); 2: a test - the scene pass cleared and its own prepass
-            static const int s_GPre = [] { const char* p = std::getenv("XLION_GPREPASS"); return p ? std::atoi(p) : 1; }();
-            static const bool s_bGPre = s_GPre > 0;
-            const bool bGPre   = s_bGPre && bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
-            // (gathered, the read is the pixels' only: with it off - the vertex read alone - no half-resolution read, the scene pass's own vertex read)
-            const bool bScreen = bMain && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
-                              && !(bPlan && m_bBoxesOnly) && !(bGPre && s_GPre == 1 && !Scene.m_GI.m_bPerPixel) && createGIScreenTargets(View) == nullptr;
-            const bool bGather = bGPre && bScreen && s_GPre == 1;
+            // The G-buffer prepass (gi_gbuffer_gather_plan.md): the main view's prepass in a pass of its own writing each pixel's normal and
+            // submesh instance too (a masked one's through its cutout); the scene pass loads its depth
+            const bool bGPre = bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
+            // The GI read at half resolution (scene::gi_settings::m_bHalfRes; XLION_GI_HALFRES=0/1 overrides): the main view, no GI debug view,
+            // gathered from the G-buffer prepass (GatherGI, below: no geometry drawn for it) into the view's buffer; the scene pass's GI draws
+            // upsample it (SurfelGIScreen) instead of reading the surfels each pixel. With the per-pixel read off (the vertex read alone) none:
+            // the gather has no vertices - the scene pass's own vertex read
+            static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
+            const bool bScreen = bGPre && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
+                              && Scene.m_GI.m_bPerPixel && createGIScreenTargets(View) == nullptr;
             if( pPre ) Window.WriteTimestamp(*pPre, 1);
             const auto PreCpu0 = std::chrono::steady_clock::now();     // (measurement: the half-res block's CPU, PRESCENE)
             if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
@@ -2685,7 +2679,7 @@ namespace xlionrender
             {
                 // Temporal (XLION_GI_TEMPORAL=0: off): last frame's buffer becomes the one reprojected from; this frame's is cleared (a pixel no
                 // GI surface covers keeps nothing of an older frame) and gets the header: the size, the frame's 2x2 pattern, whether last
-                // frame's is there, its world to clip and the eye's move (xlionrender_gi_screen_frag.glsl)
+                // frame's is there, its world to clip and the eye's move (xlionrender_gi_gather_frag.glsl)
                 static const int s_TemporalEnv = [] { const char* p = std::getenv("XLION_GI_TEMPORAL"); return p ? std::atoi(p) : -1; }();     // (0 off, 1/2/4 the rate)
                 const bool bTemporal = s_TemporalEnv >= 0 ? s_TemporalEnv != 0 : Scene.m_GI.m_bTemporal;
                 const int  Rate      = s_TemporalEnv > 0 ? s_TemporalEnv : Scene.m_GI.m_TemporalRate;
@@ -2727,7 +2721,6 @@ namespace xlionrender
                     Window.CopyBuffer(View.m_GIScreenHeader, View.m_GIScreenBuffer, std::span{ &C, 1 });
                 }
                 View.m_GIScreenPrevW2C = W2C; View.m_GIScreenPrevEye = Eye; View.m_bGIScreenPrev = true; ++View.m_GIScreenFrame;
-                if( bGather )
                 {
                     // The gather's table (xlionrender_gi_gather_common.glsl): every visible rigid GI instance's clusters - their GI reference
                     // and GI buffer, the passes' list of buffers (GatherBuffers); the passes run after the G-buffer prepass, below
@@ -2781,117 +2774,6 @@ namespace xlionrender
                     (void)View.m_GIGatherTable.MemoryMapFrameRegion(int(m_GatherTableBase), int(m_GatherTable.size()), [&](void* p) { std::memcpy(p, m_GatherTable.data(), m_GatherTable.size() * sizeof(std::uint32_t)); });
                     m_GIStats.m_nScreenDraws = int(m_GatherBuffers.size());          // (its passes: a full-screen draw a GI buffer)
                     m_GIStats.m_nScreenCalls = int(m_GatherBuffers.size()) + 1;      // (+ the classification)
-                }
-                else
-                {       // (the geometry passes: until the gather replaces them for good)
-                // Its draws: a record (the cluster's push constants) and a command a cluster, in runs of one bind state - phase 0 a run a
-                // geometry, phase 1 a run a geometry and GI buffer - each run one indirect draw (this frame's region of the view's buffers)
-                m_ScreenRecords.clear(); m_ScreenCommands.clear(); m_ScreenRuns.clear();
-                const int Base = int(m_Device.getFrameIndex() % ring_frames_v) * screen_draws_v;
-                for( int Phase = 0; Phase < 2; ++Phase )        // 0: the depth, 1: the GI read at it
-                {
-                    for( const auto& Vis : m_Visible )
-                    {
-                        const std::size_t iDraw = Vis.m_iDraw;
-                        const auto&       D     = Scene.m_Draws[iDraw];
-                        const auto*       pMesh = Vis.m_pMesh;
-                        const std::uint32_t Slot = m_DrawSlot[iDraw];
-                        if( !pMesh->m_bCluster || Slot == instance_slots::none_v ) continue;
-                        const auto& G = pMesh->m_Geom;
-                        if( G.m_Kind == geom_kind::SKIN ) continue;
-                        const bool bSections = !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
-                        const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
-                        if( Phase == 1 && !(bSections ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu) ) continue;
-                        const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
-                        for( const auto& Sub : G.m_Submeshes )
-                        {
-                            if( !ScreenOk(Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr) ) continue;
-                            for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
-                            {
-                                if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
-                                if( m_ScreenRecords.size() == std::size_t(screen_draws_v) ) break;
-                                const xgpu::buffer*        pBuf = nullptr;
-                                details::push_static_geom  Rec{ c, Slot, 0u, 0xFFFFFFFFu, 0u };
-                                if( Phase == 1 )
-                                {
-                                    const std::uint16_t k = bSections ? pMesh->m_GIClusterSection[c] : 0;
-                                    pBuf = bSections ? &pMesh->m_GISections[k].m_Buffer : &pMesh->m_GIBuffer;
-                                    if( bSections )
-                                    {
-                                        const auto SGI = k < m_DrawGISec[iDraw].size() ? m_DrawGISec[iDraw][k] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
-                                        if( SGI.second == 0xFFFFFFFFu ) continue;
-                                        Rec = { c, Slot, SGI.first, SGI.second, 0u, pMesh->m_GIClusterVertexDelta[c] };
-                                    }
-                                    else Rec = { c, Slot, GI.first, GI.second, 0u };
-                                }
-                                const auto& C = G.m_Clusters[c];
-                                if( m_ScreenRuns.empty() || m_ScreenRuns.back().m_Phase != Phase || m_ScreenRuns.back().m_pGeom != &G || m_ScreenRuns.back().m_pGI != pBuf )
-                                    m_ScreenRuns.push_back({ Phase, &G, pBuf, int(m_ScreenRecords.size()), 0 });
-                                ++m_ScreenRuns.back().m_Count;
-                                m_ScreenCommands.push_back({ C.m_nIndices, 1u, C.m_iIndex, std::int32_t(C.m_iVertex), std::uint32_t(Base + int(m_ScreenRecords.size())) });
-                                m_ScreenRecords.push_back(Rec);
-                                m_GIStats.m_nScreenDraws += Phase;
-                            }
-                        }
-                    }
-                }
-                const int nScreen = int(m_ScreenRecords.size());
-                if( nScreen )
-                {
-                    (void)View.m_GIScreenRecords.MemoryMapFrameRegion(Base, nScreen, [&](void* p) { std::memcpy(p, m_ScreenRecords.data(), m_ScreenRecords.size() * sizeof(m_ScreenRecords[0])); });
-                    (void)View.m_GIScreenCommands.MemoryMapFrameRegion(Base, nScreen, [&](void* p) { std::memcpy(p, m_ScreenCommands.data(), m_ScreenCommands.size() * sizeof(m_ScreenCommands[0])); });
-                }
-                m_GIStats.m_nScreenCalls = int(m_ScreenRuns.size());
-
-                auto SCmd = Window.StartRenderPass(View.m_GIScreenPass);
-                // Measurement only (XLION_GPU_TIMES): the pass split - its start, its first GI-read run (phase 0, the half-size depth, before), its
-                // end (SCREENSPLIT)
-                static const bool s_bScreenSplit = std::getenv("XLION_GPU_TIMES") != nullptr;
-                static std::unordered_map<const void*, xgpu::timestamps> s_ScreenSplit;      // ponytail: per renderer, never erased (a measurement hook)
-                xgpu::timestamps* pScreenSplit = nullptr;
-                if( s_bScreenSplit )
-                {
-                    auto [It, bNew] = s_ScreenSplit.try_emplace(this);
-                    if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_ScreenSplit.erase(It);
-                    else pScreenSplit = &It->second;
-                }
-                if( pScreenSplit )
-                {
-                    static std::vector<std::uint64_t> s_Ns;
-                    static double s_Depth = 0, s_Read = 0; static int s_n = 0;
-                    if( pScreenSplit->getResults(s_Ns) && s_Ns.size() >= 3 && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
-                    {
-                        s_Depth += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Read += double(s_Ns[2] - s_Ns[1]) * 1e-6;
-                        if( ++s_n == 120 ) { std::printf("SCREENSPLIT half-size depth %.3f, GI read %.3f ms\n", s_Depth / s_n, s_Read / s_n); std::fflush(stdout); s_n = 0; s_Depth = s_Read = 0; }
-                    }
-                    SCmd.WriteTimestamp(*pScreenSplit, 0);
-                }
-                bool bReadStamped = false;
-                for( const auto& Run : m_ScreenRuns )
-                {
-                    const auto& G = *Run.m_pGeom;
-                    if( pScreenSplit && Run.m_Phase == 1 && !bReadStamped ) { SCmd.WriteTimestamp(*pScreenSplit, 1); bReadStamped = true; }
-                    if( Run.m_Phase == 0 )
-                    {
-                        std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenRecords };
-                        SCmd.setPipelineInstance(m_GIScreenDepthInstance, std::span{ Buffers });
-                    }
-                    else
-                    {
-                        std::array<xgpu::buffer*, 12> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, const_cast<xgpu::buffer*>(Run.m_pGI), &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &View.m_GIScreenBuffer, &View.m_GIScreenRecords, &View.m_GIScreenPrev };
-                        SCmd.setPipelineInstance(m_GIScreenInstance, std::span{ Buffers });
-                    }
-                    SCmd.setDynamicUBO(m_LightUBO, 1);
-                    SCmd.setDynamicUBO(m_StaticGeomUBO, 0);
-                    BindClusterStreams(SCmd, G);
-                    SCmd.DrawIndexedIndirect(View.m_GIScreenCommands, Base + Run.m_First, Run.m_Count);
-                }
-                if( pScreenSplit ) { if( !bReadStamped ) SCmd.WriteTimestamp(*pScreenSplit, 1); SCmd.WriteTimestamp(*pScreenSplit, 2); }
-                SCmd.Release();         // (the pass ends: a copy goes outside it)
-                {   // (its counters into this frame's slot: read a ring later, above)
-                    const xgpu::buffer::copy C{ 6, CSlot, 1 };
-                    Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });
-                }
                 }
             }
 
@@ -3057,7 +2939,7 @@ namespace xlionrender
             else if( bMain ) m_TailReport.m_bOn = false;
             if( pPre ) Window.WriteTimestamp(*pPre, 4);
 
-            // The GI gather (bGather), between the G-buffer prepass and the scene pass: at half size, the classification (each pixel's GI
+            // The GI gather (bScreen), between the G-buffer prepass and the scene pass: at half size, the classification (each pixel's GI
             // buffer as its depth), then a full-screen pass a GI buffer tested EQUAL - into the buffer the scene pass upsamples
             const auto GatherGI = [&]
             {
@@ -3135,7 +3017,6 @@ namespace xlionrender
             }
 
             // A GPU culled run's draws in a pass (0: pass 1, 1: pass 2)
-            bool bGPrePass = bGPre;        // (the culled prepass runs into the G-buffer pass)
             const auto DrawCulled = [&]( std::size_t r, int Pass )
             {
                 const auto& R = m_CullRuns[r];
@@ -3149,7 +3030,7 @@ namespace xlionrender
                     const auto& R = m_CullRuns[r];
                     if( R.m_pInstance ) continue;
                     std::array<xgpu::buffer*, 10> Buffers{ R.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, &m_pCull->m_Records };
-                    Cmd.setPipelineInstance(bGPrePass ? m_GPreRecordsInstance : m_GIScreenDepthInstance, std::span{ Buffers });     // (the depth prepass's pipeline reading the records)
+                    Cmd.setPipelineInstance(bGPre ? m_GPreRecordsInstance : m_GIScreenDepthInstance, std::span{ Buffers });     // (the depth prepass's pipeline reading the records: the G-buffer's, or depth only)
                     Cmd.setDynamicUBO(m_LightUBO, 1);
                     Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                     BindClusterStreams(Cmd, *R.m_pGeom);
@@ -3240,7 +3121,7 @@ namespace xlionrender
                 bool bCutLight = false;
                 const void* pPrepassBound = nullptr;
                 // (Mode 0: all of it; with the G-buffer prepass 1: all of it into the G-buffer - a masked one's cutout writes its normal and
-                // instance (the material compiler's XLION_GPRE_OUT) -, then 2: the scene pass starts (XLION_GPREPASS=2: all of it again there))
+                // instance (the material compiler's XLION_GPRE_OUT) -, then 2: the scene pass starts)
                 for( int Mode = bGPre ? 1 : 0; Mode <= (bGPre ? 2 : 0); ++Mode )
                 {
                 if( Mode == 2 && bOcclude )        // (GPU occlusion with the G-buffer: its Hi-Z from the G-buffer's depth, pass 2's prepass into it too)
@@ -3250,7 +3131,7 @@ namespace xlionrender
                     CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
                     PrepassCulled(1);
                 }
-                if( Mode == 2 ) { CmdPass.reset(); if( bGather ) GatherGI(); CmdPass.emplace(Window.StartRenderPass(s_GPre == 2 ? View.m_ScenePass : View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; if( s_GPre == 2 ) { bGPrePass = false; PrepassCulled(0); } }
+                if( Mode == 2 ) { CmdPass.reset(); if( bScreen ) GatherGI(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
@@ -3276,7 +3157,7 @@ namespace xlionrender
                             }
                             else if( St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided ) continue;
                         }
-                        if( Mode == 2 && s_GPre != 2 ) continue;        // (everything in the G-buffer: the masked ones' cutout writes its normal and instance too, mb_standard_pbr.frag XLION_GPRE_OUT)
+                        if( Mode == 2 ) continue;        // (everything in the G-buffer: the masked ones' cutout writes its normal and instance too, mb_standard_pbr.frag XLION_GPRE_OUT)
                         if( pCut )
                         {
                             if( !bCutLight )            // (this render's lighting block, its cutout flag set: renderTail wrote its part already)

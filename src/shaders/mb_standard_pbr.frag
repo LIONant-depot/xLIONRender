@@ -271,7 +271,7 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 #ifndef XLION_TAIL_SCREEN                // (the tail pass, xlionrender_tail_screen_frag.glsl: the lights and their shadows only, from here no material)
 #ifndef XLION_LDR_OUTPUT
 #ifndef XLION_NO_GI_PIXEL
-// The GI read at half resolution (xlionrender_gi_screen_frag.glsl's buffer, bound as GIMesh), upsampled to this pixel: its 4 half
+// The GI read at half resolution (xlionrender_gi_gather_frag.glsl's buffer, bound as GIMesh), upsampled to this pixel: its 4 half
 // resolution neighbors, bilinear, each weighed by how close its distance to the eye is to this pixel's and how much its normal agrees
 // (an edge keeps its side's light). g_GI and g_GIRefl, as the full read gives them; none of the 4 alike: the most alike
 void SurfelGIScreen(in const vec3 Ng, in const float Dist)
@@ -285,11 +285,11 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
     for (int k = 0; k < 4; ++k)
     {
         const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1u, H - 1u));
-        const uint  a = 4u * (8u + uint(P.y) * W + uint(P.x));     // (after the header: xlionrender_gi_screen_frag.glsl)
+        const uint  a = 4u * (8u + uint(P.y) * W + uint(P.x));     // (after the header: xlionrender_gi_gather_frag.glsl)
         const uvec4 Q = uvec4(GIMesh[a], GIMesh[a + 1u], GIMesh[a + 2u], GIMesh[a + 3u]);
         if ((Q.w & (1u << 30)) == 0u) continue;
         const float d = unpackHalf2x16(Q.y).y;
-        const vec2  o = vec2(float((Q.w >> 16) & 63u), float((Q.w >> 22) & 63u)) / 63.0 * 2.0 - 1.0;     // (6 + 6 bits: xlionrender_gi_screen_frag.glsl)
+        const vec2  o = vec2(float((Q.w >> 16) & 63u), float((Q.w >> 22) & 63u)) / 63.0 * 2.0 - 1.0;     // (6 + 6 bits: xlionrender_gi_gather_frag.glsl)
         vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y));
         if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
         n = normalize(n);
@@ -310,9 +310,9 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
 
 //-------------------------------------------------------------------------------------------
 // The GI at this pixel (g_GI, g_GIRefl, g_GIDebug, g_GISource): the vertex read, the probe grid, the pixel read of the surfels, the
-// local mean. Its own function: the half-resolution GI pass (xlionrender_gi_screen_frag.glsl) runs the same read
+// local mean. Its own function: the half-resolution GI gather (xlionrender_gi_gather_frag.glsl) copies its per-pixel read
 //-------------------------------------------------------------------------------------------
-// The face normal's derivative product, taken by a caller where its whole quad still runs (xlionrender_gi_screen_frag.glsl: most of its
+// The face normal's derivative product, taken by a caller where its whole quad still runs (a full-screen caller: most of its
 // lanes return before the read; a derivative after that is undefined)
 bool g_bGIFaceD = false;
 vec3 g_GIFaceD  = vec3(0.0);

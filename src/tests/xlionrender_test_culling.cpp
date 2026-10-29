@@ -116,7 +116,7 @@ int main()
         }
         CHECK(nCovered > size_v * size_v / 10 && nDiff == 0, "GPU culled: %d of %d covered texels differ from the CPU path", nDiff, nCovered);
         // The view made again (an editor's resize): the passes made on first use (the G-buffer prepass's, the loaded scene pass) follow its
-        // new targets - a destroyed handle kept its reference and the prepass drew into the old ones (XLION_GPREPASS=1: a grey view)
+        // new targets - a destroyed handle kept its reference and the prepass drew into the old ones (the G-buffer prepass: a grey view)
         CHECK(!Renderer.CreateView(View, { .m_Width = size_v, .m_Height = size_v }), "CreateView again");
         CHECK(App.RenderFrame(Scene, View, Camera) && App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, GPU), "Render GPU culled, the view made again");
         nDiff = 0;

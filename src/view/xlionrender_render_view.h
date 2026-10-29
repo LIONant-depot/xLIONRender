@@ -40,15 +40,15 @@ namespace xlionrender
         xgpu::renderpass        m_OutlinePass;          // m_Output, loaded
         xgpu::pipeline_instance m_MaskInstance[3];      // per geometry path: CreateMesh meshes, rigid, skin
         xgpu::pipeline_instance m_OutlineInstance;
-        // The GI read at half resolution (instance::renderScenePass, scene::gi_settings::m_bHalfRes): its depth and a color of the scene's
-        // format (the pass's layout is the scene pass's: the same pipelines), the pass, the buffer the read writes (entry 0: its size, then
-        // a uvec4 a pixel: xlionrender_gi_screen_frag.glsl) and zeros to clear it with
+        // The GI read at half resolution (instance::renderScenePass, scene::gi_settings::m_bHalfRes; the gather from the G-buffer): its
+        // depth (each pixel's GI buffer: the gather's classification) and a color (not written), the pass, the buffer the read writes (entry
+        // 0: its size, then a uvec4 a pixel: xlionrender_gi_gather_frag.glsl) and zeros to clear it with
         xgpu::texture           m_GIScreenColor;        // R16G16B16A16_SFLOAT, half size (not written)
         xgpu::texture           m_GIScreenDepth;        // DEPTH_F32, half size
         xgpu::renderpass        m_GIScreenPass;
         xgpu::buffer            m_GIScreenBuffer, m_GIScreenZeros;
         // Temporal: last frame's buffer (swapped with m_GIScreenBuffer each frame: this frame's pixels off the pattern reproject from it),
-        // the header's ring (host visible, instance::screen_header_v entries a frame: xlionrender_gi_screen_frag.glsl), last frame's
+        // the header's ring (host visible, instance::screen_header_v entries a frame: xlionrender_gi_gather_frag.glsl), last frame's
         // camera-centered world to clip and eye, and whether the last buffer holds a frame of this size
         xgpu::buffer            m_GIScreenPrev, m_GIScreenHeader, m_GIScreenCounters;     // (the counters: host visible, an entry a ring frame)
         xmath::fmat4            m_GIScreenPrevW2C;
@@ -56,9 +56,6 @@ namespace xlionrender
         std::uint32_t           m_GIScreenFrame     = 0;
         bool                    m_bGIScreenPrev     = false;
         bool                    m_bGIScreenPerPixel = true;     // the read it was (scene::gi_settings::m_bPerPixel): a change drops it
-        // and its draws (instance::renderScenePass): a record a cluster (details::push_static_geom, read by gl_InstanceIndex) and an
-        // indirect command (details::draw_indexed_indirect), host visible, a region per ring frame (instance::screen_draws_v each)
-        xgpu::buffer            m_GIScreenRecords, m_GIScreenCommands;
         // GPU culling's occlusion (instance::createCullTargets, the main view's): the scene pass again, loaded (its second pass draws after
         // the Hi-Z), and the Hi-Z pyramid (gpu_cull::HiZFloats floats)
         xgpu::renderpass        m_ScenePassLoad;
