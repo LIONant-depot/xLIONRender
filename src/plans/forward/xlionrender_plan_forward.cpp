@@ -1790,6 +1790,8 @@ namespace xlionrender
                     const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
                     if( !Vis.m_bCastsShadow ) continue;
                     if( bPairs && Draws[i].m_bGPU && Vis.m_Opacity != material_visibility::opacity::MASKED ) continue;     // (the pairs drew it)
+                    static const bool s_bNoMaskedCasters = std::getenv("XLION_SH_NO_MASKED") != nullptr;     // (measurement: the masked casters' share)
+                    if( s_bNoMaskedCasters && Vis.m_Opacity == material_visibility::opacity::MASKED && !bOpaqueCut ) continue;
                     auto* pCut = Vis.m_Opacity == material_visibility::opacity::MASKED && !bOpaqueCut ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
                     auto* pInstance = pCut ? pCut : &m_ShadowInstance[bSkin ? 2 : 1];
                     if( pInstance->m_Private.get() != pBound || &G != pBoundGeom )
