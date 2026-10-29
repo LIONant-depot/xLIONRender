@@ -160,10 +160,10 @@ float ShadowVSMAt(in const int Level, in const vec3 World, in const vec3 Ng, in 
 
 // Contact-hardening's blocker search (the current epoch): the 4 x 4 texels of a level around the point, the light-space distance from the
 // receiver to the mean of those nearer the light than it. -2: the level's pages are not there; -1: no blocker
-float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint MoverBase)
+float VSMBlockerDistanceEp(in const int Level, in const vec3 L, in const uint MoverBase, in const vec4 LvIn, in const float Texel0, in const uint TableBase)
 {
-    const vec4  Lv    = UBOLight.VSMLevels[Level];
-    const float Texel = UBOLight.VSMParams.y * float(1 << Level);
+    const vec4  Lv    = LvIn;
+    const float Texel = Texel0 * float(1 << Level);
     const float Half  = Lv.z * UBOLight.VSMParams2.x * kVSMDepthRange;
     const float Depth = clamp((L.z - (Lv.w - Half)) / (2.0 * Half), 0.0, 1.0);
     const float Bias  = 2.0 * kVSMDepthBias * Texel / (2.0 * Half);
@@ -174,7 +174,7 @@ float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint Move
     float Sum = 0.0, n = 0.0;
     if (PLo == PHi)                                                                    // (inside one page: the 16 taps in 4 gathers)
     {
-        const uint E = VSMEntry(Level, PLo, uint(UBOLight.VSMParams.w));
+        const uint E = VSMEntry(Level, PLo, TableBase);
         if (E == 0u) return -2.0;
         const ivec2 Base = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - PLo * kVSMPageTexels;
         ivec2 MBase;
@@ -195,7 +195,7 @@ float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint Move
     {
         const ivec2 P = ivec2((j & 1) != 0 ? PHi.x : PLo.x, (j & 2) != 0 ? PHi.y : PLo.y);
         if (j > 0 && P == PLo) { Base[j] = Base[0]; continue; }
-        const uint  E = VSMEntry(Level, P, uint(UBOLight.VSMParams.w));
+        const uint  E = VSMEntry(Level, P, TableBase);
         if (E == 0u) return -2.0;
         Base[j] = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - P * kVSMPageTexels;
     }
@@ -214,6 +214,11 @@ float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint Move
         if (d < Depth - Bias) { Sum += d; n += 1.0; }
     }
     return n > 0.0 ? (Depth - Sum / n) * 2.0 * Half : -1.0;
+}
+// (this epoch's)
+float VSMBlockerDistance(in const int Level, in const vec3 L, in const uint MoverBase)
+{
+    return VSMBlockerDistanceEp(Level, L, MoverBase, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w));
 }
 
 // The pixel's light-space footprint (the level's choice), from the screen derivatives: set by the material in uniform control flow,
@@ -248,11 +253,25 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     if (UBOLight.VSMParams3.y > 0.0)
     {
         const int Top = min(First + int(UBOLight.VSMParams3.z), nLevels - 1);
-        for (int ls = Top; ls >= First; ls -= 2)                                       // (the coarsest, then two finer: a thin caster lost in a coarse level)
+        bool bNoPage = true;                                                           // (every level of the search without its page yet)
+        for (int ls = Top; ls >= First - 2; ls -= 2)                                   // (the coarsest, then two finer: a thin caster lost in a coarse level)
         {
-            const float Tl = UBOLight.VSMParams.y * float(1 << ls);
-            const vec3  Ls = (UBOLight.W2Light * vec4(World + Ng * (kVSMNormalOffset * Grazing * Tl), 1.0)).xyz;
-            const float D  = UBOLight.VSMParams3.w == 0.0 ? VSMBlockerDistance(ls, Ls, 0u) : VSMBlockerDistance(ls, Ls, uint(UBOLight.VSMParams3.w));
+            float D = -2.0;
+            if (ls >= First)
+            {
+                const float Tl = UBOLight.VSMParams.y * float(1 << ls);
+                const vec3  Ls = (UBOLight.W2Light * vec4(World + Ng * (kVSMNormalOffset * Grazing * Tl), 1.0)).xyz;
+                D = UBOLight.VSMParams3.w == 0.0 ? VSMBlockerDistance(ls, Ls, 0u) : VSMBlockerDistance(ls, Ls, uint(UBOLight.VSMParams3.w));
+                if (D != -2.0) bNoPage = false;
+            }
+            else if (bNoPage && UBOLight.VSMPrevParams.x != 0.0)
+            {
+                // a new epoch (the sun moved) without the search's pages yet: the previous epoch's blockers - without them no blocker was
+                // found, the penumbra 0: each shadow showed sharp, then blurred as the pages came (Tomas)
+                const float Tp = UBOLight.VSMPrevParams.z * float(1 << Top);
+                const vec3  Lp = (UBOLight.VSMPrevW2Light * vec4(World + Ng * (kVSMNormalOffset * Grazing * Tp), 1.0)).xyz;
+                D = VSMBlockerDistanceEp(Top, Lp, 0u, UBOLight.VSMPrevLevels[Top], UBOLight.VSMPrevParams.z, uint(UBOLight.VSMPrevParams.w));
+            }
             if (D < 0.0) continue;                                                     // (no page there, or no blocker: a finer level)
             {
                 const float Penumbra = D * UBOLight.VSMParams3.y;                       // world units, half the width
