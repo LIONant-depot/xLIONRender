@@ -1557,7 +1557,7 @@ namespace xlionrender
 
     xgpu::device::error* instance::createGIScreenTargets( render_view& View ) noexcept
     {
-        const int W = (View.m_Width + 1) / 2, H = (View.m_Height + 1) / 2;
+        const int D = GIScreenDivisor(), W = (View.m_Width + D - 1) / D, H = (View.m_Height + D - 1) / D;
         if( View.m_GIScreenPass.m_Private && View.m_GIScreenWidth == W && View.m_GIScreenHeight == H ) return nullptr;
         destroyGIScreenTargets(View);
         if( auto Err = m_Device.Create(View.m_GIScreenColor, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;

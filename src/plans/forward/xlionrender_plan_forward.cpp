@@ -2707,6 +2707,7 @@ namespace xlionrender
                         std::memset(pH, 0, screen_header_v * 16);
                         pH[0] = std::uint32_t(View.m_GIScreenWidth); pH[1] = std::uint32_t(View.m_GIScreenHeight);
                         pH[2] = View.m_GIScreenFrame; pH[3] = (bTemporal && View.m_bGIScreenPrev ? 1u : 0u) | (RateLog2 << 1);
+                        pH[28] = std::uint32_t(GIScreenDivisor());      // (entry 7.x: the read's resolution divisor - the upsample's, mb_standard_pbr.frag)
                         std::memcpy(pH + 4, &View.m_GIScreenPrevW2C, sizeof(float) * 16);        // (entries 1-4: its columns, as the UBO's mat4)
                         const float M[3] = { Move[0], Move[1], Move[2] };
                         std::memcpy(pH + 20, M, sizeof(M));

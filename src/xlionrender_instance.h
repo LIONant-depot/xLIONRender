@@ -394,6 +394,10 @@ namespace xlionrender
         xgpu::device::error*        createOutlineTargets( render_view& View ) noexcept;
         void                        destroyOutlineTargets( render_view& View ) noexcept;
         xgpu::device::error*        createGIScreenTargets( render_view& View ) noexcept;
+        // The GI screen read's resolution: 1 / this of the view's - a quarter (Bistro moving run, frame p95: half 15.9, quarter 13.7, an
+        // eighth 12.7 ms; the scorecard's GI views alike, 0.08% / 0.23% of pixels over 8 levels; Lumen's screen probes: 1 a 16 x 16).
+        // XLION_GI_SCREEN_DIV overrides (2..16)
+        static int                  GIScreenDivisor( void ) noexcept { static const int s = [] { const char* p = std::getenv("XLION_GI_SCREEN_DIV"); const int d = p ? std::atoi(p) : 4; return d >= 2 && d <= 16 ? d : 4; }(); return s; }
         void                        destroyGIScreenTargets( render_view& View ) noexcept;
         xgpu::device::error*        createCullTargets   ( render_view& View ) noexcept;      // render_view::m_ScenePassLoad, m_HiZ (the first time)
         void                        updateProbes    ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;

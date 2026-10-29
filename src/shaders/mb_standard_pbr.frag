@@ -266,7 +266,7 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
 {
     const uint W = GIMesh[0], H = GIMesh[1];
     if (W == 0u || H == 0u) return;
-    const vec2  hp = gl_FragCoord.xy * 0.5 - 0.5;
+    const vec2  hp = gl_FragCoord.xy / float(max(GIMesh[28], 2u)) - 0.5;          // (header entry 7.x: the divisor, 2 half resolution)
     const vec2  i0 = floor(hp), f = hp - i0;
     vec4 Se = vec4(0.0), Sr = vec4(0.0);
     float Best = -1.0; uvec4 BestQ = uvec4(0u);
