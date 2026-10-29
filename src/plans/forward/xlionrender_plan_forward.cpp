@@ -3035,7 +3035,14 @@ namespace xlionrender
                 PrepassCulled(0);
                 if( bPass2 && !bOcclude ) PrepassCulled(1);     // (frozen: both lists now)
                 pBound = nullptr;
-                const cluster_geom* pPrepassGeom = nullptr;                for( const auto& Vis : m_Visible )
+                const cluster_geom* pPrepassGeom = nullptr;
+                // A masked material (the ivy, the leaves): its own pipeline in its cutout mode (the shadow casters' flag, m_LightParams.w 1: the
+                // fragment stops after the cut) - its depth alpha-tested, as its shading's, so it too shades once a pixel (its per-pixel GI read
+                // ran for every leaf layer: 22 ms of Bistro's 32 ms scene pass). Its color is written over by its shading. XLION_PREPASS_MASKED=0: none
+                static const bool s_bMaskedPrepass = [] { const char* p = std::getenv("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
+                bool bCutLight = false;
+                const void* pPrepassBound = nullptr;
+                for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
                     const auto&       D     = Scene.m_Draws[iDraw];
@@ -3048,31 +3055,57 @@ namespace xlionrender
                     for( const auto& Sub : G.m_Submeshes )
                     {
                         if( CulledOnGPU(iDraw, G, Sub) ) continue;
-                        const auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                        auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                        xgpu::pipeline_instance* pCut = nullptr;
                         if( pMat )
                         {
                             const auto& St = pMat->m_State;
-                            if( St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided || !St.m_bDepthWrite || !St.m_bDepthTest || St.m_bWireframe ) continue;
+                            if( !St.m_bDepthWrite || !St.m_bDepthTest || St.m_bWireframe ) continue;
+                            if( MaterialVisibilityOf(St).m_Opacity == material_visibility::opacity::MASKED )
+                            {
+                                if( !s_bMaskedPrepass || pLight == nullptr || (pCut = getMaterialInstance(*pMat, G.m_Kind)) == nullptr ) continue;
+                            }
+                            else if( St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided ) continue;
                         }
-                        if( &G != pPrepassGeom )
+                        if( pCut )
+                        {
+                            if( !bCutLight )            // (this render's lighting block, its cutout flag set: renderTail wrote its part already)
+                            {
+                                auto& E = m_LightUBO.allocEntry<details::ubo_lighting>();
+                                E = *pLight; E.m_LightParams.m_W = 1.0f;
+                                bCutLight = true;
+                            }
+                            if( pCut->m_Private.get() != pPrepassBound || &G != pPrepassGeom )
+                            {
+                                std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+                                Cmd.setPipelineInstance(*pCut, std::span{ Buffers });
+                                Cmd.setDynamicUBO(m_LightUBO, 1);
+                                Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                                BindClusterStreams(Cmd, G);
+                                pPrepassGeom = &G; pPrepassBound = pCut->m_Private.get();
+                            }
+                            if( pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);
+                        }
+                        else if( &G != pPrepassGeom || pPrepassBound != nullptr )
                         {
                             std::array<xgpu::buffer*, 9> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
                             Cmd.setPipelineInstance(m_DepthPrepassInstance, std::span{ Buffers });
                             Cmd.setDynamicUBO(m_LightUBO, 1);
                             Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                             BindClusterStreams(Cmd, G);
-                            pPrepassGeom = &G;
-                            pBound = nullptr;           // (the shading's binds start again)
+                            pPrepassGeom = &G; pPrepassBound = nullptr;
                         }
+                        pBound = nullptr;           // (the shading's binds start again)
                         for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                         {
                             if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
                             const auto& C = G.m_Clusters[c];
-                            Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, 0u });       // (no GI: the vertex shader's read skipped)
+                            Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, pCut ? pMat->m_ParamBase : 0u });       // (no GI: the vertex shader's read skipped)
                             Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                         }
                     }
                 }
+                if( bCutLight ) m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;      // (the shading's block again: the next binds take the latest entry)
             }
 
             if( pSplit ) Cmd.WriteTimestamp(*pSplit, 1);
