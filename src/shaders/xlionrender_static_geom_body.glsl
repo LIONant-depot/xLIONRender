@@ -129,9 +129,9 @@ void main()
     //
     Out.VertColor = VertData.VertColor;
 
+    OutCluster  = push.clusterIndex;      // (the G-buffer prepass: both of its vertex shaders, the GI one and not)
 #ifdef XLION_GI
     OutGI       = SurfelGI(VertData.LocalPos.xyz, normalize(VertData.Normal.xyz), L2wRows, (scales.x + scales.y + scales.z) / 3.0);
-    OutCluster  = push.clusterIndex;
     OutGIRef    = push.giLevel == gi_probes_v || push.giLevel == gi_screen_v ? uvec2(0u, push.giLevel) : uvec2(GIDebugCode(push.giLevel) == 4u ? push.clusterIndex : push.giOffset, push.giLevel);     // SURFACE_COLOR: the cluster (SurfelGITriangleColor)
 #else
     OutGI       = vec4(0.0);

@@ -115,6 +115,13 @@ int main()
             if (CPU[i] != GPU[i] && nDiff++ < 4) std::printf("texel %d (%d, %d): CPU %f, GPU %f\n", int(i), int(i) % size_v, int(i) / size_v, CPU[i], GPU[i]);
         }
         CHECK(nCovered > size_v * size_v / 10 && nDiff == 0, "GPU culled: %d of %d covered texels differ from the CPU path", nDiff, nCovered);
+        // The view made again (an editor's resize): the passes made on first use (the G-buffer prepass's, the loaded scene pass) follow its
+        // new targets - a destroyed handle kept its reference and the prepass drew into the old ones (XLION_GPREPASS=1: a grey view)
+        CHECK(!Renderer.CreateView(View, { .m_Width = size_v, .m_Height = size_v }), "CreateView again");
+        CHECK(App.RenderFrame(Scene, View, Camera) && App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, GPU), "Render GPU culled, the view made again");
+        nDiff = 0;
+        for (std::size_t i = 0; i < CPU.size(); ++i) nDiff += CPU[i] != GPU[i];
+        CHECK(nDiff == 0, "The view made again: %d texels differ from the CPU path", nDiff);
         // What the GPU kept, read back a few frames later: the spheres in the view (the CPU's draw test keeps a few more: a box against planes)
         for (int k = 0; k < 4; ++k) CHECK(App.RenderFrame(Scene, View, Camera), "Render GPU culled %d", k);
         const auto Kept = Renderer.getCullStats();
