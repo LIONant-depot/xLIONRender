@@ -2666,10 +2666,11 @@ namespace xlionrender
             // the surfels each pixel - a quarter of the reads
             static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
             static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
-            // The G-buffer prepass (gi_gbuffer_gather_plan.md; XLION_GPREPASS=1 while it is not the default): the opaque prepass in a pass of
-            // its own writing each pixel's normal and submesh instance too; the scene pass loads its depth. (No occlusion yet: its second pass
-            // would draw into the scene pass.) With the half-resolution read on, the GI gathers from it (bGather): no geometry drawn for the GI
-            static const int s_GPre = [] { const char* p = std::getenv("XLION_GPREPASS"); return p ? std::atoi(p) : 0; }();     // (2: a test - the G-buffer pass, then the scene pass cleared and its own prepass as before)
+            // The G-buffer prepass (gi_gbuffer_gather_plan.md): the prepass in a pass of its own writing each pixel's normal and submesh instance
+            // too (a masked one's through its cutout); the scene pass loads its depth. With the half-resolution read on, the GI gathers from it
+            // (bGather): no geometry drawn for the GI - the geometry read drew the masked as solid quads, their GI over what is behind (Tomas's
+            // hedge). XLION_GPREPASS=0: the geometry read (measurement, to be removed); 2: a test - the scene pass cleared and its own prepass
+            static const int s_GPre = [] { const char* p = std::getenv("XLION_GPREPASS"); return p ? std::atoi(p) : 1; }();
             static const bool s_bGPre = s_GPre > 0;
             const bool bGPre   = s_bGPre && bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
             // (gathered, the read is the pixels' only: with it off - the vertex read alone - no half-resolution read, the scene pass's own vertex read)
