@@ -1195,13 +1195,19 @@ namespace xlionrender
         return makeInstance(M, k, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, Kind, false, false, true); });
     }
 
+    xgpu::pipeline_instance* instance::getCutoutInstance( material_slot& M ) noexcept
+    {
+        if( M.m_Instance[cutout_path_v].m_Private ) return &M.m_Instance[cutout_path_v];
+        return makeInstance(M, cutout_path_v, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, geom_kind::RIGID, false, false, false, true); });
+    }
+
     xgpu::pipeline_instance* instance::getRecordsInstance( material_slot& M ) noexcept
     {
         if( M.m_Instance[records_path_v].m_Private ) return &M.m_Instance[records_path_v];
         return makeInstance(M, records_path_v, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, geom_kind::RIGID, false, true); });
     }
 
-    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow, bool bRecords, bool bGBuffer ) noexcept
+    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow, bool bRecords, bool bGBuffer, bool bCutout ) noexcept
     {
         const bool bSkin = Kind == geom_kind::SKIN;
 
@@ -1245,6 +1251,11 @@ namespace xlionrender
             Setup.m_DepthStencil.m_bDepthClampEnable        = true;
         }
         else ApplyState(Setup, M.m_State);
+        // a rigid masked one's shading: its depth is the prepass's (plan_forward: its cutout drawn there), so it no longer writes it - a discard
+        // with depth writes kept the depth test late, every hidden leaf ran the whole shader (Bistro: 15 ms). XLION_PREPASS_MASKED=0: as before
+        static const bool s_bMaskedPrepass = [] { const char* p = std::getenv("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
+        if( s_bMaskedPrepass && !bShadow && !bGBuffer && !bCutout && !bSkin && M.m_State.m_Blend == material_state::blend::MASKED && M.m_State.m_bDepthTest && !M.m_State.m_bWireframe )
+            Setup.m_DepthStencil.m_bDepthWriteEnable = false;
         if( bGBuffer )      // the thin G-buffer: opaque, its depth laid and tested (a masked one discards in its own code)
         {
             Setup.m_Blend = xgpu::pipeline::blend{};
@@ -1262,13 +1273,14 @@ namespace xlionrender
     instance::pipeline_key instance::PipelineKey( const material_slot& M, std::size_t k ) noexcept
     {
         std::uint32_t State = 0;
-        if( k < capture_path_v || k == records_path_v )
+        if( k < capture_path_v || k == records_path_v || k == cutout_path_v )
         {
             const auto& S = M.m_State;
             State = (S.isBlended() ? 1u + std::uint32_t(S.m_Blend) : 0u) | (S.m_bDoubleSided ? 1u << 4 : 0u) | (S.m_bWireframe ? 1u << 5 : 0u)
-                  | (S.m_bDepthTest ? 1u << 6 : 0u) | (S.m_bDepthWrite ? 1u << 7 : 0u);
+                  | (S.m_bDepthTest ? 1u << 6 : 0u) | (S.m_bDepthWrite ? 1u << 7 : 0u)
+                  | (S.m_Blend == material_state::blend::MASKED ? 1u << 8 : 0u);      // (a masked one's shading writes no depth: buildMaterialPipeline)
         }
-        if( k >= gbuffer_path_v ) return { M.m_GBufferFragment.m_Private.get(), M.m_State.m_bDoubleSided ? 1u << 4 : 0u, k };
+        if( k >= gbuffer_path_v && k != cutout_path_v ) return { M.m_GBufferFragment.m_Private.get(), M.m_State.m_bDoubleSided ? 1u << 4 : 0u, k };
         return { M.m_Fragment.m_Private.get(), State, k };
     }
 

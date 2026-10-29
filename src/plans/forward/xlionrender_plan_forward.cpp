@@ -3063,7 +3063,7 @@ namespace xlionrender
                             if( !St.m_bDepthWrite || !St.m_bDepthTest || St.m_bWireframe ) continue;
                             if( MaterialVisibilityOf(St).m_Opacity == material_visibility::opacity::MASKED )
                             {
-                                if( !s_bMaskedPrepass || pLight == nullptr || (pCut = getMaterialInstance(*pMat, G.m_Kind)) == nullptr ) continue;
+                                if( !s_bMaskedPrepass || pLight == nullptr || (pCut = getCutoutInstance(*pMat)) == nullptr ) continue;
                             }
                             else if( St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided ) continue;
                         }
