@@ -2772,7 +2772,8 @@ namespace xlionrender
                 // the walk (Bistro: 22 of its 33 ms scene pass). Frostbite's GIBS lights what is outside its deferred path from a probe volume,
                 // Lumen's translucency from a volume too. XLION_GI_BLEND_PIXEL=1: the per-pixel read, as before (measurement)
                 static const bool s_bBlendPixel = std::getenv("XLION_GI_BLEND_PIXEL") != nullptr;
-                const bool  bBlendProbes = !s_bBlendPixel && bRigid && Probes && pMat && pMat->m_State.m_Blend != material_state::blend::OFF;
+                // (BLENDED only: a masked one - the ivy, its alpha test - read the street's probes, flat pale patches on the walls, Tomas)
+                const bool  bBlendProbes = !s_bBlendPixel && bRigid && Probes && pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::BLENDED;
                 const bool  bSections = bSections0 && !bScreenSub && !bBlendProbes;
                 // measurement (XLION_GPU_TIMES): why a main-view GI draw misses the half-resolution read - GIHALFMISS every 240 frames
                 static const bool s_bHalfMiss = std::getenv("XLION_GPU_TIMES") != nullptr;
