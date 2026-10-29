@@ -249,6 +249,15 @@ namespace xlionrender::details
         std::uint32_t   m_Pad = 0;
     };
 
+    // xlionrender_ao_comp.glsl push_t
+    struct push_ao
+    {
+        std::uint32_t   m_W, m_H, m_Div, m_Frame;
+        float           m_Radius, m_Thickness, m_PixelsPerUnit;
+        std::uint32_t   m_TableBase, m_bPrev;
+        float           m_Blend;
+    };
+
     // xlionrender_tonemap_frag.glsl
     struct push_tonemap
     {

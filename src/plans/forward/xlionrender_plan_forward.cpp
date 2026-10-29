@@ -2669,8 +2669,12 @@ namespace xlionrender
             // upsample it (SurfelGIScreen) instead of reading the surfels each pixel. With the per-pixel read off (the vertex read alone) none:
             // the gather has no vertices - the scene pass's own vertex read
             static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
+            // (the GI off: the same pass, no GI in it - the ambient occlusion's way to the materials)
             const bool bScreen = bGPre && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
-                              && Scene.m_GI.m_bPerPixel && createGIScreenTargets(View) == nullptr;
+                              && (Scene.m_GI.m_bPerPixel || !Scene.m_GI.m_bEnable) && createGIScreenTargets(View) == nullptr;
+            // The ambient occlusion (scene::gi_settings::m_bAO; XLION_AO=0/1 overrides): with the half-resolution pass, the GI on or off
+            static const int s_AOEnv = [] { const char* p = std::getenv("XLION_AO"); return p ? std::atoi(p) : -1; }();
+            const bool bAO = bScreen && (s_AOEnv >= 0 ? s_AOEnv != 0 : Scene.m_GI.m_bAO);
             if( pPre ) Window.WriteTimestamp(*pPre, 1);
             const auto PreCpu0 = std::chrono::steady_clock::now();     // (measurement: the half-res block's CPU, PRESCENE)
             if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
@@ -2713,6 +2717,7 @@ namespace xlionrender
                         pH[0] = std::uint32_t(View.m_GIScreenWidth); pH[1] = std::uint32_t(View.m_GIScreenHeight);
                         pH[2] = View.m_GIScreenFrame; pH[3] = (bTemporal && View.m_bGIScreenPrev ? 1u : 0u) | (RateLog2 << 1);
                         pH[28] = std::uint32_t(GIScreenDivisor());      // (entry 7.x: the read's resolution divisor - the upsample's, mb_standard_pbr.frag)
+                        pH[29] = bAO ? 1u : 0u;                         // (7.y: the ambient occlusion follows the pixels)
                         std::memcpy(pH + 4, &View.m_GIScreenPrevW2C, sizeof(float) * 16);        // (entries 1-4: its columns, as the UBO's mat4)
                         const float M[3] = { Move[0], Move[1], Move[2] };
                         std::memcpy(pH + 20, M, sizeof(M));
@@ -2792,7 +2797,7 @@ namespace xlionrender
                 const auto  GI     = iDraw < m_DrawGI.size() && !bNoGI ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                 const bool  bSections0 = !bNoGI && bRigid && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == pMesh->m_Geom.m_Clusters.size();
                 // read at half resolution (the pass above): the buffer as its GI buffer, gi_screen_v as its level - one buffer for every section
-                const bool  bScreenSub = bScreen && bRigid && ScreenOk(pMat) && (bSections0 ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu);
+                const bool  bScreenSub = bScreen && bRigid && ScreenOk(pMat) && (!Scene.m_GI.m_bEnable || (bSections0 ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu));     // (the GI off: every one - the screen buffer brings the ambient occlusion)
                 // a blended draw (glass) reads the probe grid - 8 probes, O(1) - not the surfels a pixel: no prepass under it, each layer paid
                 // the walk (Bistro: 22 of its 33 ms scene pass). Frostbite's GIBS lights what is outside its deferred path from a probe volume,
                 // Lumen's translucency from a volume too. XLION_GI_BLEND_PIXEL=1: the per-pixel read, as before (measurement)
@@ -2964,6 +2969,21 @@ namespace xlionrender
                         if( ++s_n == 120 ) { std::printf("SCREENSPLIT gather: classification %.3f, GI read %.3f ms (%d passes)\n", s_Cls / s_n, s_Read / s_n, int(m_GatherBuffers.size())); std::fflush(stdout); s_n = 0; s_Cls = s_Read = 0; }
                     }
                 }
+                // The ambient occlusion first (xlionrender_ao_comp.glsl): from the G-buffer, on the gather's grid, into the GI screen buffer
+                // after its pixels - the materials' indirect light by it (mb_standard_pbr.frag SurfelGIScreen), the GI on or off. Last
+                // frame's becomes the history
+                if( bAO )
+                {
+                    std::swap(View.m_AO, View.m_AOPrev);
+                    const float* pM = reinterpret_cast<const float*>(&W2C);      // (column major: the clip y row's scale, P11 - the view's rotation keeps it)
+                    const float  P11 = std::sqrt(pM[1] * pM[1] + pM[5] * pM[5] + pM[9] * pM[9]);
+                    const details::push_ao Push{ std::uint32_t(View.m_GIScreenWidth), std::uint32_t(View.m_GIScreenHeight), std::uint32_t(GIScreenDivisor()), View.m_GIScreenFrame
+                                               , Scene.m_GI.m_AORadius, Scene.m_GI.m_AOThickness, 0.5f * float(View.m_GIScreenHeight) * P11, m_GatherTableBase, View.m_bAOPrev ? 1u : 0u, 0.2f };
+                    auto Buffers  = std::array<xgpu::buffer*, 4>{ &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AOPrev, &View.m_AO };
+                    auto Textures = std::array<const xgpu::texture*, 2>{ &View.m_Depth, &View.m_GPreNormal };
+                    Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), (View.m_GIScreenWidth + 7) / 8, (View.m_GIScreenHeight + 7) / 8);
+                }
+                View.m_bAOPrev = bAO;
                 {
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 0);

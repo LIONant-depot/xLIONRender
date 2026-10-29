@@ -424,6 +424,8 @@ namespace xlionrender
         xgpu::pipeline_instance     m_ForwardGBInstance, m_StaticGeomGBInstance;
         xgpu::shader                m_TailDenoiseShader;
         xgpu::compute               m_TailDenoise;
+        xgpu::shader                m_AOShader;                     // the ambient occlusion (renderScenePass, before the GI gather: xlionrender_ao_comp.glsl)
+        xgpu::compute               m_AOCompute;
         xgpu::buffer                m_TailFrames;                   // the denoiser's frame (host visible, a slot a ring frame)
         xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
         xgpu::shader                m_ReflTraceShader;              // the reflection trace's benchmark (m_ReflTraceBench): its pass, counters (4 per ring slot), timestamps

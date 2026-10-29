@@ -270,6 +270,9 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 
 #ifndef XLION_TAIL_SCREEN                // (the tail pass, xlionrender_tail_screen_frag.glsl: the lights and their shadows only, from here no material)
 #ifndef XLION_LDR_OUTPUT
+// The screen's ambient occlusion at this pixel (SurfelGIScreen; xlionrender_ao_comp.glsl): PBRLighting's indirect light (the GI or the
+// flat ambient, the environment) by it - with the GI or without, once
+float g_ScreenAO = 1.0;
 #ifndef XLION_NO_GI_PIXEL
 // The GI read at half resolution (xlionrender_gi_gather_frag.glsl's buffer, bound as GIMesh), upsampled to this pixel: its 4 half
 // resolution neighbors, bilinear, each weighed by how close its distance to the eye is to this pixel's and how much its normal agrees
@@ -282,9 +285,18 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
     const vec2  i0 = floor(hp), f = hp - i0;
     vec4 Se = vec4(0.0), Sr = vec4(0.0);
     float Best = -1.0; uvec4 BestQ = uvec4(0u);
+    const bool bAO = GIMesh[29] != 0u;      // (header entry 7.y: the ambient occlusion is in the buffer, after the pixels: xlionrender_ao_comp.glsl)
+    vec2 Sa = vec2(0.0);
     for (int k = 0; k < 4; ++k)
     {
         const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1u, H - 1u));
+        const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
+        if (bAO)                // (its own guide, the distance: it is there without the GI)
+        {
+            const vec2  A  = unpackHalf2x16(GIMesh[4u * (8u + W * H) + uint(P.y) * W + uint(P.x)]);
+            const float wa = A.y > 0.0 ? max(0.0, 1.0 - abs(A.y - Dist) / max(0.05 * Dist, 1e-3)) : 0.0;
+            Sa += vec2(A.x, 1.0) * wb * wa * wa;
+        }
         const uint  a = 4u * (8u + uint(P.y) * W + uint(P.x));     // (after the header: xlionrender_gi_gather_frag.glsl)
         const uvec4 Q = uvec4(GIMesh[a], GIMesh[a + 1u], GIMesh[a + 2u], GIMesh[a + 3u]);
         if ((Q.w & (1u << 30)) == 0u) continue;
@@ -294,7 +306,6 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
         if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
         n = normalize(n);
         const float wd = max(0.0, 1.0 - abs(d - Dist) / max(0.05 * Dist, 1e-3)), wn = pow(max(dot(n, Ng), 0.0), 8.0);
-        const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
         const float w = wb * wd * wd * wn;
         if (wd * wn > Best) { Best = wd * wn; BestQ = Q; }
         const vec3 E = vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
@@ -304,6 +315,7 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
     if (Se.w > 1e-4) { g_GI = vec4(Se.rgb / Se.w, 1.0); g_GISource = 2u; }
     else if (Best >= 0.0) { g_GI = vec4(unpackHalf2x16(BestQ.x), unpackHalf2x16(BestQ.y).x, 1.0); g_GISource = 2u; }
     if (Sr.w > 1e-4) g_GIRefl = vec4(Sr.rgb / Sr.w, 1.0);
+    if (Sa.y > 1e-4) g_ScreenAO = Sa.x / Sa.y;
 }
 
 #endif
@@ -414,7 +426,8 @@ vec3 PBRLighting
 #ifndef XLION_LDR_OUTPUT
 	g_CapRoughness = inRoughness; g_CapF0 = inF0;
 	GIPixelGI(inNormal, N, V, inAlbedo, inMetalic, inEmissiveColor);
-	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO);   // the sky probe
+	ambient *= g_ScreenAO;
+	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO * g_ScreenAO);   // the sky probe
 #endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).

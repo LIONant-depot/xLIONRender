@@ -107,6 +107,9 @@ namespace xlionrender
         constexpr std::uint32_t s_TailScreenFrag[] = {
             #include "xlionrender_tail_screen_frag.h"
         };
+        constexpr std::uint32_t s_AOComp[] = {
+            #include "xlionrender_ao_comp.h"
+        };
         constexpr std::uint32_t s_TailDenoiseComp[] = {
             #include "xlionrender_tail_denoise_comp.h"
         };
@@ -681,6 +684,10 @@ namespace xlionrender
             // the screen tail's denoiser (shaders/xlionrender_tail_denoise_comp.glsl): its frame a ring slot each (3 mat4 + a vec4)
             if( auto Err = Device.Create(m_TailDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TailDenoiseComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32 }); Err ) return Err;
+            // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;
+            // the G-buffer's depth and normal
+            if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_AOCompute, { .m_pShader = &m_AOShader, .m_nBuffers = 4, .m_nTextures = 2, .m_PushConstantsSize = sizeof(details::push_ao) }); Err ) return Err;
             if( auto Err = Device.Create(m_TailFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * 64 + 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
@@ -1628,7 +1635,7 @@ namespace xlionrender
             auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_GIScreenColor }, xgpu::renderpass::attachment{ View.m_GIScreenDepth } };
             if( auto Err = m_Device.Create(View.m_GIScreenPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
-        std::vector<std::array<std::uint32_t, 4>> Data(screen_header_v + std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
+        std::vector<std::array<std::uint32_t, 4>> Data(screen_header_v + std::size_t(W) * std::size_t(H) + (std::size_t(W) * std::size_t(H) + 3) / 4, std::array<std::uint32_t, 4>{});     // (+ the ambient occlusion: a uint a pixel, xlionrender_ao_comp.glsl)
         if( auto Err = m_Device.Create(View.m_GIScreenZeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
         Data[0] = { std::uint32_t(W), std::uint32_t(H), 0u, 0u };
         if( auto Err = m_Device.Create(View.m_GIScreenBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
@@ -1636,6 +1643,12 @@ namespace xlionrender
         if( auto Err = m_Device.Create(View.m_GIScreenHeader, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * screen_header_v }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenCounters, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
         View.m_bGIScreenPrev = false;
+        {   // the ambient occlusion on that grid (xlionrender_ao_comp.glsl): a vec2 a pixel, zeros (a device-local buffer is made from its first data)
+            const std::vector<float> Zeros(2 * std::size_t(W) * std::size_t(H), 0.0f);
+            for( auto* pB : { &View.m_AO, &View.m_AOPrev } )
+                if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = W * H, .m_pData = const_cast<float*>(Zeros.data()) }); Err ) return Err;
+            View.m_bAOPrev = false;
+        }
         View.m_GIScreenWidth = W; View.m_GIScreenHeight = H;
         return nullptr;
     }
@@ -1651,6 +1664,9 @@ namespace xlionrender
         if( View.m_GIScreenHeader.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenHeader));
         if( View.m_GIScreenCounters.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenCounters));
         View.m_bGIScreenPrev = false;
+        if( View.m_AO.m_Private )     ReleaseBuffer(View.m_AO);
+        if( View.m_AOPrev.m_Private ) ReleaseBuffer(View.m_AOPrev);
+        View.m_bAOPrev = false;
         View.m_GIScreenWidth = View.m_GIScreenHeight = 0;
     }
 

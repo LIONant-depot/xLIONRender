@@ -211,6 +211,9 @@ namespace xlionrender
         bool            m_bHalfRes      = true;     // the opaque pixels' GI read at half resolution, upsampled by depth and normal (the main view; not the debug views)
         bool            m_bTemporal     = true;     // that read: some of its pixels a frame, the rest reprojected from the last (XLION_GI_TEMPORAL=0: off)
         std::uint8_t    m_TemporalRate  = 4;        // its fresh tiles: 1 in 1, 2 or 4 a frame (XLION_GI_TEMPORAL=1/2/4)
+        bool            m_bAO           = true;     // short-range ambient occlusion on that read's irradiance (xlionrender_ao_comp.glsl; XLION_AO=0/1 overrides)
+        float           m_AORadius      = 0.5f;     // its range (world units): the occlusion below the GI's own resolution
+        float           m_AOThickness   = 0.15f;    // a depth sample's assumed thickness (world units): thin geometry does not hide what is behind it
         bool            m_bProbes       = true;     // the probe grid: the GI of what has no surfels of its own (skinned meshes), around the eye
         float           m_ProbeSpacing  = 1.0f;     // its probes' spacing (32 x 16 x 32 of them)
         float           m_GPUBudgetMs   = 2.0f;     // the GPU time a frame's GI slice may take (its rays: the measured rays per ms times this); 0: no limit, every batch (m_RayBudget) in one slice

@@ -300,6 +300,7 @@ int main()
         std::vector<object> Objects;
         for (int i = 0; i < 4; ++i) Objects.push_back({ &RaySphere, Sphere, xmath::fmat4::fromTranslation({ -1.8f + 1.2f * float(i), 0.6f, 0 }), Mats[i] });
         xlionrender::scene Scene;
+        Scene.m_GI.m_bAO = false;      // (images compared between paths: the screen's ambient occlusion is gi_render's)
         Scene.m_Sun.m_Intensity = 0;
         Scene.m_Sky = { .m_Zenith = { 0.6f, 0.6f, 0.6f }, .m_Horizon = { 0.6f, 0.6f, 0.6f }, .m_Ground = { 0.6f, 0.6f, 0.6f }, .m_Intensity = 1 };
         rgb_image Gpu;
@@ -363,6 +364,7 @@ int main()
         , { &RaySphere, Sphere, xmath::fmat4::fromTranslation({ -0.4f, 0.6f, 0.4f }) * xmath::fmat4::fromScale({ 1.2f, 1.2f, 1.2f }), { .m_BaseColor = { 0.95f, 0.93f, 0.88f }, .m_Metallic = 1, .m_Roughness = 0.05f } }
         , { &RaySphere, Sphere, xmath::fmat4::fromTranslation({ 1.3f, 0.5f, 0.9f }), { .m_BaseColor = { 1.00f, 0.78f, 0.34f }, .m_Metallic = 1, .m_Roughness = 0.35f } } };
         xlionrender::scene Scene;
+        Scene.m_GI.m_bAO = false;      // (images compared between paths: the screen's ambient occlusion is gi_render's)
         Scene.m_Sun   = { .m_Direction = { 0.35f, -1, 0.45f }, .m_Intensity = 2.5f };
         Scene.m_Sky.m_Intensity = 1;
         Scene.m_LocalLights = { { .m_Position = { -1.2f, 1.4f, -0.8f }, .m_Radius = 4, .m_Color = { 1, 0.9f, 0.75f }, .m_Intensity = 3 } };
@@ -465,6 +467,7 @@ int main()
         std::vector<xlionrender::gi::surfel_mesh> Rays(Lab.size());
         std::vector<object> Objects;
         xlionrender::scene Scene;
+        Scene.m_GI.m_bAO = false;      // (images compared between paths: the screen's ambient occlusion is gi_render's)
         for (std::size_t k = 0; k < Lab.size(); ++k)
         {
             xlionrender::mesh_id Id;
@@ -480,6 +483,7 @@ int main()
         Scene.m_Sky.m_Intensity = 1;
         Scene.m_LocalLights = { { .m_Position = { -1.2f, 1.4f, -0.8f }, .m_Radius = 4, .m_Color = { 1, 0.9f, 0.75f }, .m_Intensity = 3 } };
         Scene.m_GI = { .m_bEnable = true, .m_EmissiveScale = 1 };       // (the reference's emission lights as it shows: the GI's default lights it 100 times brighter)
+        Scene.m_GI.m_bAO = false;      // (against the path traced reference: it has no screen-space occlusion)
         Scene.m_bDebugReflection = true;
         Scene.m_Probes.clear();
 

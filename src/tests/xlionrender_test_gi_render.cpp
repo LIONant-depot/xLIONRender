@@ -105,6 +105,7 @@ int main()
     Scene.m_GI = { .m_bEnable = true, .m_RayBudget = 1 << 20, .m_FilterPasses = 2 };    // every instance every frame; the read checks below were tuned at 2 filter passes (more blurs the per-pixel / vertex difference they measure)
     Scene.m_GI.m_TraceAllowanceMs = 0;                                         // no time allowance: the same work every run (the comparisons are not timing dependent)
     Scene.m_GI.m_GPUBudgetMs      = 0;                                         // (on the GPU too: every batch in one slice)
+    Scene.m_GI.m_bAO              = false;                                     // (the reads compared as they are; the AO has its own check below)
     // (gi_dynamic_master_plan.md 7a: an instance's hits bring no light until its material is captured, so the bleeding comes after them)
     CHECK(App.RenderFrame(Scene, View, Camera), "Render with GI");                 // (its first frame queues the captures)
     for (int f = 0; f < 2000 && Renderer.isGICapturing(); ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render with GI while capturing");
@@ -126,6 +127,31 @@ int main()
     CHECK(std::abs(OffL - OffR) < 0.1, "without GI the floor's two sides differ in color (%.2f vs %.2f)", OffL, OffR);
     CHECK(OnR > OnL * 1.15, "no color bleeding with GI (near red %.2f, near green %.2f)", OnR, OnL);
     CHECK(MOn[1] > MOff[1] * 1.05, "GI adds no light");
+
+    // The ambient occlusion (scene::gi_settings::m_bAO, xlionrender_ao_comp.glsl) on the indirect light, the GI on and off (Tomas: it
+    // stands on its own): it only darkens, the room's corners and wall feet most, the open surfaces little
+    for (const bool bGI : { true, false })
+    {
+        Scene.m_GI.m_bHalfRes = true;
+        Scene.m_GI.m_bEnable  = bGI;
+        std::printf("(the GI %s) ", bGI ? "on" : "off");
+        for (int f = 0; f < 8; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, no AO");
+        const auto NoAO = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bAO = true;
+        for (int f = 0; f < 16; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, AO");
+        const auto AO = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bAO = false;
+        DumpRGB("gi_ao", AO, W, H);
+        int nBrighter = 0, nDarker = 0; double S = 0, R = 0;
+        for (std::size_t i = 0; i < AO.size(); ++i)
+        {
+            const double a = 0.2126 * NoAO[i][0] + 0.7152 * NoAO[i][1] + 0.0722 * NoAO[i][2], b = 0.2126 * AO[i][0] + 0.7152 * AO[i][1] + 0.0722 * AO[i][2];
+            nBrighter += b > a * 1.02 + 1e-3; nDarker += b < a * 0.95; S += a - b; R += a;
+        }
+        std::printf("ambient occlusion: %d pixels darker by 5%%+, %d brighter, the image %.2f%% darker\n", nDarker, nBrighter, 100 * S / std::max(R, 1e-9));
+        CHECK(nDarker > 100 && nBrighter < int(AO.size()) / 1000 && S < 0.15 * R, "the ambient occlusion: %d darker, %d brighter, %.2f%% darker", nDarker, nBrighter, 100 * S / std::max(R, 1e-9));
+        Scene.m_GI.m_bEnable = true;
+    }
 
     // The GI read at half resolution (scene::gi_settings::m_bHalfRes), upsampled by depth and normal, against the read every
     // pixel makes: the same room within a few percent (its edges: the upsample's), and its pass drew
