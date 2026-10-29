@@ -2522,6 +2522,7 @@ namespace xlionrender
         // (PRESCENE: the largest of 120 frames each; the sun turning added ~3.8 ms there, 2026-10-29)
         static std::unordered_map<const void*, xgpu::timestamps> s_Pre;      // ponytail: per renderer, never erased (a measurement hook)
         xgpu::timestamps* pPre = nullptr;
+        static double s_PreCpuMs = 0;
         if( bMain && std::getenv("XLION_GPU_TIMES") )
         {
             auto [It, bNew] = s_Pre.try_emplace(this);
@@ -2533,8 +2534,8 @@ namespace xlionrender
             static std::vector<std::uint64_t> s_Ns; static double s_Max[4] = {}; static int s_n = 0;
             if( pPre->getResults(s_Ns) && s_Ns.size() >= 5 && s_Ns[4] >= s_Ns[3] && s_Ns[3] >= s_Ns[2] && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] )
                 for( int k = 0; k < 4; ++k ) s_Max[k] += double(s_Ns[k + 1] - s_Ns[k]) * 1e-6;
-            if( ++s_n == 120 ) { std::printf("PRESCENE mean of 120 frames: setup (lights, cells, GI) %.3f, GI half-res %.3f, GPU cull %.3f, screen tail %.3f ms; half-res pixels fresh %d reprojected %d rejected %d aged %d\n", s_Max[0] / 120, s_Max[1] / 120, s_Max[2] / 120, s_Max[3] / 120
-                                             , m_GIStats.m_nScreenFresh, m_GIStats.m_nScreenReprojected, m_GIStats.m_nScreenRejected, m_GIStats.m_nScreenAged); std::fflush(stdout); s_n = 0; for( auto& v : s_Max ) v = 0; }
+            if( ++s_n == 120 ) { std::printf("PRESCENE mean of 120 frames: setup (lights, cells, GI) %.3f, GI half-res %.3f, GPU cull %.3f, screen tail %.3f ms; half-res pixels fresh %d reprojected %d rejected %d aged %d; its CPU %.3f ms\n", s_Max[0] / 120, s_Max[1] / 120, s_Max[2] / 120, s_Max[3] / 120
+                                             , m_GIStats.m_nScreenFresh, m_GIStats.m_nScreenReprojected, m_GIStats.m_nScreenRejected, m_GIStats.m_nScreenAged, s_PreCpuMs / 120); std::fflush(stdout); s_n = 0; s_PreCpuMs = 0; for( auto& v : s_Max ) v = 0; }
             Window.WriteTimestamp(*pPre, 0);
         }
         details::ubo_lighting* pLight = nullptr;       // (this render's lighting block: the screen tail sets its part, renderTail)
@@ -2666,6 +2667,7 @@ namespace xlionrender
             const bool bScreen = bMain && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
                               && !(bPlan && m_bBoxesOnly) && createGIScreenTargets(View) == nullptr;
             if( pPre ) Window.WriteTimestamp(*pPre, 1);
+            const auto PreCpu0 = std::chrono::steady_clock::now();     // (measurement: the half-res block's CPU, PRESCENE)
             if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
             if( bMain && !bScreen ) View.m_bGIScreenPrev = false;      // (a frame without it: nothing to reproject from)
             if( bScreen )
@@ -2878,7 +2880,7 @@ namespace xlionrender
                 };
             };
 
-            if( pPre ) Window.WriteTimestamp(*pPre, 2);
+            if( pPre ) { Window.WriteTimestamp(*pPre, 2); s_PreCpuMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - PreCpu0).count(); }
             // GPU culling (features/cull, documentation/gpu_cluster_culling.md): the main view's opaque rigid clusters with a material, a
             // candidate each, in runs (a bind state each; a prepass run a geometry), culled here - outside the pass - into their runs' commands
             static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
