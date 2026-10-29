@@ -1290,7 +1290,7 @@ namespace xlionrender
         { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
         , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
         , VertexSSBO(0)                                         // clusters
-        , VertexSSBO(1)                                         // RIGID: instances, SKIN: bones
+        , bSkin ? VertexSSBO(1) : BothSSBO(1)                   // RIGID: instances (a fragment may read the record: xlionrender_geom_standard_frag.glsl's constant material), SKIN: bones
         };
         if( bSkin ) UniformBinds.push_back(VertexSSBO(2));     // SKIN: instances
         UniformBinds.push_back(FragmentSSBO(3));                // lights

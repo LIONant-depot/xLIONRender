@@ -2492,7 +2492,8 @@ namespace xlionrender
         if( m_PlanarLevels != nLevels || m_PlanarMipsBuffer.getEntryCount() < int(Base) )
         {
             m_Device.Destroy(std::move(m_PlanarMipsBuffer));
-            if( m_Device.Create(m_PlanarMipsBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = int(std::max<std::uint32_t>(Base, 1)) }) ) { m_PlanarLevels = 0; return; }
+            const std::vector<std::uint64_t> Zeros(std::max<std::uint32_t>(Base, 1), 0);      // (a device-local buffer is made from its first data: without it the handle stayed the staging buffer, bound as storage - a validation error each bind)
+            if( m_Device.Create(m_PlanarMipsBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = int(Zeros.size()), .m_pData = const_cast<std::uint64_t*>(Zeros.data()) }) ) { m_PlanarLevels = 0; return; }
             m_PlanarLevels = nLevels;
         }
         for( int L = 1; L <= nLevels; ++L )
