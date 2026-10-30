@@ -286,6 +286,7 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
     vec4 Se = vec4(0.0), Sr = vec4(0.0);
     float Best = -1.0; uvec4 BestQ = uvec4(0u);
     vec2 Sa = vec2(0.0);
+    bool bStrong = false;
     for (int k = 0; k < 4; ++k)
     {
         const ivec2 P = clamp(ivec2(i0) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(W - 1u, H - 1u));
@@ -308,11 +309,36 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
         if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
         n = normalize(n);
         const float wd = max(0.0, 1.0 - abs(d - Dist) / max(0.05 * Dist, 1e-3)), wn = pow(max(dot(n, Ng), 0.0), 8.0);
-        const float w = wb * wd * wd * wn;
+        // (a weak entry - no surfel supports it, its local mean: the gather's age 3 - weighs little: a thin hole of the coverage takes its
+        // supported neighbours' light, not a different read's - the dashes on the Cornell box's red cube, Tomas)
+        const bool  bWeak = ((Q.w >> 28) & 3u) == 3u;
+        const float w = wb * wd * wd * wn * (bWeak ? 0.02 : 1.0);
+        bStrong = bStrong || (!bWeak && wd * wn > 0.0);
         if (wd * wn > Best) { Best = wd * wn; BestQ = Q; }
         const vec3 E = vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
         Se += vec4(E * w, w);
         if ((Q.w & (1u << 31)) != 0u) Sr += vec4(vec3(unpackHalf2x16(Q.z), unpackHalf2x16(Q.w & 0xFFFFu).x) * w, w);
+    }
+    // All 4 weak (a coverage hole wider than a sample: the gather's local mean is all they have): the ring around them, its supported
+    // entries of this surface only - the hole takes the light around it
+    if (!bStrong)
+    {
+        vec4 Sg = vec4(0.0);
+        for (int k = 0; k < 16; ++k)
+        {
+            const ivec2 r = ivec2(k & 3, k >> 2) - 1;
+            if (r.x >= 0 && r.x <= 1 && r.y >= 0 && r.y <= 1) continue;       // (the 4 above)
+            const ivec2 P = clamp(ivec2(i0) + r, ivec2(0), ivec2(W - 1u, H - 1u));
+            const uint  a = 4u * (8u + uint(P.y) * W + uint(P.x));
+            const uvec4 Q = uvec4(GIMesh[a], GIMesh[a + 1u], GIMesh[a + 2u], GIMesh[a + 3u]);
+            if ((Q.w & (1u << 30)) == 0u || ((Q.w >> 28) & 3u) == 3u) continue;
+            const vec2  o = vec2(float((Q.w >> 16) & 63u), float((Q.w >> 22) & 63u)) / 63.0 * 2.0 - 1.0;
+            vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y));
+            if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+            const float wd = max(0.0, 1.0 - abs(unpackHalf2x16(Q.y).y - Dist) / max(0.05 * Dist, 1e-3)), wn = pow(max(dot(normalize(n), Ng), 0.0), 8.0);
+            Sg += vec4(vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x), 1.0) * (wd * wd * wn);
+        }
+        if (Sg.w > 1e-4) Se = Sg;
     }
     if (Se.w > 1e-4) { g_GI = vec4(Se.rgb / Se.w, 1.0); g_GISource = 2u; }
     else if (Best >= 0.0) { g_GI = vec4(unpackHalf2x16(BestQ.x), unpackHalf2x16(BestQ.y).x, 1.0); g_GISource = 2u; }

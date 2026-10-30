@@ -124,6 +124,7 @@ void main()
         vec3       GFace  = dot(GFaceD, GFaceD) > 1e-24 ? normalize(dot(GFaceD, GN0) < 0.0 ? -GFaceD : GFaceD) : GN0;
         if (dot(GFace, GN0) < 0.7) GFace = GN0;
         vec4 E = vec4(0.0);
+        bool bWeak = true;            // (no surfel supports it: the local mean - flagged, the upsample prefers its supported neighbours)
         g_GIRefl = vec4(0.0);
         if (Ref == gi_probes_v) E = SurfelGIProbes(S.P, N);        // (a skinned surface: the probe grid, GIMesh its buffer)
         else if ((Ref & gi_per_pixel_v) != 0u)
@@ -136,6 +137,7 @@ void main()
             const GIQueryResult Q = SurfelGIQuery(Pm, GFace, GN0, Offset, Ref & 0xFFu);
             // (the full read's policy: a low confidence - the surfels near mostly out of sight - blends into a smooth read; there the vertex
             // read, here the local mean: unblended, a weak read's noise and leaks showed as speckled patches - Tomas's Sponza arch)
+            bWeak = !Q.bSupported;
             if (Q.bSupported) E = vec4(mix(SurfelGILocalMean(Pm, GFace, Offset, Ref & 0xFFu), Q.Irradiance, smoothstep(0.0, 0.25, Q.Confidence)), 1.0);
             if (!Q.bSupported || Q.Confidence < 0.25) g_GIRefl = vec4(0.0);
         }
@@ -145,7 +147,7 @@ void main()
         bKeep = !bE && !bR;           // (no GI here: the AO's own entry stays)
         const vec3 Rr = bR ? g_GIRefl.rgb : vec3(0.0);
         Out = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, Dist)), packHalf2x16(Rr.rg),
-                    (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFFu) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u));
+                    (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFFu) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u) | (bE && bWeak ? 3u << 28 : 0u));     // (age 3, never a fresh one's: weak - a hole in the surfels' coverage, the Cornell cube's dashes)
     }
     if (bIn && !(bKeep && push.AO != 0u)) GIScreen[screen_header_v + uint(P.y) * W + uint(P.x)] = Out;
 
