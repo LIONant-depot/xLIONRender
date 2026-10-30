@@ -1625,7 +1625,7 @@ namespace xlionrender
     {
         if( View.m_GPrePass.m_Private ) return nullptr;
         if( auto Err = m_Device.Create(View.m_GPreNormal, { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_GPreId,     { .m_Format = xgpu::texture::format::R32G32_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GPreId,     { .m_Format = xgpu::texture::format::R32G32B32A32_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;     // (z: the exact distance to the eye)
         // (the HDR target first, cleared here: the scene pass then loads it as it loads the depth - loaded without a clear this frame it was
         // in no attachment layout: nothing drew)
         auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId }, xgpu::renderpass::attachment{ View.m_Depth } };

@@ -10,7 +10,7 @@ layout(location = 15) flat in uint InCluster;       // the cluster (xlionrender_
 
 layout(location = 0) out vec4 OutHDR;               // (the pass's first target: the scene's HDR, only cleared - the pipeline's mask keeps it)
 layout(location = 1) out vec2 OutNormal;
-layout(location = 2) out vec2 OutId;
+layout(location = 2) out vec4 OutId;
 
 void main()
 {
@@ -19,5 +19,5 @@ void main()
     if (n.z < 0.0) o = (1.0 - abs(o.yx)) * vec2(o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0);
     OutHDR    = vec4(0.0);
     OutNormal = o;
-    OutId     = vec2(float(InInstance + 1u), gl_FrontFacing ? float(InCluster) : -float(InCluster) - 1.0);     // (x 0: nothing drawn there - the cleared value; y < 0: a back face)
+    OutId     = vec4(float(InInstance + 1u), gl_FrontFacing ? float(InCluster) : -float(InCluster) - 1.0, length(In.wSpacePosition.xyz), 0.0);     // (x 0: nothing drawn there - the cleared value; y < 0: a back face; z: the distance, exact - the depth buffer's is not, far away)
 }

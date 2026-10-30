@@ -41,7 +41,7 @@ gather_sample GatherSample(in const ivec2 p)
     S.Q    = p * D + ivec2(((p.x ^ p.y) & 1) == 0 ? D / 2 - 1 : D / 2);
     const ivec2 Size = textureSize(GPreDepth, 0);
     S.Q    = min(S.Q, Size - 1);
-    const vec2 Id = texelFetch(GPreId, S.Q, 0).xy;
+    const vec4 Id = texelFetch(GPreId, S.Q, 0);
     if (Id.x < 0.5) return S;
     S.bFront = Id.y >= 0.0;
     S.Slot = uint(Id.x + 0.5) - 1u; S.Cluster = uint((S.bFront ? Id.y : -Id.y - 1.0) + 0.5);
@@ -60,6 +60,8 @@ gather_sample GatherSample(in const ivec2 p)
     const float z = texelFetch(GPreDepth, S.Q, 0).r;
     const vec4  W = C2W * vec4((vec2(S.Q) + 0.5) / vec2(Size) * 2.0 - 1.0, z, 1.0);
     S.P = W.xyz / W.w;
+    if (Id.z > 0.0) S.P = normalize(S.P) * Id.z;      // (the exact distance: rebuilt from the depth buffer a far grazing point sank or rose off
+                                                       // the surface - the surfels' visibility is that sensitive: bright blotches far down Sponza's corridor)
     const vec2 o = texelFetch(GPreNormal, S.Q, 0).xy;
     vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y));
     if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);

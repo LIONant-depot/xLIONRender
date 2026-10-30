@@ -66,7 +66,7 @@ namespace xlionrender
         // The G-buffer prepass (instance::createGPreTargets, the main view's; gi_gbuffer_gather_plan.md): the opaque depth with each pixel's
         // world normal (octahedral) and submesh instance (slot + 1, cluster) - the GI gathers from them; the scene pass loads its depth
         xgpu::texture           m_GPreNormal;           // R16G16_SFLOAT
-        xgpu::texture           m_GPreId;               // R32G32_SFLOAT (exact integers): 0 nothing
+        xgpu::texture           m_GPreId;               // R32G32B32A32_SFLOAT: slot + 1 (0 nothing), the cluster (-(cluster + 1): a back face), the exact distance to the eye
         xgpu::renderpass        m_GPrePass;
         xgpu::renderpass        m_GPrePassLoad;         // (GPU occlusion's pass 2: the G-buffer loaded again after the Hi-Z)
         // The GI gather from them (xlionrender_gi_gather_common.glsl): its classification's and passes' instances (this view's G-buffer

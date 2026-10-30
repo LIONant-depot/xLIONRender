@@ -45,6 +45,12 @@ ivec2 FullTexel(in const ivec2 p)
 vec3 WorldAt(in const ivec2 q, in const float z)
 {
     const vec4 W = g_C2W * vec4((vec2(q) + 0.5) / vec2(g_Size) * 2.0 - 1.0, z, 1.0);
+    const float d = texelFetch(GPreId, q, 0).z;       // (the G-buffer's exact distance, as the gather's)
+    return d > 0.0 ? normalize(W.xyz / W.w) * d : W.xyz / W.w;
+}
+vec3 RayAt(in const ivec2 q, in const float z)         // (the depth buffer's point on the texel's ray: the slice's direction)
+{
+    const vec4 W = g_C2W * vec4((vec2(q) + 0.5) / vec2(g_Size) * 2.0 - 1.0, z, 1.0);
     return W.xyz / W.w;
 }
 vec3 NormalAt(in const ivec2 Q)
@@ -71,7 +77,7 @@ float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 
         const float Phi = (float(s) + n0) / float(slices_v) * PI;
         const vec2  Dir = vec2(cos(Phi), sin(Phi));
         // the slice's direction in the world: the step of a few pixels along Dir at this depth
-        const vec3  Dw    = WorldAt(FullTexel(p) + ivec2(round(Dir * 8.0 * float(Push.Div))), z) - P;
+        const vec3  Dw    = RayAt(FullTexel(p) + ivec2(round(Dir * 8.0 * float(Push.Div))), z) - RayAt(FullTexel(p), z);
         const vec3  Ortho = normalize(Dw - V * dot(Dw, V));
         const vec3  Axis  = normalize(cross(Ortho, V));
         const vec3  Np    = N - Axis * dot(N, Axis);

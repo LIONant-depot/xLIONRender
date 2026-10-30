@@ -65,7 +65,9 @@ void main()
                                 uintBitsToFloat(uvec4(GITable[push.TableBase + 8u], GITable[push.TableBase + 9u], GITable[push.TableBase + 10u], GITable[push.TableBase + 11u])),
                                 uintBitsToFloat(uvec4(GITable[push.TableBase + 12u], GITable[push.TableBase + 13u], GITable[push.TableBase + 14u], GITable[push.TableBase + 15u])));
         const vec4  Wd   = C2W * vec4((vec2(Qd) + 0.5) / vec2(Size) * 2.0 - 1.0, zd, 1.0);
-        if (zd < 1.0) Pd = Ai * (Wd.xyz / Wd.w - Off - vec3(I.Rows[0].w, I.Rows[1].w, I.Rows[2].w));
+        const float dd   = texelFetch(GPreId, Qd, 0).z;
+        const vec3  Pw   = dd > 0.0 ? normalize(Wd.xyz / Wd.w) * dd : Wd.xyz / Wd.w;
+        if (zd < 1.0) Pd = Ai * (Pw - Off - vec3(I.Rows[0].w, I.Rows[1].w, I.Rows[2].w));
     }
     const vec3  GFaceD = cross(dFdx(Pd), dFdy(Pd));
     if (!S.bHit) return;
