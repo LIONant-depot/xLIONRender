@@ -122,7 +122,7 @@ vec4 ReflScreen(in const vec3 N)
             const uvec2 r = (k & 1u) != 0u ? Q.zw : Q.xy;
             const vec2  bd = unpackHalf2x16(r.y);
             const float Dist = 1.0 / gl_FragCoord.w;
-            if (bd.y > 0.0 && abs(bd.y - Dist) < 0.05 * Dist) return vec4(unpackHalf2x16(r.x), bd.x, 1.0);
+            if (bd.y > 0.0 && abs(bd.y - Dist) < 0.05 * Dist && !any(isnan(vec3(unpackHalf2x16(r.x), bd.x))) && !any(isinf(vec3(unpackHalf2x16(r.x), bd.x)))) return vec4(unpackHalf2x16(r.x), bd.x, 1.0);
         }
     }
     const vec2  hp = gl_FragCoord.xy * 0.5 - 0.5;
@@ -141,7 +141,9 @@ vec4 ReflScreen(in const vec3 N)
         const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
         const float w  = wb * wd * wd * wn;
         const float c  = unpackHalf2x16(Q.y).y;
-        Su += w * c * vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
+        const vec3  u  = vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
+        if (any(isnan(u)) || any(isinf(u)) || isnan(c) || isinf(c)) continue;      // (not finite: none - a NaN made the whole pixel black)
+        Su += w * c * u;
         Sc += w * c; Sw += w;
     }
     return Sw > 1e-4 && Sc > 1e-4 ? vec4(Su / Sc, Sc / Sw) : vec4(0.0);

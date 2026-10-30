@@ -142,7 +142,8 @@ void main()
             if (!Q.bSupported || Q.Confidence < 0.25) g_GIRefl = vec4(0.0);
         }
         if (E.w < 0.5 && (Ref & 0x8000u) == 0u) E = vec4(SurfelGILocalMean(Pm, GFace, Offset, Ref & 0xFFu), 1.0);
-        if (push.AO != 0u) E.rgb *= GatherAO(P, W, H, Dist);      // (a fresh read only: a reprojected one carries last frame's)
+        if (push.AO != 0u) E.rgb *= GatherAO(P, W, H, Dist);
+        if (any(isnan(E.rgb)) || any(isinf(E.rgb))) E = vec4(0.0);     // (never a non-finite entry: the reprojection would carry it on)      // (a fresh read only: a reprojected one carries last frame's)
         const bool bE = E.w > 0.5, bR = g_GIRefl.w > 0.5;
         bKeep = !bE && !bR;           // (no GI here: the AO's own entry stays)
         const vec3 Rr = bR ? g_GIRefl.rgb : vec3(0.0);

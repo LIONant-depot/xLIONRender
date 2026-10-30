@@ -41,8 +41,8 @@ uint  Base() { return uint(Size().x * Size().y); }              // (the reflecti
 // A radiance as the records' half floats hold it: past 65504 a half is infinite (a near-mirror hit's point light highlight: 1 / (pi a2)
 // at roughness 0.045 is ~78000) and the denoiser's weights made it NaN - black, flickering blocks on Police's lit walls (Tomas)
 vec3 HalfSafe(in const vec3 c) { return any(isnan(c)) ? vec3(0.0) : min(c, vec3(60000.0)); }
-vec3  RecU(uvec4 R)     { return vec3(unpackHalf2x16(R.x), unpackHalf2x16(R.y).x); }
-float RecConf(uvec4 R)  { return unpackHalf2x16(R.y).y; }
+vec3  RecU(uvec4 R)     { return HalfSafe(vec3(unpackHalf2x16(R.x), unpackHalf2x16(R.y).x)); }      // (a history a NaN once reached kept it, and spread it)
+float RecConf(uvec4 R)  { const float c = unpackHalf2x16(R.y).y; return isnan(c) || isinf(c) ? 0.0 : c; }
 uint  RecClass(uvec4 R) { return (R.w >> 24) & 15u; }
 float MetaDist(uint w)  { return unpackHalf2x16(w & 0xFFFFu).x; }
 vec3  MetaNormal(uint w){ return OctDecode(vec2(float((w >> 16) & 15u), float((w >> 20) & 15u)) / 15.0 * 2.0 - 1.0); }

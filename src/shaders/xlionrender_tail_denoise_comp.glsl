@@ -45,8 +45,9 @@ uint  Meta(float Dist, vec3 N, float nD, float nS)
 }
 float MetaDist(uint w)   { return unpackHalf2x16(w & 0xFFFFu).x; }
 vec3  MetaNormal(uint w) { return OctDecode(vec2(float((w >> 16) & 15u), float((w >> 20) & 15u)) / 15.0 * 2.0 - 1.0); }
-vec3  RecD(uvec4 R) { return vec3(unpackHalf2x16(R.x), unpackHalf2x16(R.y).x); }
-vec3  RecS(uvec4 R) { return vec3(unpackHalf2x16(R.y).y, unpackHalf2x16(R.z)); }
+vec3 Finite3(in const vec3 c) { return any(isnan(c)) || any(isinf(c)) ? vec3(0.0) : c; }     // (a record that is not finite reads as none: nothing non-finite outlives its frame)
+vec3  RecD(uvec4 R) { return Finite3(vec3(unpackHalf2x16(R.x), unpackHalf2x16(R.y).x)); }
+vec3  RecS(uvec4 R) { return Finite3(vec3(unpackHalf2x16(R.y).y, unpackHalf2x16(R.z))); }
 uvec4 Rec(vec3 D, vec3 S, uint w) { return uvec4(packHalf2x16(D.rg), packHalf2x16(vec2(D.b, S.r)), packHalf2x16(S.gb), w); }
 
 // This frame's tail around the workgroup (its 8 x 8 texels and kNb more each side): the samples and their distances, read once

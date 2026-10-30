@@ -414,8 +414,10 @@ int LocalTailScreen(in const vec3 N, in const float NdotV, in const vec3 Albedo,
         const float w  = wb * wd * wd * wn;
         const float a  = max(0.0, 1.0 - abs(d - Dist) / (0.25 * Dist)) * max(dot(n, N), 0.0);
         if (a > Best) { Best = a; BestD = vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x); BestS = vec3(unpackHalf2x16(Q.y).y, unpackHalf2x16(Q.z)); }
-        Sd += w * vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x);
-        Ss += w * vec3(unpackHalf2x16(Q.y).y, unpackHalf2x16(Q.z));
+        const vec3 qd = vec3(unpackHalf2x16(Q.x), unpackHalf2x16(Q.y).x), qs = vec3(unpackHalf2x16(Q.y).y, unpackHalf2x16(Q.z));
+        if (any(isnan(qd)) || any(isinf(qd)) || any(isnan(qs)) || any(isinf(qs))) continue;      // (not finite: none)
+        Sd += w * qd;
+        Ss += w * qs;
         Sw += w;
     }
     if (Sw < 1e-4)
