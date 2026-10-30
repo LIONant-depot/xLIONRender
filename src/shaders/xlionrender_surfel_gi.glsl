@@ -133,7 +133,7 @@ bool GIReadCellAt(in const ivec3 C, in const vec3 P, in const vec3 N, inout uint
     const uint  KeyLo = U.z | (U.y << 21);
     const uint  KeyHi = (U.y >> 11) | (U.x << 10);
     uint h = ((uint(C.x) * 73856093u) ^ (uint(C.y) * 19349663u) ^ (uint(C.z) * 83492791u)) & Mask;
-    for (uint n = 0u; n < GIMesh[6]; ++n, h = (h + 1u) & Mask)        // [6]: the table's longest probe
+    for (uint n = 0u; n < min(GIMesh[6], 64u); ++n, h = (h + 1u) & Mask)        // [6]: the table's longest probe (64 at most: a buffer read as another's never loops for seconds - a GPU timeout)
     {
         const uint e = GIMesh[2] + 4u * h;
         if (GIMesh[e + 1u] == 0xFFFFFFFFu) return false;
@@ -142,7 +142,7 @@ bool GIReadCellAt(in const ivec3 C, in const vec3 P, in const vec3 N, inout uint
         // the cell splits its floor in two: the point's own side), then facing its way, then nearest its plane. Word 3: count | mask << 16
         Patches = GIMesh[5] + GIMesh[e + 2u]; nPatches = GIMesh[e + 3u];
         float Best = -1e30;
-        for (uint p = 0u; p < GIMesh[e + 3u]; ++p)
+        for (uint p = 0u; p < min(GIMesh[e + 3u], 64u); ++p)
         {
             const uint  a  = GIMesh[5] + GIMesh[e + 2u] + 4u * p;
             const vec3  Np = GIOctDecode(unpackSnorm2x16(GIMesh[a]));
