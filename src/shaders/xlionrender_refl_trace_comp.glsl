@@ -122,6 +122,9 @@ void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec,
     }
 }
 
+// A radiance as the records' half floats hold it: past 65504 a half is infinite (a near-mirror hit's point light highlight: 1 / (pi a2)
+// at roughness 0.045 is ~78000) and the denoiser's weights made it NaN - black, flickering blocks on Police's lit walls (Tomas)
+vec3 HalfSafe(in const vec3 c) { return any(isnan(c)) ? vec3(0.0) : min(c, vec3(60000.0)); }
 // The planar view's pyramid at uv (0..1, the planar view's), level L (0: the view itself), bilinear: rgb, the coverage
 vec4 PlanarLevel(int L, vec2 uv)
 {
@@ -197,8 +200,8 @@ void main()
                 Lod = log2(max(2.0 * t * a / max(length(P), 1e-3) * PL[Push.m_Slot].Info.x, 1.0));
             }
             const vec4 C = PlanarAt(uv, Lod);
-            Rec.x = packHalf2x16(C.rg);
-            Rec.y = packHalf2x16(vec2(C.b, clamp(C.a, 0.0, 1.0)));
+            Rec.x = packHalf2x16(HalfSafe(C.rgb).rg);
+            Rec.y = packHalf2x16(vec2(HalfSafe(C.rgb).b, clamp(C.a, 0.0, 1.0)));
             Rec.z = packHalf2x16(vec2(t, 1.0));
             Rec.w |= refl_planar_v << 24;
             atomicAdd(s_Planar, 1u);
@@ -275,7 +278,7 @@ void main()
                             const float Cone = Px * length(P) + (Px + 2.0 * Beta + a) * Hit.m_T;
                             Hits[1u + 3u * At]  = uvec4(uint(Hit.m_Inst), uint(Hit.m_Tri), floatBitsToUint(Hit.m_U), floatBitsToUint(Hit.m_V));
                             const vec3  E = (Ed + Ei) * (1.0 / gi_pi_v);
-                            Hits[2u + 3u * At]  = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, Sy.r)), packHalf2x16(Sy.gb), packHalf2x16(vec2(Cone, Sel)));
+                            Hits[2u + 3u * At]  = uvec4(packHalf2x16(HalfSafe(E).rg), packHalf2x16(vec2(HalfSafe(E).b, HalfSafe(Sy).r)), packHalf2x16(HalfSafe(Sy).gb), packHalf2x16(vec2(Cone, Sel)));
                             Hits[3u + 3u * At]  = uvec4(Key, 0xFFFFFFFFu, 0u, 0u);
                         }
                         Class = refl_hit_v; Dist = Hit.m_T;
@@ -286,8 +289,8 @@ void main()
                         Class = refl_miss_v;
                     }
                     const float Conf = 1.0 - smoothstep(0.5 * Push.m_MaxRough, Push.m_MaxRough, Rough);     // (B: sharp receivers; glossy ones fade to the probes until the reconstruction)
-                    Rec.x = packHalf2x16(Lr.rg);
-                    Rec.y = packHalf2x16(vec2(Lr.b, Conf));
+                    Rec.x = packHalf2x16(HalfSafe(Lr).rg);
+                    Rec.y = packHalf2x16(vec2(HalfSafe(Lr).b, Conf));
                     Rec.z = packHalf2x16(vec2(Dist, w));
                     Rec.w |= Class << 24;
                     if (PrefixIncomplete(O, L, Hit.m_Inst >= 0 ? Hit.m_T : 1e30)) { Rec.w |= 1u << 28; atomicAdd(s_Incomplete, 1u); }     // (bit 28: PREFIX_INCOMPLETE)
@@ -313,7 +316,7 @@ void main()
                                   : Push.m_Mode == 6u ? vec3(max(dot(N, -normalize(P)), 0.0))                                      // (6: N.V - a sphere's bright spot at its centre)
                                   : Push.m_Mode == 5u ? N * 0.5 + 0.5                                                              // (5: the G-buffer's normal the trace uses)
                                   : vec3(clamp(-e * 10.0, 0.0, 1.0), abs(e) < 0.01 ? 1.0 : 0.0, clamp(e * 10.0, 0.0, 1.0));    // (red / blue: 10 x the error)
-                    Rec.x = packHalf2x16(C.rg); Rec.y = packHalf2x16(vec2(C.b, 1.0)); Rec.z = packHalf2x16(vec2(0.0, 1.0)); Rec.w |= refl_hit_v << 24;
+                    Rec.x = packHalf2x16(HalfSafe(C).rg); Rec.y = packHalf2x16(vec2(HalfSafe(C).b, 1.0)); Rec.z = packHalf2x16(vec2(0.0, 1.0)); Rec.w |= refl_hit_v << 24;
                 }
                 else if (Hit.m_Inst >= 0) atomicAdd(s_Hits, 1u);
             }

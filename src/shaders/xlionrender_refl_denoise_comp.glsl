@@ -38,13 +38,16 @@ layout(push_constant) uniform push_t { uint m_Pass, m_Slot, m_Pad0, m_Pad1; } Pu
 
 ivec2 Size() { return ivec2(F[Push.m_Slot].Params.xy); }
 uint  Base() { return uint(Size().x * Size().y); }              // (the reflections' records after the tail's)
+// A radiance as the records' half floats hold it: past 65504 a half is infinite (a near-mirror hit's point light highlight: 1 / (pi a2)
+// at roughness 0.045 is ~78000) and the denoiser's weights made it NaN - black, flickering blocks on Police's lit walls (Tomas)
+vec3 HalfSafe(in const vec3 c) { return any(isnan(c)) ? vec3(0.0) : min(c, vec3(60000.0)); }
 vec3  RecU(uvec4 R)     { return vec3(unpackHalf2x16(R.x), unpackHalf2x16(R.y).x); }
 float RecConf(uvec4 R)  { return unpackHalf2x16(R.y).y; }
 uint  RecClass(uvec4 R) { return (R.w >> 24) & 15u; }
 float MetaDist(uint w)  { return unpackHalf2x16(w & 0xFFFFu).x; }
 vec3  MetaNormal(uint w){ return OctDecode(vec2(float((w >> 16) & 15u), float((w >> 20) & 15u)) / 15.0 * 2.0 - 1.0); }
 vec4  RecQ(uvec4 R)     { return vec4(RecU(R) * RecConf(R), RecConf(R)); }     // (the light premultiplied by the coverage, the coverage)
-uvec4 WithQ(uvec4 R, vec4 Q) { const vec3 U = Q.a > 1e-4 ? Q.rgb / Q.a : vec3(0.0); return uvec4(packHalf2x16(U.rg), packHalf2x16(vec2(U.b, clamp(Q.a, 0.0, 1.0))), R.z, R.w); }
+uvec4 WithQ(uvec4 R, vec4 Q) { const vec3 U = HalfSafe(Q.a > 1e-4 ? Q.rgb / Q.a : vec3(0.0)); return uvec4(packHalf2x16(U.rg), packHalf2x16(vec2(U.b, clamp(Q.a, 0.0, 1.0))), R.z, R.w); }
 
 // This frame's records around the workgroup (its 8 x 8 texels and kNb more each side): their U and view depth (-1: none traced)
 const int kNb   = 2;                        // the neighbourhood: 5 x 5 texels
