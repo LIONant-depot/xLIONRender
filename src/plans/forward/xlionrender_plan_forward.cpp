@@ -2759,7 +2759,8 @@ namespace xlionrender
                         if( pMesh->m_Geom.m_Kind == geom_kind::SKIN )         // (a skinned one: the probe grid - its GI read is the gather's too)
                         {
                             const xgpu::buffer* pProbes = Scene.m_GI.m_bEnable && Scene.m_GI.m_bProbes && m_pGITrace ? m_pGITrace->ProbeBuffer() : nullptr;
-                            if( pProbes == nullptr || m_GatherTable.size() + 4 * pMesh->m_Geom.m_Clusters.size() > std::size_t(gather_table_uints_v) ) continue;
+                            if( pProbes == nullptr || m_GatherTable.size() + 1 + 4 * pMesh->m_Geom.m_Clusters.size() > std::size_t(gather_table_uints_v) ) continue;
+                            m_GatherTable.push_back(std::uint32_t(pMesh->m_Geom.m_Clusters.size()));     // (its clusters' count before them: the gather reads no other instance's)
                             m_GatherTable[20 + Slot] = std::uint32_t(m_GatherTable.size());
                             const std::uint32_t k = BufferIndex(pProbes);
                             for( std::size_t c = 0; c < pMesh->m_Geom.m_Clusters.size(); ++c ) m_GatherTable.insert(m_GatherTable.end(), { 0u, 0xFFFFFFFEu, k, 0u });     // (xlionrender_surfel_gi.glsl gi_probes_v)
@@ -2769,7 +2770,8 @@ namespace xlionrender
                         const bool bSections = !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
                         const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                         if( !(bSections ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu) ) continue;
-                        if( m_GatherTable.size() + 4 * G.m_Clusters.size() > std::size_t(gather_table_uints_v) ) { bFull = true; continue; }
+                        if( m_GatherTable.size() + 1 + 4 * G.m_Clusters.size() > std::size_t(gather_table_uints_v) ) { bFull = true; continue; }
+                        m_GatherTable.push_back(std::uint32_t(G.m_Clusters.size()));
                         m_GatherTable[20 + Slot] = std::uint32_t(m_GatherTable.size());
                         for( std::uint32_t c = 0; c < std::uint32_t(G.m_Clusters.size()); ++c )
                         {
