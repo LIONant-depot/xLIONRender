@@ -74,7 +74,7 @@ layout(location = 1) out vec2 OutGPreNormal;
 layout(location = 2) out vec2 OutGPreId;
 #define XLION_GPRE_OUT() { const vec3 gpn_ = normalize(In.Normal.xyz); vec2 gpo_ = gpn_.xy / (abs(gpn_.x) + abs(gpn_.y) + abs(gpn_.z)); \
     if (gpn_.z < 0.0) gpo_ = (1.0 - abs(gpo_.yx)) * vec2(gpo_.x >= 0.0 ? 1.0 : -1.0, gpo_.y >= 0.0 ? 1.0 : -1.0); \
-    OutGPreNormal = gpo_; OutGPreId = vec2(float(XMAT_PUSH_INSTANCE + 1u), float(XMAT_PUSH_CLUSTER)); }
+    OutGPreNormal = gpo_; OutGPreId = vec2(float(XMAT_PUSH_INSTANCE + 1u), gl_FrontFacing ? float(XMAT_PUSH_CLUSTER) : -float(XMAT_PUSH_CLUSTER) - 1.0); }
 #else
 #define XLION_GPRE_OUT()
 #endif

@@ -18,6 +18,7 @@ layout(std430, set = 0, binding = 3) buffer out_b             { vec2 AOOut[]; };
 layout(std430, set = 0, binding = 4) buffer raw_b             { vec2 AORaw[]; };
 layout(set = 1, binding = 0) uniform sampler2D GPreDepth;
 layout(set = 1, binding = 1) uniform sampler2D GPreNormal;
+layout(set = 1, binding = 2) uniform sampler2D GPreId;      // (its y < 0: a back face - the normal turned to its visible side)
 
 layout(push_constant) uniform push_t
 {
@@ -57,7 +58,7 @@ vec3 NormalAt(in const ivec2 Q)
 // The raw AO at half-size pixel p (Mode 0)
 float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 P, in const float Dist)
 {
-    const vec3 V = -P / Dist, N0 = NormalAt(Q), N = dot(N0, V) < 0.0 ? -N0 : N0;      // (a double-sided back face: its visible side)
+    const vec3 V = -P / Dist, N0 = NormalAt(Q), N = texelFetch(GPreId, Q, 0).y >= 0.0 ? N0 : -N0;      // (a double-sided back face: its visible side)
     // the 4 x 4 pattern: 16 rotations a tile (a stratified order), the steps' offsets from the same index
     const uint  k16 = uint((p.x & 3) | ((p.y & 3) << 2));
     const uint  Order[16] = uint[16](0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
@@ -76,7 +77,9 @@ float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 
         const vec3  Np    = N - Axis * dot(N, Axis);
         const float NpLen = length(Np);
         if (NpLen < 1e-4) continue;
-        const float n = sign(dot(Ortho, Np)) * acos(clamp(dot(Np, V) / NpLen, -1.0, 1.0));
+        // (the projected normal within the visible hemisphere, as GTAO's saturate: a grazing smooth normal that leans away from the eye
+        // put the hemisphere behind the surface - every sample an occluder, a black wedge along Sponza's arch, Tomas)
+        const float n = sign(dot(Ortho, Np)) * acos(clamp(dot(Np, V) / NpLen, 0.0, 1.0));
         uint Mask = 0u;
         for (int k = 0; k < steps_v; ++k)
         {
@@ -93,8 +96,13 @@ float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 
                 const float L  = length(d);
                 if (L < 1e-5 || L > Push.Radius) continue;          // (short range: beyond it the GI's own visibility holds)
                 const vec3  db = d - V * Push.Thickness;
-                // the front and back horizons' angles from the view direction, as fractions of the hemisphere around n (HTraceAO's)
-                vec2 h = vec2(acos(clamp(dot(d, V) / L, -1.0, 1.0)), acos(clamp(dot(db, V) / max(length(db), 1e-5), -1.0, 1.0)));
+                // the front and back horizons' cosines from the view direction, faded to the hemisphere's edge over the range's last 60 %
+                // (HTraceAO's falloff: a sample at the range's end occluded fully and one past it not at all drew a sharp arc that moved
+                // with the camera - Tomas's Sponza arch), then as fractions of the hemisphere around n (HTraceAO's)
+                const float Fade = clamp((Push.Radius - L) / (0.6 * Push.Radius), 0.0, 1.0);
+                const float MinCos = cos(side == 0 ? n - HALF_PI : n + HALF_PI);
+                const vec2  c = mix(vec2(MinCos), vec2(dot(d, V) / L, dot(db, V) / max(length(db), 1e-5)), Fade);
+                vec2 h = vec2(acos(clamp(c.x, -1.0, 1.0)), acos(clamp(c.y, -1.0, 1.0)));
                 h = side == 0 ? clamp((n + h + HALF_PI) / PI, 0.0, 1.0) : clamp((n - h.yx + HALF_PI) / PI, 0.0, 1.0);
                 h = h * h * (3.0 - 2.0 * h);
                 const uvec2 b = uvec2(floor(vec2(min(h.x, h.y), max(h.x, h.y)) * 32.0));
@@ -165,7 +173,7 @@ void main()
         }
     }
     AOOut[i] = vec2(AO, Dist);
-    const vec3 N0 = NormalAt(Q), N = dot(N0, WorldAt(Q, z)) > 0.0 ? -N0 : N0;     // (the upsample's guide: the visible side)
+    const vec3 N0 = NormalAt(Q), N = texelFetch(GPreId, Q, 0).y >= 0.0 ? N0 : -N0;     // (the upsample's guide: the visible side)
     vec2 on = N.xy / (abs(N.x) + abs(N.y) + abs(N.z));
     if (N.z < 0.0) on = (1.0 - abs(on.yx)) * vec2(on.x >= 0.0 ? 1.0 : -1.0, on.y >= 0.0 ? 1.0 : -1.0);
     const uvec2 Oq = uvec2(clamp(on * 0.5 + 0.5, 0.0, 1.0) * 63.0 + 0.5);

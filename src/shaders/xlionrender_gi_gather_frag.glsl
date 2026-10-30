@@ -74,7 +74,7 @@ void main()
     const uint  W = Hd.x, H = Hd.y;
     const bool  bIn = uint(P.x) < W && uint(P.y) < H;
     const vec3  Nr = S.N;                                   // (the vertex normal: the read's)
-    const vec3  N  = dot(Nr, S.P) > 0.0 ? -Nr : Nr;        // (turned to the viewer: the guide's, the reflection's)
+    const vec3  N  = S.bFront ? Nr : -Nr;                   // (its visible side: the guide's, the reflection's)
     const float Dist = length(S.P);
     vec2 o = N.xy / (abs(N.x) + abs(N.y) + abs(N.z));
     if (N.z < 0.0) o = (1.0 - abs(o.yx)) * vec2(o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0);

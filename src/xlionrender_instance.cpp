@@ -714,7 +714,7 @@ namespace xlionrender
             // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;
             // the G-buffer's depth and normal
             if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_AOCompute, { .m_pShader = &m_AOShader, .m_nBuffers = 5, .m_nTextures = 2, .m_PushConstantsSize = sizeof(details::push_ao) }); Err ) return Err;
+            if( auto Err = Device.Create(m_AOCompute, { .m_pShader = &m_AOShader, .m_nBuffers = 5, .m_nTextures = 3, .m_PushConstantsSize = sizeof(details::push_ao) }); Err ) return Err;
             if( auto Err = Device.Create(m_TailFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * 64 + 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
@@ -1440,7 +1440,7 @@ namespace xlionrender
             auto Binds = std::array
             { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
             , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
-            , VertexSSBO(0), VertexSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7), FragmentSSBO(9), FragmentSSBO(10), FragmentSSBO(14)
+            , VertexSSBO(0), BothSSBO(1), FragmentSSBO(3), FragmentSSBO(4), BothSSBO(5), BothSSBO(6), BothSSBO(7), FragmentSSBO(9), FragmentSSBO(10), FragmentSSBO(14)     // (1: a fragment may read the instance record - the constant material's)
             };
             xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_static_geom)
                                        , .m_UniformBinds = std::span{ Binds }, .m_Samplers = Samplers, .m_nTextureSlots = TableSlots(M) };

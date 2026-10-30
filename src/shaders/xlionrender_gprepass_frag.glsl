@@ -19,5 +19,5 @@ void main()
     if (n.z < 0.0) o = (1.0 - abs(o.yx)) * vec2(o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0);
     OutHDR    = vec4(0.0);
     OutNormal = o;
-    OutId     = vec2(float(InInstance + 1u), float(InCluster));     // (x 0: nothing drawn there - the cleared value)
+    OutId     = vec2(float(InInstance + 1u), gl_FrontFacing ? float(InCluster) : -float(InCluster) - 1.0);     // (x 0: nothing drawn there - the cleared value; y < 0: a back face)
 }

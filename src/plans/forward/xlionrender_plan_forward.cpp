@@ -2993,7 +2993,7 @@ namespace xlionrender
                     details::push_ao Push{ std::uint32_t(View.m_GIScreenWidth), std::uint32_t(View.m_GIScreenHeight), std::uint32_t(GIScreenDivisor()), 0u
                                          , Scene.m_GI.m_AORadius, Scene.m_GI.m_AOThickness, 0.5f * float(View.m_GIScreenHeight) * P11, m_GatherTableBase, 0u, 0.33f };     // (no history: each frame good on its own - HypeHype's; moving looks as still)
                     auto Buffers  = std::array<xgpu::buffer*, 5>{ &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AOPrev, &View.m_AO, &View.m_AORaw };
-                    auto Textures = std::array<const xgpu::texture*, 2>{ &View.m_Depth, &View.m_GPreNormal };
+                    auto Textures = std::array<const xgpu::texture*, 3>{ &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId };
                     const int GX = (View.m_GIScreenWidth + 7) / 8, GY = (View.m_GIScreenHeight + 7) / 8;
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                     Push.m_Mode = 1u;

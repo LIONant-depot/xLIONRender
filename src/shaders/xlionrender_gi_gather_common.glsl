@@ -23,6 +23,7 @@ layout(push_constant) uniform gather_push
 struct gather_sample
 {
     bool  bHit;         // a GI surface is there
+    bool  bFront;       // seen from its front (the id's y >= 0)
     ivec2 Q;            // the full-size texel
     vec3  P;            // camera-centred world position
     vec3  N;            // world normal (its visible side)
@@ -42,7 +43,8 @@ gather_sample GatherSample(in const ivec2 p)
     S.Q    = min(S.Q, Size - 1);
     const vec2 Id = texelFetch(GPreId, S.Q, 0).xy;
     if (Id.x < 0.5) return S;
-    S.Slot = uint(Id.x + 0.5) - 1u; S.Cluster = uint(Id.y + 0.5);
+    S.bFront = Id.y >= 0.0;
+    S.Slot = uint(Id.x + 0.5) - 1u; S.Cluster = uint((S.bFront ? Id.y : -Id.y - 1.0) + 0.5);
     const uint T = push.TableBase;
     if (S.Slot >= GITable[T + 19u]) return S;
     const uint First = GITable[T + 20u + S.Slot];
