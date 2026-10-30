@@ -2885,6 +2885,31 @@ int main()
         CHECK(WFromA < 0.005 * WAll, "room B's floor reads room A's surfels per pixel (%.2f%% of its weight)", 100 * WFromA / std::max(WAll, 1e-9));
     }
 
+    // 6q. Every point of a rotated box's faces finds its read cell (a thin line of the Cornell box's tall box, rotated, read nothing:
+    //     COVERAGE's magenta, the white dashes, Tomas 2026-10-30)
+    {
+        for (const float Yaw : { 0.29f, -0.31f, 0.785f })
+        {
+            surfel_mesh M = Box({ 0.6f, 1.2f, 0.6f }, 0.05f);
+            const xmath::fmat4 L2W = xmath::fmat4::fromTranslation({ 0.19f, 0.6f, -0.27f }) * xmath::fmat4::fromRotationY(xmath::radian{ Yaw });
+            for (std::size_t v = 0; v < M.m_Pos.size(); ++v) { M.m_Pos[v] = L2W * M.m_Pos[v]; M.m_Nrm[v] = L2W.TransformDirection(M.m_Nrm[v]).NormalizeCopy(); }
+            M.Bake(0.05f, 0.75f);
+            M.BuildReadGrid();
+            int nNone = 0, nPts = 0; v3 First{};
+            for (const auto& T : M.m_Tris)
+            {
+                const v3 A = M.m_Pos[T[0]], B = M.m_Pos[T[1]], C = M.m_Pos[T[2]], N = (B - A).Cross(C - A).NormalizeCopy();
+                for (int i = 1; i < 48; ++i) for (int j = 1; i + j < 48; ++j, ++nPts)     // (inside: a face's rim is its neighbor's too)
+                {
+                    const v3 P = A + (B - A) * (i / 48.0f) + (C - A) * (j / 48.0f);
+                    if (M.ReadCellList(P, N).empty()) { if (!nNone++) First = P; }
+                }
+            }
+            std::printf("rotated box (yaw %.2f): read cell %.4f, %d of %d face points read nothing (first %.4f %.4f %.4f)\n", Yaw, M.m_ReadCell, nNone, nPts, First.m_X, First.m_Y, First.m_Z);
+            CHECK(nNone == 0, "a rotated box's face has %d points with no read cell (yaw %.2f)", nNone, Yaw);
+        }
+    }
+
     if (g_nErrors) { std::printf("%d checks failed\n", g_nErrors); return 1; }      // (CHECK counts and goes on: every failure is printed)
     std::printf("PASS\n");
     return 0;

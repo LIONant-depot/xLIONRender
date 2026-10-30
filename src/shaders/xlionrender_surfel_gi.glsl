@@ -125,13 +125,10 @@ float GIMaskDistance(in const vec3 P, in const vec3 N, in const vec3 PatchN, in 
     }
     return Best;
 }
-bool GIReadCellLookup(in const vec3 P, in const vec3 N, out uint First, out uint Count, out vec3 PatchN, out uint Patches, out uint nPatches)
+bool GIReadCellAt(in const ivec3 C, in const vec3 P, in const vec3 N, inout uint First, inout uint Count, inout vec3 PatchN, inout uint Patches, inout uint nPatches)
 {
-    First = 0u; Count = 0u; PatchN = N; Patches = 0u; nPatches = 0u;
-    const uint Mask = GIMesh[3];
-    if (Mask == 0u) return false;
+    const uint  Mask  = GIMesh[3];
     const float Cell  = uintBitsToFloat(GIMesh[4]);
-    const ivec3 C     = ivec3(floor((P + N * (0.05 * Cell)) / Cell));
     const uvec3 U     = uvec3(C) & 0x1FFFFFu;                       // surfel_grid::Key: 21 bits per axis
     const uint  KeyLo = U.z | (U.y << 21);
     const uint  KeyHi = (U.y >> 11) | (U.x << 10);
@@ -158,6 +155,28 @@ bool GIReadCellLookup(in const vec3 P, in const vec3 N, out uint First, out uint
             if (Score > Best) { Best = Score; First = GIMesh[a + 2u]; Count = w3 & 0xFFFFu; PatchN = Np; }
         }
         return Best > -1e29;
+    }
+    return false;
+}
+bool GIReadCellLookup(in const vec3 P, in const vec3 N, out uint First, out uint Count, out vec3 PatchN, out uint Patches, out uint nPatches)
+{
+    First = 0u; Count = 0u; PatchN = N; Patches = 0u; nPatches = 0u;
+    if (GIMesh[3] == 0u) return false;
+    const float Cell = uintBitsToFloat(GIMesh[4]);
+    const vec3  L    = (P + N * (0.05 * Cell)) / Cell;
+    const ivec3 C    = ivec3(floor(L));
+    if (GIReadCellAt(C, P, N, First, Count, PatchN, Patches, nPatches)) return true;
+    // Not in the bake's cells but within a sample's spacing (an eighth of a cell: surfel_mesh::BuildReadGridAt) of their edge: the cells
+    // across it - the bake's points and the pixel's land a hair apart there (a line along a rotated box's cell edges read nothing:
+    // COVERAGE's magenta, the Cornell box's white dashes, Tomas 2026-10-30)
+    const vec3  F = L - vec3(C);
+    const ivec3 D = ivec3(F.x < 0.125 ? -1 : F.x > 0.875 ? 1 : 0, F.y < 0.125 ? -1 : F.y > 0.875 ? 1 : 0, F.z < 0.125 ? -1 : F.z > 0.875 ? 1 : 0);
+    if (D == ivec3(0)) return false;
+    for (int k = 1; k < 8; ++k)
+    {
+        const ivec3 O = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1) * D;
+        if (O == ivec3(0) || ((k & 1) != 0 && D.x == 0) || ((k & 2) != 0 && D.y == 0) || ((k & 4) != 0 && D.z == 0)) continue;
+        if (GIReadCellAt(C + O, P, N, First, Count, PatchN, Patches, nPatches)) return true;
     }
     return false;
 }
