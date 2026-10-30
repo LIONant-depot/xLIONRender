@@ -1331,11 +1331,7 @@ namespace xlionrender
             Setup.m_DepthStencil.m_bDepthClampEnable        = true;
         }
         else ApplyState(Setup, M.m_State);
-        // a rigid masked one's shading: its depth is the prepass's (plan_forward: its cutout drawn there), so it no longer writes it - a discard
-        // with depth writes kept the depth test late, every hidden leaf ran the whole shader (Bistro: 15 ms). XLION_PREPASS_MASKED=0: as before
-        static const bool s_bMaskedPrepass = [] { const char* p = std::getenv("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
-        if( s_bMaskedPrepass && !bShadow && !bGBuffer && !bCutout && !bSkin && M.m_State.m_Blend == material_state::blend::MASKED && M.m_State.m_bDepthTest && !M.m_State.m_bWireframe )
-            Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+        // (a masked material is an opaque one with a discard: the same depth test and write in every pass - Tomas; its cutout in the prepass and here run the same test)
         if( bGBuffer )      // the thin G-buffer: opaque, its depth laid and tested (a masked one discards in its own code)
         {
             Setup.m_Blend = xgpu::pipeline::blend{};
