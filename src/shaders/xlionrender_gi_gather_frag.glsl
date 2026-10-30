@@ -53,13 +53,28 @@ void main()
     const mat3  Ai = inverse(transpose(At));
     const vec3  Off = vec3(uintBitsToFloat(GITable[push.TableBase + 16u]), uintBitsToFloat(GITable[push.TableBase + 17u]), uintBitsToFloat(GITable[push.TableBase + 18u]));
     const vec3  Pm = Ai * (S.P - Off - vec3(I.Rows[0].w, I.Rows[1].w, I.Rows[2].w));
-    const vec3  GFaceD = cross(dFdx(Pm), dFdy(Pm));          // (before any lane leaves: the read's face normal)
+    // The read's face normal from the derivatives of a position at the same texel of every block (the checkerboard's alternate texels
+    // skewed them: a wrong face on curved surfaces, sunlit surfels behind read - Tomas's Sponza arch), before any lane leaves
+    vec3 Pd = Pm;
+    {
+        const ivec2 Size = textureSize(GPreDepth, 0);
+        const ivec2 Qd   = min(P * int(push.Div) + ivec2(int(push.Div) / 2), Size - 1);
+        const float zd   = texelFetch(GPreDepth, Qd, 0).r;
+        const mat4  C2W  = mat4(uintBitsToFloat(uvec4(GITable[push.TableBase + 0u], GITable[push.TableBase + 1u], GITable[push.TableBase + 2u], GITable[push.TableBase + 3u])),
+                                uintBitsToFloat(uvec4(GITable[push.TableBase + 4u], GITable[push.TableBase + 5u], GITable[push.TableBase + 6u], GITable[push.TableBase + 7u])),
+                                uintBitsToFloat(uvec4(GITable[push.TableBase + 8u], GITable[push.TableBase + 9u], GITable[push.TableBase + 10u], GITable[push.TableBase + 11u])),
+                                uintBitsToFloat(uvec4(GITable[push.TableBase + 12u], GITable[push.TableBase + 13u], GITable[push.TableBase + 14u], GITable[push.TableBase + 15u])));
+        const vec4  Wd   = C2W * vec4((vec2(Qd) + 0.5) / vec2(Size) * 2.0 - 1.0, zd, 1.0);
+        if (zd < 1.0) Pd = Ai * (Wd.xyz / Wd.w - Off - vec3(I.Rows[0].w, I.Rows[1].w, I.Rows[2].w));
+    }
+    const vec3  GFaceD = cross(dFdx(Pd), dFdy(Pd));
     if (!S.bHit) return;
 
     const uvec4 Hd = GIScreen[0];
     const uint  W = Hd.x, H = Hd.y;
     const bool  bIn = uint(P.x) < W && uint(P.y) < H;
-    const vec3  N = S.N;
+    const vec3  Nr = S.N;                                   // (the vertex normal: the read's)
+    const vec3  N  = dot(Nr, S.P) > 0.0 ? -Nr : Nr;        // (turned to the viewer: the guide's, the reflection's)
     const float Dist = length(S.P);
     vec2 o = N.xy / (abs(N.x) + abs(N.y) + abs(N.z));
     if (N.z < 0.0) o = (1.0 - abs(o.yx)) * vec2(o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0);
@@ -103,12 +118,13 @@ void main()
         // mb_standard_pbr.frag GIPixelGI, the per-pixel read (inNormal (0, 0, 1): the surface's own normal). ponytail: a copy of its
         // policy until the material compiler's step (stage 2c) moves it into xlionrender_surfel_gi.glsl for both
         const uint Offset = S.Entry.x, Ref = S.Entry.y;
-        const vec3 GN0    = normalize(At * N);
+        const vec3 GN0    = normalize(At * Nr);
         vec3       GFace  = dot(GFaceD, GFaceD) > 1e-24 ? normalize(dot(GFaceD, GN0) < 0.0 ? -GFaceD : GFaceD) : GN0;
         if (dot(GFace, GN0) < 0.7) GFace = GN0;
         vec4 E = vec4(0.0);
         g_GIRefl = vec4(0.0);
-        if ((Ref & gi_per_pixel_v) != 0u)
+        if (Ref == gi_probes_v) E = SurfelGIProbes(S.P, N);        // (a skinned surface: the probe grid, GIMesh its buffer)
+        else if ((Ref & gi_per_pixel_v) != 0u)
         {
             g_GIMoments      = (Ref & gi_no_moments_v) == 0u;
             g_GIPixelCap     = GIPixelCap(Ref);
@@ -116,7 +132,9 @@ void main()
             g_GIAblateLookup = (Ref >> 25u) & 3u;
             g_GIReflDir      = normalize(Ai * reflect(normalize(S.P), N));        // (the eye at the origin: V = -P)
             const GIQueryResult Q = SurfelGIQuery(Pm, GFace, GN0, Offset, Ref & 0xFFu);
-            if (Q.bSupported) E = vec4(Q.Irradiance, 1.0);
+            // (the full read's policy: a low confidence - the surfels near mostly out of sight - blends into a smooth read; there the vertex
+            // read, here the local mean: unblended, a weak read's noise and leaks showed as speckled patches - Tomas's Sponza arch)
+            if (Q.bSupported) E = vec4(mix(SurfelGILocalMean(Pm, GFace, Offset, Ref & 0xFFu), Q.Irradiance, smoothstep(0.0, 0.25, Q.Confidence)), 1.0);
             if (!Q.bSupported || Q.Confidence < 0.25) g_GIRefl = vec4(0.0);
         }
         if (E.w < 0.5 && (Ref & 0x8000u) == 0u) E = vec4(SurfelGILocalMean(Pm, GFace, Offset, Ref & 0xFFu), 1.0);

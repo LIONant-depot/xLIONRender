@@ -37,6 +37,7 @@ layout(location = 12) flat out uvec2 OutGIRef;
 layout(location = 13) out vec4 OutGITangent;
 layout(location = 14) out vec4 OutPrevClip;         // last frame's clip position (the screen tail's motion; w 0: none)
 layout(location = 8) flat out uint OutInstance;     // the slot, for fragment shaders that read the instance record (geom standard)
+layout(location = 15) flat out uint OutCluster;     // the cluster drawn (the G-buffer prepass: the submesh instance, xlionrender_gprepass_frag.glsl)
 
 
 void main()
@@ -47,6 +48,7 @@ void main()
     // Transform to all needed spaces
     //
     OutInstance             = push.instanceIndex;
+    OutCluster              = push.clusterIndex;
     const InstanceData I    = instances.Instances[push.instanceIndex];
     const mat3x4 L2wRows    = mat3x4(I.Rows[0], I.Rows[1], I.Rows[2]);
     Out.wSpacePosition      = vec4(VertData.LocalPos * L2wRows + mesh.WorldOffset.xyz, 1.0);
@@ -88,7 +90,7 @@ void main()
     OutGI         = vec4(0.0);
     OutGIPos      = Out.wSpacePosition.xyz;                       // (the probe grid's read: the eye's world, as the lights')
     OutGINormal   = vec3(0.0, 1.0, 0.0);
-    OutGIRef      = uvec2(0u, push.giProbes != 0u ? 0xFFFFFFFEu : 0xFFFFFFFFu);     // (xlionrender_surfel_gi.glsl gi_probes_v / gi_none_v)
+    OutGIRef      = uvec2(0u, push.giProbes == 2u ? 0xFFFFFFFDu : push.giProbes != 0u ? 0xFFFFFFFEu : 0xFFFFFFFFu);     // (gi_screen_v: the gather read its probes / gi_probes_v / gi_none_v)
     OutGITangent  = vec4(1.0, 0.0, 0.0, 1.0);
 }
 

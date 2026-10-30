@@ -519,6 +519,10 @@ namespace xlionrender
         xgpu::pipeline_instance     m_DepthPrepassInstance;
         xgpu::pipeline              m_GPrePipeline, m_GPreRecordsPipeline;     // the G-buffer prepass: the CPU path's, the records' (GPU culling)
         xgpu::pipeline_instance     m_GPreInstance, m_GPreRecordsInstance;
+        xgpu::pipeline              m_GPre2SPipeline;                  // (the CPU path's, culling nothing: double-sided opaque submeshes)
+        xgpu::pipeline_instance     m_GPre2SInstance;
+        xgpu::pipeline              m_GPreSkinPipeline;                // (skinned meshes: single sided, opaque)
+        xgpu::pipeline_instance     m_GPreSkinInstance;
         // The GI gather from it (xlionrender_gi_gather_common.glsl; its instances are the views': render_view::m_GIClassifyInstance ...):
         // the classification (each half-size pixel's GI buffer as its depth), the passes (one a GI buffer, tested EQUAL)
         xgpu::pipeline              m_GIClassifyPipeline, m_GIGatherPipeline;

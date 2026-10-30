@@ -227,6 +227,10 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_GPrePipeline));
         m_Device.Destroy(std::move(m_GPreRecordsInstance));
         m_Device.Destroy(std::move(m_GPreRecordsPipeline));
+        m_Device.Destroy(std::move(m_GPre2SInstance));
+        m_Device.Destroy(std::move(m_GPreSkinInstance));
+        m_Device.Destroy(std::move(m_GPreSkinPipeline));
+        m_Device.Destroy(std::move(m_GPre2SPipeline));
         m_Device.Destroy(std::move(m_GIClassifyPipeline));
         m_Device.Destroy(std::move(m_GIGatherPipeline));
         m_Device.Destroy(std::move(m_GIScreenDepthInstance));
@@ -570,6 +574,9 @@ namespace xlionrender
                     xgpu::pipeline::setup Rec{ .m_VertexDescriptor = m_StaticGeomVD, .m_Shaders = RecShaders, .m_PushConstantsSize = sizeof(details::push_static_geom), .m_UniformBinds = RecBinds, .m_Samplers = Samplers };
                     if( auto Err = Device.Create(m_GPrePipeline, Cpu); Err ) return Err;
                     if( auto Err = Device.Create(m_GPreInstance, { .m_PipeLine = m_GPrePipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+                    Cpu.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+                    if( auto Err = Device.Create(m_GPre2SPipeline, Cpu); Err ) return Err;
+                    if( auto Err = Device.Create(m_GPre2SInstance, { .m_PipeLine = m_GPre2SPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
                     if( auto Err = Device.Create(m_GPreRecordsPipeline, Rec); Err ) return Err;
                     if( auto Err = Device.Create(m_GPreRecordsInstance, { .m_PipeLine = m_GPreRecordsPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
                 }
@@ -650,6 +657,25 @@ namespace xlionrender
         if( auto Err = Device.Create(m_DefaultMaterialGBFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DefaultMaterialGBFrag) }); Err ) return Err;
         if( auto Err = Device.Create(m_StaticGeomGIVert,    { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_StaticGeomGIVert) }); Err ) return Err;     // RIGID: reads the surfel GI
         if( auto Err = Device.Create(m_SkinGeomVert,        { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_SkinGeomVert) }); Err ) return Err;
+        {   // the G-buffer prepass for skinned meshes (single sided, opaque): their vertex shader, the skin material pipelines' layout
+            // (buildMaterialPipeline), the G-buffer's fragment
+            using ub = xgpu::pipeline::uniform_binds;
+            const auto V = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
+            const auto F = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
+            const auto B = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bVertex = true, .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
+            auto SkinBinds = std::array
+            { ub{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true },   .m_Type = ub::type::UBO_DYNAMIC }
+            , ub{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::UBO_DYNAMIC }
+            , V(0), V(1), V(2), F(3), F(4), B(5), B(6), B(7), V(8), F(9), F(10), F(14)
+            };
+            xgpu::shader GPreFrag;
+            if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPrePassFrag) }); Err ) return Err;
+            auto Shaders  = std::array<const xgpu::shader*, 2>{ &GPreFrag, &m_SkinGeomVert };
+            auto Samplers = LitSamplers();
+            auto Bindings = LitBindings({});
+            if( auto Err = Device.Create(m_GPreSkinPipeline, { .m_VertexDescriptor = m_SkinGeomVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_skin_geom), .m_UniformBinds = SkinBinds, .m_Samplers = Samplers }); Err ) return Err;
+            if( auto Err = Device.Create(m_GPreSkinInstance, { .m_PipeLine = m_GPreSkinPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+        }
         if( auto Err = Device.Create(m_GICaptureVert,       { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
         if( auto Err = Device.Create(m_StaticGeomGIRecordsVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_StaticGeomGIRecordsVert) }); Err ) return Err;     // RIGID, GPU culled
         if( m_pCull = std::make_unique<gpu_cull>(); !m_pCull->Init(Device, s_CullComp, s_HiZComp) ) m_pCull.reset();      // (no drawIndirectCount: the CPU path)

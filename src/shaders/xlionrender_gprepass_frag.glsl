@@ -14,7 +14,7 @@ layout(location = 2) out vec2 OutId;
 
 void main()
 {
-    vec3 n = normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0);
+    vec3 n = normalize(In.Normal.xyz);      // (not turned to the viewer: a double-sided back face's GI reads the vertex normal, as the materials' own read)
     vec2 o = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
     if (n.z < 0.0) o = (1.0 - abs(o.yx)) * vec2(o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0);
     OutHDR    = vec4(0.0);

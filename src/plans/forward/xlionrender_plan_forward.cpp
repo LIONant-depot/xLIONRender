@@ -2644,6 +2644,10 @@ namespace xlionrender
                 if( bPlan ) planClusters(Scene, Eye, Frustum);
             }
 
+            static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
+            // The G-buffer prepass (gi_gbuffer_gather_plan.md): the main view's prepass in a pass of its own writing each pixel's normal and
+            // submesh instance too (a masked one's through its cutout); the scene pass loads its depth
+            const bool bGPre = bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
             // A submesh the half-resolution GI pass reads (and the depth prepass lays): opaque, single sided, depth written and tested, filled
             const auto Opaque = [&]( const material_slot* pMat )
             {
@@ -2658,12 +2662,10 @@ namespace xlionrender
             {
                 if( Opaque(pMat) ) return true;
                 const auto& St = pMat->m_State;
-                return s_bScreenMasked && St.m_Blend == material_state::blend::MASKED && !St.m_bDoubleSided && St.m_bDepthWrite && St.m_bDepthTest && !St.m_bWireframe;
+                // (double sided: in the G-buffer prepass too - its pipeline that culls nothing)
+                if( bGPre && St.m_Blend == material_state::blend::OFF && St.m_bDepthWrite && St.m_bDepthTest && !St.m_bWireframe ) return true;
+                return s_bScreenMasked && St.m_Blend == material_state::blend::MASKED && (bGPre || !St.m_bDoubleSided) && St.m_bDepthWrite && St.m_bDepthTest && !St.m_bWireframe;
             };
-            static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
-            // The G-buffer prepass (gi_gbuffer_gather_plan.md): the main view's prepass in a pass of its own writing each pixel's normal and
-            // submesh instance too (a masked one's through its cutout); the scene pass loads its depth
-            const bool bGPre = bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
             // The GI read at half resolution (scene::gi_settings::m_bHalfRes; XLION_GI_HALFRES=0/1 overrides): the main view, no GI debug view,
             // gathered from the G-buffer prepass (GatherGI, below: no geometry drawn for it) into the view's buffer; the scene pass's GI draws
             // upsample it (SurfelGIScreen) instead of reading the surfels each pixel. With the per-pixel read off (the vertex read alone) none:
@@ -2753,7 +2755,16 @@ namespace xlionrender
                         const std::size_t iDraw = Vis.m_iDraw;
                         const auto*       pMesh = Vis.m_pMesh;
                         const std::uint32_t Slot = m_DrawSlot[iDraw];
-                        if( !pMesh->m_bCluster || Slot == instance_slots::none_v || pMesh->m_Geom.m_Kind == geom_kind::SKIN ) continue;
+                        if( !pMesh->m_bCluster || Slot == instance_slots::none_v ) continue;
+                        if( pMesh->m_Geom.m_Kind == geom_kind::SKIN )         // (a skinned one: the probe grid - its GI read is the gather's too)
+                        {
+                            const xgpu::buffer* pProbes = Scene.m_GI.m_bEnable && Scene.m_GI.m_bProbes && m_pGITrace ? m_pGITrace->ProbeBuffer() : nullptr;
+                            if( pProbes == nullptr || m_GatherTable.size() + 4 * pMesh->m_Geom.m_Clusters.size() > std::size_t(gather_table_uints_v) ) continue;
+                            m_GatherTable[20 + Slot] = std::uint32_t(m_GatherTable.size());
+                            const std::uint32_t k = BufferIndex(pProbes);
+                            for( std::size_t c = 0; c < pMesh->m_Geom.m_Clusters.size(); ++c ) m_GatherTable.insert(m_GatherTable.end(), { 0u, 0xFFFFFFFEu, k, 0u });     // (xlionrender_surfel_gi.glsl gi_probes_v)
+                            continue;
+                        }
                         const auto& G = pMesh->m_Geom;
                         const bool bSections = !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == G.m_Clusters.size();
                         const auto GI = iDraw < m_DrawGI.size() ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
@@ -3082,7 +3093,8 @@ namespace xlionrender
                     pInstance = &m_StaticGeomInstance;      // the constant material, read from the instance record
                 }
                 const std::uint32_t MaterialBase = pMat ? pMat->m_ParamBase : 0u;
-                xgpu::buffer* const SkinGI = bSkin && Probes ? Probes : &m_GIDummy;
+                const bool bSkinScreen = bSkin && bScreen && Opaque(pMat);      // (in the G-buffer: the screen buffer brings its GI - the gather's probe read - and its AO)
+                xgpu::buffer* const SkinGI = bSkinScreen ? &View.m_GIScreenBuffer : bSkin && Probes ? Probes : &m_GIDummy;
                 const auto GIOf = RigidGI(iDraw, pMat);         // (rigid: a cluster's GI buffer and push constants)
                 const auto Bind = [&](xgpu::buffer* pGIBuffer)
                 {
@@ -3117,7 +3129,7 @@ namespace xlionrender
                 {
                     if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
                     const auto& C = G.m_Clusters[c];
-                    if( bSkin ) { Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, SkinGI != &m_GIDummy ? 1u : 0u, MaterialBase, G.m_PrevBones }); }
+                    if( bSkin ) { Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, bSkinScreen ? 2u : SkinGI != &m_GIDummy ? 1u : 0u, MaterialBase, G.m_PrevBones }); }
                     else
                     {
                         const auto [pBuf, Push] = GIOf(c, Slot, MaterialBase);
@@ -3165,13 +3177,38 @@ namespace xlionrender
                     const std::uint32_t Slot = m_DrawSlot[iDraw];
                     if( !pMesh->m_bCluster || Slot == instance_slots::none_v || (bPlan && m_bBoxesOnly) ) continue;
                     const auto& G = pMesh->m_Geom;
-                    if( G.m_Kind == geom_kind::SKIN ) continue;
+                    if( G.m_Kind == geom_kind::SKIN )
+                    {
+                        // (with the G-buffer: its single-sided opaque submeshes into it - their AO and the gather's probe-grid read)
+                        if( !(bGPre && Mode == 1) ) continue;
+                        const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
+                        for( const auto& Sub : G.m_Submeshes )
+                        {
+                            auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                            if( !Opaque(pMat) ) continue;
+                            std::array<xgpu::buffer*, 12> Buffers{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+                            Cmd.setPipelineInstance(m_GPreSkinInstance, std::span{ Buffers });
+                            Cmd.setDynamicUBO(m_LightUBO, 1);
+                            Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
+                            BindClusterStreams(Cmd, G);
+                            pPrepassGeom = nullptr; pPrepassBound = nullptr;
+                            for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                            {
+                                if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
+                                const auto& C = G.m_Clusters[c];
+                                Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, 0u, G.m_PrevBones });
+                                Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
+                            }
+                        }
+                        continue;
+                    }
                     const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
                     for( const auto& Sub : G.m_Submeshes )
                     {
                         if( CulledOnGPU(iDraw, G, Sub) ) continue;
                         auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                         xgpu::pipeline_instance* pCut = nullptr;
+                        bool b2S = false;           // (double sided, opaque: the G-buffer prepass's pipeline that culls nothing)
                         if( pMat )
                         {
                             const auto& St = pMat->m_State;
@@ -3180,7 +3217,8 @@ namespace xlionrender
                             {
                                 if( !s_bMaskedPrepass || pLight == nullptr || (pCut = getCutoutInstance(*pMat)) == nullptr ) continue;
                             }
-                            else if( St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided ) continue;
+                            else if( St.m_Blend != material_state::blend::OFF || (St.m_bDoubleSided && !(bGPre && Mode == 1)) ) continue;
+                            b2S = St.m_bDoubleSided;
                         }
                         if( Mode == 2 ) continue;        // (everything in the G-buffer: the masked ones' cutout writes its normal and instance too, mb_standard_pbr.frag XLION_GPRE_OUT)
                         if( pCut )
@@ -3202,14 +3240,14 @@ namespace xlionrender
                             }
                             if( pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);
                         }
-                        else if( &G != pPrepassGeom || pPrepassBound != nullptr )
+                        else if( &G != pPrepassGeom || pPrepassBound != (b2S ? m_GPre2SInstance.m_Private.get() : nullptr) )
                         {
                             std::array<xgpu::buffer*, 9> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams };
-                            Cmd.setPipelineInstance(bGPre && Mode == 1 ? m_GPreInstance : m_DepthPrepassInstance, std::span{ Buffers });
+                            Cmd.setPipelineInstance(bGPre && Mode == 1 ? (b2S ? m_GPre2SInstance : m_GPreInstance) : m_DepthPrepassInstance, std::span{ Buffers });
                             Cmd.setDynamicUBO(m_LightUBO, 1);
                             Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                             BindClusterStreams(Cmd, G);
-                            pPrepassGeom = &G; pPrepassBound = nullptr;
+                            pPrepassGeom = &G; pPrepassBound = b2S ? m_GPre2SInstance.m_Private.get() : nullptr;
                         }
                         pBound = nullptr;           // (the shading's binds start again)
                         for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
