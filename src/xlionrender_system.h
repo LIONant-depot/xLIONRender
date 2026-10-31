@@ -257,6 +257,7 @@ namespace xlionrender
             auto* pDevice = GetDeviceInternal();
             if (!pDevice) return;
             xlioncore::resources::Initialize(*pDevice, getGameMgr().m_SceneMgr.m_ProjectPath.c_str());
+            XPROFILE_MEM_OWNER("LIONRender: a world's scene renderer");        // (the profiler's memory map: its views, GI, meshes, shadows...)
             if (!m_pScene) m_pScene = std::make_unique<scene_renderer>();
             auto& R = *m_pScene;
             if (!R.Init(*pDevice)) return;

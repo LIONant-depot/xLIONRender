@@ -33,6 +33,7 @@ namespace xlionrender
     bool Init(xgpu::device& Device) noexcept
     {
         g_pDevice = &Device;
+        XPROFILE_MEM_OWNER("LIONRender: the editor's renderer");
         return g_Renderer.Init(Device) && g_TextRenderer.Init(Device);
     }
 
@@ -42,6 +43,7 @@ namespace xlionrender
     void Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View, const roles* pRoles) noexcept
     {
         XPROFILE_SCOPE("LIONRender Draw");
+        XPROFILE_MEM_OWNER("LIONRender: the editor's renderer");
         if (auto* pSystem = FindSystem(pWorld)) pSystem->Collect(View, pRoles);
         g_Renderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH, pRoles);
         g_TextRenderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH);          // after the solids: the text is blended over them
