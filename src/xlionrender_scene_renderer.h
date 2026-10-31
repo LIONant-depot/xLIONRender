@@ -40,7 +40,10 @@ namespace xlionrender
         scene                                           m_Scene;
         bool                                            m_bReady    = false;
         bool                                            m_bFailed   = false;
-        std::unordered_map<const void*, mesh_id>        m_Meshes;       // per loaded geometry
+        // per loaded geometry (keyed by its address while it lives - DropReplacedMeshes: a geometry replaced lets it go): the renderer's mesh, and
+        // the reference it was asked by (what it resolves to now)
+        struct geom_mesh { mesh_id m_Id; std::uint64_t m_Ref = 0; };
+        std::unordered_map<const void*, geom_mesh>      m_Meshes;
         struct made_material { material_id m_Id; std::vector<const void*> m_From; };     // m_From: the instance, its material, its textures it was made from
         std::unordered_map<std::uint64_t, made_material> m_Materials;  // per material instance (instance guid)
         std::uint32_t                                   m_UpdateCount = 0;              // xlioncore::resources::UpdateCount when the materials were last checked
@@ -103,7 +106,8 @@ namespace xlionrender
             auto* pGeom = static_cast<xgeom_static::xgpu::geom*>(xlioncore::resources::GetResource(geom_static_type_guid_v.m_Value, Ref.m_Instance.m_Value));
             if (!pGeom) return nullptr;
             auto [It, bNew] = m_Meshes.try_emplace(pGeom);
-            if (bNew && m_Renderer.CreateClusterGeom(It->second, MakeClusterGeom(*pGeom))) { m_Meshes.erase(It); return nullptr; }
+            if (bNew && m_Renderer.CreateClusterGeom(It->second.m_Id, MakeClusterGeom(*pGeom))) { m_Meshes.erase(It); return nullptr; }
+            if (bNew) It->second.m_Ref = Ref.m_Instance.m_Value;
             // GI on: the surfels the GeomStatic compiler baked, with the rays' structures built from the geometry's CPU copy, the first time.
             // Phase 7: the geometry's arrays are copied here; it is decoded, and its surfels, the rays' BVH, the read grid and the GPU
             // buffer's data are made on a worker (0.6 s for the Police building, all of it on the main thread before); when they are
@@ -148,8 +152,8 @@ namespace xlionrender
                 else if (P->m_bDone.load(std::memory_order_acquire))
                 {
                     m_GILoadPartMs[1] += P->m_WorkerMs;                        // the surfels and the rays' structures, on the worker
-                    const bool bGI = P->m_bOk && (P->m_Sections.empty() ? !m_Renderer.SetMeshGI(It->second, std::move(P->m_Surfels), std::move(P->m_Packed))
-                                                                         : !m_Renderer.SetMeshGISections(It->second, std::move(P->m_Sections), std::move(P->m_ClusterSection), std::move(P->m_ClusterVertexDelta)));
+                    const bool bGI = P->m_bOk && (P->m_Sections.empty() ? !m_Renderer.SetMeshGI(It->second.m_Id, std::move(P->m_Surfels), std::move(P->m_Packed))
+                                                                         : !m_Renderer.SetMeshGISections(It->second.m_Id, std::move(P->m_Sections), std::move(P->m_ClusterSection), std::move(P->m_ClusterVertexDelta)));
                     m_GILoadPartMs[2] += Ms(T0);                               // handed to the renderer (its GPU buffers), here
                     m_GIBaked[pGeom] = bGI;
                     m_GILoads.erase(pGeom);
@@ -159,7 +163,27 @@ namespace xlionrender
                 m_Renderer.NoteGILoad(LoadMs);
             }
             if (auto G = m_GIBaked.find(pGeom); G != m_GIBaked.end()) m_Stats.m_GIMeshes += G->second;
-            return &It->second;
+            return &It->second.m_Id;
+        }
+
+        // A geometry replaced (compiled again, or a background load taking over): what was made from the old one goes - its mesh reads the
+        // old one's buffers, and the old address, once freed, can be a later geometry's, which must not find it. The geometry's reference
+        // resolves to something else now: its mesh, GI and outline are made again from the new one when next asked for.
+        // (Only a replacement frees a geometry mid-session - xlioncore's resource cache holds every loaded one - and each one moves UpdateCount)
+        void DropReplacedMeshes() noexcept
+        {
+            int nDropped = 0;
+            for (auto It = m_Meshes.begin(); It != m_Meshes.end();)
+            {
+                if (xlioncore::resources::GetResource(geom_static_type_guid_v.m_Value, It->second.m_Ref) == It->first) { ++It; continue; }
+                m_Renderer.DestroyMesh(It->second.m_Id);
+                m_GIBaked.erase(It->first);
+                m_GILoads.erase(It->first);         // (a GI job still running keeps its own copy of the geometry)
+                m_OutlineMade.erase(It->first);
+                It = m_Meshes.erase(It);
+                ++nDropped;
+            }
+            if (nDropped) { std::printf("Renderer: %d mesh(es) of replaced geometries dropped, %zu left\n", nDropped, m_Meshes.size()); std::fflush(stdout); }
         }
 
         // The renderer's material of a material instance (invalid: not loaded yet, or it does not resolve - the slot draws with the constant material)
@@ -490,6 +514,7 @@ namespace xlionrender
                     It = m_Materials.erase(It);
                 }
                 // (an override slot whose instance was compiled again: a new source key, a new material when next drawn)
+                DropReplacedMeshes();
             }
         }
 
@@ -525,7 +550,7 @@ namespace xlionrender
             m_Renderer.DestroyView(m_View);
             m_Overrides.Clear(m_Renderer);
             for (auto& [Key, M] : m_Materials) m_Renderer.DestroyMaterial(M.m_Id);
-            for (auto& [Key, Id] : m_Meshes)    m_Renderer.DestroyMesh(Id);
+            for (auto& [Key, M] : m_Meshes)     m_Renderer.DestroyMesh(M.m_Id);
             for (auto& [Key, E] : m_Skinned)    ReleaseSkinned(E);
         }
     };
