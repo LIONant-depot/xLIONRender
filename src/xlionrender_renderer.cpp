@@ -52,14 +52,14 @@ namespace xlionrender
     bool renderer::BuildMesh(xgpu::device& Device, mesh& Mesh, const xprim_geom::mesh& GeneratedMesh) noexcept
     {
         if (!Ok(Device.Create(Mesh.m_Verts, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ
-            , .m_EntryByteSize = sizeof(xprim_geom::vertex), .m_EntryCount = static_cast<int>(GeneratedMesh.m_Vertices.size()) }))) return false;
+            , .m_EntryByteSize = sizeof(xprim_geom::vertex), .m_EntryCount = static_cast<int>(GeneratedMesh.m_Vertices.size()), .m_pName = "Geometry: primitive vertices" }))) return false;
         (void)Mesh.m_Verts.MemoryMap(0, static_cast<int>(GeneratedMesh.m_Vertices.size()), [&](void* pData)
         {
             std::memcpy(pData, GeneratedMesh.m_Vertices.data(), GeneratedMesh.m_Vertices.size() * sizeof(xprim_geom::vertex));
         });
 
         if (!Ok(Device.Create(Mesh.m_Indices, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t)
-            , .m_EntryCount = static_cast<int>(GeneratedMesh.m_Indices.size()) }))) return false;
+            , .m_EntryCount = static_cast<int>(GeneratedMesh.m_Indices.size()), .m_pName = "Geometry: primitive indices" }))) return false;
         (void)Mesh.m_Indices.MemoryMap(0, static_cast<int>(GeneratedMesh.m_Indices.size()), [&](void* pData)
         {
             std::memcpy(pData, GeneratedMesh.m_Indices.data(), GeneratedMesh.m_Indices.size() * sizeof(std::uint32_t));

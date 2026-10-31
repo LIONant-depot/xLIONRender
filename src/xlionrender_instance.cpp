@@ -342,29 +342,29 @@ namespace xlionrender
         }
 
         // Uniforms (dynamic UBO rings) - layouts in shaders/xlionrender_forward_standard_frag.glsl
-        if( auto Err = Device.Create(m_LightUBO,    { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_lighting), .m_EntryCount = 16 }); Err ) return Err;
-        if( auto Err = Device.Create(m_LightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_light_data), .m_EntryCount = ring_frames_v * light_region_v, .m_bWriteOnly = true }); Err ) return Err;
-        if( auto Err = Device.Create(m_GILightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * gi_light_region_v }); Err ) return Err;     // a uvec4 a surfel: the HL2 basis' 3 colors in RGB9E5, the validity
-        if( auto Err = Device.Create(m_GIMomentRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * gi_light_region_v * gi::moment_texels_v }); Err ) return Err;
+        if( auto Err = Device.Create(m_LightUBO,    { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_lighting), .m_EntryCount = 16, .m_pName = "Lights: lighting uniforms" }); Err ) return Err;
+        if( auto Err = Device.Create(m_LightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_light_data), .m_EntryCount = ring_frames_v * light_region_v, .m_pName = "Lights: light ring", .m_bWriteOnly = true }); Err ) return Err;
+        if( auto Err = Device.Create(m_GILightRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * gi_light_region_v, .m_pName = "GI: light ring" }); Err ) return Err;     // a uvec4 a surfel: the HL2 basis' 3 colors in RGB9E5, the validity
+        if( auto Err = Device.Create(m_GIMomentRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * gi_light_region_v * gi::moment_texels_v, .m_pName = "GI: moment ring" }); Err ) return Err;
         {
             const std::uint32_t Zeros[8] = {};     // a GIMesh header: no surfels, no read grid
-            if( auto Err = Device.Create(m_GIDummy, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(Zeros), .m_EntryCount = 1, .m_pData = const_cast<std::uint32_t*>(Zeros) }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIDummy, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(Zeros), .m_EntryCount = 1, .m_pData = const_cast<std::uint32_t*>(Zeros), .m_pName = "GI: dummy" }); Err ) return Err;
         }
         {
             std::uint32_t White = 0xFFFFFFFFu;
-            if( auto Err = Device.Create(m_WhiteColorStream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(White), .m_EntryCount = 1, .m_pData = &White }); Err ) return Err;
+            if( auto Err = Device.Create(m_WhiteColorStream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(White), .m_EntryCount = 1, .m_pData = &White, .m_pName = "Geometry: white colour stream" }); Err ) return Err;
             float NoUV1[2] = { -3.0e38f, -3.0e38f };   // mb_input_definition_full.vert mb_UV1: below -1e38 reads UV0
-            if( auto Err = Device.Create(m_NoUV1Stream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(NoUV1), .m_EntryCount = 1, .m_pData = NoUV1 }); Err ) return Err;
+            if( auto Err = Device.Create(m_NoUV1Stream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(NoUV1), .m_EntryCount = 1, .m_pData = NoUV1, .m_pName = "Geometry: no uv1 stream" }); Err ) return Err;
         }
-        if( auto Err = Device.Create(m_CellRing,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * max_cell_uints_v, .m_bWriteOnly = true }); Err ) return Err;
-        if( auto Err = Device.Create(m_MaterialUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_material), .m_EntryCount = max_draws_per_frame_v }); Err ) return Err;
+        if( auto Err = Device.Create(m_CellRing,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * max_cell_uints_v, .m_pName = "Lights: cell ring", .m_bWriteOnly = true }); Err ) return Err;
+        if( auto Err = Device.Create(m_MaterialUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_material), .m_EntryCount = max_draws_per_frame_v, .m_pName = "Materials: material uniforms" }); Err ) return Err;
 
         // White 1x1 texture bound where the shadow map will go
         {
             const std::uint32_t White = 0xffffffffu;
             const auto          Mips  = std::array{ xgpu::texture::setup::mip_size{ sizeof(White) } };
             xgpu::texture::setup Setup{ .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
-                                      , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&White), sizeof(White) }, .m_isGamma = false };
+                                      , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&White), sizeof(White) }, .m_isGamma = false, .m_pName = "Shadows: white dummy" };
             if( auto Err = Device.Create(m_WhiteTexture, Setup); Err ) return Err;
         }
 
@@ -373,31 +373,31 @@ namespace xlionrender
             const int Clipmap = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, Local = ShadowSetup.m_LocalAtlasSize;
             // (the sun's pool twice as tall: 4096 slots, Unreal's r.Shadow.Virtual.MaxPhysicalPages - the levels' detail far out (the sun's
             // ShadowDetailDistance) needs the pages; with 2048 the dynamic resolution took it back, Tomas: "they don't do anything"; +64 MB)
-            if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = 2 * Clipmap + Local, .m_Height = std::max(2 * Clipmap, Local), .m_isGamma = false }); Err ) return Err;
+            if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = 2 * Clipmap + Local, .m_Height = std::max(2 * Clipmap, Local), .m_isGamma = false, .m_pName = "Shadows: shadow atlas" }); Err ) return Err;
         }
 
         // The environment probe's textures (filled by updateEnvironment)
         for( int k = 0; k < env_source_levels_v; ++k )
-            if( auto Err = Device.Create(m_EnvSource[k], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = env_source_size_v >> k, .m_Height = env_source_size_v >> k, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = Device.Create(m_EnvAtlas,  { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 384, .m_Height = 256, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = Device.Create(m_EnvDFG,    { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = env_dfg_size_v, .m_Height = env_dfg_size_v, .m_isGamma = false }); Err ) return Err;
+            if( auto Err = Device.Create(m_EnvSource[k], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = env_source_size_v >> k, .m_Height = env_source_size_v >> k, .m_isGamma = false, .m_pName = "Probes: environment source" }); Err ) return Err;
+        if( auto Err = Device.Create(m_EnvAtlas,  { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 384, .m_Height = 256, .m_isGamma = false, .m_pName = "Probes: environment atlas" }); Err ) return Err;
+        if( auto Err = Device.Create(m_EnvDFG,    { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = env_dfg_size_v, .m_Height = env_dfg_size_v, .m_isGamma = false, .m_pName = "Probes: environment DFG" }); Err ) return Err;
 
         // The GI's material capture: its target, pass, the quads (4 corners a surfel, twice: albedo and emission) and their indices
-        if( auto Err = Device.Create(m_GICaptureTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = gi_capture_w_v, .m_Height = gi_capture_h_v, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = Device.Create(m_GICaptureTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = gi_capture_w_v, .m_Height = gi_capture_h_v, .m_isGamma = false, .m_pName = "GI: capture target" }); Err ) return Err;
         {
             // Cleared to 0: a texel a cut out (alpha tested) material discards reads back as no albedo and no emission - the pass's default
             // clear (0.45 gray) made every cut out surfel emit 0.45, a light at EmissiveScale
             auto A = std::array{ xgpu::renderpass::attachment{ m_GICaptureTex } };
             if( auto Err = Device.Create(m_GICapturePass, { .m_Attachments = A, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
-        if( auto Err = Device.Create(m_GICaptureVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 4 * gi_capture_passes_v * gi_capture_max_v }); Err ) return Err;
-        if( auto Err = Device.Create(m_GICaptureIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6 * gi_capture_max_v }); Err ) return Err;
+        if( auto Err = Device.Create(m_GICaptureVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 4 * gi_capture_passes_v * gi_capture_max_v, .m_pName = "GI: capture vertices" }); Err ) return Err;
+        if( auto Err = Device.Create(m_GICaptureIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6 * gi_capture_max_v, .m_pName = "GI: capture indices" }); Err ) return Err;
         (void)m_GICaptureIB.MemoryMap(0, 6 * gi_capture_max_v, [](void* p)
         {
             auto* I = static_cast<std::uint32_t*>(p);
             for( std::uint32_t q = 0; q < std::uint32_t(gi_capture_max_v); ++q ) { const std::uint32_t v = 4 * q; const std::uint32_t Q[6] = { v, v + 1, v + 2, v, v + 2, v + 3 }; std::memcpy(I + 6 * q, Q, sizeof(Q)); }
         });
-        if( auto Err = Device.Create(m_ProbeAtlas,{ .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = probe_slots_x_v * 384, .m_Height = probe_slots_v / probe_slots_x_v * 256, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = Device.Create(m_ProbeAtlas,{ .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = probe_slots_x_v * 384, .m_Height = probe_slots_v / probe_slots_x_v * 256, .m_isGamma = false, .m_pName = "Probes: probe atlas" }); Err ) return Err;
 
         // Forward standard-material pipeline
         {
@@ -454,25 +454,25 @@ namespace xlionrender
             , xgpu::vertex_descriptor::attribute{ .m_Offset = 0,  .m_Format = xgpu::vertex_descriptor::format::FLOAT_2D, .m_iStream = 3 }             // optional: UV1
             };
             if( auto Err = Device.Create(m_SkinGeomVD, { .m_bUseStreaming = true, .m_Topology = xgpu::vertex_descriptor::topology::TRIANGLE_LIST, .m_VertexSize = 0, .m_Attributes = SkinAttributes, .m_bDynamicStride = true }); Err ) return Err;
-            if( auto Err = Device.Create(m_StaticGeomUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_geom_view), .m_EntryCount = 64 }); Err ) return Err;
+            if( auto Err = Device.Create(m_StaticGeomUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_geom_view), .m_EntryCount = 64, .m_pName = "Frame: static geometry uniforms" }); Err ) return Err;
             {
                 // Device-local (GPU_READ: created from zeros, then only written by GPU copies); the ring: host-visible, a region per frame
                 std::vector<details::instance_data> Zeros(max_instances_v + max_transient_v, details::instance_data{});
                 void* pZeros = Zeros.data();
-                if( auto Err = Device.Create(m_InstanceBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(details::instance_data), .m_EntryCount = int(Zeros.size()), .m_pData = pZeros }); Err ) return Err;
-                if( auto Err = Device.Create(m_InstanceRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::instance_data), .m_EntryCount = ring_frames_v * (max_instances_v + max_transient_v) }); Err ) return Err;
+                if( auto Err = Device.Create(m_InstanceBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(details::instance_data), .m_EntryCount = int(Zeros.size()), .m_pData = pZeros, .m_pName = "Frame: instance data" }); Err ) return Err;
+                if( auto Err = Device.Create(m_InstanceRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::instance_data), .m_EntryCount = ring_frames_v * (max_instances_v + max_transient_v), .m_pName = "Frame: instance ring" }); Err ) return Err;
             }
             m_InstanceSlots.Init(max_instances_v);
             {
                 std::vector<xmath::fvec4> Zeros(max_material_params_v, xmath::fvec4(0, 0, 0, 0));
                 void* pZeros = Zeros.data();
-                if( auto Err = Device.Create(m_MaterialParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = max_material_params_v, .m_pData = pZeros }); Err ) return Err;
-                if( auto Err = Device.Create(m_MaterialParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = ring_frames_v * param_ring_v }); Err ) return Err;
+                if( auto Err = Device.Create(m_MaterialParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = max_material_params_v, .m_pData = pZeros, .m_pName = "Materials: material parameters" }); Err ) return Err;
+                if( auto Err = Device.Create(m_MaterialParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = ring_frames_v * param_ring_v, .m_pName = "Materials: material parameter ring" }); Err ) return Err;
                 std::vector<entity_params> EntityZeros(max_instances_v + max_transient_v);     // a 64 B entry per slot (every slot a shader can index), like the instance buffer
                 void* pEntityZeros = EntityZeros.data();
-                if( auto Err = Device.Create(m_EntityParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(entity_params), .m_EntryCount = int(EntityZeros.size()), .m_pData = pEntityZeros }); Err ) return Err;
+                if( auto Err = Device.Create(m_EntityParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(entity_params), .m_EntryCount = int(EntityZeros.size()), .m_pData = pEntityZeros, .m_pName = "Materials: entity parameters" }); Err ) return Err;
                 // ponytail: sized like the instance ring (3 x 5 MiB); shrink to the pending slots only if the memory matters
-                if( auto Err = Device.Create(m_EntityParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(entity_params), .m_EntryCount = ring_frames_v * int(EntityZeros.size()) }); Err ) return Err;
+                if( auto Err = Device.Create(m_EntityParamsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(entity_params), .m_EntryCount = ring_frames_v * int(EntityZeros.size()), .m_pName = "Materials: entity parameter ring" }); Err ) return Err;
             }
 
             xgpu::shader Vert, Frag;
@@ -647,9 +647,9 @@ namespace xlionrender
             BlitSetup.m_DepthStencil.m_bDepthWriteEnable = false;
             if( auto Err = Device.Create(m_BlitPipeline, BlitSetup); Err ) return Err;
 
-            if( auto Err = Device.Create(m_FullscreenVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_EntryByteSize = sizeof(fullscreen_vert), .m_EntryCount = 3 }); Err ) return Err;
+            if( auto Err = Device.Create(m_FullscreenVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_EntryByteSize = sizeof(fullscreen_vert), .m_EntryCount = 3, .m_pName = "Frame: fullscreen vertices" }); Err ) return Err;
             (void)m_FullscreenVB.MemoryMap(0, 3, [](void* p) { const fullscreen_vert V[] = { {-1,-1}, {3,-1}, {-1,3} }; std::memcpy(p, V, sizeof(V)); });
-            if( auto Err = Device.Create(m_FullscreenIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 3 }); Err ) return Err;
+            if( auto Err = Device.Create(m_FullscreenIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 3, .m_pName = "Frame: fullscreen indices" }); Err ) return Err;
             (void)m_FullscreenIB.MemoryMap(0, 3, [](void* p) { const std::uint32_t I[] = { 0, 1, 2 }; std::memcpy(p, I, sizeof(I)); });
         }
 
@@ -695,10 +695,10 @@ namespace xlionrender
             std::vector<std::uint32_t> Zeros(std::size_t(nReq), 0u);
             if( auto Err = Device.Create(m_VSMRequestShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_VSMRequestComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMRequest, { .m_pShader = &m_VSMRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
-            if( auto Err = Device.Create(m_VSMFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::vsm_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
-            if( auto Err = Device.Create(m_VSMReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data() }); Err ) return Err;
-            if( auto Err = Device.Create(m_VSMZeros,   { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data() }); Err ) return Err;
-            if( auto Err = Device.Create(m_VSMReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nReq }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::vsm_frame), .m_EntryCount = ring_frames_v, .m_pName = "Shadows: VSM frames" }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data(), .m_pName = "Shadows: VSM requests" }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMZeros,   { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data(), .m_pName = "Shadows: VSM zeros" }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nReq, .m_pName = "Shadows: VSM requests readback" }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMTimes,   { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMRenderTimes, { .m_Count = 2 }); Err ) return Err;
             // the local lights' pages: their request pass (its frame a ring slot each, its bits and counters)
@@ -715,7 +715,7 @@ namespace xlionrender
             // the G-buffer's depth and normal
             if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_AOCompute, { .m_pShader = &m_AOShader, .m_nBuffers = 5, .m_nTextures = 3, .m_PushConstantsSize = sizeof(details::push_ao) }); Err ) return Err;
-            if( auto Err = Device.Create(m_TailFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * 64 + 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
+            if( auto Err = Device.Create(m_TailFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * 64 + 16, .m_EntryCount = ring_frames_v, .m_pName = "Frame: tail frames" }); Err ) return Err;
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
@@ -727,17 +727,17 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ReflSSRTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflHitsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflHitsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflHits, { .m_pShader = &m_ReflHitsShader, .m_nBuffers = 12, .m_nTextures = 1, .m_PushConstantsSize = 52 }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 64 + 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 64 + 16, .m_EntryCount = ring_frames_v, .m_pName = "Frame: reflection frames" }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMipsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflPlanarMipsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMips, { .m_pShader = &m_PlanarMipsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
-            if( auto Err = Device.Create(m_PlanarParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 16 + 8 * 16 + 16 + 2 * 16 * refl_boxes_v, .m_EntryCount = ring_frames_v }); Err ) return Err;
-            if( auto Err = Device.Create(m_PlanarMipsBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = 1, .m_pData = Zeros.data() }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 8 * ring_frames_v, .m_pData = Zeros.data() }); Err ) return Err;
+            if( auto Err = Device.Create(m_PlanarParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 16 + 8 * 16 + 16 + 2 * 16 * refl_boxes_v, .m_EntryCount = ring_frames_v, .m_pName = "Frame: planar reflection parameters" }); Err ) return Err;
+            if( auto Err = Device.Create(m_PlanarMipsBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = 1, .m_pData = Zeros.data(), .m_pName = "Render target: planar reflection mips" }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 8 * ring_frames_v, .m_pData = Zeros.data(), .m_pName = "Debug: reflection stats" }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflTimes, { .m_Count = 7 }); Err ) return Err;     // (the start, after the trace, the sharp trace, the hits' shading, the reconstruction)
             if( const char* p = std::getenv("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } if( m_ReflTraceBench > 0 ) m_LightMode = light_mode::SCREEN; }     // (its rays start from the thin G-buffer: the screen tail's)
-            if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v }); Err ) return Err;
-            if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data() }); Err ) return Err;
-            if( auto Err = Device.Create(m_LocalReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nLocal }); Err ) return Err;
+            if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v, .m_pName = "Shadows: local light frames" }); Err ) return Err;
+            if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data(), .m_pName = "Shadows: local light requests" }); Err ) return Err;
+            if( auto Err = Device.Create(m_LocalReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nLocal, .m_pName = "Shadows: local light requests readback" }); Err ) return Err;
         }
 
         // Shadows: the atlas's passes (a clear for its first use - a never rendered attachment cannot be loaded -, then load), the
@@ -764,7 +764,7 @@ namespace xlionrender
                 if( auto Err = Device.Create(m_ShadowClearInstance, { .m_PipeLine = m_ShadowClearPipeline }); Err ) return Err;
             }
 
-            if( auto Err = Device.Create(m_ShadowUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_geom_view), .m_EntryCount = max_shadow_draws_per_frame_v }); Err ) return Err;
+            if( auto Err = Device.Create(m_ShadowUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_geom_view), .m_EntryCount = max_shadow_draws_per_frame_v, .m_pName = "Shadows: shadow uniforms" }); Err ) return Err;
 
             auto Binds = std::array
             { xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
@@ -962,8 +962,8 @@ namespace xlionrender
         assert(m_bReady && !Vertices.empty() && !Indices.empty());
 
         mesh_slot M;
-        if( auto Err = m_Device.Create(M.m_VertexBuffer, { .m_Type = xgpu::buffer::type::VERTEX, .m_EntryByteSize = sizeof(vertex),        .m_EntryCount = static_cast<int>(Vertices.size()) }); Err ) return Err;
-        if( auto Err = m_Device.Create(M.m_IndexBuffer,  { .m_Type = xgpu::buffer::type::INDEX,  .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = static_cast<int>(Indices.size())  }); Err ) return Err;
+        if( auto Err = m_Device.Create(M.m_VertexBuffer, { .m_Type = xgpu::buffer::type::VERTEX, .m_EntryByteSize = sizeof(vertex),        .m_EntryCount = static_cast<int>(Vertices.size()), .m_pName = "Geometry: vertices" }); Err ) return Err;
+        if( auto Err = m_Device.Create(M.m_IndexBuffer,  { .m_Type = xgpu::buffer::type::INDEX,  .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = static_cast<int>(Indices.size()), .m_pName = "Geometry: indices"  }); Err ) return Err;
         (void)M.m_VertexBuffer.MemoryMap(0, static_cast<int>(Vertices.size()), [&](void* p) { std::memcpy(p, Vertices.data(), Vertices.size_bytes()); });
         (void)M.m_IndexBuffer .MemoryMap(0, static_cast<int>(Indices.size()),  [&](void* p) { std::memcpy(p, Indices.data(),  Indices.size_bytes());  });
         M.m_nIndices = static_cast<int>(Indices.size());
@@ -1017,9 +1017,9 @@ namespace xlionrender
         if( findMesh(Id) == nullptr || PosNrm.empty() || Indices.empty() ) return nullptr;
         auto& M = m_Meshes[Id.m_Index];
         if( M.m_nOutlineIndices > 0 ) return nullptr;
-        if( auto Err = m_Device.Create(M.m_OutlineVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 6 * sizeof(float), .m_EntryCount = int(PosNrm.size() / 6) }); Err ) return Err;
+        if( auto Err = m_Device.Create(M.m_OutlineVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 6 * sizeof(float), .m_EntryCount = int(PosNrm.size() / 6), .m_pName = "Outline: vertices" }); Err ) return Err;
         (void)M.m_OutlineVB.MemoryMap(0, int(PosNrm.size() / 6), [&](void* p) { std::memcpy(p, PosNrm.data(), PosNrm.size() * sizeof(float)); });
-        if( auto Err = m_Device.Create(M.m_OutlineIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Indices.size()) }); Err ) return Err;
+        if( auto Err = m_Device.Create(M.m_OutlineIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Indices.size()), .m_pName = "Outline: indices" }); Err ) return Err;
         (void)M.m_OutlineIB.MemoryMap(0, int(Indices.size()), [&](void* p) { std::memcpy(p, Indices.data(), Indices.size() * sizeof(std::uint32_t)); });
         M.m_OutlineCenter = Center; M.m_OutlineHalf = Half;
         M.m_nOutlineIndices = int(Indices.size());
@@ -1106,7 +1106,7 @@ namespace xlionrender
             S.m_nOwned = In.m_nOwned;
             S.m_Ghosts = std::move(In.m_Ghosts);
             const auto Packed = In.m_Packed.empty() ? PackMeshGI(*S.m_pGI, {}, {}) : std::move(In.m_Packed);
-            if( auto Err = m_Device.Create(S.m_Buffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Packed.size()), .m_pData = const_cast<std::uint32_t*>(Packed.data()) }); Err ) return Err;
+            if( auto Err = m_Device.Create(S.m_Buffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Packed.size()), .m_pData = const_cast<std::uint32_t*>(Packed.data()), .m_pName = "GI: section" }); Err ) return Err;
         }
         M.m_GIClusterSection     = std::move(ClusterSection);
         M.m_GIClusterVertexDelta = std::move(ClusterVertexDelta);
@@ -1123,7 +1123,7 @@ namespace xlionrender
     xgpu::device::error* instance::createMeshGI( mesh_slot& M, std::span<const std::uint32_t> Data ) noexcept
     {
         if( M.m_GIBuffer.m_Private ) ReleaseBuffer(M.m_GIBuffer);
-        return m_Device.Create(M.m_GIBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Data.size()), .m_pData = const_cast<std::uint32_t*>(Data.data()) });
+        return m_Device.Create(M.m_GIBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Data.size()), .m_pData = const_cast<std::uint32_t*>(Data.data()), .m_pName = "GI: mesh surfels" });
     }
 
     //------------------------------------------------------------------------------------------------
@@ -1484,9 +1484,9 @@ namespace xlionrender
 
         View.m_Width  = Setup.m_Width;
         View.m_Height = Setup.m_Height;
-        if( auto Err = m_Device.Create(View.m_HDR,    { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = Setup.m_Width, .m_Height = Setup.m_Height, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_Depth,  { .m_Format = xgpu::texture::format::DEPTH_F32,           .m_Width = Setup.m_Width, .m_Height = Setup.m_Height, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_Output, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM,      .m_Width = Setup.m_Width, .m_Height = Setup.m_Height, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_HDR,    { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = Setup.m_Width, .m_Height = Setup.m_Height, .m_isGamma = false, .m_pName = "Render target: HDR colour" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_Depth,  { .m_Format = xgpu::texture::format::DEPTH_F32,           .m_Width = Setup.m_Width, .m_Height = Setup.m_Height, .m_isGamma = false, .m_pName = "Render target: depth" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_Output, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM,      .m_Width = Setup.m_Width, .m_Height = Setup.m_Height, .m_isGamma = false, .m_pName = "Render target: tone-mapped output" }); Err ) return Err;
 
         {
             auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_Depth } };
@@ -1587,8 +1587,8 @@ namespace xlionrender
     {
         if( View.m_Mask.m_Private && View.m_MaskWidth == View.m_Width && View.m_MaskHeight == View.m_Height ) return nullptr;
         destroyOutlineTargets(View);
-        if( auto Err = m_Device.Create(View.m_Mask,      { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_MaskDepth, { .m_Format = xgpu::texture::format::DEPTH_F32,     .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_Mask,      { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Outline: mask" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_MaskDepth, { .m_Format = xgpu::texture::format::DEPTH_F32,     .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Outline: mask depth" }); Err ) return Err;
         {
             auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_Mask }, xgpu::renderpass::attachment{ View.m_MaskDepth } };
             if( auto Err = m_Device.Create(View.m_MaskPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
@@ -1620,8 +1620,8 @@ namespace xlionrender
     xgpu::device::error* instance::createGPreTargets( render_view& View ) noexcept
     {
         if( View.m_GPrePass.m_Private ) return nullptr;
-        if( auto Err = m_Device.Create(View.m_GPreNormal, { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_GPreId,     { .m_Format = xgpu::texture::format::R32G32B32A32_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false }); Err ) return Err;     // (z: the exact distance to the eye)
+        if( auto Err = m_Device.Create(View.m_GPreNormal, { .m_Format = xgpu::texture::format::R16G16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: prepass normals" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GPreId,     { .m_Format = xgpu::texture::format::R32G32B32A32_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: prepass ids" }); Err ) return Err;     // (z: the exact distance to the eye)
         // (the HDR target first, cleared here: the scene pass then loads it as it loads the depth - loaded without a clear this frame it was
         // in no attachment layout: nothing drew)
         auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId }, xgpu::renderpass::attachment{ View.m_Depth } };
@@ -1632,7 +1632,7 @@ namespace xlionrender
             auto Bindings = LitBindings(Textures, false);
             if( auto Err = m_Device.Create(View.m_GIClassifyInstance, { .m_PipeLine = m_GIClassifyPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
             if( auto Err = m_Device.Create(View.m_GIGatherInstance,   { .m_PipeLine = m_GIGatherPipeline,   .m_SamplersBindings = Bindings }); Err ) return Err;
-            if( auto Err = m_Device.Create(View.m_GIGatherTable, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * gather_table_uints_v }); Err ) return Err;
+            if( auto Err = m_Device.Create(View.m_GIGatherTable, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * gather_table_uints_v, .m_pName = "GI: gather table" }); Err ) return Err;
         }
         return createCullTargets(View);     // (the scene pass then loads the depth: m_ScenePassLoad)
     }
@@ -1644,7 +1644,7 @@ namespace xlionrender
         if( auto Err = m_Device.Create(View.m_ScenePassLoad, { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
         const std::vector<float> Zeros(std::size_t(gpu_cull::HiZFloats(View.m_Width, View.m_Height)), 0.0f);     // (a device-local buffer is made from its first data)
         return m_Device.Create(View.m_HiZ, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(float)
-                                           , .m_EntryCount = int(Zeros.size()), .m_pData = const_cast<float*>(Zeros.data()) });
+                                           , .m_EntryCount = int(Zeros.size()), .m_pData = const_cast<float*>(Zeros.data()), .m_pName = "Culling: HiZ pyramid" });
     }
 
     xgpu::device::error* instance::createGIScreenTargets( render_view& View ) noexcept
@@ -1652,24 +1652,24 @@ namespace xlionrender
         const int D = GIScreenDivisor(), W = (View.m_Width + D - 1) / D, H = (View.m_Height + D - 1) / D;
         if( View.m_GIScreenPass.m_Private && View.m_GIScreenWidth == W && View.m_GIScreenHeight == H ) return nullptr;
         destroyGIScreenTargets(View);
-        if( auto Err = m_Device.Create(View.m_GIScreenColor, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_GIScreenDepth, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenColor, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "GI: screen colour" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenDepth, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "GI: screen depth" }); Err ) return Err;
         {
             auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_GIScreenColor }, xgpu::renderpass::attachment{ View.m_GIScreenDepth } };
             if( auto Err = m_Device.Create(View.m_GIScreenPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
         std::vector<std::array<std::uint32_t, 4>> Data(screen_header_v + std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
-        if( auto Err = m_Device.Create(View.m_GIScreenZeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenZeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen zeros" }); Err ) return Err;
         Data[0] = { std::uint32_t(W), std::uint32_t(H), 0u, 0u };
-        if( auto Err = m_Device.Create(View.m_GIScreenBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_GIScreenPrev, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_GIScreenHeader, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * screen_header_v }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_GIScreenCounters, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen buffer" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenPrev, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen buffer previous" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenHeader, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * screen_header_v, .m_pName = "GI: screen header" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenCounters, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v, .m_pName = "GI: screen counters" }); Err ) return Err;
         View.m_bGIScreenPrev = false;
         {   // the ambient occlusion on that grid (xlionrender_ao_comp.glsl): a vec2 a pixel, zeros (a device-local buffer is made from its first data)
             const std::vector<float> Zeros(2 * std::size_t(W) * std::size_t(H), 0.0f);
             for( auto* pB : { &View.m_AO, &View.m_AOPrev, &View.m_AORaw } )
-                if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = W * H, .m_pData = const_cast<float*>(Zeros.data()) }); Err ) return Err;
+                if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = W * H, .m_pData = const_cast<float*>(Zeros.data()), .m_pName = "GI: ambient occlusion" }); Err ) return Err;
             View.m_bAOPrev = false;
         }
         View.m_GIScreenWidth = W; View.m_GIScreenHeight = H;
@@ -1701,15 +1701,15 @@ namespace xlionrender
         if( View.m_TailPass.m_Private && View.m_TailWidth == W && View.m_TailHeight == H ) return nullptr;
         destroyTailTargets(View);
         using fmt = xgpu::texture::format;
-        if( auto Err = m_Device.Create(View.m_TailGColor, { .m_Format = fmt::A2B10G10R10_UNORM, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_TailGDepth, { .m_Format = fmt::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_TailGMotion, { .m_Format = fmt::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailGColor, { .m_Format = fmt::A2B10G10R10_UNORM, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: tail colour" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailGDepth, { .m_Format = fmt::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: tail depth" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailGMotion, { .m_Format = fmt::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: tail motion" }); Err ) return Err;
         {
             auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_TailGColor }, xgpu::renderpass::attachment{ View.m_TailGMotion }, xgpu::renderpass::attachment{ View.m_TailGDepth } };
             if( auto Err = m_Device.Create(View.m_TailGPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
-        if( auto Err = m_Device.Create(View.m_TailDiffuse,  { .m_Format = fmt::B10G11R11_UFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_TailSpecular, { .m_Format = fmt::B10G11R11_UFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailDiffuse,  { .m_Format = fmt::B10G11R11_UFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: tail diffuse" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailSpecular, { .m_Format = fmt::B10G11R11_UFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: tail specular" }); Err ) return Err;
         {
             auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_TailDiffuse }, xgpu::renderpass::attachment{ View.m_TailSpecular } };
             if( auto Err = m_Device.Create(View.m_TailPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
@@ -1722,7 +1722,7 @@ namespace xlionrender
         // the records (binding 14): the tail's W x H, then the reflections' W x H (xlionrender_refl_trace_comp.glsl); the denoiser's temporal
         const std::vector<std::array<std::uint32_t, 4>> Zeros(2 * std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
         for( auto* pB : { &View.m_TailResult, &View.m_TailTemporal, &View.m_ReflTemporal, &View.m_ReflHistory } )      // (the reflections' reconstruction: its two)
-            if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = (pB == &View.m_TailResult ? 2 : 1) * W * H, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()) }); Err ) return Err;
+            if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = (pB == &View.m_TailResult ? 2 : 1) * W * H, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()), .m_pName = "Render target: tail records" }); Err ) return Err;
         View.m_TailWidth = W; View.m_TailHeight = H;
         View.m_bTailPrev = false;
         return nullptr;
@@ -1738,27 +1738,27 @@ namespace xlionrender
         if( m_HitShadePass.m_Private ) return nullptr;
         using usage = xgpu::buffer::setup::usage;
         constexpr std::uint32_t Rows = hit_cap_v / hit_width_v;
-        if( auto Err = m_Device.Create(m_HitShadeTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = int(hit_width_v), .m_Height = int(2 * Rows), .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitShadeTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = int(hit_width_v), .m_Height = int(2 * Rows), .m_isGamma = false, .m_pName = "Probes: hit shading target" }); Err ) return Err;
         {
             auto A = std::array{ xgpu::renderpass::attachment{ m_HitShadeTex } };
             if( auto Err = m_Device.Create(m_HitShadePass, { .m_Attachments = A, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
         // one quad (its corners come from its instance: xlionrender_gi_capture_vert.glsl's hits), an instance a hit
-        if( auto Err = m_Device.Create(m_HitVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 4 }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitVB, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(float) * 2, .m_EntryCount = 4, .m_pName = "Probes: hit vertices" }); Err ) return Err;
         (void)m_HitVB.MemoryMap(0, 4, [&](void* p) { std::memset(p, 0, 4 * 2 * sizeof(float)); });
-        if( auto Err = m_Device.Create(m_HitIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6 }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitIB, { .m_Type = xgpu::buffer::type::INDEX, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6, .m_pName = "Probes: hit indices" }); Err ) return Err;
         (void)m_HitIB.MemoryMap(0, 6, [](void* p) { const std::uint32_t Q[6] = { 0, 1, 2, 0, 2, 3 }; std::memcpy(p, Q, sizeof(Q)); });
         // (each with its data: a GPU_READ buffer made without any stays a host staging buffer - the shaders' accesses over the bus)
         const std::vector<xmath::fvec4> Zeros(2 * hit_cap_v, xmath::fvec4{ 0, 0, 0, 0 });
-        if( auto Err = m_Device.Create(m_HitCapture, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = int(2 * hit_cap_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()) }); Err ) return Err;
-        if( auto Err = m_Device.Create(m_HitBins, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(3 * hit_max_bins_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()) }); Err ) return Err;
-        if( auto Err = m_Device.Create(m_HitCounts, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(ring_frames_v * hit_max_bins_v) }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitCapture, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = int(2 * hit_cap_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()), .m_pName = "Probes: hit capture" }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitBins, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(3 * hit_max_bins_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()), .m_pName = "Probes: hit bins" }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitCounts, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(ring_frames_v * hit_max_bins_v), .m_pName = "Probes: hit counts" }); Err ) return Err;
         (void)m_HitCounts.MemoryMap(0, ring_frames_v * hit_max_bins_v, [](void* p) { std::memset(p, 0, ring_frames_v * hit_max_bins_v * sizeof(std::uint32_t)); });
         {
             const std::vector<std::array<std::uint32_t, 4>> ListZeros(1 + 3 * std::size_t(hit_cap_v), std::array<std::uint32_t, 4>{});
-            if( auto Err = m_Device.Create(m_HitList, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(1 + 3 * hit_cap_v), .m_pData = const_cast<std::array<std::uint32_t, 4>*>(ListZeros.data()) }); Err ) return Err;
+            if( auto Err = m_Device.Create(m_HitList, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(1 + 3 * hit_cap_v), .m_pData = const_cast<std::array<std::uint32_t, 4>*>(ListZeros.data()), .m_pName = "Probes: hit list" }); Err ) return Err;
         }
-        if( auto Err = m_Device.Create(m_HitDraws, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = int(2 * hit_max_bins_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()) }); Err ) return Err;
+        if( auto Err = m_Device.Create(m_HitDraws, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = int(2 * hit_max_bins_v), .m_pData = const_cast<xmath::fvec4*>(Zeros.data()), .m_pName = "Probes: hit draw args" }); Err ) return Err;
         return nullptr;
     }
 
@@ -1770,9 +1770,9 @@ namespace xlionrender
         Kill(View.m_SharpGPass); Kill(View.m_SharpGColor); Kill(View.m_SharpGMotion); Kill(View.m_SharpGDepth);
         using fmt = xgpu::texture::format;
         const int W = View.m_Width, H = View.m_Height;
-        if( auto Err = m_Device.Create(View.m_SharpGColor,  { .m_Format = fmt::A2B10G10R10_UNORM, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_SharpGDepth,  { .m_Format = fmt::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
-        if( auto Err = m_Device.Create(View.m_SharpGMotion, { .m_Format = fmt::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_SharpGColor,  { .m_Format = fmt::A2B10G10R10_UNORM, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: sharp colour" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_SharpGDepth,  { .m_Format = fmt::DEPTH_F32, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: sharp depth" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_SharpGMotion, { .m_Format = fmt::R16G16B16A16_SFLOAT, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: sharp motion" }); Err ) return Err;
         {
             auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_SharpGColor }, xgpu::renderpass::attachment{ View.m_SharpGMotion }, xgpu::renderpass::attachment{ View.m_SharpGDepth } };
             if( auto Err = m_Device.Create(View.m_SharpGPass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
@@ -1781,7 +1781,7 @@ namespace xlionrender
         const int nRecords = 2 * Wh * Hh + ((W + 1) & ~1) * H / 2;     // (rows padded to even)
         const std::vector<std::array<std::uint32_t, 4>> Zeros(std::size_t(nRecords), std::array<std::uint32_t, 4>{});
         Kill(View.m_TailResult);
-        if( auto Err = m_Device.Create(View.m_TailResult, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = nRecords, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()) }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_TailResult, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = nRecords, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()), .m_pName = "Render target: tail records" }); Err ) return Err;
         View.m_bTailPrev = false;
         View.m_SharpWidth = W; View.m_SharpHeight = H;
         return nullptr;

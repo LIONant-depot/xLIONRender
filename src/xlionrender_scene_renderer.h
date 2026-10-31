@@ -390,7 +390,7 @@ namespace xlionrender
                 {
                     auto Geom = MakeSkinGeom(*pGeom, E.m_Bones[k]);
                     Geom.m_PrevBones = std::uint32_t(nBones);
-                    if (m_pDevice->Create(E.m_Bones[k], { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = 2 * nBones, .m_bWriteOnly = true })
+                    if (m_pDevice->Create(E.m_Bones[k], { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = 2 * nBones, .m_pName = "Geometry: skin bones", .m_bWriteOnly = true })
                         || m_Renderer.CreateClusterGeom(E.m_Mesh[k], Geom))
                     { ReleaseSkinned(E); ++m_Stats.m_Waiting; return; }
                 }

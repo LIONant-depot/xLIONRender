@@ -64,9 +64,9 @@ namespace xlionrender
         constexpr std::uint32_t Indices[6] = { 0, 1, 2, 0, 2, 3 };
         for (auto& Stream : m_Streams)
         {
-            if (!Ok(Device.Create(Stream[0], { .m_Type = xgpu::buffer::type::INDEX,  .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6 }))) return false;
-            if (!Ok(Device.Create(Stream[1], { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(Corners[0]),    .m_EntryCount = 4 }))) return false;
-            if (!Ok(Device.Create(Stream[2], { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(instance),      .m_EntryCount = kMaxInstances }))) return false;
+            if (!Ok(Device.Create(Stream[0], { .m_Type = xgpu::buffer::type::INDEX,  .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 6, .m_pName = "Text: indices" }))) return false;
+            if (!Ok(Device.Create(Stream[1], { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(Corners[0]),    .m_EntryCount = 4, .m_pName = "Text: corners" }))) return false;
+            if (!Ok(Device.Create(Stream[2], { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(instance),      .m_EntryCount = kMaxInstances, .m_pName = "Text: instances" }))) return false;
             (void)Stream[0].MemoryMap(0, 6, [&](void* pData) { std::memcpy(pData, Indices, sizeof(Indices)); });
             (void)Stream[1].MemoryMap(0, 4, [&](void* pData) { std::memcpy(pData, Corners, sizeof(Corners)); });
         }

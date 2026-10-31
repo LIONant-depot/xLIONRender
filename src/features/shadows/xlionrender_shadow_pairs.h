@@ -52,14 +52,14 @@ namespace xlionrender
             return Device.hasDrawIndirectCount()
                 && !Device.Create(m_Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ reinterpret_cast<const std::int32_t*>(SPIRV.data()), SPIRV.size() } } })
                 && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 6, .m_PushConstantsSize = 32 })
-                && !Device.Create(m_Candidates, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(candidate), .m_EntryCount = ring_frames_v * max_candidates_v })
-                && !Device.Create(m_Matrices, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = ring_frames_v * max_draws_v })
-                && !Device.Create(m_Pages, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(page), .m_EntryCount = ring_frames_v * max_pages_v })
-                && !Device.Create(m_Zeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros })
-                && !Device.Create(m_Counts, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros })
-                && !Device.Create(m_CountsHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * counts_v })
-                && !Device.Create(m_Commands, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = max_candidates_v, .m_pData = pZeros })
-                && !Device.Create(m_Records, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 3 * sizeof(std::uint32_t), .m_EntryCount = max_records_v, .m_pData = pZeros });
+                && !Device.Create(m_Candidates, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(candidate), .m_EntryCount = ring_frames_v * max_candidates_v, .m_pName = "Shadows: pair candidates" })
+                && !Device.Create(m_Matrices, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = ring_frames_v * max_draws_v, .m_pName = "Shadows: pair matrices" })
+                && !Device.Create(m_Pages, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(page), .m_EntryCount = ring_frames_v * max_pages_v, .m_pName = "Shadows: pair pages" })
+                && !Device.Create(m_Zeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros, .m_pName = "Shadows: pair zeros" })
+                && !Device.Create(m_Counts, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros, .m_pName = "Shadows: pair counts" })
+                && !Device.Create(m_CountsHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * counts_v, .m_pName = "Shadows: pair counts readback" })
+                && !Device.Create(m_Commands, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = max_candidates_v, .m_pData = pZeros, .m_pName = "Shadows: pair draw args" })
+                && !Device.Create(m_Records, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 3 * sizeof(std::uint32_t), .m_EntryCount = max_records_v, .m_pData = pZeros, .m_pName = "Shadows: pair draw records" });
         }
 
         // A frame's start: what the GPU did the last time this frame's slot was used (that frame is done)

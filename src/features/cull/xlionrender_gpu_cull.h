@@ -46,18 +46,18 @@ namespace xlionrender
                 && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 7, .m_PushConstantsSize = 32 })
                 && !Device.Create(m_HiZShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw(HiZSPIRV) })
                 && !Device.Create(m_HiZCompute, { .m_pShader = &m_HiZShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 32 })
-                && !Device.Create(m_HiZCounter, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 1, .m_pData = pZeros })
+                && !Device.Create(m_HiZCounter, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 1, .m_pData = pZeros, .m_pName = "Culling: HiZ counter" })
                 && !Device.Create(m_Times, { .m_Count = 4 })
-                && !Device.Create(m_Candidates, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(candidate), .m_EntryCount = ring_frames_v * max_candidates_v })
-                && !Device.Create(m_Matrices, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = ring_frames_v * max_draws_v })
-                && !Device.Create(m_Zeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros })
+                && !Device.Create(m_Candidates, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(candidate), .m_EntryCount = ring_frames_v * max_candidates_v, .m_pName = "Culling: candidates" })
+                && !Device.Create(m_Matrices, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = ring_frames_v * max_draws_v, .m_pName = "Culling: matrices" })
+                && !Device.Create(m_Zeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros, .m_pName = "Culling: zeros" })
                 // a count a run and pass (pass 2's at max_runs_v), read back a ring later (a region of both a ring frame)
-                && !Device.Create(m_Counts, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros })
-                && !Device.Create(m_CountsHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * counts_v })
-                && !Device.Create(m_Vis, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = max_vis_v, .m_pData = pZeros })
+                && !Device.Create(m_Counts, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros, .m_pName = "Culling: counts" })
+                && !Device.Create(m_CountsHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * counts_v, .m_pName = "Culling: counts readback" })
+                && !Device.Create(m_Vis, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = max_vis_v, .m_pData = pZeros, .m_pName = "Culling: visibility" })
                 // a run's commands: its candidates' room, a candidate in two runs (its own, its prepass's), in each pass
-                && !Device.Create(m_Commands, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = 4 * max_candidates_v, .m_pData = pZeros })
-                && !Device.Create(m_Records, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::push_static_geom), .m_EntryCount = 4 * max_candidates_v, .m_pData = pZeros });
+                && !Device.Create(m_Commands, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = 4 * max_candidates_v, .m_pData = pZeros, .m_pName = "Culling: draw args" })
+                && !Device.Create(m_Records, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(details::push_static_geom), .m_EntryCount = 4 * max_candidates_v, .m_pData = pZeros, .m_pName = "Culling: draw records" });
         }
 
         // An instance slot's first visibility entry (its cluster c: + c), kept while the slot keeps its cluster count. Full: every slot
