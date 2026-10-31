@@ -3850,7 +3850,7 @@ namespace xlionrender
             {
                 for( int k = 0; k < 6; ++k ) s_Sum[k] += (s_Ns[k + 1] - s_Ns[k]) * 1e-6;
                 // measurement (XLION_FRAME_CSV=<file>, the scorecard's game sequence): every frame's parts, for p95 / max
-                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands,shadow_pass,probes_planar\n"); return f; }();
+                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands,shadow_pass,probes_planar,wall_ms\n"); return f; }();
                 if( s_pCsv )
                 {
                     std::fprintf(s_pCsv, "%llu", (unsigned long long)m_Device.getFrameIndex());
@@ -3859,8 +3859,11 @@ namespace xlionrender
                     const auto& G = getLastGPUTimes();
                     const auto& Pg = m_VSMReport.m_Pages;     // (the sun's pages rendered this frame: the fine ones, the net's; a new epoch)
                     const auto& Sd = m_ShadowDrawStats;     // (the shadow pass's commands this frame: the CPU path's draws, the pairs' indirect ones)
-                    std::fprintf(s_pCsv, ",%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%lld,%d,%d,%d,%d,%d,%.4f,%.4f\n", (s_Ns[6] - s_Ns[0]) * 1e-6, G.m_ShadowMs, G.m_SceneMs, G.m_ToneMapMs, Pg.m_Rendered, Pg.m_RenderedPinned, Pg.m_Epochs
-                                , Sd.m_CpuDraws, (long long)Sd.m_CpuTris, Sd.m_CpuCasters, Sd.m_IndirectDraws, Sd.m_IndirectMax, Sd.m_PageClears, m_PairsReport.m_nCandidates, m_SplitShadowMs, m_SplitProbesMs);
+                    // (wall_ms: the time since the last row - a stall of the main thread, a load on it, shows here and not in the GPU parts)
+                    static auto s_Last = std::chrono::steady_clock::now(); const auto Now = std::chrono::steady_clock::now();
+                    const double WallMs = std::chrono::duration<double, std::milli>(Now - s_Last).count(); s_Last = Now;
+                    std::fprintf(s_pCsv, ",%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%lld,%d,%d,%d,%d,%d,%.4f,%.4f,%.3f\n", (s_Ns[6] - s_Ns[0]) * 1e-6, G.m_ShadowMs, G.m_SceneMs, G.m_ToneMapMs, Pg.m_Rendered, Pg.m_RenderedPinned, Pg.m_Epochs
+                                , Sd.m_CpuDraws, (long long)Sd.m_CpuTris, Sd.m_CpuCasters, Sd.m_IndirectDraws, Sd.m_IndirectMax, Sd.m_PageClears, m_PairsReport.m_nCandidates, m_SplitShadowMs, m_SplitProbesMs, WallMs);
                     if( m_Device.getFrameIndex() % 60 == 0 ) std::fflush(s_pCsv);
                 }
                 if( ++s_n == 120 ) { std::printf("RENDERGPU environment %.2f, instances %.2f, GI update %.2f, captures %.2f, shadows+scene+tonemap %.2f, overlays+outline %.2f ms\n", s_Sum[0] / s_n, s_Sum[1] / s_n, s_Sum[2] / s_n, s_Sum[3] / s_n, s_Sum[4] / s_n, s_Sum[5] / s_n); std::fflush(stdout); s_n = 0; for( auto& v : s_Sum ) v = 0; }
