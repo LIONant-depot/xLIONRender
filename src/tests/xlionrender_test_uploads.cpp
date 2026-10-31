@@ -122,6 +122,23 @@ int main()
         for (auto& T : Many) CHECK(MakeTexture(T, 128, 9), "block texture again");
         CHECK(Device.getMemoryStats().m_nBlocks == Full.m_nBlocks, "Made again: %d blocks, was %d (the freed ranges reused)", Device.getMemoryStats().m_nBlocks, Full.m_nBlocks);
         for (auto& T : Many) Device.Destroy(std::move(T));
+
+        // Blocks that empty go back to the driver but one spare (a texture moving to fewer mips gives its memory back): 48 textures of
+        // 4 MB fill 3+ new blocks; destroyed, at most one more block than before is left
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Empty, View, Camera), "frames for the destroys above to retire");
+        const auto Before2 = Device.getMemoryStats();
+        std::vector<xgpu::texture> Large(48);
+        for (auto& T : Large) CHECK(MakeTexture(T, 1024, 33), "4 MB texture");
+        const auto Full2 = Device.getMemoryStats();
+        CHECK(Full2.m_nBlocks >= Before2.m_nBlocks + 3 && Full2.m_nDedicated == Before2.m_nDedicated, "48 textures of 4 MB: %d blocks more, %d of their own more", Full2.m_nBlocks - Before2.m_nBlocks, Full2.m_nDedicated - Before2.m_nDedicated);
+        for (auto& T : Large) { Device.Destroy(std::move(T)); T.m_Private.reset(); }
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Empty, View, Camera), "frames for the destroys to retire");
+        const auto Freed2 = Device.getMemoryStats();
+        std::printf("VRAM: %d blocks -> %d with the 4 MB textures -> %d destroyed\n", Before2.m_nBlocks, Full2.m_nBlocks, Freed2.m_nBlocks);
+        CHECK(Freed2.m_nRanges == Before2.m_nRanges && Freed2.m_nBlocks <= Before2.m_nBlocks + 1, "Destroyed: %d blocks left (were %d before, %d full)", Freed2.m_nBlocks, Before2.m_nBlocks, Full2.m_nBlocks);
+        for (auto& T : Large) CHECK(MakeTexture(T, 1024, 34), "4 MB texture again (released slots reused)");
+        CHECK(Device.getMemoryStats().m_nRanges == Before2.m_nRanges + 48, "made again: %d ranges more", Device.getMemoryStats().m_nRanges - Before2.m_nRanges);
+        for (auto& T : Large) Device.Destroy(std::move(T));
         Renderer.DestroyView(View);
     }
 
