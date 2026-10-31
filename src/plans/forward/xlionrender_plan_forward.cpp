@@ -1,6 +1,13 @@
 // Plan A - forward. instance::Render lives here so each plan is one file to read.
 #include "xlionrender_instance.h"
 #include "plans/forward/xlionrender_plan_forward.h"
+// The profiler (xprofile / Tracy): the frame's passes as CPU and GPU zones - in LIONRender.dll; the tests are built without it
+#if __has_include("xprofile.h")
+    #include "xprofile.h"
+#else
+    #define XPROFILE_SCOPE(NAME)
+    #define XPROFILE_GPU_SCOPE(TARGET, NAME)
+#endif
 #include <map>
 #include <chrono>
 #include <optional>
@@ -3874,13 +3881,14 @@ namespace xlionrender
         // (the first frame's capture used to read them undefined: a Vulkan validation error)
         if( !m_bProbeAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ProbeAtlasClearPass); m_bProbeAtlasReady = true; }
         if( !m_bShadowAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ShadowClearPass); m_bShadowAtlasReady = true; }
-        updateEnvironment(Window, Scene);
+        { XPROFILE_SCOPE("Render: environment"); XPROFILE_GPU_SCOPE(Window, "Render: environment"); updateEnvironment(Window, Scene); }
         if( pTS ) Window.WriteTimestamp(*pTS, 1);
-        updateInstances(Window, Scene, Eye);
+        { XPROFILE_SCOPE("Render: instances"); XPROFILE_GPU_SCOPE(Window, "Render: instances"); updateInstances(Window, Scene, Eye); }
         if( pTS ) Window.WriteTimestamp(*pTS, 2);
-        updateGI(Window, Scene, Eye, ProjScale);
+        { XPROFILE_SCOPE("Render: GI update"); XPROFILE_GPU_SCOPE(Window, "Render: GI update"); updateGI(Window, Scene, Eye, ProjScale); }
         if( pTS ) Window.WriteTimestamp(*pTS, 3);                                   // CPU (getGIStats); the probes' captures read it too
         {
+            XPROFILE_SCOPE("Render: GI capture"); XPROFILE_GPU_SCOPE(Window, "Render: GI capture");
             const auto TCapture = std::chrono::steady_clock::now();
             processGICapture(Window);                           // the surfels' material colors (one mesh at a time)
             if( !m_GIFrames.empty() ) m_GIFrames.back().m_Stats.m_CaptureMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TCapture).count();
@@ -3894,22 +3902,26 @@ namespace xlionrender
         xgpu::timestamps* pSplit = nullptr;
         if( pTS ) { auto [It, bNew] = s_SplitTS.try_emplace(this); if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_SplitTS.erase(It); else pSplit = &It->second; }
         if( pSplit ) Window.WriteTimestamp(*pSplit, 0);
-        renderShadows(Window, Scene, Eye, ProjScale);
+        { XPROFILE_SCOPE("Render: shadows"); XPROFILE_GPU_SCOPE(Window, "Render: shadows"); renderShadows(Window, Scene, Eye, ProjScale); }
         if( pSplit ) Window.WriteTimestamp(*pSplit, 1);
-        updateProbes(Window, Scene, Eye);
-        renderPlanar(Window, Scene, View, Camera);
+        { XPROFILE_SCOPE("Render: probes"); XPROFILE_GPU_SCOPE(Window, "Render: probes"); updateProbes(Window, Scene, Eye); }
+        { XPROFILE_SCOPE("Render: planar"); XPROFILE_GPU_SCOPE(Window, "Render: planar"); renderPlanar(Window, Scene, View, Camera); }
         if( pSplit ) { Window.WriteTimestamp(*pSplit, 2); static std::vector<std::uint64_t> s_SplitNs; if( pSplit->getResults(s_SplitNs) && s_SplitNs.size() >= 3 && s_SplitNs[2] >= s_SplitNs[0] ) { m_SplitShadowMs = (s_SplitNs[1] - s_SplitNs[0]) * 1e-6; m_SplitProbesMs = (s_SplitNs[2] - s_SplitNs[1]) * 1e-6; } }
         const auto T2 = clock::now();
 
         updateBudget();
         const auto T2b = clock::now();
-        renderScenePass(Window, Scene, View, W2C, Eye, true);
-        if( Scene.m_Sun.m_bCastShadows && !std::getenv("XLION_NO_SUN_SHADOWS") ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
-        localRequestPass(Window, Scene, View, W2C, Eye);
+        { XPROFILE_SCOPE("Render: scene pass"); XPROFILE_GPU_SCOPE(Window, "Render: scene pass"); renderScenePass(Window, Scene, View, W2C, Eye, true); }
+        {
+            XPROFILE_SCOPE("Render: shadow requests"); XPROFILE_GPU_SCOPE(Window, "Render: shadow requests");
+            if( Scene.m_Sun.m_bCastShadows && !std::getenv("XLION_NO_SUN_SHADOWS") ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
+            localRequestPass(Window, Scene, View, W2C, Eye);
+        }
         const auto T2c = clock::now();
 
         // HDR -> exposure -> LionMapper -> sRGB output (alpha = coverage)
         {
+            XPROFILE_SCOPE("Render: tone map"); XPROFILE_GPU_SCOPE(Window, "Render: tone map");
             auto Cmd = Window.StartRenderPass(View.m_OutputPass);
             Cmd.setPipelineInstance(View.m_ToneMapInstance);
             Cmd.setPushConstants(details::push_tonemap{ { View.m_Exposure, 0, 0, 0 }, View.m_Background });
@@ -3928,7 +3940,7 @@ namespace xlionrender
         }
 
         // The selection's outline last, over the overlays too: the host's grid is opaque floor and painted over the outline of an object standing on it
-        renderOutline(Window, Scene, View, W2C, Eye);
+        { XPROFILE_SCOPE("Render: outline"); XPROFILE_GPU_SCOPE(Window, "Render: outline"); renderOutline(Window, Scene, View, W2C, Eye); }
         if( pTS ) Window.WriteTimestamp(*pTS, 6);
 
         const auto T3 = clock::now();
