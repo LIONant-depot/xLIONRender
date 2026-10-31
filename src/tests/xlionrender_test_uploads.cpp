@@ -99,6 +99,43 @@ int main()
         Renderer.DestroyView(View);
     }
 
+    // A streamed texture (setup::m_FirstMip, device::ExtendTexture): the image is made whole but only mips 2.. go up; the extension uploads
+    // mips 0-1 into the same image and is a new texture of all of it (its own id). Each mip a value of its own; mip 0 reads back; the
+    // first texture destroyed first, the extension still reads back (the image lives while either does); no validation error
+    {
+        constexpr int side_v = 64, mips_v = 7, first_v = 2;
+        std::vector<std::vector<std::uint32_t>> Mip(mips_v);
+        for (int m = 0; m < mips_v; ++m) Mip[m].assign(std::size_t(side_v >> m) * (side_v >> m), 0xff000000u | std::uint32_t(40 + 30 * m));
+        const auto Bytes = [&](int m) { return std::span<const std::byte>{ reinterpret_cast<const std::byte*>(Mip[m].data()), Mip[m].size() * 4 }; };
+        std::array<xgpu::texture::setup::mip_size, mips_v> Sizes;
+        for (int m = 0; m < mips_v; ++m) Sizes[m] = { std::uint32_t(Mip[m].size() * 4) };
+        std::vector<std::span<const std::byte>> Tail, Top;
+        for (int m = first_v; m < mips_v; ++m) Tail.push_back(Bytes(m));
+        for (int m = 0; m < first_v; ++m) Top.push_back(Bytes(m));
+
+        xgpu::texture Src, Whole;
+        CHECK(!Device.Create(Src, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = side_v, .m_Height = side_v, .m_MipSizes = Sizes
+                                  , .m_MipFaceData = Tail, .m_FirstMip = first_v, .m_isGamma = false }), "streamed texture (mips 2..)");
+        CHECK(Src.getTextureDimensions()[0] == side_v, "a streamed texture tells its whole size (%d)", Src.getTextureDimensions()[0]);
+        CHECK(!Device.ExtendTexture(Whole, Src, Top), "ExtendTexture");
+        CHECK(Whole.getID().isValid() && Whole.getID() != Src.getID(), "the extension has an id of its own");
+        CHECK(Device.ExtendTexture(Whole, Whole, Top) != nullptr, "a whole texture cannot be extended");
+        std::vector<std::uint32_t> Read; int W = 0, H = 0;
+        CHECK(!Device.ReadTexture(Whole, Read, W, H) && W == side_v && Read == Mip[0], "the extension's mip 0 reads back");
+
+        xlionrender::scene Empty;
+        xlionrender::render_view View;
+        CHECK(!Renderer.CreateView(View, { .m_Width = 16, .m_Height = 16 }), "CreateView");
+        xgpu::tools::view Camera;
+        Device.Destroy(std::move(Src)); Src.m_Private.reset();
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Empty, View, Camera), "frames: the first texture retired");
+        Read.clear();
+        CHECK(!Device.ReadTexture(Whole, Read, W, H) && Read == Mip[0], "the extension reads back after the first texture is gone");
+        Device.Destroy(std::move(Whole));
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Empty, View, Camera), "frames: the extension retired");
+        Renderer.DestroyView(View);
+    }
+
     // Device-local memory in blocks (xGPU Details/Vulkan/xgpu_vulkan_vram.cpp): 200 textures of 64 KB take ranges of the blocks (at most one
     // new block), not 200 allocations; destroyed, their ranges come back (the free bytes as before); made again, no new block
     {
