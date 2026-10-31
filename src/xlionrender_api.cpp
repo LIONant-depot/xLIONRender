@@ -2,6 +2,7 @@
 #include "xlionrender_renderer.h"
 #include "xlionrender_internal.h"
 #include "xlionrender_system.h"
+#include "xprofile.h"
 #include <algorithm>
 #include <cstring>
 #include <format>
@@ -40,6 +41,7 @@ namespace xlionrender
 
     void Draw(const void* pWorld, xgpu::cmd_buffer& CmdBuffer, const xmath::fmat4& W2C, float ViewportW, float ViewportH, view View, const roles* pRoles) noexcept
     {
+        XPROFILE_SCOPE("LIONRender Draw");
         if (auto* pSystem = FindSystem(pWorld)) pSystem->Collect(View, pRoles);
         g_Renderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH, pRoles);
         g_TextRenderer.Draw(CmdBuffer, W2C, ViewportW, ViewportH);          // after the solids: the text is blended over them

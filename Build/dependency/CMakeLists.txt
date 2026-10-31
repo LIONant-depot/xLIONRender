@@ -8,6 +8,7 @@
 FetchAndPopulate("https://github.com/LIONant-depot/xECSV2.git"     "main")
 FetchAndPopulate("https://github.com/LIONant-depot/xGPU.git"       "main")
 FetchAndPopulate("https://github.com/LIONant-depot/xprim_geom.git" "main")
+FetchAndPopulate("https://github.com/LIONant-depot/xprofile.git"   "main")       # the profiler (xprofile.dll: one client for every module and Level copy)
 
 # Shader compilation - self-contained (not relying on xLION's own GLSLC variable, which may not be
 # set yet at the point this depot gets fetched - resolves the same relative path xLION's own
@@ -120,7 +121,7 @@ target_compile_definitions(xLIONRender PRIVATE XECS_BUILD_SHARED XLIONRENDER_BUI
 # here, so xtextfile/xproperty symbols it declares dllimport need xLIONCore's own import lib to
 # resolve at link time - xLIONCore.dll is the one binary that actually exports them.
 # xLIONRender_lib: the forward renderer (xlionrender::instance), compiled into this DLL for the Levels' Meshes and lights (xlionrender_scene_renderer.h)
-target_link_libraries(xLIONRender PRIVATE xGPU xprim_geom xLIONCore xLIONRender_lib)
+target_link_libraries(xLIONRender PRIVATE xGPU xprim_geom xLIONCore xLIONRender_lib xprofile)
 if(WIN32)
   target_link_libraries(xLIONRender PRIVATE Advapi32.lib)
 endif()
