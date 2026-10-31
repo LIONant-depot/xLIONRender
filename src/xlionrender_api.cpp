@@ -177,3 +177,11 @@ extern "C" __declspec(dllexport) xlionrender::xRenderEditor* XLionRender_CreateE
 {
     return new xlionrender::editor_impl;
 }
+
+// Before a copy of this DLL is unloaded (a Level closing - xlevel_engine_copies.h): its own scheduler's workers stop. Each worker thread
+// holds a reference to the module its code is in (the C runtime's thread start), so while they run FreeLibrary never unloads the copy:
+// it stayed loaded, its file locked (the close waited a second on it), 2026-11-01
+extern "C" __declspec(dllexport) void XLionRender_BeforeUnload() noexcept
+{
+    if (auto& S = xscheduler::g_System; S.getWorkerCount()) S.Shutdown();
+}
