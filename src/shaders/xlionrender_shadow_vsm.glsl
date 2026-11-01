@@ -395,3 +395,21 @@ float SunShadow(in const vec3 World, in const vec3 Ng)
 {
     return UBOLight.VSMParams.x != 0.0 ? ShadowVSM(World, Ng) : 1.0;
 }
+
+// The sun's shadow mask (shaders/xlionrender_sun_mask_frag.glsl, slot 11): per pixel the visibility (16 bits) and the prepass surface's
+// distance to the eye (a half float). A fragment at that distance (within 0.3%: the prepass's depth is not bit for bit the shading's)
+// reads it (UBOLight.ShadowLevels[0].x 1: this pass has the mask); any other (blended, not in the prepass) shades inline
+layout(binding = 11) uniform usampler2D SamplerSunMask;
+const float kSunMaskTolerance = 0.003;
+#ifndef XLION_TAIL_SCREEN
+float SunShadowMasked(in const vec3 World, in const vec3 Ng)
+{
+    if (UBOLight.ShadowLevels[0].x == 1.0)
+    {
+        const uint  m = texelFetch(SamplerSunMask, ivec2(gl_FragCoord.xy), 0).r;
+        const float d = length(World - UBOLight.CameraPos.xyz);
+        if (abs(unpackHalf2x16(m & 0xFFFFu).x - d) <= kSunMaskTolerance * d) return float(m >> 16u) / 65535.0;
+    }
+    return SunShadow(World, Ng);
+}
+#endif

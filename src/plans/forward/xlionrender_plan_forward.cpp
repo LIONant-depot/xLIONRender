@@ -3035,6 +3035,44 @@ namespace xlionrender
                 Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });
             };
 
+            // The sun's shadow mask (XLION_SUN_MASK; S1a measurement): between the G-buffer prepass and the scene pass, the sun's visibility
+            // per pixel from the prepass (shaders/xlionrender_sun_mask_frag.glsl); mode 2: the materials skip their own lookup
+            const bool bSunMask = bGPre && m_SunMaskMode > 0 && pLight && pLight->m_VSMParams.m_X != 0.0f && View.m_SunMaskInstance.m_Private;
+            if( bSunMask )
+            {
+                pLight->m_TailC2W = W2C.Inverse();
+                if( m_SunMaskMode == 2 ) pLight->m_VSMParams.m_X = 0.0f;
+            }
+            const auto SunMask = [&]
+            {
+                m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;     // (the scene's block: other passes took entries since - the pass binds the latest)
+                {
+                    auto MCmd = Window.StartRenderPass(View.m_SunMaskPass);
+                    MCmd.WriteTimestamp(m_SunMaskTimes, 0);          // (in the pass's own command buffer: the window's wrote them around nothing)
+                    MCmd.setViewport(0.0f, 0.0f, float(View.m_Width), float(View.m_Height));
+                    MCmd.setScissor(0, 0, View.m_Width, View.m_Height);
+                    std::array<xgpu::buffer*, 2> Buffers{ &m_LightRing, &m_CellRing };
+                    MCmd.setPipelineInstance(View.m_SunMaskInstance, Buffers);
+                    MCmd.setDynamicUBO(m_LightUBO, 1);
+                    MCmd.setBuffer(m_FullscreenVB);
+                    MCmd.setBuffer(m_FullscreenIB);
+                    MCmd.Draw(3);
+                    MCmd.WriteTimestamp(m_SunMaskTimes, 1);
+                }
+                // mode 3: the materials read it - the flag in the scene's block itself (the light cuts' per draw entries are copies of it) and
+                // that block again (the next binds take the latest entry). A lit pass before this one in the frame sees the flag too: its
+                // fragments are not at the mask's distances (the check) or are last frame's (a still camera). A debug view of the pages
+                // shades inline: ShadowVSM's colours
+                if( m_SunMaskMode == 3 && pLight->m_VSMParams2.m_W < 2.0f )
+                {
+                    pLight->m_ShadowLevels[0].m_X = 1.0f;
+                    m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;
+                }
+                if( std::vector<std::uint64_t> Ns; m_SunMaskTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] >= Ns[0] && Ns[0] != ~0ull ) { m_SunMaskSum += double(Ns[1] - Ns[0]) * 1e-6; ++m_SunMaskSumN; }
+                static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                if( s_bTimes && m_SunMaskSumN >= 120 ) { std::printf("SUNMASKGPU %d x %d: %.3f ms (mode %d)\n", View.m_Width, View.m_Height, m_SunMaskSum / m_SunMaskSumN, m_SunMaskMode); std::fflush(stdout); m_SunMaskSum = 0; m_SunMaskSumN = 0; }
+            };
+
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
             CmdPass.emplace(Window.StartRenderPass(bGPre ? View.m_GPrePass : View.m_ScenePass));
             auto& Cmd = *CmdPass;
@@ -3177,7 +3215,7 @@ namespace xlionrender
                     CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
                     PrepassCulled(1);
                 }
-                if( Mode == 2 ) { CmdPass.reset(); if( bScreen ) GatherGI(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
+                if( Mode == 2 ) { CmdPass.reset(); if( bScreen ) GatherGI(); if( bSunMask ) SunMask(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
@@ -3822,6 +3860,7 @@ namespace xlionrender
     {
         assert(m_bReady && View.m_Width > 0);
         m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
+        if( m_SunMaskTex.m_Private && !m_bSunMaskCleared ) { (void)Window.StartRenderPass(m_SunMaskClear); m_bSunMaskCleared = true; }      // (slot 11 sampled from the first draw)
         static const bool s_bNoBudget = std::getenv("XLION_NO_FRAME_BUDGET") != nullptr;    // measurement only (GI review): every cluster drawn, whatever the host's budget
         if( s_bNoBudget ) m_FrameBudgetMs = 0;
 

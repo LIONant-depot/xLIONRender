@@ -71,6 +71,7 @@ namespace xlionrender
         {
             shadows::setup  m_Shadows;
             bool            m_bProbes = true;       // the reflection probes' atlas (24 MiB); false: a 1x1 stand-in, no probe resident
+            bool            m_bSunMask = true;      // the sun's shadow mask's target (XLION_SUN_MASK; 32 MiB at its largest view) - not for a preview
             // An editor preview or thumbnail renderer: a sun pool of 256 slots (the net 64 of them, 128 with the previous epoch's), a local part
             // of 32 slots, no probes - 12 MiB of shadow atlas instead of 160, no probe atlas (a renderer per preview panel and thumbnail runtime)
             static setup Preview( void ) noexcept
@@ -82,6 +83,7 @@ namespace xlionrender
                 S.m_Shadows.m_LocalAtlasSize = 1024;
                 S.m_Shadows.m_LocalAtlasHeight = 512;
                 S.m_bProbes = false;
+                S.m_bSunMask = std::getenv("XLION_SUN_MASK_PREVIEW") != nullptr;     // (measurement: the scorecard's sequence is a preview)
                 return S;
             }
         };
@@ -446,6 +448,12 @@ namespace xlionrender
         xgpu::compute               m_AOCompute;
         xgpu::buffer                m_TailFrames;                   // the denoiser's frame (host visible, a slot a ring frame)
         xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
+        // The sun's shadow mask (XLION_SUN_MASK, xLION_Docs shadows_gpu_plan.md S1a): 3 the materials read it (UBOLight.ShadowLevels[0].x 1);
+        // measurement: 1 the pass runs and the materials keep their own lookup (its cost alone), 2 the materials skip theirs (VSMParams.x 0)
+        int                         m_SunMaskMode = 0;
+        xgpu::pipeline              m_SunMaskPipeline;
+        xgpu::timestamps            m_SunMaskTimes;
+        double                      m_SunMaskSum = 0; int m_SunMaskSumN = 0;
         xgpu::shader                m_ReflTraceShader;              // the reflection trace's benchmark (m_ReflTraceBench): its pass, counters (4 per ring slot), timestamps
         xgpu::compute               m_ReflTrace;
         xgpu::shader                m_ReflDenoiseShader;            // the reflections' reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl), its frames (a ring slot each)
@@ -717,6 +725,13 @@ namespace xlionrender
         xgpu::pipeline              m_ToneMapPipeline;
         xgpu::pipeline              m_BlitPipeline;
         xgpu::texture               m_WhiteTexture;
+        // The sun's shadow mask's target (R32_UINT: the visibility in 16 bits, a hash of the prepass depth in 16 - the materials read it where
+        // their own depth hashes the same: shaders/xlionrender_sun_mask_frag.glsl), the size of the largest main view it serves; a view
+        // larger shades inline. Every lit pipeline samples it in slot 11 (the dummy without it)
+        xgpu::renderpass            m_SunMaskClear;                     // (its first use: a clear - in the read layout before any draw samples it)
+        bool                        m_bSunMaskCleared = false;
+        xgpu::texture               m_SunMaskTex, m_SunMaskDummy;      // (the dummy: 1 x 1 R32_UINT - slot 11's format whatever the instance)
+        static constexpr int        sun_mask_w_v = 3840, sun_mask_h_v = 2160;
         xgpu::shader                m_DefaultMaterialFrag, m_DefaultMaterialGBFrag;     // (CreateDefaultMaterial: its HDR fragment and its G-buffer variant)
 
         // Shadows (features/shadows): the atlas (16 bits: the sun's page pool on the left, the local pages' part on the right),
@@ -792,7 +807,7 @@ namespace xlionrender
         // The environment probe (features/environment; shaders/xlionrender_environment*.glsl): the sky into an octahedral source, the
         // source prefiltered into a roughness atlas, the split-sum DFG table. Lit pipelines bind the atlas and the table at samplers
         // 8 and 9 (0-7: the shadow atlas and the material's textures, padded with white).
-        static constexpr int        lit_samplers_v          = 11;           // + 10: the probe atlas
+        static constexpr int        lit_samplers_v          = 12;           // + 10: the probe atlas, 11: the sun's shadow mask
         static constexpr int        env_source_size_v       = 256;
         static constexpr int        env_dfg_size_v          = 64;
         static constexpr int        env_source_levels_v     = 6;            // the source pyramid: 256 .. 8 (filtered importance sampling)

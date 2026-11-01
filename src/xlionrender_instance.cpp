@@ -107,6 +107,9 @@ namespace xlionrender
         constexpr std::uint32_t s_TailScreenFrag[] = {
             #include "xlionrender_tail_screen_frag.h"
         };
+        constexpr std::uint32_t s_SunMaskFrag[] = {
+            #include "xlionrender_sun_mask_frag.h"
+        };
         constexpr std::uint32_t s_AOComp[] = {
             #include "xlionrender_ao_comp.h"
         };
@@ -303,6 +306,7 @@ namespace xlionrender
         Samplers[8] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
         Samplers[9]  = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
         Samplers[10] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
+        Samplers[11] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp, .m_MipmapMag = xgpu::pipeline::sampler::mipmap_sampler::NEAREST, .m_MipmapMin = xgpu::pipeline::sampler::mipmap_sampler::NEAREST, .m_MipmapMode = xgpu::pipeline::sampler::mipmap_mode::NEAREST };
         return Samplers;
     }
 
@@ -315,6 +319,7 @@ namespace xlionrender
         Bindings.emplace_back(m_EnvAtlas);
         Bindings.emplace_back(m_EnvDFG);
         Bindings.emplace_back(m_ProbeAtlas);
+        Bindings.emplace_back(m_SunMaskTex.m_Private ? m_SunMaskTex : m_SunMaskDummy);
         return Bindings;
     }
 
@@ -368,6 +373,22 @@ namespace xlionrender
             xgpu::texture::setup Setup{ .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
                                       , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&White), sizeof(White) }, .m_isGamma = false, .m_pName = "Shadows: white dummy" };
             if( auto Err = Device.Create(m_WhiteTexture, Setup); Err ) return Err;
+        }
+
+        // The sun's shadow mask's target (before any lit binding: slot 11), and the stand-in of its format every instance binds without it
+        {
+            const std::uint32_t Zero = 0u;
+            const auto          Mips = std::array{ xgpu::texture::setup::mip_size{ sizeof(Zero) } };
+            if( auto Err = Device.Create(m_SunMaskDummy, { .m_Format = xgpu::texture::format::R32_UINT, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
+                                                         , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Zero), sizeof(Zero) }, .m_isGamma = false, .m_pName = "Shadows: sun mask dummy" }); Err ) return Err;
+        }
+        if( const char* p = std::getenv("XLION_SUN_MASK") ) m_SunMaskMode = std::atoi(p);
+        if( m_SunMaskMode > 0 && Setup.m_bSunMask )
+        {
+            // (cleared by m_SunMaskClear before the first render's draws: every lit pipeline binds it, any draw may sample it)
+            if( auto Err = Device.Create(m_SunMaskTex, { .m_Format = xgpu::texture::format::R32_UINT, .m_Width = sun_mask_w_v, .m_Height = sun_mask_h_v, .m_isGamma = false, .m_pName = "Render target: sun shadow mask" }); Err ) return Err;
+            auto A = std::array{ xgpu::renderpass::attachment{ m_SunMaskTex } };
+            if( auto Err = Device.Create(m_SunMaskClear, { .m_Attachments = A, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         }
 
         // The shadow atlas: every lit pipeline samples it in slot 0
@@ -534,6 +555,27 @@ namespace xlionrender
                 Setup.m_DepthStencil.m_bDepthTestEnable  = false;
                 Setup.m_DepthStencil.m_bDepthWriteEnable = false;
                 if( auto Err = Device.Create(m_TailPipeline, Setup); Err ) return Err;
+            }
+            // the sun's shadow mask (shaders/xlionrender_sun_mask_frag.glsl; XLION_SUN_MASK): a full-screen pass over the G-buffer prepass in
+            // the materials' layout - the shadow atlas in slot 0, the prepass's depth, normal and ids in 1-3; the lighting block, the lights
+            // and their cells (the page table). Its instances bind a view's prepass: createGPreTargets
+            if( m_SunMaskTex.m_Private )
+            {
+                xgpu::shader MaskFrag, FullVert;
+                if( auto Err = Device.Create(MaskFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_SunMaskFrag) }); Err ) return Err;
+                if( auto Err = Device.Create(FullVert, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
+                auto MaskShaders = std::array<const xgpu::shader*, 2>{ &MaskFrag, &FullVert };
+                auto MaskBinds = std::array
+                { xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 3, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // lights
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 4, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // light cells
+                };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = MaskShaders, .m_UniformBinds = MaskBinds, .m_Samplers = Samplers };
+                Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_bDepthTestEnable  = false;
+                Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+                if( auto Err = Device.Create(m_SunMaskPipeline, Setup); Err ) return Err;
+                if( auto Err = Device.Create(m_SunMaskTimes, { .m_Count = 2 }); Err ) return Err;
             }
 
             // the depth prepass: the same vertex shader and layout, depth only (no color written)
@@ -1629,6 +1671,14 @@ namespace xlionrender
         auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId }, xgpu::renderpass::attachment{ View.m_Depth } };
         if( auto Err = m_Device.Create(View.m_GPrePass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GPrePassLoad, { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
+        if( m_SunMaskTex.m_Private && View.m_Width <= sun_mask_w_v && View.m_Height <= sun_mask_h_v )    // the sun's shadow mask (XLION_SUN_MASK): the pass's instance on this view's prepass
+        {
+            auto MaskAttachments = std::array{ xgpu::renderpass::attachment{ m_SunMaskTex } };
+            if( auto Err = m_Device.Create(View.m_SunMaskPass, { .m_Attachments = MaskAttachments }); Err ) return Err;
+            auto Textures = std::array<xgpu::texture*, 4>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId };
+            auto Bindings = LitBindings(Textures, true);
+            if( auto Err = m_Device.Create(View.m_SunMaskInstance, { .m_PipeLine = m_SunMaskPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+        }
         {   // the GI gather reading them (slot 0: the white texture - no shadows there)
             auto Textures = std::array<xgpu::texture*, 4>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId };
             auto Bindings = LitBindings(Textures, false);
@@ -1813,6 +1863,8 @@ namespace xlionrender
         if( View.m_GPrePassLoad.m_Private )    m_Device.Destroy(std::move(View.m_GPrePassLoad));
         if( View.m_GPreNormal.m_Private )      m_Device.Destroy(std::move(View.m_GPreNormal));
         if( View.m_GPreId.m_Private )          m_Device.Destroy(std::move(View.m_GPreId));
+        if( View.m_SunMaskInstance.m_Private ) m_Device.Destroy(std::move(View.m_SunMaskInstance));
+        if( View.m_SunMaskPass.m_Private )     m_Device.Destroy(std::move(View.m_SunMaskPass));
         if( View.m_GIClassifyInstance.m_Private ) m_Device.Destroy(std::move(View.m_GIClassifyInstance));
         if( View.m_GIGatherInstance.m_Private )   m_Device.Destroy(std::move(View.m_GIGatherInstance));
         if( View.m_GIGatherTable.m_Private )      ReleaseBuffer(View.m_GIGatherTable);

@@ -475,7 +475,7 @@ vec3 PBRLighting
 	// it, unless a debug view shows the pages; the footprint's derivatives stay outside the branch)
 	VSMFootprint(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
 	const bool bSunFacing = saturate(dot(N, normalize(UBOLight.wSpaceLightPos.xyz))) >= 1e-4 || UBOLight.VSMParams2.w >= 2.0;
-	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? (bSunFacing ? SunShadow(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, FaceN) : 0.0) : 1.0;
+	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? (bSunFacing ? SunShadowMasked(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, FaceN) : 0.0) : 1.0;
 #endif
 	// xLIONRender: W == 0 is a directional light (XYZ = direction towards the light, no falloff); W > 0 a point
 	// light with that falloff radius. (The original treated W == 0 as a zero-radius point light: always black.)
