@@ -408,7 +408,8 @@ namespace xlionrender::shadows
                 return PageDistance2(a, C) < PageDistance2(b, C);
             });
             int Budget = m_bHasPrev || m_Setup.m_SteadyBudget <= 0 ? m_Setup.m_Budget : m_Setup.m_SteadyBudget;     // (a previous epoch bridges a rebuild: the budget)
-            if (m_Setup.m_FrameBudget > 0 && bCache) Budget = std::min(Budget, std::max(m_Setup.m_FrameBudget - m_Stats.m_RenderedPinned, 4));     // (the net's first; 4 at least: the rebuild moves on)
+            // (the net's first - a budgeted one's: the first net, all of it at once, leaves the fine pages their budget; 4 at least: the rebuild moves on)
+            if (m_Setup.m_FrameBudget > 0 && bCache) Budget = std::min(Budget, std::max(m_Setup.m_FrameBudget - (m_bHasPrev ? m_Stats.m_RenderedPinned : 0), 4));
             for (const auto& K : Want)
             {
                 if (Budget <= 0) { ++m_Stats.m_Deferred; continue; }
