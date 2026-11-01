@@ -51,6 +51,19 @@ namespace xlionrender
         // k (submesh s is the same material slot): a pass may draw a coarser LOD (the shadow pages by their texel size)
         std::vector<std::vector<submesh>> m_LODSubmeshes;
         const std::vector<submesh>& LODSubmeshes( int k ) const noexcept { return m_LODSubmeshes.empty() ? m_Submeshes : m_LODSubmeshes[std::size_t(std::clamp(k, 0, int(m_LODSubmeshes.size()) - 1))]; }
+        // The main view's LOD pick (instance: by projected error): per LOD k each submesh's error, object space (its mesh's LOD error: the
+        // geometry's lod::m_Error, 0 without one), and per submesh s the box of its LOD 0 clusters (a LOD group: xgeom_static's compiler)
+        std::vector<std::vector<float>>   m_LODErrors;
+        std::vector<xmath::fbbox>         m_SubBoxes;
+        // the coarsest LOD of submesh s whose error, Scale times larger (the draw's), stays under MaxPixels at Distance (ProjScale: pixels per
+        // unit at distance 1)
+        int PickLOD( std::size_t s, float Distance, float Scale, float ProjScale, float MaxPixels ) const noexcept
+        {
+            int k = 0;
+            while( std::size_t(k + 1) < m_LODErrors.size() && s < m_LODErrors[std::size_t(k + 1)].size()
+                && m_LODErrors[std::size_t(k + 1)][s] * Scale * ProjScale <= MaxPixels * Distance ) ++k;
+            return k;
+        }
     };
 
     // From an xgeom_static::xgpu::geom or an xgeom_skin::xgpu::geom (templated: no xgeom / resource includes here), each mesh at
@@ -64,14 +77,30 @@ namespace xlionrender
         int nLODs = 1;
         for( auto& M : Geom.getMeshes() ) nLODs = std::max(nLODs, int(M.m_nLODs));
         G.m_LODSubmeshes.resize(std::size_t(nLODs));
+        G.m_LODErrors.resize(std::size_t(nLODs));
         for( int k = 0; k < nLODs; ++k )
             for( auto& M : Geom.getMeshes() )
             {
                 if( M.m_nLODs == 0 ) continue;
                 const auto& L = Geom.getLODs()[M.m_iLOD + std::clamp(k, 0, int(M.m_nLODs) - 1)];
+                float Error = 0;
+                if constexpr( requires { L.m_Error; } ) Error = L.m_Error;      // (xgeom_static's; another geometry's LODs: 0, never picked by error)
                 for( auto& Sub : Geom.getSubmeshes().subspan(L.m_iSubmesh, L.m_nSubmesh) )
+                {
                     G.m_LODSubmeshes[std::size_t(k)].push_back({ Sub.m_iCluster, Sub.m_nCluster, Sub.m_iMaterial });
+                    G.m_LODErrors[std::size_t(k)].push_back(k == 0 ? 0.0f : Error > 0 ? Error : 1e30f);     // (no error recorded: never picked)
+                }
             }
+        for( const auto& Sub : G.m_LODSubmeshes[0] )
+        {
+            xmath::fbbox B{ xmath::fvec3(1e30f), xmath::fvec3(-1e30f) };
+            for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters && c < G.m_Clusters.size(); ++c )
+            {
+                const auto& CB = G.m_Clusters[c].m_BBox;
+                B.m_Min = xmath::fvec3::Min(B.m_Min, CB.m_Min); B.m_Max = xmath::fvec3::Max(B.m_Max, CB.m_Max);
+            }
+            G.m_SubBoxes.push_back(B);
+        }
         G.m_Submeshes = G.m_LODSubmeshes[std::size_t(std::clamp(iLOD, 0, nLODs - 1))];
         return G;
     }

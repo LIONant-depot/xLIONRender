@@ -25,6 +25,17 @@ int main()
 
     app App;
     CHECK(App.Init(), "Init");
+
+    {   // The main view's LOD pick (cluster_geom::PickLOD): the coarsest LOD whose error projects under the pixels asked for - LOD 1 off by
+        // 1 cm, LOD 2 by 4 cm, 1000 pixels a unit at distance 1, 1 pixel: LOD 0 nearer than 10 m, LOD 1 to 40 m, LOD 2 beyond; twice the scale
+        // twice as far; an error never recorded (1e30) never picked
+        xlionrender::cluster_geom G;
+        G.m_LODErrors = { { 0.0f }, { 0.01f }, { 0.04f } };
+        CHECK(G.PickLOD(0, 5.0f, 1, 1000, 1) == 0 && G.PickLOD(0, 20.0f, 1, 1000, 1) == 1 && G.PickLOD(0, 50.0f, 1, 1000, 1) == 2, "PickLOD by distance");
+        CHECK(G.PickLOD(0, 15.0f, 2, 1000, 1) == 0 && G.PickLOD(0, 25.0f, 2, 1000, 1) == 1, "PickLOD by the draw's scale");
+        G.m_LODErrors[1][0] = 1e30f;
+        CHECK(G.PickLOD(0, 1e6f, 1, 1000, 1) == 0, "PickLOD: an unrecorded error is never picked");
+    }
     auto& Renderer = App.m_Renderer;
     auto& Device   = App.m_Device;
 

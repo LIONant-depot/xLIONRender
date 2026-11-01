@@ -1699,6 +1699,15 @@ namespace xlionrender
             const float Texel = m_VSM.Level0Texel() * float(1 << Level);
             return std::clamp(int(std::ceil(std::log2(std::max(Texel / s_LODTexel, 1.0f)) - 1e-4f)), 0, 7);
         };
+        // A page of LOD k draws submesh s (a LOD group) at the coarsest LOD up to k whose error stays within the page's texel (its finest at
+        // LOD k: half the texel that asks for k) - a coarse LOD's shape change (a vault collapsed flat) never moves a shadow by more than a texel
+        const auto PageSub = [&]( const cluster_geom& G, int k, std::size_t s ) -> const cluster_geom::submesh&
+        {
+            const float Texel = s_LODTexel * float(1 << std::max(k - 1, 0));
+            int j = k;
+            while( j > 0 && std::size_t(j) < G.m_LODErrors.size() && s < G.m_LODErrors[std::size_t(j)].size() && G.m_LODErrors[std::size_t(j)][s] > Texel ) --j;
+            return G.LODSubmeshes(j)[s];
+        };
         const int LocalW = m_LocalPages.getSetup().m_PoolTexels, LocalH = m_LocalPages.getSetup().PoolHeight();
         if( bPairs && (!m_VSM.m_ToRender.empty() || !m_LocalPages.m_ToRender.empty()) )
         {
@@ -1765,8 +1774,9 @@ namespace xlionrender
                     const uint32_t Want  = bLast ? ~((1u << k) - 1u) : (1u << k);       // (the pages' LODs this list serves)
                     if( bLocal ? k != 0 : (LODsUsed & Want) == 0 ) continue;
                     const float    Tag   = bLocal ? -1.0f : bLast ? -1.0f - float(k) : float(k);
-                    for( const auto& Sub : G.LODSubmeshes(k) )
+                    for( std::size_t s = 0; s < G.LODSubmeshes(k).size(); ++s )
                     {
+                        const auto& Sub  = PageSub(G, k, s);
                         auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                         if( pMat && !MaterialVisibilityOf(pMat->m_State).m_bCastsShadow ) continue;
                         // a masked one: its cutout's run (the material's fragment through the records); no pipeline: the CPU path draws it
@@ -1882,8 +1892,9 @@ namespace xlionrender
 
                 const auto& G     = M.m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
-                for( const auto& Sub : G.LODSubmeshes(Lod) )          // (the page's LOD: PageLOD)
+                for( std::size_t s = 0; s < G.LODSubmeshes(Lod).size(); ++s )          // (the page's LOD: PageLOD; each group's within its error: PageSub)
                 {
+                    const auto& Sub = PageSub(G, Lod, s);
                     // The material's settings: no shadow, or a masked one's cutout (its own caster: the material's fragment, which stops after the cut)
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                     const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
@@ -2942,6 +2953,7 @@ namespace xlionrender
             static const bool s_bNoGPUCull     = std::getenv("XLION_NO_GPU_CULL") != nullptr;
             static const bool s_bNoGPUOcclusion = std::getenv("XLION_NO_GPU_OCCLUSION") != nullptr;
             m_CullCandidates.clear(); m_CullMatrices.clear(); m_CullRuns.clear(); m_CullRunOf.clear(); m_CullSub.clear();
+            if( bMain ) m_LODReport = {};
             m_CullSubBase.assign(Scene.m_Draws.size(), ~0u);
             bool          bOcclude   = false;       // the two passes: pass 1 (seen last frame), the Hi-Z, pass 2 (the rest)
             bool          bPass2     = false;       // pass 2's lists drawn (occlusion, or a frozen cull that had them)
@@ -2971,9 +2983,26 @@ namespace xlionrender
                     // Measurement only (XLION_MAIN_LOD=k): every rigid geometry's LOD k in the main view (its GI not mapped: the upper bound of
                     // the main view's LODs, shadows_gpu_plan.md)
                     static const int s_MainLOD = [] { const char* p = std::getenv("XLION_MAIN_LOD"); return p ? std::atoi(p) : 0; }();
+                    // The LOD a submesh (a LOD group) draws: the coarsest whose error projects under XLION_LOD_PIXELS (1) pixels at the group's
+                    // box (its nearest point; inside it: LOD 0) - groups meet crack-free at any mix (xgeom_static's locked group borders).
+                    // XLION_LOD_PIXELS=0: LOD 0
+                    static const float s_LODPixels = [] { const char* p = std::getenv("XLION_LOD_PIXELS"); return p ? float(std::atof(p)) : 1.0f; }();
+                    const bool  bPick    = s_MainLOD == 0 && s_LODPixels > 0 && G.m_LODSubmeshes.size() > 1 && G.m_SubBoxes.size() == G.m_Submeshes.size() && m_LODProjScale > 0;
+                    const float L2WScale = bPick ? std::max({ (D.m_L2W * xmath::fvec3{ 1, 0, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length(), (D.m_L2W * xmath::fvec3{ 0, 1, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length()
+                                                            , (D.m_L2W * xmath::fvec3{ 0, 0, 1 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length() }) : 1.0f;
                     for( std::size_t s = 0; s < G.m_Submeshes.size(); ++s )
                     {
-                        const auto& Sub  = s_MainLOD > 0 ? G.LODSubmeshes(s_MainLOD)[s] : G.m_Submeshes[s];
+                        int Lod = s_MainLOD;
+                        if( bPick )
+                        {
+                            const auto B = G.m_SubBoxes[s].TransformCopy(D.m_L2W);
+                            const auto Near = xmath::fvec3::Max(B.m_Min, xmath::fvec3::Min(Eye, B.m_Max));
+                            Lod = G.PickLOD(s, (Near - Eye).Length(), L2WScale, m_LODProjScale, s_LODPixels);
+                            ++m_LODReport.m_nGroups[std::size_t(std::min(Lod, 3))];
+                            m_LODReport.m_nLODs = std::max(m_LODReport.m_nLODs, int(G.m_LODErrors.size()));
+                            for( std::size_t k = 1; k < 4 && k < G.m_LODErrors.size(); ++k ) if( s < G.m_LODErrors[k].size() ) m_LODReport.m_MinError[k] = std::min(m_LODReport.m_MinError[k], G.m_LODErrors[k][s]);
+                        }
+                        const auto& Sub  = Lod > 0 ? G.LODSubmeshes(Lod)[s] : G.m_Submeshes[s];
                         auto*       pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                         // (past the caps: the CPU path; a submesh adds at most a run a cluster and its prepass run)
                         if( pMat == nullptr || !Opaque(pMat) || m_CullCandidates.size() + Sub.m_nClusters > std::size_t(gpu_cull::max_candidates_v)
@@ -3032,6 +3061,7 @@ namespace xlionrender
                     if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
                         std::printf("CULLGPU pass 1 cull %.3f, pyramid + pass 2 cull %.3f ms; occlusion %s (it hid %.0f%% of the triangles it tested); %d clusters, %lld triangles shaded\n"
                                    , m_pCull->m_CullGpuMs, m_pCull->m_OccludeGpuMs, m_pCull->isOcclusionSkipped() ? "skipped" : "on", 100.0 * m_pCull->m_OccludedShare, m_pCull->m_Drawn, (long long)m_pCull->m_Triangles), std::fflush(stdout);
+                    if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 ) std::printf("LODGROUPS the main view's LOD groups by their pick: LOD 0 %d, 1 %d, 2 %d, 3+ %d; %d LODs, the least error at LOD 1 %g, 2 %g, 3 %g\n", m_LODReport.m_nGroups[0], m_LODReport.m_nGroups[1], m_LODReport.m_nGroups[2], m_LODReport.m_nGroups[3], m_LODReport.m_nLODs, m_LODReport.m_MinError[1], m_LODReport.m_MinError[2], m_LODReport.m_MinError[3]), std::fflush(stdout);
                     m_CullFrozen = { true, m_CullRuns.size(), CullSecond, bOcclude };
                 }
             }
@@ -3994,6 +4024,7 @@ namespace xlionrender
         const xmath::fmat4 W2C     = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
 
         const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
+        m_LODProjScale = ProjScale;                             // (the main view's LOD pick: renderScenePass)
         using clock = std::chrono::steady_clock;
         const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
         const auto T0 = clock::now();

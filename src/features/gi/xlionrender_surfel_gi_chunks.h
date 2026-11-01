@@ -510,6 +510,63 @@ namespace xlionrender::gi
         return true;
     }
 
+    // The coarser LODs' clusters in the sections (the bake and the sections see LOD 0's clusters only): a coarse vertex is one of LOD 0's
+    // (the simplifier keeps vertices: the same position, another cluster's quantization) - its twin, the nearest LOD 0 vertex facing its
+    // way. A coarse cluster takes the section most of its vertices' twins are in, each vertex its twin's surfels there (a twin in another
+    // section: the nearest LOD 0 vertex of the cluster's own section). Whole: FromXGeomStatic's (every vertex's position and normal)
+    template <class T_GEOM> void AssignCoarseClusters(sections_flat& F, const surfel_mesh& Whole, const T_GEOM& Geom) noexcept
+    {
+        const auto LOD0     = LOD0Clusters(Geom);
+        const auto Clusters = Geom.getClusters();
+        if (F.m_ClusterSection.size() != Clusters.size() || F.m_VertSurfels.size() != 4 * Whole.m_Pos.size()) return;
+        constexpr float cell_v = 0.05f;
+        const auto Cell = [&](const v3& P, int dx, int dy, int dz)
+        {
+            const auto I = [](float f, int d) { return std::int64_t(std::floor(f / cell_v)) + d; };
+            return std::uint64_t(I(P.m_X, dx) * 73856093) ^ std::uint64_t(I(P.m_Y, dy) * 19349663) ^ std::uint64_t(I(P.m_Z, dz) * 83492791);
+        };
+        std::unordered_multimap<std::uint64_t, std::uint32_t> Grid;
+        std::vector<int> VertSection(Whole.m_Pos.size(), -1);
+        for (std::size_t c = 0; c < Clusters.size(); ++c) if (LOD0[c])
+            for (std::uint32_t v = Clusters[c].m_iVertex; v < Clusters[c].m_iVertex + Clusters[c].m_nVertices && v < Whole.m_Pos.size(); ++v)
+            {
+                VertSection[v] = F.m_ClusterSection[c];
+                Grid.emplace(Cell(Whole.m_Pos[v], 0, 0, 0), v);
+            }
+        const auto Twin = [&](std::uint32_t v, int Section)       // (Section < 0: any)
+        {
+            int Best = -1; float BestD = 1e30f; bool bFacing = false;
+            for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+            {
+                const auto [B, E] = Grid.equal_range(Cell(Whole.m_Pos[v], dx, dy, dz));
+                for (auto It = B; It != E; ++It)
+                {
+                    const std::uint32_t t = It->second;
+                    if (Section >= 0 && VertSection[t] != Section) continue;
+                    const v3 d = Whole.m_Pos[t] - Whole.m_Pos[v];
+                    const float D = d.Dot(d);
+                    const bool  bF = Whole.m_Nrm[t].Dot(Whole.m_Nrm[v]) > 0.5f;
+                    if ((bF && !bFacing) || (bF == bFacing && D < BestD)) { Best = int(t); BestD = D; bFacing = bF; }
+                }
+            }
+            return Best;
+        };
+        for (std::size_t c = 0; c < Clusters.size(); ++c)
+        {
+            if (LOD0[c]) continue;
+            const std::uint32_t First = Clusters[c].m_iVertex, Last = std::min<std::uint32_t>(First + Clusters[c].m_nVertices, std::uint32_t(Whole.m_Pos.size()));
+            std::unordered_map<int, int> Votes;
+            for (std::uint32_t v = First; v < Last; ++v) if (const int t = Twin(v, -1); t >= 0) ++Votes[VertSection[std::size_t(t)]];
+            if (Votes.empty()) continue;
+            int Section = Votes.begin()->first;
+            for (const auto& [s, n] : Votes) if (n > Votes[Section]) Section = s;
+            F.m_ClusterSection[c] = std::uint16_t(Section);
+            for (std::uint32_t v = First; v < Last; ++v)
+                if (const int t = Twin(v, Section); t >= 0)
+                    for (int k = 0; k < 4; ++k) F.m_VertSurfels[4 * std::size_t(v) + std::size_t(k)] = F.m_VertSurfels[4 * std::size_t(t) + std::size_t(k)];
+        }
+    }
+
     // Per triangle (FromXGeomStatic's order: cluster by cluster, its indices in threes, LOD 0's clusters only) its cluster
     template <class T_GEOM> std::vector<int> TriClustersOf(const T_GEOM& Geom) noexcept
     {
@@ -543,6 +600,7 @@ namespace xlionrender::gi
         F.m_ClusterSection.assign(Geom.getGIClusterSections().begin(), Geom.getGIClusterSections().end());
         const auto TriCluster = TriClustersOf(Geom);
         if (TriCluster.size() != Whole.m_Tris.size()) return false;
+        const auto LOD0 = LOD0Clusters(Geom);
         const auto V = ViewOf(F);
         Out.assign(F.m_Sections.size(), {});
         ClusterSection = F.m_ClusterSection;
@@ -554,6 +612,23 @@ namespace xlionrender::gi
             Out[k].m_Surfels.m_bBounce = Geom.m_GIMode != decltype(Geom.m_GIMode)::RECEIVE;
             Out[k].m_nOwned = F.m_Sections[k].m_nOwned;
             Out[k].m_Ghosts.assign(F.m_Ghosts.begin() + F.m_Sections[k].m_iGhost, F.m_Ghosts.begin() + F.m_Sections[k].m_iGhost + F.m_Sections[k].m_nGhosts);
+            // the coarser LODs' clusters of this section (no triangles in it: AssignCoarseClusters): their vertices after its own, each cluster's
+            // together (its draw's delta), with their vertex surfels
+            auto& C = Out[k].m_Surfels;
+            for (std::size_t c = 0; c < Geom.getClusters().size(); ++c)
+            {
+                if (ClusterSection[c] != k || LOD0[c]) continue;
+                const auto& Cl = Geom.getClusters()[c];
+                for (std::uint32_t v = Cl.m_iVertex; v < Cl.m_iVertex + Cl.m_nVertices && v < Whole.m_Pos.size() && v < VMap.size(); ++v)
+                {
+                    VMap[v] = int(C.m_Pos.size());
+                    C.m_Pos.push_back(Whole.m_Pos[v]); C.m_Nrm.push_back(Whole.m_Nrm[v]);
+                    if (C.m_UV.size() + 1 == C.m_Pos.size() && v < Whole.m_UV.size()) C.m_UV.push_back(Whole.m_UV[v]);
+                    std::array<int, 4> VS;
+                    for (int j = 0; j < 4; ++j) { const std::uint16_t s = F.m_VertSurfels[4 * std::size_t(v) + std::size_t(j)]; VS[std::size_t(j)] = s == 0xFFFF ? -1 : int(s); }
+                    C.m_VertSurfels.push_back(VS);
+                }
+            }
             for (std::size_t c = 0; c < Geom.getClusters().size(); ++c)
             {
                 if (ClusterSection[c] != k) continue;
