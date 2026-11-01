@@ -510,13 +510,14 @@ namespace xlionrender::gi
         return true;
     }
 
-    // Per triangle (FromXGeomStatic's order: cluster by cluster, its indices in threes) its cluster
+    // Per triangle (FromXGeomStatic's order: cluster by cluster, its indices in threes, LOD 0's clusters only) its cluster
     template <class T_GEOM> std::vector<int> TriClustersOf(const T_GEOM& Geom) noexcept
     {
         std::vector<int> Out;
         const auto Clusters = Geom.getClusters();
+        const auto LOD0     = LOD0Clusters(Geom);
         const std::size_t nIdx = Geom.getIndices().size();
-        for (std::size_t c = 0; c < Clusters.size(); ++c)
+        for (std::size_t c = 0; c < Clusters.size(); ++c) if (LOD0[c])
             for (std::uint32_t i = Clusters[c].m_iIndex; i + 2 < Clusters[c].m_iIndex + Clusters[c].m_nIndices && i + 2 < nIdx; i += 3) Out.push_back(int(c));
         return Out;
     }

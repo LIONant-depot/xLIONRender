@@ -39,9 +39,12 @@ layout(push_constant) uniform push_t
 // box through the page's world -> clip against the sides and the far plane
 bool Pairs(candidate K, mat4 M, bool bLocal, float bMover, vec2 Lo, vec2 Hi, uint p)
 {
-    const vec4 R = Pages[p].Rect;
-    if (!bLocal) return R.w == bMover && Hi.x >= R.x && Lo.x <= R.x + R.z && Hi.y >= R.y && Lo.y <= R.y + R.z;
-    if (R.w != 2.0) return false;
+    const vec4  R    = Pages[p].Rect;
+    const float Kind = mod(R.w, 4.0);                                   // (w: the page's kind + 4 x the LOD its casters draw)
+    const float Lod  = floor(R.w * 0.25);                               // (the candidate's LOD: w >= 0 that one, else -1 - w and coarser)
+    if (K.Center.w >= 0.0 ? Lod != K.Center.w : Lod < -1.0 - K.Center.w) return false;
+    if (!bLocal) return Kind == bMover && Hi.x >= R.x && Lo.x <= R.x + R.z && Hi.y >= R.y && Lo.y <= R.y + R.z;
+    if (Kind != 2.0) return false;
     const mat4 C  = Pages[p].W2C * M;
     const vec4 Cc = C * vec4(K.Center.xyz, 1.0);
     const vec4 Ax = C[0] * K.Half.x, Ay = C[1] * K.Half.y, Az = C[2] * K.Half.z;

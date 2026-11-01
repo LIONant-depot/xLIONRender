@@ -1947,6 +1947,22 @@ namespace xlionrender::gi
     // A compiled xgeom_static's geometry (its CPU copy: positions quantized per cluster, 12-bit oct normals, 16-bit indices per cluster) into a
     // surfel_mesh, in the GPU buffer's vertex order (the vertex shader reads the surfels by gl_VertexIndex). Mirrors getVertexData of
     // shaders/xgeom_static_mb_input_full.vert. Then Bake (the GeomStatic compiler) or SurfelsFromXGeomStatic (the renderer).
+    // A compiled xgeom_static's clusters of its meshes' LOD 0 (the others are the same surfaces simplified: the GI bakes, traces and reads
+    // LOD 0's - a coarser LOD's triangles counted again would be duplicate geometry). A geometry of one LOD: every cluster
+    template <class T_GEOM> std::vector<bool> LOD0Clusters(const T_GEOM& Geom) noexcept
+    {
+        const auto Clusters = Geom.getClusters(); const auto LODs = Geom.getLODs(); const auto Subs = Geom.getSubmeshes();
+        std::vector<bool> Out(Clusters.size(), LODs.empty());
+        for (const auto& Mesh : Geom.getMeshes())
+        {
+            if (std::size_t(Mesh.m_iLOD) >= LODs.size()) continue;
+            const auto& L = LODs[Mesh.m_iLOD];
+            for (std::size_t s = L.m_iSubmesh; s < std::size_t(L.m_iSubmesh) + L.m_nSubmesh && s < Subs.size(); ++s)
+                for (std::size_t c = Subs[s].m_iCluster; c < std::size_t(Subs[s].m_iCluster) + Subs[s].m_nCluster && c < Out.size(); ++c) Out[c] = true;
+        }
+        return Out;
+    }
+
     template <class T_GEOM> void FromXGeomStatic(surfel_mesh& M, const T_GEOM& Geom) noexcept
     {
         const auto Verts = Geom.getVertices();
@@ -1959,6 +1975,7 @@ namespace xlionrender::gi
         M.m_Tris.clear();
         M.m_TriMaterial.clear();
         std::vector<std::uint16_t> ClusterMaterial(Geom.getClusters().size(), 0);       // a cluster's material: its submesh's
+        const auto LOD0 = LOD0Clusters(Geom);
         for (const auto& Sub : Geom.getSubmeshes())
             for (std::uint32_t c = Sub.m_iCluster; c < std::uint32_t(Sub.m_iCluster) + Sub.m_nCluster && c < ClusterMaterial.size(); ++c) ClusterMaterial[c] = Sub.m_iMaterial;
         const auto OctDecode = [](float x, float y) noexcept
@@ -1985,6 +2002,7 @@ namespace xlionrender::gi
                 M.m_UV[v]  = { float(Extra[v].m_UV[0]) / 65535.0f * D.m_UVScaleTranslation.m_X + D.m_UVScaleTranslation.m_Z
                              , float(Extra[v].m_UV[1]) / 65535.0f * D.m_UVScaleTranslation.m_Y + D.m_UVScaleTranslation.m_W };
             }
+            if (!LOD0[c]) continue;         // (a coarser LOD's: its vertices are there - the same buffer order -, its triangles are not)
             for (std::uint32_t i = C.m_iIndex; i + 2 < C.m_iIndex + C.m_nIndices && i + 2 < Index.size(); i += 3)
             {
                 M.m_Tris.push_back({ int(C.m_iVertex + Index[i]), int(C.m_iVertex + Index[i + 1]), int(C.m_iVertex + Index[i + 2]) });

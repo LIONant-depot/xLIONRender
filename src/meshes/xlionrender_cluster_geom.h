@@ -45,8 +45,12 @@ namespace xlionrender
         std::uint32_t               m_MaxInfluences = 4;        // SKIN: 1..4 bone weights used
         std::uint32_t               m_PrevBones     = 0;        // SKIN: last frame's pose in m_pBones from this matrix on (the screen tail's motion); 0: none (this frame's)
         xmath::fbbox                m_BBox;                     // local bounds (shadow culling and invalidation); SKIN: covering every pose
-        std::vector<cluster>        m_Clusters;
-        std::vector<submesh>        m_Submeshes;
+        std::vector<cluster>        m_Clusters;                 // every LOD's (the cluster ids are the geometry's, across its LODs)
+        std::vector<submesh>        m_Submeshes;                // the drawn LOD's (MakeClusterGeom's iLOD)
+        // Per LOD k (0 the finest): every mesh's submeshes at k (a mesh with fewer repeats its coarsest) - the same count and order at each
+        // k (submesh s is the same material slot): a pass may draw a coarser LOD (the shadow pages by their texel size)
+        std::vector<std::vector<submesh>> m_LODSubmeshes;
+        const std::vector<submesh>& LODSubmeshes( int k ) const noexcept { return m_LODSubmeshes.empty() ? m_Submeshes : m_LODSubmeshes[std::size_t(std::clamp(k, 0, int(m_LODSubmeshes.size()) - 1))]; }
     };
 
     // From an xgeom_static::xgpu::geom or an xgeom_skin::xgpu::geom (templated: no xgeom / resource includes here), each mesh at
@@ -57,13 +61,18 @@ namespace xlionrender
         cluster_geom G{ .m_pStreams = &Geom.IndexBuffer(), .m_pColors = Geom.getVertexColors().empty() ? nullptr : &Geom.ColorBuffer(), .m_pUV1 = Geom.getUV1s().empty() ? nullptr : &Geom.UV1Buffer(), .m_pClusterData = &Geom.ClusterBuffer(), .m_BBox = Geom.m_BBox };
 
         for( auto& C : Geom.getClusters() ) G.m_Clusters.push_back({ C.m_iIndex, C.m_nIndices, C.m_iVertex, C.m_BBox });
-        for( auto& M : Geom.getMeshes() )
-        {
-            if( M.m_nLODs == 0 ) continue;
-            const auto& L = Geom.getLODs()[M.m_iLOD + std::clamp(iLOD, 0, int(M.m_nLODs) - 1)];
-            for( auto& Sub : Geom.getSubmeshes().subspan(L.m_iSubmesh, L.m_nSubmesh) )
-                G.m_Submeshes.push_back({ Sub.m_iCluster, Sub.m_nCluster, Sub.m_iMaterial });
-        }
+        int nLODs = 1;
+        for( auto& M : Geom.getMeshes() ) nLODs = std::max(nLODs, int(M.m_nLODs));
+        G.m_LODSubmeshes.resize(std::size_t(nLODs));
+        for( int k = 0; k < nLODs; ++k )
+            for( auto& M : Geom.getMeshes() )
+            {
+                if( M.m_nLODs == 0 ) continue;
+                const auto& L = Geom.getLODs()[M.m_iLOD + std::clamp(k, 0, int(M.m_nLODs) - 1)];
+                for( auto& Sub : Geom.getSubmeshes().subspan(L.m_iSubmesh, L.m_nSubmesh) )
+                    G.m_LODSubmeshes[std::size_t(k)].push_back({ Sub.m_iCluster, Sub.m_nCluster, Sub.m_iMaterial });
+            }
+        G.m_Submeshes = G.m_LODSubmeshes[std::size_t(std::clamp(iLOD, 0, nLODs - 1))];
         return G;
     }
 

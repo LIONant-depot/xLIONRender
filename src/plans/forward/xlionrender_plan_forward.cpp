@@ -1674,6 +1674,16 @@ namespace xlionrender
         // on the GPU - outside the passes
         struct pairs_run { const cluster_geom* m_pGeom; std::uint32_t m_First, m_Max; bool m_bLocal; };
         std::vector<pairs_run> PairRuns;
+        // The casters' LOD a sun page draws (cluster_geom::LODSubmeshes): texels up to XLION_SH_LOD_TEXEL (2 cm) the finest, each doubling a
+        // LOD coarser - a coarse page drew every full-detail triangle (the shadow pass's cost was its triangles). XLION_SH_NO_LOD: LOD 0
+        static const float s_LODTexel = [] { const char* p = std::getenv("XLION_SH_LOD_TEXEL"); return p ? float(std::atof(p)) : 0.02f; }();
+        static const bool  s_bNoLOD   = std::getenv("XLION_SH_NO_LOD") != nullptr;
+        const auto PageLOD = [&]( int Level ) -> int
+        {
+            if( s_bNoLOD || s_LODTexel <= 0.0f ) return 0;
+            const float Texel = m_VSM.Level0Texel() * float(1 << Level);
+            return std::clamp(int(std::ceil(std::log2(std::max(Texel / s_LODTexel, 1.0f)) - 1e-4f)), 0, 7);
+        };
         const int LocalW = m_LocalPages.getSetup().m_PoolTexels, LocalH = m_LocalPages.getSetup().PoolHeight();
         if( bPairs && (!m_VSM.m_ToRender.empty() || !m_LocalPages.m_ToRender.empty()) )
         {
@@ -1681,10 +1691,13 @@ namespace xlionrender
             std::vector<shadow_pairs::page> Pages;
             Pages.reserve(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
             bool bAny[2] = {};
+            std::uint32_t LODsUsed = 0;         // (the LODs this frame's sun pages draw: a candidate list each)
             for( const auto& P : m_VSM.m_ToRender )
             {
-                Pages.push_back({ P.m_W2C, { T / AW, T / AH, (T + 2.0f * float(P.m_AtlasX)) / AW - 1.0f, (T + 2.0f * float(P.m_AtlasY)) / AH - 1.0f }, { P.m_MinX, P.m_MinY, P.m_Size, P.m_bMover ? 1.0f : 0.0f } });
+                const int k = PageLOD(P.m_Key.m_Level);
+                Pages.push_back({ P.m_W2C, { T / AW, T / AH, (T + 2.0f * float(P.m_AtlasX)) / AW - 1.0f, (T + 2.0f * float(P.m_AtlasY)) / AH - 1.0f }, { P.m_MinX, P.m_MinY, P.m_Size, (P.m_bMover ? 1.0f : 0.0f) + 4.0f * float(k) } });     // (w: its kind + 4 x its LOD)
                 bAny[P.m_bMover] = true;
+                LODsUsed |= 1u << k;
             }
             // (the local pages: in their part's viewport - LocalW x LocalH texels)
             std::vector<int> Lit;
@@ -1723,20 +1736,31 @@ namespace xlionrender
                 const auto [It, bNew] = RunOf.try_emplace({ &G, bLocal }, std::uint32_t(PairRuns.size()));
                 if( bNew ) PairRuns.push_back({ &G, 0, 0, bLocal });
                 L2L.push_back(bLocal ? D.m_L2W : Rot * D.m_L2W);
-                for( const auto& Sub : G.m_Submeshes )
+                // a candidate list per LOD the pages use (Center.w: its LOD - it pairs with the pages of that LOD only), the geometry's coarsest
+                // once for that LOD and every coarser one (w -1 - k: a single-LOD geometry's candidates pair with every page, as before -
+                // a list per LOD outgrew the candidates' room); a local light's: LOD 0, any page
+                const int nGeomLODs = std::max(1, int(G.m_LODSubmeshes.size()));
+                for( int k = 0; k < nGeomLODs; ++k )
                 {
-                    auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
-                    if( pMat && !MaterialVisibilityOf(pMat->m_State).m_bCastsShadow ) continue;
-                    if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) continue;     // (its cutout: the CPU path's)
-                    for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                    const bool     bLast = k == nGeomLODs - 1;
+                    const uint32_t Want  = bLast ? ~((1u << k) - 1u) : (1u << k);       // (the pages' LODs this list serves)
+                    if( bLocal ? k != 0 : (LODsUsed & Want) == 0 ) continue;
+                    const float    Tag   = bLocal ? -1.0f : bLast ? -1.0f - float(k) : float(k);
+                    for( const auto& Sub : G.LODSubmeshes(k) )
                     {
-                        if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
-                        const auto& C    = G.m_Clusters[c];
-                        const auto  Ctr  = C.m_BBox.getCenter();
-                        const auto  Half = (C.m_BBox.m_Max - C.m_BBox.m_Min) * 0.5f;
-                        Cands.push_back({ It->second, 0, c, Draws[i].m_Slot, C.m_nIndices, C.m_iIndex, std::int32_t(C.m_iVertex), Draw
-                                        , { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, 0 }, { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
-                        ++PairRuns[It->second].m_Max;
+                        auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                        if( pMat && !MaterialVisibilityOf(pMat->m_State).m_bCastsShadow ) continue;
+                        if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) continue;     // (its cutout: the CPU path's)
+                        for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                        {
+                            if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
+                            const auto& C    = G.m_Clusters[c];
+                            const auto  Ctr  = C.m_BBox.getCenter();
+                            const auto  Half = (C.m_BBox.m_Max - C.m_BBox.m_Min) * 0.5f;
+                            Cands.push_back({ It->second, 0, c, Draws[i].m_Slot, C.m_nIndices, C.m_iIndex, std::int32_t(C.m_iVertex), Draw
+                                            , { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, Tag }, { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
+                            ++PairRuns[It->second].m_Max;
+                        }
                     }
                 }
             };
@@ -1792,7 +1816,7 @@ namespace xlionrender
         const shadows::vsm::page_to_render* pSunPage = nullptr;
         bool bOpaqueCut = false;        // (the GI's sun map: masked submeshes drawn whole - the GI's rays block on them alike; their cutout's fragment cost 49 ms a map in Bistro)
         std::vector<std::vector<decltype(m_VSM.Bounds(xmath::fbbox{}))>> ClusterLight(Draws.size());     // (DrawCasters: a draw's clusters in light space, this frame)
-        const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, std::span<const std::uint32_t> Indices, const auto& Keep )
+        const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, std::span<const std::uint32_t> Indices, const auto& Keep, int Lod = 0 )
         {
             auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();     // absolute world: the instances' origin as is
             ViewBlock.m_w2C         = W2C;
@@ -1822,7 +1846,7 @@ namespace xlionrender
 
                 const auto& G     = M.m_Geom;
                 const bool  bSkin = G.m_Kind == geom_kind::SKIN;
-                for( const auto& Sub : G.m_Submeshes )
+                for( const auto& Sub : G.LODSubmeshes(Lod) )          // (the page's LOD: PageLOD)
                 {
                     // The material's settings: no shadow, or a masked one's cutout (its own caster: the material's fragment, which stops after the cut)
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
@@ -1971,7 +1995,7 @@ namespace xlionrender
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);
                 pSunPage = &P;
-                DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); });
+                DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); }, PageLOD(P.m_Key.m_Level));
                 pSunPage = nullptr;
             }
             if( !m_VSM.m_ToRender.empty() && bPairs )      // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
