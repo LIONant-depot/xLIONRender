@@ -348,11 +348,16 @@ namespace xlionrender::gi
             for (std::size_t b = 0; b + 1 < Focus.size(); b += 2)
             {
                 const v3& Lo = Focus[b]; const v3& Hi = Focus[b + 1];
-                const int a[3] = { int(std::floor(Lo.m_X / Spacing)) - 1, int(std::floor(Lo.m_Y / Spacing)) - 1, int(std::floor(Lo.m_Z / Spacing)) - 1 };
-                const int e[3] = { int(std::floor(Hi.m_X / Spacing)) + 1, int(std::floor(Hi.m_Y / Spacing)) + 1, int(std::floor(Hi.m_Z / Spacing)) + 1 };
+                // (the box's cells and one around, clipped to the grid: a big box - a whole level's mesh - walked every cell of it, 3 ms a frame)
+                const float Lw[3] = { Lo.m_X, Lo.m_Y, Lo.m_Z }, Hw[3] = { Hi.m_X, Hi.m_Y, Hi.m_Z };
+                int a[3], e[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    a[k] = int(std::max(std::floor(Lw[k] / Spacing) - 1, float(G0[k])));
+                    e[k] = int(std::min(std::floor(Hw[k] / Spacing) + 1, float(G0[k] + Dim[std::size_t(k)] - 1)));
+                }
                 for (int z = a[2]; z <= e[2]; ++z) for (int y = a[1]; y <= e[1]; ++y) for (int x = a[0]; x <= e[0]; ++x)
                 {
-                    if (x < G0[0] || y < G0[1] || z < G0[2] || x >= G0[0] + Dim[0] || y >= G0[1] + Dim[1] || z >= G0[2] + Dim[2]) continue;     // (outside the grid)
                     const v3 C{ float(x) * Spacing - Eye.m_X, float(y) * Spacing - Eye.m_Y, float(z) * Spacing - Eye.m_Z };
                     Near.push_back({ C.Dot(C), Slot(x, y, z) });
                 }
@@ -1190,9 +1195,11 @@ namespace xlionrender::gi
             Window.Dispatch(m_Scatter, Bufs, &Push, sizeof(Push), (nPairs + 63) / 64);
             m_UploadWords = std::size_t(nPairs) + m_RunStage.size();
             if (m_RunJobs.empty()) return true;
-            if (!Fit(m_RunB, int(sizeof(std::uint32_t)), m_RunStage.size()) || m_RunB.MemoryMap(0, int(m_RunStage.size()), [&](void* p) { std::memcpy(p, m_RunStage.data(), m_RunStage.size() * sizeof(std::uint32_t)); })) return false;
-            if (!Fit(m_RunJobB, int(sizeof(m_RunJobs[0])), m_RunJobs.size()) || m_RunJobB.MemoryMap(0, int(m_RunJobs.size()), [&](void* p) { std::memcpy(p, m_RunJobs.data(), m_RunJobs.size() * sizeof(m_RunJobs[0])); })) return false;
-            xgpu::buffer* RBufs[] = { &m_RunB, &m_DataB, &m_RunJobB };
+            // (two of each, as the staging: the emitter table's run goes up every frame - MemoryMap waited for the GPU's frame, 7 ms on the Bistro)
+            auto& RunB = m_RunB2[m_nSubmits % 2]; auto& RunJobB = m_RunJobB2[m_nSubmits % 2];
+            if (!Fit(RunB, int(sizeof(std::uint32_t)), m_RunStage.size()) || RunB.MemoryMapFrameRegion(0, int(m_RunStage.size()), [&](void* p) { std::memcpy(p, m_RunStage.data(), m_RunStage.size() * sizeof(std::uint32_t)); })) return false;
+            if (!Fit(RunJobB, int(sizeof(m_RunJobs[0])), m_RunJobs.size()) || RunJobB.MemoryMapFrameRegion(0, int(m_RunJobs.size()), [&](void* p) { std::memcpy(p, m_RunJobs.data(), m_RunJobs.size() * sizeof(m_RunJobs[0])); })) return false;
+            xgpu::buffer* RBufs[] = { &RunB, &m_DataB, &RunJobB };
             const int Pad[4] = {};
             Window.Dispatch(m_Migrate, RBufs, Pad, sizeof(Pad), int(m_RunJobs.size()));
             return true;
@@ -1310,7 +1317,7 @@ namespace xlionrender::gi
         std::vector<std::uint32_t>          m_MatGen;           // per instance: world::MatGen when its material last went up
         std::vector<std::uint32_t>          m_RunStage;         // Refresh's runs of words (a material), their copy jobs
         std::vector<std::array<int, 4>>     m_RunJobs;
-        xgpu::buffer                        m_RunB, m_RunJobB, m_TlasStageB, m_TlasJobB;
+        xgpu::buffer                        m_RunB2[2], m_RunJobB2[2], m_TlasStageB, m_TlasJobB;
         std::uint64_t                       m_XformGen = 0;
         std::size_t                         m_NodeCap = 0;      // the nodes' buffer: the meshes', the TLAS's, its reserve
         std::size_t                         m_EmRoom = 0;       // the emitter table's room (world::GPUEmitterRoom)

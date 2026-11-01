@@ -216,7 +216,7 @@ namespace xlionrender
         W.m_Setup.m_bGPUOwned = bGPU;                               // (G4c: the light lives there: the pick hands out ranges)
         W.m_Setup.m_bEmitterSampling = Scene.m_GI.m_bEmitterSampling;      // (G5: no links)
         const auto TCollect = std::chrono::steady_clock::now();
-        if( m_pGITrace ) m_pGITrace->Collect(W, GIFrame);         // (the GPU's last slice; a read back asked for: into the world's arrays)
+        if( m_pGITrace ) { XPROFILE_SCOPE("GI: collect"); m_pGITrace->Collect(W, GIFrame); }         // (the GPU's last slice; a read back asked for: into the world's arrays)
         const double CollectMs = MsSince(TCollect);
         if( m_bGIToCPU && m_bGIToCPUAsked && m_pGITrace && !m_pGITrace->ReadBackPending() )        // the world has the GPU's light: the CPU's now
         {
@@ -236,6 +236,7 @@ namespace xlionrender
         std::vector<std::vector<int>> DrawSecIds(Scene.m_Draws.size());     // GI sections: per draw its sections' world instances
         for( std::size_t i = 0; i < Scene.m_Draws.size(); ++i )
         {
+            XPROFILE_SCOPE("GI: register");
             const auto&         D  = Scene.m_Draws[i];
             const std::uint32_t ID = std::uint32_t(D.m_Instance);
             const auto*         pM = findMesh(D.m_Mesh);
@@ -319,6 +320,7 @@ namespace xlionrender
                     W.SetGhosts(Ids[k], S.m_nOwned, std::move(Owners));
                 }
         }
+        XPROFILE_SCOPE("GI: retire and lights");
         const auto Retire = [&](auto& Ids)
         {
             for( auto It = Ids.begin(); It != Ids.end(); )
@@ -425,6 +427,7 @@ namespace xlionrender
         // the material captures have been done for 10 frames (the control: the solve never sees an uncaptured material)
         static const bool s_bHold = std::getenv("XLION_GI_HOLD_CAPTURES") != nullptr;
         {   // (gi_dynamic_master_plan.md 7a) an instance is provisional until no capture of it is queued: all of them in (or dropped)
+            XPROFILE_SCOPE("GI: provisional");
             std::vector<char> Queued(std::size_t(W.InstanceCount()), 0);
             for( const auto& J : m_GICaptures ) if( std::size_t(J.m_GIId) < Queued.size() ) Queued[std::size_t(J.m_GIId)] = 1;
             const auto Release = [&](const auto& Ids) { for( const auto& [Key, Id] : Ids ) if( std::size_t(Id) < Queued.size() && !Queued[std::size_t(Id)] && W.IsProvisional(Id) ) W.SetProvisional(Id, false); };
@@ -450,7 +453,7 @@ namespace xlionrender
             W.m_Setup.m_bAblateStats   = bFrozen && s_Ablate.find("stats") != std::string::npos;     // ("freeze,stats": the diagnostic run, never timed)
             W.m_Setup.m_bAblateFallback = bFrozen && s_Ablate.find("fallback") != std::string::npos; // ("freeze,fallback": only the unsupported hits' walk stubbed)
         }
-        m_GIStats = W.Update(L, Eye, bGPU && Scene.m_GI.m_GPUBudgetMs > 0 ? m_pGITrace->BatchRays() : Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender));     // (no GPU budget: the scene's rays, a slice each)
+        { XPROFILE_SCOPE("GI: world update"); m_GIStats = W.Update(L, Eye, bGPU && Scene.m_GI.m_GPUBudgetMs > 0 ? m_pGITrace->BatchRays() : Scene.m_GI.m_RayBudget, std::uint32_t(m_GIRender)); }     // (no GPU budget: the scene's rays, a slice each)
         if( bGPU )
         {
             const auto TSubmit = std::chrono::steady_clock::now();
@@ -460,6 +463,7 @@ namespace xlionrender
             if( !m_bGISliceTSTried ) { m_bGISliceTSTried = true; m_bGISliceTS = m_Device.Create(m_GISliceTS, { .m_Count = 5 }) == nullptr; }
             if( m_bGISliceTS )
             {
+                XPROFILE_SCOPE("GI: slice times");
                 if( m_GISliceTS.getResults(m_GISliceNs) && m_GISliceNs.size() >= 5 && m_GISliceNs[1] >= m_GISliceNs[4] && m_GISliceNs[4] > m_GISliceNs[0] && m_GISliceNs[3] > m_GISliceNs[2] && m_GIQuietFrames > ring_frames_v + 1 )
                 {
                     const double Show = double(m_GISliceNs[3] - m_GISliceNs[2]) * 1e-6;
@@ -478,13 +482,13 @@ namespace xlionrender
                 m_pGITrace->SetSunMap(m_bGISunMapValid && bSame ? &m_GISunMap : nullptr, m_GISunW2C, m_GISunTexel, m_GISunDepthPerMeter, m_bGISunMapMade && !bSame && !m_bGISunRays);
             }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 0);
-            m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye);
+            { XPROFILE_SCOPE("GI: submit"); m_pGITrace->Submit(Window, W, L, GIFrame, Scene.m_GI.m_GPUBudgetMs, Eye); }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 4);
             // The link solve, on by default (Tomas 2026-10-24: it is what settles the light): the links built on the GPU once the rays settled (30
             // frames), then solved every frame and the rays stop (moving objects still get them). XLION_GI_LINKS=<rays>[,settle frames[,surfels a
             // frame]] changes it; XLION_GI_LINKS=0 turns it off
             static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 64, 30, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
-            if( s_Links[0] > 0 ) m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]);
+            if( s_Links[0] > 0 ) { XPROFILE_SCOPE("GI: links"); m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]); }
             if( auto* pT = GITimes(this, m_Device) )
             {
                 Window.WriteTimestamp(pT->m_T, 5);
@@ -495,12 +499,13 @@ namespace xlionrender
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 4);
             if( Scene.m_GI.m_bProbes && !s_bNoProbes && !m_pGITrace->isRelighting() )
             {
+                XPROFILE_SCOPE("GI: probes");
                 // the grid's readers: the drawn meshes without surfels of their own (skinned, moving) - their probes every frame, the rest
                 // 64 a frame (a full pass ~4 s)
                 std::vector<gi::v3> Focus;
                 for( const auto& D : Scene.m_Draws )
                 {
-                    if( D.m_Instance != 0 && getGIId(D.m_Instance) >= 0 ) continue;
+                    if( D.m_Instance != 0 && hasGI(D.m_Instance) ) continue;
                     const auto* pM = findMesh(D.m_Mesh);
                     if( pM == nullptr ) continue;
                     const auto& B = pM->m_bCluster ? pM->m_Geom.m_BBox : pM->m_BBox;
@@ -567,6 +572,7 @@ namespace xlionrender
         std::vector<std::uint32_t> ZeroWords;
         const auto Zeros = [&](xgpu::buffer::setup::usage U, std::size_t nWords) -> std::optional<void*> { if( U != xgpu::buffer::setup::usage::GPU_READ ) return std::nullopt; ZeroWords.assign(nWords, 0u); return static_cast<void*>(ZeroWords.data()); };
         const auto ForEachGIId = [&](auto&& Fn) { for( const auto& [K, Id] : m_GIIds ) Fn(Id); for( const auto& [K, Id] : m_GISecIds ) Fn(Id); };
+        XPROFILE_SCOPE("GI: places and rings");
         bool bCompact = false;
         ForEachGIId([&](int Id)
         {
@@ -693,8 +699,8 @@ namespace xlionrender
                 for( std::size_t k = 0; k < DrawSecIds[i].size(); ++k ) WriteOne(DrawSecIds[i][k], m_DrawGISec[i][k]);
             }
         };
-        if( bShowOnGPU ) RingWrite(nullptr);
-        else (void)m_GILightRing.MemoryMapFrameRegion(std::size_t(Base), std::size_t(m_GIRegion), RingWrite);
+        { XPROFILE_SCOPE("GI: ring"); if( bShowOnGPU ) RingWrite(nullptr);
+        else (void)m_GILightRing.MemoryMapFrameRegion(std::size_t(Base), std::size_t(m_GIRegion), RingWrite); }
         m_GIStats.m_RingCopyMs = MsSince(TRing);
         const auto TMomentsCopy = std::chrono::steady_clock::now();
 
@@ -730,7 +736,7 @@ namespace xlionrender
             }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 2);
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 2);
-            (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation, Scene.m_GI.m_bShowBlend);
+            XPROFILE_SCOPE("GI: show"); (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation, Scene.m_GI.m_bShowBlend);
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 3);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 3);
         }

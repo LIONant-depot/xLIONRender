@@ -128,6 +128,7 @@ namespace xlionrender
                       void                    setGISunRays( bool b )                                        noexcept { m_bGISunRays = b; }     // the relight's sun by shadow rays, not the map
                       int                     getGIId( std::uint64_t Instance ) const                       noexcept { const auto It = m_GIIds.find(std::uint32_t(Instance)); return It == m_GIIds.end() ? -1 : It->second; }    // a draw's instance in getGIWorld (-1: none)
                       int                     getGISectionId( std::uint64_t Instance, int Section ) const   noexcept { const auto It = m_GISecIds.find((std::uint64_t(std::uint32_t(Instance)) << 16) | std::uint64_t(Section)); return It == m_GISecIds.end() ? -1 : It->second; }    // (GI sections: a draw's section's)
+                      bool                    hasGI( std::uint64_t Instance ) const                         noexcept { return getGIId(Instance) >= 0 || getGISectionId(Instance, 0) >= 0; }    // a draw is in the GI's world (its BVH): whole or by sections
                       bool                    isGICapturing( void ) const                                   noexcept { return !m_GICaptures.empty(); }
 
         // A material: its HDR fragment shader (xmaterial::rt::getShaderHDR()) and its sampler bindings in shader order - slot 0
