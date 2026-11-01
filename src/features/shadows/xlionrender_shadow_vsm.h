@@ -81,6 +81,9 @@ namespace xlionrender::shadows
             // epoch rendered all 256 at once, 148k draws in Bistro). The previous epoch's net shows meanwhile (its own slots: NetSlots),
             // and a new epoch waits until the previous one is gone (never a hole). 0: every page of the net at once, its old net freed
             int     m_NetBudget      = 16;
+            // Every page a frame, the net's and the fine ones (0: off): the renderer's estimate of what fits the shadows' slice by the pages'
+            // measured GPU time (instance: XLION_SH_PAGES_MS) - the steady and new-epoch budgets above are caps under it. Not with the cache off
+            int     m_FrameBudget    = 0;
             int     m_SteadyBudget   = 0;                // fine pages a frame while no new epoch is rebuilding (the camera moving, the sun still): 0 as m_Budget; the renderer's: all of them, in their frame as Unreal's (late pages popped in while moving, Tomas) - a new epoch keeps m_Budget (every page again: 46 ms at once in Bistro)
 
             int SlotsPerRow ( void ) const noexcept { return m_PoolTexels / page_texels_v; }
@@ -169,6 +172,7 @@ namespace xlionrender::shadows
         }
 
         const setup& getSetup( void ) const noexcept { return m_Setup; }
+        void         SetFrameBudget( int nPages ) noexcept { m_Setup.m_FrameBudget = nPages; }     // (setup::m_FrameBudget, set every frame - no re-Init)
 
         static std::uint64_t Pack(const key& K) noexcept
         {
@@ -368,6 +372,7 @@ namespace xlionrender::shadows
                 }
                 std::sort(Net.begin(), Net.end(), [&](const key& a, const key& b) { return PageDistance2(a, C) < PageDistance2(b, C); });
                 int NetBudget = m_Setup.m_NetBudget > 0 && m_bHasPrev ? m_Setup.m_NetBudget : int(Net.size());     // (no previous net to show: all of it - the first)
+                if (m_Setup.m_FrameBudget > 0 && bCache && m_bHasPrev) NetBudget = std::min(NetBudget, m_Setup.m_FrameBudget);
                 for (const auto& K : Net)
                 {
                     if (NetBudget <= 0) { ++m_Stats.m_Deferred; ++m_Stats.m_NetDeferred; continue; }
@@ -403,6 +408,7 @@ namespace xlionrender::shadows
                 return PageDistance2(a, C) < PageDistance2(b, C);
             });
             int Budget = m_bHasPrev || m_Setup.m_SteadyBudget <= 0 ? m_Setup.m_Budget : m_Setup.m_SteadyBudget;     // (a previous epoch bridges a rebuild: the budget)
+            if (m_Setup.m_FrameBudget > 0 && bCache) Budget = std::min(Budget, std::max(m_Setup.m_FrameBudget - m_Stats.m_RenderedPinned, 4));     // (the net's first; 4 at least: the rebuild moves on)
             for (const auto& K : Want)
             {
                 if (Budget <= 0) { ++m_Stats.m_Deferred; continue; }

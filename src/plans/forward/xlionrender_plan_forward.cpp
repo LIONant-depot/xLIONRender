@@ -1552,7 +1552,11 @@ namespace xlionrender
                 m_VSMReport.m_RequestGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
             if( const int Slot = int(m_Device.getFrameIndex() % ring_frames_v); !m_VSMRenderTimed[Slot] ) m_VSMReport.m_RenderGpuMs = 0;
             else if( std::vector<std::uint64_t> Ns; m_VSMRenderTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
+            {
                 m_VSMReport.m_RenderGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
+                // a page's GPU time, smoothed (the frames that rendered a few: their fixed part would dominate)
+                if( const int n = m_VSMRenderPages[std::size_t(m_Device.getFrameIndex() % ring_frames_v)]; n >= 8 ) m_VSMPageMs += (m_VSMReport.m_RenderGpuMs / n - m_VSMPageMs) * 0.1;
+            }
             // Level 0's texel: the clipmap's level 0 texel / 4, at most 2 mm (a scene's tile can be tens of metres: the static geom
             // preview's is the model's radius / 2); the screen picks the level, so the 2 mm only show where a pixel asks for them. The
             // levels: at least the setup's, more (up to max_levels_v) when the coarsest would not cover what the clipmap covers
@@ -1606,6 +1610,10 @@ namespace xlionrender
               if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d\n", Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine), std::fflush(stdout); }
             m_VSMLevelBand = std::clamp(Sun.m_ShadowLevelBlend, 0.01f, 0.95f);
             ShCpu.Lap();
+            // The frame's pages by their measured cost: what fits the pages' share of the shadows' slice (XLION_SH_PAGES_MS overrides; 0 off)
+            static const float s_PagesMs = [] { const char* p = std::getenv("XLION_SH_PAGES_MS"); return p ? float(std::atof(p)) : -1.0f; }();
+            const float PagesMs = s_PagesMs >= 0 ? s_PagesMs : m_ShadowPagesMs;
+            m_VSM.SetFrameBudget(PagesMs > 0 ? std::clamp(int(PagesMs / std::max(m_VSMPageMs, 1e-3)), 8, 1024) : 0);
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
             ShCpu.Lap();
@@ -1650,6 +1658,7 @@ namespace xlionrender
 
         m_nShadowTilesRendered = static_cast<int>(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
         m_VSMRenderTimed[m_Device.getFrameIndex() % ring_frames_v] = !m_VSM.m_ToRender.empty();
+        m_VSMRenderPages[m_Device.getFrameIndex() % ring_frames_v] = int(m_VSM.m_ToRender.size());
         if( m_nShadowTilesRendered == 0 ) return;
 
         ShCpu.Lap();
@@ -2959,9 +2968,12 @@ namespace xlionrender
                     const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
                     m_CullSub.resize(Base + G.m_Submeshes.size(), 0);
                     bool bAny = false;
+                    // Measurement only (XLION_MAIN_LOD=k): every rigid geometry's LOD k in the main view (its GI not mapped: the upper bound of
+                    // the main view's LODs, shadows_gpu_plan.md)
+                    static const int s_MainLOD = [] { const char* p = std::getenv("XLION_MAIN_LOD"); return p ? std::atoi(p) : 0; }();
                     for( std::size_t s = 0; s < G.m_Submeshes.size(); ++s )
                     {
-                        const auto& Sub  = G.m_Submeshes[s];
+                        const auto& Sub  = s_MainLOD > 0 ? G.LODSubmeshes(s_MainLOD)[s] : G.m_Submeshes[s];
                         auto*       pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                         // (past the caps: the CPU path; a submesh adds at most a run a cluster and its prepass run)
                         if( pMat == nullptr || !Opaque(pMat) || m_CullCandidates.size() + Sub.m_nClusters > std::size_t(gpu_cull::max_candidates_v)
@@ -4004,7 +4016,7 @@ namespace xlionrender
             {
                 for( int k = 0; k < 6; ++k ) s_Sum[k] += (s_Ns[k + 1] - s_Ns[k]) * 1e-6;
                 // measurement (XLION_FRAME_CSV=<file>, the scorecard's game sequence): every frame's parts, for p95 / max
-                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands,shadow_pass,probes_planar,wall_ms\n"); return f; }();
+                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands,shadow_pass,probes_planar,wall_ms,sh_pair_tris\n"); return f; }();
                 if( s_pCsv )
                 {
                     std::fprintf(s_pCsv, "%llu", (unsigned long long)m_Device.getFrameIndex());
@@ -4016,8 +4028,8 @@ namespace xlionrender
                     // (wall_ms: the time since the last row - a stall of the main thread, a load on it, shows here and not in the GPU parts)
                     static auto s_Last = std::chrono::steady_clock::now(); const auto Now = std::chrono::steady_clock::now();
                     const double WallMs = std::chrono::duration<double, std::milli>(Now - s_Last).count(); s_Last = Now;
-                    std::fprintf(s_pCsv, ",%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%lld,%d,%d,%d,%d,%d,%.4f,%.4f,%.3f\n", (s_Ns[6] - s_Ns[0]) * 1e-6, G.m_ShadowMs, G.m_SceneMs, G.m_ToneMapMs, Pg.m_Rendered, Pg.m_RenderedPinned, Pg.m_Epochs
-                                , Sd.m_CpuDraws, (long long)Sd.m_CpuTris, Sd.m_CpuCasters, Sd.m_IndirectDraws, Sd.m_IndirectMax, Sd.m_PageClears, m_PairsReport.m_nCandidates, m_SplitShadowMs, m_SplitProbesMs, WallMs);
+                    std::fprintf(s_pCsv, ",%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%lld,%d,%d,%d,%d,%d,%.4f,%.4f,%.3f,%lld\n", (s_Ns[6] - s_Ns[0]) * 1e-6, G.m_ShadowMs, G.m_SceneMs, G.m_ToneMapMs, Pg.m_Rendered, Pg.m_RenderedPinned, Pg.m_Epochs
+                                , Sd.m_CpuDraws, (long long)Sd.m_CpuTris, Sd.m_CpuCasters, Sd.m_IndirectDraws, Sd.m_IndirectMax, Sd.m_PageClears, m_PairsReport.m_nCandidates, m_SplitShadowMs, m_SplitProbesMs, WallMs, (long long)m_PairsReport.m_Triangles);     // (sh_pair_tris: the pairs' triangles, a ring late)
                     if( m_Device.getFrameIndex() % 60 == 0 ) std::fflush(s_pCsv);
                 }
                 if( ++s_n == 120 ) { std::printf("RENDERGPU environment %.2f, instances %.2f, GI update %.2f, captures %.2f, shadows+scene+tonemap %.2f, overlays+outline %.2f ms\n", s_Sum[0] / s_n, s_Sum[1] / s_n, s_Sum[2] / s_n, s_Sum[3] / s_n, s_Sum[4] / s_n, s_Sum[5] / s_n); std::fflush(stdout); s_n = 0; for( auto& v : s_Sum ) v = 0; }

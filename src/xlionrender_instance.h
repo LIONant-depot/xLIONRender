@@ -769,6 +769,9 @@ namespace xlionrender
         xgpu::timestamps                        m_VSMTimes;                 // the request pass's GPU time
         xgpu::timestamps                        m_VSMRenderTimes;           // the sun's pages' rendering GPU time
         std::array<bool, ring_frames_v>         m_VSMRenderTimed{};         // whether a ring slot's frame rendered sun pages (timed)
+        std::array<int, ring_frames_v>          m_VSMRenderPages{};         // how many (the GPU time a page: m_VSMPageMs)
+        double                                  m_VSMPageMs     = 0.05;     // a sun page's GPU time (pairs, clears), smoothed - the frame's page budget (renderShadows)
+        float                                   m_ShadowPagesMs = 1.6f;     // the pages' share of the shadows' 2.0 ms slice (methodology 3: request pass, bounds, the locals' in the rest); 0: no frame budget
         std::array<shadows::vsm::snapshot, ring_frames_v> m_VSMSnap{};
         std::vector<shadows::vsm::key>          m_VSMRequests;
         std::vector<std::uint32_t>              m_VSMGot;                   // (the request readback's copy, kept: a frame's room)
