@@ -1951,6 +1951,10 @@ namespace xlionrender::gi
     // LOD 0's - a coarser LOD's triangles counted again would be duplicate geometry). A geometry of one LOD: every cluster
     template <class T_GEOM> std::vector<bool> LOD0Clusters(const T_GEOM& Geom) noexcept
     {
+        if constexpr (!requires { Geom.getLODs(); Geom.getMeshes(); })        // (a copy without the LOD tables - geom_gi_copy: its clusters as they are)
+            return std::vector<bool>(Geom.getClusters().size(), true);
+        else
+        {
         const auto Clusters = Geom.getClusters(); const auto LODs = Geom.getLODs(); const auto Subs = Geom.getSubmeshes();
         std::vector<bool> Out(Clusters.size(), LODs.empty());
         for (const auto& Mesh : Geom.getMeshes())
@@ -1961,6 +1965,7 @@ namespace xlionrender::gi
                 for (std::size_t c = Subs[s].m_iCluster; c < std::size_t(Subs[s].m_iCluster) + Subs[s].m_nCluster && c < Out.size(); ++c) Out[c] = true;
         }
         return Out;
+        }
     }
 
     template <class T_GEOM> void FromXGeomStatic(surfel_mesh& M, const T_GEOM& Geom) noexcept
