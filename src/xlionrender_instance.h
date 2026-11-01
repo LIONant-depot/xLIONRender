@@ -448,11 +448,16 @@ namespace xlionrender
         xgpu::compute               m_AOCompute;
         xgpu::buffer                m_TailFrames;                   // the denoiser's frame (host visible, a slot a ring frame)
         xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
-        // The sun's shadow mask (XLION_SUN_MASK, xLION_Docs shadows_gpu_plan.md S1a): 3 the materials read it (UBOLight.ShadowLevels[0].x 1);
+        // The sun's shadow mask (XLION_SUN_MASK, xLION_Docs shadows_gpu_plan.md S1a): 3 the materials read it (UBOLight.ShadowLevels[0].x 1),
+        // 4 and its pass skips the filter where every tap is proven lit (S1b: the pages' depth bounds, ShadowLevels[0].y 1; 5 such pixels half lit: tests);
         // measurement: 1 the pass runs and the materials keep their own lookup (its cost alone), 2 the materials skip theirs (VSMParams.x 0)
         int                         m_SunMaskMode = 0;
         xgpu::pipeline              m_SunMaskPipeline;
         xgpu::timestamps            m_SunMaskTimes;
+        xgpu::shader                m_VSMBoundsShader;              // the sun's pages' depth bounds (S1b): a page rendered this frame reduced into its slot's entry
+        xgpu::compute               m_VSMBoundsCompute;
+        xgpu::buffer                m_VSMBounds, m_VSMBoundsList;   // per slot: least | greatest << 16; this frame's pages (their atlas origin, a ring)
+        void                        vsmBounds( xgpu::window& Window ) noexcept;
         double                      m_SunMaskSum = 0; int m_SunMaskSumN = 0;
         xgpu::shader                m_ReflTraceShader;              // the reflection trace's benchmark (m_ReflTraceBench): its pass, counters (4 per ring slot), timestamps
         xgpu::compute               m_ReflTrace;

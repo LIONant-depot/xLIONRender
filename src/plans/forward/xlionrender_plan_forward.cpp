@@ -2015,6 +2015,26 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    // The sun's pages rendered this frame, each reduced to its depth bounds in its slot's entry (S1b; the sun mask's early-out reads them)
+    void instance::vsmBounds( xgpu::window& Window ) noexcept
+    {
+        if( !m_VSMBoundsCompute.m_Private || m_SunMaskMode < 4 || m_VSM.m_ToRender.empty() ) return;
+        const int Slots = m_VSM.getSetup().Slots();
+        const int n     = std::min(int(m_VSM.m_ToRender.size()), Slots);
+        const int Base  = int(m_Device.getFrameIndex() % ring_frames_v) * Slots;
+        (void)m_VSMBoundsList.MemoryMapFrameRegion(Base, n, [&](void* p)
+        {
+            auto* pO = static_cast<std::int32_t*>(p);
+            for( int i = 0; i < n; ++i ) { pO[2 * i] = m_VSM.m_ToRender[i].m_AtlasX; pO[2 * i + 1] = m_VSM.m_ToRender[i].m_AtlasY; }
+        });
+        const std::uint32_t Push[4] = { std::uint32_t(Base), std::uint32_t(n), std::uint32_t(m_VSM.getSetup().SlotsPerRow()), 0u };
+        auto Buffers  = std::array<xgpu::buffer*, 2>{ &m_VSMBoundsList, &m_VSMBounds };
+        auto Textures = std::array<const xgpu::texture*, 1>{ &m_ShadowAtlas };
+        Window.Dispatch(m_VSMBoundsCompute, Buffers, Textures, Push, sizeof(Push), n, 1);
+    }
+
+    //------------------------------------------------------------------------------------------------
+
     // The scene into View's HDR target (and depth), lit, from a camera-centered W2C at Eye: the main view, and the reflection
     // probes' capture faces (bMain false: no timestamps). Shadows, instances and cells of this frame are already up to date.
     // The screen tail (light_mode::SCREEN, the main view; documentation/lighting_p3_design.md "The decision"), before the scene pass: the thin
@@ -3041,6 +3061,7 @@ namespace xlionrender
             if( bSunMask )
             {
                 pLight->m_TailC2W = W2C.Inverse();
+                pLight->m_ShadowLevels[0].m_Y = m_SunMaskMode == 5 ? 2.0f : m_SunMaskMode >= 4 ? 1.0f : 0.0f;       // (the mask pass's early-out; 5: the test's view of it)
                 if( m_SunMaskMode == 2 ) pLight->m_VSMParams.m_X = 0.0f;
             }
             const auto SunMask = [&]
@@ -3051,7 +3072,7 @@ namespace xlionrender
                     MCmd.WriteTimestamp(m_SunMaskTimes, 0);          // (in the pass's own command buffer: the window's wrote them around nothing)
                     MCmd.setViewport(0.0f, 0.0f, float(View.m_Width), float(View.m_Height));
                     MCmd.setScissor(0, 0, View.m_Width, View.m_Height);
-                    std::array<xgpu::buffer*, 2> Buffers{ &m_LightRing, &m_CellRing };
+                    std::array<xgpu::buffer*, 3> Buffers{ &m_LightRing, &m_CellRing, &m_VSMBounds };
                     MCmd.setPipelineInstance(View.m_SunMaskInstance, Buffers);
                     MCmd.setDynamicUBO(m_LightUBO, 1);
                     MCmd.setBuffer(m_FullscreenVB);
@@ -3063,7 +3084,7 @@ namespace xlionrender
                 // that block again (the next binds take the latest entry). A lit pass before this one in the frame sees the flag too: its
                 // fragments are not at the mask's distances (the check) or are last frame's (a still camera). A debug view of the pages
                 // shades inline: ShadowVSM's colours
-                if( m_SunMaskMode == 3 && pLight->m_VSMParams2.m_W < 2.0f )
+                if( m_SunMaskMode >= 3 && pLight->m_VSMParams2.m_W < 2.0f )
                 {
                     pLight->m_ShadowLevels[0].m_X = 1.0f;
                     m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;
@@ -3941,7 +3962,7 @@ namespace xlionrender
         xgpu::timestamps* pSplit = nullptr;
         if( pTS ) { auto [It, bNew] = s_SplitTS.try_emplace(this); if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_SplitTS.erase(It); else pSplit = &It->second; }
         if( pSplit ) Window.WriteTimestamp(*pSplit, 0);
-        { XPROFILE_SCOPE("Render: shadows"); XPROFILE_GPU_SCOPE(Window, "Render: shadows"); renderShadows(Window, Scene, Eye, ProjScale); }
+        { XPROFILE_SCOPE("Render: shadows"); XPROFILE_GPU_SCOPE(Window, "Render: shadows"); renderShadows(Window, Scene, Eye, ProjScale); vsmBounds(Window); }
         if( pSplit ) Window.WriteTimestamp(*pSplit, 1);
         { XPROFILE_SCOPE("Render: probes"); XPROFILE_GPU_SCOPE(Window, "Render: probes"); updateProbes(Window, Scene, Eye); }
         { XPROFILE_SCOPE("Render: planar"); XPROFILE_GPU_SCOPE(Window, "Render: planar"); renderPlanar(Window, Scene, View, Camera); }

@@ -110,6 +110,9 @@ namespace xlionrender
         constexpr std::uint32_t s_SunMaskFrag[] = {
             #include "xlionrender_sun_mask_frag.h"
         };
+        constexpr std::uint32_t s_VSMBoundsComp[] = {
+            #include "xlionrender_vsm_bounds_comp.h"
+        };
         constexpr std::uint32_t s_AOComp[] = {
             #include "xlionrender_ao_comp.h"
         };
@@ -569,6 +572,7 @@ namespace xlionrender
                 { xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
                 , xgpu::pipeline::uniform_binds{ .m_BindIndex = 3, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // lights
                 , xgpu::pipeline::uniform_binds{ .m_BindIndex = 4, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }   // light cells
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 20, .m_Usage = { .m_bFragment = true }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }  // the pages' depth bounds
                 };
                 xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = MaskShaders, .m_UniformBinds = MaskBinds, .m_Samplers = Samplers };
                 Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
@@ -576,6 +580,13 @@ namespace xlionrender
                 Setup.m_DepthStencil.m_bDepthWriteEnable = false;
                 if( auto Err = Device.Create(m_SunMaskPipeline, Setup); Err ) return Err;
                 if( auto Err = Device.Create(m_SunMaskTimes, { .m_Count = 2 }); Err ) return Err;
+                // the sun's pages' depth bounds (S1b, shaders/xlionrender_vsm_bounds_comp.glsl): per slot, made when its page renders
+                using usage = xgpu::buffer::setup::usage;
+                const std::vector<std::uint32_t> Zeros(std::size_t(sunAtlasWidth() / shadows::vsm::page_texels_v) * std::size_t(sunAtlasHeight() / shadows::vsm::page_texels_v), 0u);      // (least depth 0: nothing proven until rendered)
+                if( auto Err = Device.Create(m_VSMBoundsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_VSMBoundsComp) }); Err ) return Err;
+                if( auto Err = Device.Create(m_VSMBoundsCompute, { .m_pShader = &m_VSMBoundsShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 16 }); Err ) return Err;
+                if( auto Err = Device.Create(m_VSMBounds, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Zeros.size()), .m_pData = const_cast<std::uint32_t*>(Zeros.data()), .m_pName = "Shadows: VSM page depth bounds" }); Err ) return Err;
+                if( auto Err = Device.Create(m_VSMBoundsList, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * sizeof(std::int32_t), .m_EntryCount = ring_frames_v * int(Zeros.size()), .m_pName = "Shadows: VSM pages to bound" }); Err ) return Err;
             }
 
             // the depth prepass: the same vertex shader and layout, depth only (no color written)

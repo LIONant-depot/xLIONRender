@@ -92,6 +92,27 @@ int main()
     CHECK(Mean < 0.005, "The mask shades differently on average (%.5f)", Mean);
     CHECK(nOff < int(Inline.size()) / 200, "%d texels differ by more than 5%% (at most 0.5%% of them: silhouettes)", nOff);
 
+    // (whole-page bounds prove almost nothing here: a lit receiver is a caster too - its own surface is in the page, nearer the light
+    // across the reach: shadows_gpu_plan.md S1b; the share is printed, its correctness checked)
+    // modes 4, 5 (S1b, the early-out on the pages' depth bounds): what it claims lit (5 writes those half lit) is lit in the full
+    // evaluation - mode 3's texel equals the unshadowed one (mode 2's: no material lookup) -, and with it the image is mode 3's exactly
+    std::vector<float> Early, Claimed;
+    CHECK(Render("4", Early),   "Render with the early-out (settled)");
+    CHECK(Render("5", Claimed), "Render with the early-out's pixels marked (settled)");
+    int nClaimed = 0, nWrong = 0;
+    float MaxEarly = 0;
+    for (std::size_t i = 0; i < Mask.size(); ++i)
+    {
+        MaxEarly = std::max(MaxEarly, std::abs(Early[i] - Mask[i]));
+        if (std::abs(Claimed[i] - Mask[i]) <= 1e-6f) continue;
+        ++nClaimed;
+        if (std::abs(Mask[i] - Skip[i]) > 1e-4f * std::max(Skip[i], 1e-3f)) ++nWrong;
+    }
+    std::printf("modes 4/5: %d of %d texels proven lit (%.1f%%), %d of them not lit in the full evaluation; mode 4 vs 3 max difference %g\n"
+               , nClaimed, int(Mask.size()), 100.0 * nClaimed / double(Mask.size()), nWrong, MaxEarly);
+    CHECK(nWrong == 0, "%d texels proven lit are shadowed in the full evaluation", nWrong);
+    CHECK(MaxEarly <= 1e-6f, "The early-out changed the image (max %g)", MaxEarly);
+
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");
     return 0;
