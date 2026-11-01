@@ -148,6 +148,48 @@ int main()
     };
     CHECK(Compare("still"), "compare, still");
 
+    {   // Masked casters through the GPU pairs: their material's cutout runs in the pairs' indirect draws as in the CPU path's (spheres cut
+        // out in stripes), and it cuts - spheres cut out everywhere leave the image as without them (their shadows gone too)
+        static constexpr std::uint32_t s_Stripes[] = {
+            #include "xlionrender_test_stripes_frag.h"
+        };
+        static constexpr std::uint32_t s_Cut[] = {
+            #include "xlionrender_test_cutout_frag.h"
+        };
+        xgpu::shader StripesFrag, CutFrag;
+        CHECK(!Device.Create(StripesFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Stripes), std::size(s_Stripes) } } }), "stripes shader");
+        CHECK(!Device.Create(CutFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_Cut), std::size(s_Cut) } } }), "cut out shader");
+        xlionrender::material_id Stripes, Cut;
+        CHECK(!Renderer.CreateMaterial(Stripes, StripesFrag, Slots, { .m_Blend = xlionrender::material_state::blend::MASKED }), "masked material");
+        CHECK(!Renderer.CreateMaterial(Cut, CutFrag, Slots, { .m_Blend = xlionrender::material_state::blend::MASKED }), "cut out material");
+        for (std::size_t i = 1; i < iMovers; i += 2) Scene.m_Draws[i].m_Materials = { Stripes };
+        CHECK(App.RenderFrame(Scene, View, Camera), "the masked casters' first frame");     // (a new material's first frame: its pipelines and parameters come in)
+        CHECK(Compare("masked casters"), "compare, masked casters");
+
+        const auto Render = [&](std::vector<float>& I)
+        {
+            Renderer.m_bShadowCache = false;
+            const bool bOk = App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, I);
+            Renderer.m_bShadowCache = true;
+            return bOk && Renderer.getPairsReport().m_bGPU;
+        };
+        std::vector<float> CutOut, Without;
+        for (std::size_t i = 1; i < iMovers; i += 2) Scene.m_Draws[i].m_Materials = { Cut };
+        CHECK(Render(CutOut), "spheres cut out everywhere, the GPU pairs");
+        const auto All = Scene.m_Draws;
+        std::vector<xlionrender::draw> Kept;
+        for (std::size_t i = 0; i < All.size(); ++i) if (i == 0 || i >= iMovers || i % 2 == 0) Kept.push_back(All[i]);
+        Scene.m_Draws = Kept;
+        CHECK(Render(Without), "without those spheres");
+        Scene.m_Draws = All;
+        int nDiff = 0; for (std::size_t i = 0; i < CutOut.size(); ++i) nDiff += std::abs(CutOut[i] - Without[i]) > 1e-4f;
+        std::printf("masked casters cut out everywhere: %d values differ from the image without them\n", nDiff);
+        CHECK(nDiff <= int(CutOut.size() / 2000), "masked casters cut out everywhere still change the image: %d values (their shadows: the cutout did not run)", nDiff);
+        for (std::size_t i = 1; i < iMovers; i += 2) Scene.m_Draws[i].m_Materials = { Material };
+        Renderer.DestroyMaterial(Stripes);
+        Renderer.DestroyMaterial(Cut);
+    }
+
     CHECK(Bench("still", false), "the benchmark, still");
     {   // The sun's shadow in the scene pass (the pages' lookups, the contact-hardening's search and filters): its GPU time with and without
         const auto ScenePass = [&]()

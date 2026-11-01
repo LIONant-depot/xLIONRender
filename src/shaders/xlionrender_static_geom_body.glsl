@@ -40,6 +40,22 @@ layout(location = 13) out vec4 OutGITangent;        //   and the tangent (w: the
 layout(location = 14) out vec4 OutPrevClip;         // last frame's clip position (the screen tail's motion: the G-buffer variants read it; w 0: none)
 layout(location = 15) flat out uint OutCluster;      // the cluster drawn (the G-buffer prepass: the submesh instance, xlionrender_gprepass_frag.glsl)
 
+#ifdef XLION_SHADOW_RECORDS
+// xlionrender_shadow_pairs_cut_vert.glsl: the record's page (xlionrender_shadow_pairs_vert.glsl's placement: its world -> clip, then
+// its square of the atlas, clipped to it)
+struct PageData
+{
+    mat4   W2C;
+    vec4   Atlas;
+    vec4   Rect;
+};
+layout(std430, set = 1, binding = 13) readonly buffer PageBuffer
+{
+    PageData Pages[];
+};
+out float gl_ClipDistance[4];
+#endif
+
 #ifdef XLION_GI
 #include "xlionrender_surfel_gi.glsl"
 
@@ -96,7 +112,19 @@ void main()
     Out.wSpacePosition      = vec4(VertData.LocalPos * L2wRows + mesh.WorldOffset.xyz, 1.0);
     OutPrevClip             = mesh.PrevWorldOffset.w > 0.5 ? mesh.PrevW2C * vec4(VertData.LocalPos * mat3x4(I.PrevRows[0], I.PrevRows[1], I.PrevRows[2]) + mesh.PrevWorldOffset.xyz, 1.0) : vec4(0.0);
     Out.ShadowPosition      = vec4(0.5, 0.5, 2.0, 1.0);                 // the editors' single shadow map (LDR materials) only
+#ifdef XLION_SHADOW_RECORDS
+    {
+        const PageData P = Pages[push.page];
+        const vec4     C = P.W2C * Out.wSpacePosition;
+        gl_ClipDistance[0] = C.w + C.x;
+        gl_ClipDistance[1] = C.w - C.x;
+        gl_ClipDistance[2] = C.w + C.y;
+        gl_ClipDistance[3] = C.w - C.y;
+        gl_Position = vec4(C.x * P.Atlas.x + C.w * P.Atlas.z, C.y * P.Atlas.y + C.w * P.Atlas.w, C.z, C.w);
+    }
+#else
     gl_Position             = mesh.w2C * Out.wSpacePosition;
+#endif
 
     //
     // Set the UVs

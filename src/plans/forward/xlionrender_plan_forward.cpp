@@ -1678,7 +1678,7 @@ namespace xlionrender
         // rigid opaque clusters of the casters that overlap a page (the sun's: of their kind, light-space rects; the local lights': their
         // light's sphere), a candidate each, a run a geometry and kind (the sun's and the local lights' draw in viewports of their own), paired
         // on the GPU - outside the passes
-        struct pairs_run { const cluster_geom* m_pGeom; std::uint32_t m_First, m_Max; bool m_bLocal; };
+        struct pairs_run { const cluster_geom* m_pGeom; std::uint32_t m_First, m_Max; bool m_bLocal; material_slot* m_pCut = nullptr; };     // m_pCut: a masked material's run (its cutout through the records)
         std::vector<pairs_run> PairRuns;
         // The casters' LOD a sun page draws (cluster_geom::LODSubmeshes): texels up to XLION_SH_LOD_TEXEL (2 cm) the finest, each doubling a
         // LOD coarser - a coarse page drew every full-detail triangle (the shadow pass's cost was its triangles). XLION_SH_NO_LOD: LOD 0
@@ -1727,7 +1727,7 @@ namespace xlionrender
             };
             std::vector<shadow_pairs::candidate>& Cands = m_PairCandidates;
             std::vector<xmath::fmat4>             L2L;
-            std::map<std::pair<const cluster_geom*, bool>, std::uint32_t> RunOf;
+            std::map<std::tuple<const cluster_geom*, bool, const material_slot*>, std::uint32_t> RunOf;     // (a masked material's submeshes: a run of their own)
             Cands.clear();
             xmath::fmat4 Rot = xmath::fmat4::fromZero();
             Rot(0, 0) = m_VSM.m_X.m_X; Rot(0, 1) = m_VSM.m_X.m_Y; Rot(0, 2) = m_VSM.m_X.m_Z;
@@ -1739,8 +1739,12 @@ namespace xlionrender
                 const auto& D    = *Draws[i].m_pDraw;
                 const auto& G    = Draws[i].m_pMesh->m_Geom;
                 const auto  Draw = std::uint32_t(L2L.size()) | (bLocal ? shadow_pairs::local_v : Draws[i].m_bMover ? shadow_pairs::mover_v : 0u);
-                const auto [It, bNew] = RunOf.try_emplace({ &G, bLocal }, std::uint32_t(PairRuns.size()));
-                if( bNew ) PairRuns.push_back({ &G, 0, 0, bLocal });
+                const auto RunFor = [&](material_slot* pCut)
+                {
+                    const auto [It, bNew] = RunOf.try_emplace({ &G, bLocal, pCut }, std::uint32_t(PairRuns.size()));
+                    if( bNew ) PairRuns.push_back({ &G, 0, 0, bLocal, pCut });
+                    return It->second;
+                };
                 L2L.push_back(bLocal ? D.m_L2W : Rot * D.m_L2W);
                 // a candidate list per LOD the pages use (Center.w: its LOD - it pairs with the pages of that LOD only), the geometry's coarsest
                 // once for that LOD and every coarser one (w -1 - k: a single-LOD geometry's candidates pair with every page, as before -
@@ -1756,16 +1760,23 @@ namespace xlionrender
                     {
                         auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                         if( pMat && !MaterialVisibilityOf(pMat->m_State).m_bCastsShadow ) continue;
-                        if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) continue;     // (its cutout: the CPU path's)
+                        // a masked one: its cutout's run (the material's fragment through the records); no pipeline: the CPU path draws it
+                        material_slot* pCut = nullptr;
+                        if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED )
+                        {
+                            if( getPairsCutInstance(*pMat) == nullptr ) { Draws[i].m_bCut = true; continue; }
+                            pCut = pMat;
+                        }
+                        const std::uint32_t Run = RunFor(pCut);
                         for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                         {
                             if( Draws[i].m_BoxedBase != ~0u && m_ClusterSkip[Draws[i].m_BoxedBase + c] == cluster_boxed_v ) continue;     // drawn as its box: no shadow
                             const auto& C    = G.m_Clusters[c];
                             const auto  Ctr  = C.m_BBox.getCenter();
                             const auto  Half = (C.m_BBox.m_Max - C.m_BBox.m_Min) * 0.5f;
-                            Cands.push_back({ It->second, 0, c, Draws[i].m_Slot, C.m_nIndices, C.m_iIndex, std::int32_t(C.m_iVertex), Draw
+                            Cands.push_back({ Run, 0, c, Draws[i].m_Slot, C.m_nIndices, C.m_iIndex, std::int32_t(C.m_iVertex), Draw
                                             , { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, Tag }, { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
-                            ++PairRuns[It->second].m_Max;
+                            ++PairRuns[Run].m_Max;
                         }
                     }
                 }
@@ -1773,12 +1784,6 @@ namespace xlionrender
             for( std::uint32_t i = 0; i < Draws.size(); ++i )
             {
                 if( !Draws[i].m_bGPU ) continue;
-                for( const auto& Sub : Draws[i].m_pMesh->m_Geom.m_Submeshes )        // (a masked material's cutout: the CPU path's material caster - its submeshes only;
-                {                                                                    //  the whole draw went there: 148k draws a frame in Bistro, every section had one)
-                    const auto& Mats = Draws[i].m_pDraw->m_Materials;
-                    auto* pMat = Sub.m_iMaterial < Mats.size() ? findMaterial(Mats[Sub.m_iMaterial]) : nullptr;
-                    if( pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::MASKED ) { Draws[i].m_bCut = true; break; }
-                }
                 if( Touches(i) )                AddCandidates(i, false);
                 if( !Lit.empty() && TouchesLocal(i) ) AddCandidates(i, true);
             }
@@ -1803,12 +1808,28 @@ namespace xlionrender
             auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();
             ViewBlock.m_w2C         = xmath::fmat4::fromIdentity();
             ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
+            bool bCutLight = false;
             for( std::uint32_t r = 0; r < std::uint32_t(PairRuns.size()); ++r )
             {
                 const auto& Run = PairRuns[r];
                 if( Run.m_bLocal != bLocal ) continue;
-                std::array<xgpu::buffer*, 4> Buffers{ Run.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_pShadowPairs->m_Records, &m_pShadowPairs->m_Pages };
-                Cmd.setPipelineInstance(m_ShadowPairsInstance, std::span{ Buffers });
+                if( Run.m_pCut )
+                {
+                    auto* pCut = getPairsCutInstance(*Run.m_pCut);
+                    if( pCut == nullptr ) continue;
+                    if( !bCutLight ) { m_LightUBO.allocEntry<details::ubo_lighting>().m_LightParams = xmath::fvec4(0, 0, 1, 1); bCutLight = true; }     // (the fragment's "shadow pass" flag, once)
+                    std::array<xgpu::buffer*, 12> Buffers{ Run.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_pShadowPairs->m_Records, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing
+                                                         , &m_MaterialParams, &m_EntityParams, &m_pShadowPairs->m_Pages, TailBuffer() };
+                    Cmd.setPipelineInstance(*pCut, std::span{ Buffers });
+                    if( Run.m_pCut->m_bTable ) Cmd.setTextureTable(Run.m_pCut->m_Table);
+                    Cmd.setDynamicUBO(m_LightUBO, 1);
+                    Cmd.setPushConstants(details::push_static_geom{ 0u, 0u, 0u, 0xFFFFFFFFu, Run.m_pCut->m_ParamBase });     // (the fragment's MaterialBase at 16)
+                }
+                else
+                {
+                    std::array<xgpu::buffer*, 4> Buffers{ Run.m_pGeom->m_pClusterData, &m_InstanceBuffer, &m_pShadowPairs->m_Records, &m_pShadowPairs->m_Pages };
+                    Cmd.setPipelineInstance(m_ShadowPairsInstance, std::span{ Buffers });
+                }
                 Cmd.setDynamicUBO(m_ShadowUBO, 0);
                 BindClusterStreams(Cmd, *Run.m_pGeom);
                 Cmd.DrawIndexedIndirectCount(m_pShadowPairs->m_Commands, int(Run.m_First), m_pShadowPairs->m_Counts, int(r), int(Run.m_Max));
@@ -1858,7 +1879,7 @@ namespace xlionrender
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                     const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
                     if( !Vis.m_bCastsShadow ) continue;
-                    if( bPairs && Draws[i].m_bGPU && Vis.m_Opacity != material_visibility::opacity::MASKED ) continue;     // (the pairs drew it)
+                    if( bPairs && Draws[i].m_bGPU && (Vis.m_Opacity != material_visibility::opacity::MASKED || !Draws[i].m_bCut) ) continue;     // (the pairs drew it: a masked one too, unless its cutout had no pipeline - m_bCut)
                     static const bool s_bNoMaskedCasters = std::getenv("XLION_SH_NO_MASKED") != nullptr;     // (measurement: the masked casters' share)
                     if( s_bNoMaskedCasters && Vis.m_Opacity == material_visibility::opacity::MASKED && !bOpaqueCut ) continue;
                     auto* pCut = Vis.m_Opacity == material_visibility::opacity::MASKED && !bOpaqueCut ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;

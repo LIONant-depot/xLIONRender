@@ -39,6 +39,9 @@ namespace xlionrender
         constexpr std::uint32_t s_ShadowPairsVert[] = {
             #include "xlionrender_shadow_pairs_vert.h"
         };
+        constexpr std::uint32_t s_ShadowPairsCutVert[] = {
+            #include "xlionrender_shadow_pairs_cut_vert.h"
+        };
         constexpr std::uint32_t s_SkinGeomVert[] = {
             #include "xlionrender_skin_geom_vert.h"
         };
@@ -735,6 +738,7 @@ namespace xlionrender
         }
         if( auto Err = Device.Create(m_GICaptureVert,       { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GICaptureVert) }); Err ) return Err;
         if( auto Err = Device.Create(m_StaticGeomGIRecordsVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_StaticGeomGIRecordsVert) }); Err ) return Err;     // RIGID, GPU culled
+        if( auto Err = Device.Create(m_ShadowPairsCutVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_ShadowPairsCutVert) }); Err ) return Err;     // RIGID masked casters through the pairs
         if( m_pCull = std::make_unique<gpu_cull>(); !m_pCull->Init(Device, s_CullComp, s_HiZComp) ) m_pCull.reset();      // (no drawIndirectCount: the CPU path)
         if( m_pShadowPairs = std::make_unique<shadow_pairs>(); !m_pShadowPairs->Init(Device, s_ShadowPairsComp) ) m_pShadowPairs.reset();
 
@@ -1338,13 +1342,19 @@ namespace xlionrender
         return makeInstance(M, cutout_path_v, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, geom_kind::RIGID, false, false, false, true); });
     }
 
+    xgpu::pipeline_instance* instance::getPairsCutInstance( material_slot& M ) noexcept
+    {
+        if( M.m_Instance[pairs_cut_path_v].m_Private ) return &M.m_Instance[pairs_cut_path_v];
+        return makeInstance(M, pairs_cut_path_v, false, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, geom_kind::RIGID, true, false, false, false, true); });
+    }
+
     xgpu::pipeline_instance* instance::getRecordsInstance( material_slot& M ) noexcept
     {
         if( M.m_Instance[records_path_v].m_Private ) return &M.m_Instance[records_path_v];
         return makeInstance(M, records_path_v, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, geom_kind::RIGID, false, true); });
     }
 
-    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow, bool bRecords, bool bGBuffer, bool bCutout ) noexcept
+    xgpu::device::error* instance::buildMaterialPipeline( xgpu::pipeline& Pipeline, const material_slot& M, geom_kind Kind, bool bShadow, bool bRecords, bool bGBuffer, bool bCutout, bool bPairsCut ) noexcept
     {
         const bool bSkin = Kind == geom_kind::SKIN;
 
@@ -1353,7 +1363,7 @@ namespace xlionrender
         assert(M.m_bTable || M.m_Textures.size() <= 8);       // slots 8, 9: the environment
         const auto Samplers = LitSamplers();
 
-        auto Shaders      = std::array<const xgpu::shader*, 2>{ bGBuffer ? &M.m_GBufferFragment : &M.m_Fragment, bSkin ? &m_SkinGeomVert : bRecords ? &m_StaticGeomGIRecordsVert : &m_StaticGeomGIVert };
+        auto Shaders      = std::array<const xgpu::shader*, 2>{ bGBuffer ? &M.m_GBufferFragment : &M.m_Fragment, bSkin ? &m_SkinGeomVert : bPairsCut ? &m_ShadowPairsCutVert : bRecords ? &m_StaticGeomGIRecordsVert : &m_StaticGeomGIVert };
         using ub = xgpu::pipeline::uniform_binds;
         const auto VertexSSBO   = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = ub::type::SSBO_STATIC }; };
         const auto FragmentSSBO = [](int i) { return ub{ .m_BindIndex = i, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }; };
@@ -1365,6 +1375,7 @@ namespace xlionrender
         , bSkin ? VertexSSBO(1) : BothSSBO(1)                   // RIGID: instances (a fragment may read the record: xlionrender_geom_standard_frag.glsl's constant material), SKIN: bones
         };
         if( bSkin ) UniformBinds.push_back(VertexSSBO(2));     // SKIN: instances
+        if( bPairsCut ) UniformBinds.push_back(VertexSSBO(2)); // the pairs' records (xlionrender_shadow_pairs_cut_vert.glsl; their pages: 13)
         UniformBinds.push_back(FragmentSSBO(3));                // lights
         UniformBinds.push_back(FragmentSSBO(4));                // light cells
         UniformBinds.push_back(BothSSBO(5));                    // the GI: the mesh's surfels (RIGID: the vertex read; both: the per-pixel read
@@ -1374,6 +1385,7 @@ namespace xlionrender
         UniformBinds.push_back(FragmentSSBO(9));                // MaterialParams (every material declares it, read or not)
         UniformBinds.push_back(FragmentSSBO(10));               // EntityParams
         if( bRecords ) UniformBinds.push_back(VertexSSBO(12)); // the draws' records (GPU culling)
+        if( bPairsCut ) UniformBinds.push_back(VertexSSBO(13)); // the pairs' pages
         UniformBinds.push_back(FragmentSSBO(14));               // the denoised screen tail (light_mode::SCREEN)
         const auto Binds = std::span{ UniformBinds };
         xgpu::pipeline::setup Setup{ .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
@@ -1413,7 +1425,7 @@ namespace xlionrender
                   | (S.m_bDepthTest ? 1u << 6 : 0u) | (S.m_bDepthWrite ? 1u << 7 : 0u)
                   | (S.m_Blend == material_state::blend::MASKED ? 1u << 8 : 0u);      // (a masked one's shading writes no depth: buildMaterialPipeline)
         }
-        if( k >= gbuffer_path_v && k != cutout_path_v ) return { M.m_GBufferFragment.m_Private.get(), M.m_State.m_bDoubleSided ? 1u << 4 : 0u, k };
+        if( k >= gbuffer_path_v && k != cutout_path_v && k != pairs_cut_path_v ) return { M.m_GBufferFragment.m_Private.get(), M.m_State.m_bDoubleSided ? 1u << 4 : 0u, k };
         return { M.m_Fragment.m_Private.get(), State, k };
     }
 
