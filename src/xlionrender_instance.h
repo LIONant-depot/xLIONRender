@@ -66,8 +66,26 @@ namespace xlionrender
                                 instance        ( const instance& )                                             = delete;
         instance&               operator=       ( const instance& )                                             = delete;
 
-        // Shadows: per platform sizes (features/shadows/xlionrender_shadow_local.h)
-        [[nodiscard]] xgpu::device::error* Init         ( xgpu::device& Device, const shadows::setup& ShadowSetup = {} ) noexcept;
+        // Per platform / per use sizes: the shadows' (features/shadows/xlionrender_shadow_local.h), the reflection probes
+        struct setup
+        {
+            shadows::setup  m_Shadows;
+            bool            m_bProbes = true;       // the reflection probes' atlas (24 MiB); false: a 1x1 stand-in, no probe resident
+            // An editor preview or thumbnail renderer: a sun pool of 256 slots (the net 64 of them, 128 with the previous epoch's), a local part
+            // of 32 slots, no probes - 12 MiB of shadow atlas instead of 160, no probe atlas (a renderer per preview panel and thumbnail runtime)
+            static setup Preview( void ) noexcept
+            {
+                setup S;
+                if( std::getenv("XLION_PREVIEW_FULL_POOLS") ) return S;      // (A/B: the previews with the renderer's sizes)
+                S.m_Shadows.m_SunPoolWidth   = S.m_Shadows.m_SunPoolHeight = 2048;
+                S.m_Shadows.m_SunPinnedRadius = 4;
+                S.m_Shadows.m_LocalAtlasSize = 1024;
+                S.m_Shadows.m_LocalAtlasHeight = 512;
+                S.m_bProbes = false;
+                return S;
+            }
+        };
+        [[nodiscard]] xgpu::device::error* Init         ( xgpu::device& Device, const setup& Setup = {} ) noexcept;
 
         [[nodiscard]] xgpu::device::error* CreateMesh   ( mesh_id& Id, std::span<const vertex> Vertices, std::span<const std::uint32_t> Indices ) noexcept;
         // An xgeom_static/xgeom_skin mesh (MakeClusterGeom / MakeSkinGeom). References Geom's GPU buffers (not owned, not
@@ -701,7 +719,7 @@ namespace xlionrender
         xgpu::texture               m_WhiteTexture;
         xgpu::shader                m_DefaultMaterialFrag, m_DefaultMaterialGBFrag;     // (CreateDefaultMaterial: its HDR fragment and its G-buffer variant)
 
-        // Shadows (features/shadows): the atlas (16 bits: the clipmap's 8x8 tiles on the left, the local maps' square on the right),
+        // Shadows (features/shadows): the atlas (16 bits: the sun's page pool on the left, the local pages' part on the right),
         // its passes (a clear for its first use, then load), the tile clear, the casters' depth pipelines per vertex path (float
         // mesh, rigid, skin), the scratch the local maps' casters render into and the remap from it into the atlas
         shadows::setup                          m_ShadowSetup;
@@ -743,7 +761,8 @@ namespace xlionrender
         std::vector<shadow_pairs::candidate>    m_PairCandidates;           // (the pairs' candidates, kept: their room)
         int                                     m_VSMSoftLevels = 0;        // the coarser levels the request pass asks for too (contact-hardening)
         static constexpr std::uint64_t          static_frames_v = 4;        // a caster unchanged this many shadow passes is static (in the sun's pages), else a mover
-        int  sunAtlasWidth( void ) const noexcept { return 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
+        int  sunAtlasWidth( void ) const noexcept { return m_ShadowSetup.m_SunPoolWidth > 0 ? m_ShadowSetup.m_SunPoolWidth : 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
+        int  sunAtlasHeight( void ) const noexcept { return m_ShadowSetup.m_SunPoolHeight > 0 ? m_ShadowSetup.m_SunPoolHeight : 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
         void vsmRequestPass( xgpu::window& Window, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
         int  vsmTableBase( void ) noexcept;
         // The local lights' shadow pages (P1d, features/shadows/xlionrender_shadow_local_pages.h): their request pass (a ring slot each, with
@@ -810,6 +829,7 @@ namespace xlionrender
         static constexpr int        probe_face_size_v       = 128;
         static constexpr int        probe_slots_v           = 32;
         static constexpr int        probe_slots_x_v         = 8;
+        int                         m_ProbeSlots            = probe_slots_v;   // resident probes at most (0: setup::m_bProbes false)
         struct probe_state
         {
             std::uint64_t           m_Key       = 0;        // the probe it holds (position, box)

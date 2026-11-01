@@ -59,7 +59,7 @@ namespace xlionrender::shadows
 
         struct setup
         {
-            int     m_PoolTexels    = 4096;             // the pool's width in the atlas (the renderer's: 8192 x 4096 x 16-bit = 64 MiB, 2048 slots -
+            int     m_PoolTexels    = 4096;             // the pool's width in the atlas (the renderer's: 8192 x 8192 x 16-bit = 128 MiB, 4096 slots -
             int     m_PoolHeight    = 0;                // Unreal's r.Shadow.Virtual.MaxPhysicalPages, at half its 32-bit memory); its height, 0: square
             int     m_Levels        = 10;               // level L's texel: level 0's x 2^L; the coarsest is the net
             int     m_Window        = 32;               // pages per level side kept in the table around the camera

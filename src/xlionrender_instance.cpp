@@ -320,11 +320,13 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
-    xgpu::device::error* instance::Init( xgpu::device& Device, const shadows::setup& ShadowSetup ) noexcept
+    xgpu::device::error* instance::Init( xgpu::device& Device, const setup& Setup ) noexcept
     {
         m_Device      = Device;
-        m_ShadowSetup = ShadowSetup;
-        m_LocalPages.Init({ .m_PoolTexels = ShadowSetup.m_LocalAtlasSize });
+        m_ShadowSetup = Setup.m_Shadows;
+        m_ProbeSlots  = Setup.m_bProbes ? probe_slots_v : 0;
+        const auto& ShadowSetup = m_ShadowSetup;
+        m_LocalPages.Init({ .m_PoolTexels = ShadowSetup.m_LocalAtlasSize, .m_PoolHeight = ShadowSetup.m_LocalAtlasHeight });
 
         // Vertex layouts
         {
@@ -370,10 +372,10 @@ namespace xlionrender
 
         // The shadow atlas: every lit pipeline samples it in slot 0
         {
-            const int Clipmap = shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, Local = ShadowSetup.m_LocalAtlasSize;
+            const int Local = ShadowSetup.m_LocalAtlasSize, LocalH = m_LocalPages.getSetup().PoolHeight();
             // (the sun's pool twice as tall: 4096 slots, Unreal's r.Shadow.Virtual.MaxPhysicalPages - the levels' detail far out (the sun's
             // ShadowDetailDistance) needs the pages; with 2048 the dynamic resolution took it back, Tomas: "they don't do anything"; +64 MB)
-            if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = 2 * Clipmap + Local, .m_Height = std::max(2 * Clipmap, Local), .m_isGamma = false, .m_pName = "Shadows: shadow atlas" }); Err ) return Err;
+            if( auto Err = Device.Create(m_ShadowAtlas,   { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = sunAtlasWidth() + Local, .m_Height = std::max(sunAtlasHeight(), LocalH), .m_isGamma = false, .m_pName = "Shadows: shadow atlas" }); Err ) return Err;
         }
 
         // The environment probe's textures (filled by updateEnvironment)
@@ -397,7 +399,7 @@ namespace xlionrender
             auto* I = static_cast<std::uint32_t*>(p);
             for( std::uint32_t q = 0; q < std::uint32_t(gi_capture_max_v); ++q ) { const std::uint32_t v = 4 * q; const std::uint32_t Q[6] = { v, v + 1, v + 2, v, v + 2, v + 3 }; std::memcpy(I + 6 * q, Q, sizeof(Q)); }
         });
-        if( auto Err = Device.Create(m_ProbeAtlas,{ .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = probe_slots_x_v * 384, .m_Height = probe_slots_v / probe_slots_x_v * 256, .m_isGamma = false, .m_pName = "Probes: probe atlas" }); Err ) return Err;
+        if( auto Err = Device.Create(m_ProbeAtlas,{ .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = Setup.m_bProbes ? probe_slots_x_v * 384 : 1, .m_Height = Setup.m_bProbes ? probe_slots_v / probe_slots_x_v * 256 : 1, .m_isGamma = false, .m_pName = "Probes: probe atlas" }); Err ) return Err;
 
         // Forward standard-material pipeline
         {
@@ -686,7 +688,7 @@ namespace xlionrender
         // (2048 slots) Every page asked for rendered in its frame while the sun is still, as Unreal's virtual shadow maps do (the finest pages
         // near the camera came last, a frame or more late while moving - a sharp patch overtaking a blurred one, Tomas); a new epoch (the sun
         // moved: every page again) keeps the budget, the previous epoch bridging it
-        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = 2 * shadows::atlas_tiles_v * ShadowSetup.m_ClipmapTileSize, .m_Window = 128, .m_SteadyBudget = 128 });     // (128 pages a level side: Unreal's clipmap levels' 16k texels - with 32 the fine levels ended 4, 8, 16 m from the eye, the walls beyond on coarse levels whatever the bias, Tomas)     // (~4 ms at most: a cut after a rebuild cost 12)
+        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = sunAtlasHeight(), .m_Window = 128, .m_PinnedRadius = ShadowSetup.m_SunPinnedRadius, .m_SteadyBudget = 128 });     // (128 pages a level side: Unreal's clipmap levels' 16k texels - with 32 the fine levels ended 4, 8, 16 m from the eye, the walls beyond on coarse levels whatever the bias, Tomas)     // (~4 ms at most: a cut after a rebuild cost 12)
         if( const char* p = std::getenv("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
         {
             using usage = xgpu::buffer::setup::usage;

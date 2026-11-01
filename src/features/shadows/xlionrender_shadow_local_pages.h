@@ -42,10 +42,12 @@ namespace xlionrender::shadows
 
         struct setup
         {
-            int     m_PoolTexels = 4096;        // the pool's square (texels); its origin in the atlas is the caller's
+            int     m_PoolTexels = 4096;        // the pool's width (texels); its origin in the atlas is the caller's
+            int     m_PoolHeight = 0;           // its height (0: square)
             int     m_Budget     = 64;          // unpinned pages rendered a frame (pinned ones: always)
             float   m_ResolutionBias = 0;       // levels added to the request's (negative: finer)
-            int Slots(void) const noexcept { return (m_PoolTexels / page_texels_v) * (m_PoolTexels / page_texels_v); }
+            int PoolHeight(void) const noexcept { return m_PoolHeight > 0 ? m_PoolHeight : m_PoolTexels; }
+            int Slots(void) const noexcept { return (m_PoolTexels / page_texels_v) * (PoolHeight() / page_texels_v); }
             int SlotsPerRow(void) const noexcept { return m_PoolTexels / page_texels_v; }
         };
 

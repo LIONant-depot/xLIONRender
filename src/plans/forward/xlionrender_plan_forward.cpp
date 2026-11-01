@@ -1281,12 +1281,12 @@ namespace xlionrender
         // Residency: the nearest probe_slots_v keep or get a slot, the others lose theirs
         // ponytail: no hysteresis - a probe at the boundary can swap in and out as the camera moves
         std::vector<bool> Wanted(nProbes, true);
-        if( nProbes > probe_slots_v )
+        if( nProbes > m_ProbeSlots )
         {
             std::vector<std::pair<float, int>> Rank(nProbes);
             for( int i = 0; i < nProbes; ++i ) Rank[i] = { BoxDistance(Scene.m_Probes[i]), i };
-            std::nth_element(Rank.begin(), Rank.begin() + probe_slots_v, Rank.end());
-            for( int k = probe_slots_v; k < nProbes; ++k )
+            std::nth_element(Rank.begin(), Rank.begin() + m_ProbeSlots, Rank.end());
+            for( int k = m_ProbeSlots; k < nProbes; ++k )
             {
                 const int i  = Rank[k].second;
                 auto&     St = m_ProbeStates[i];
@@ -1300,8 +1300,8 @@ namespace xlionrender
         {
             auto& St = m_ProbeStates[i];
             if( St.m_Slot >= 0 || !Wanted[i] ) continue;
-            while( Free < probe_slots_v && Used[Free] ) ++Free;
-            if( Free == probe_slots_v ) break;
+            while( Free < m_ProbeSlots && Used[Free] ) ++Free;
+            if( Free == m_ProbeSlots ) break;
             St.m_Slot = Free; Used[Free] = true; St.m_bValid = false; St.m_bDirty = true;
         }
 
@@ -1674,10 +1674,10 @@ namespace xlionrender
         // on the GPU - outside the passes
         struct pairs_run { const cluster_geom* m_pGeom; std::uint32_t m_First, m_Max; bool m_bLocal; };
         std::vector<pairs_run> PairRuns;
-        const int LocalW = m_LocalPages.getSetup().m_PoolTexels;
+        const int LocalW = m_LocalPages.getSetup().m_PoolTexels, LocalH = m_LocalPages.getSetup().PoolHeight();
         if( bPairs && (!m_VSM.m_ToRender.empty() || !m_LocalPages.m_ToRender.empty()) )
         {
-            const float AW = float(sunAtlasWidth()), AH = float(2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize), T = float(shadows::vsm::page_texels_v);
+            const float AW = float(sunAtlasWidth()), AH = float(sunAtlasHeight()), T = float(shadows::vsm::page_texels_v);
             std::vector<shadow_pairs::page> Pages;
             Pages.reserve(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
             bool bAny[2] = {};
@@ -1686,12 +1686,12 @@ namespace xlionrender
                 Pages.push_back({ P.m_W2C, { T / AW, T / AH, (T + 2.0f * float(P.m_AtlasX)) / AW - 1.0f, (T + 2.0f * float(P.m_AtlasY)) / AH - 1.0f }, { P.m_MinX, P.m_MinY, P.m_Size, P.m_bMover ? 1.0f : 0.0f } });
                 bAny[P.m_bMover] = true;
             }
-            // (the local pages: in their part's viewport - its own square, LocalW texels)
+            // (the local pages: in their part's viewport - LocalW x LocalH texels)
             std::vector<int> Lit;
             for( const auto& P : m_LocalPages.m_ToRender )
             {
-                const float LW = float(LocalW), TL = float(shadows::local_pages::page_texels_v);
-                Pages.push_back({ P.m_W2C, { TL / LW, TL / LW, (TL + 2.0f * float(P.m_AtlasX)) / LW - 1.0f, (TL + 2.0f * float(P.m_AtlasY)) / LW - 1.0f }, { 0, 0, 0, 2.0f } });
+                const float LW = float(LocalW), LH = float(LocalH), TL = float(shadows::local_pages::page_texels_v);
+                Pages.push_back({ P.m_W2C, { TL / LW, TL / LH, (TL + 2.0f * float(P.m_AtlasX)) / LW - 1.0f, (TL + 2.0f * float(P.m_AtlasY)) / LH - 1.0f }, { 0, 0, 0, 2.0f } });
                 if( std::find(Lit.begin(), Lit.end(), P.m_Light) == Lit.end() ) Lit.push_back(P.m_Light);
             }
             // ponytail: a caster against every page of its kind until one overlaps (the epoch's hundreds of static pages: a grid if it shows)
@@ -1976,7 +1976,7 @@ namespace xlionrender
             }
             if( !m_VSM.m_ToRender.empty() && bPairs )      // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
             {
-                const int AW = sunAtlasWidth(), AH = 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize;     // (the pool twice as tall: instance::Init)
+                const int AW = sunAtlasWidth(), AH = sunAtlasHeight();
                 Cmd.setViewport(0.0f, 0.0f, float(AW), float(AH));
                 Cmd.setScissor(0, 0, AW, AH);
                 DrawPairs(Cmd, false);
@@ -2007,8 +2007,8 @@ namespace xlionrender
         }
         if( !m_LocalPages.m_ToRender.empty() && bPairs )      // the pairs' local runs: one viewport over the local part (each instance into its page)
         {
-            Cmd.setViewport(float(LocalX), 0.0f, float(LocalW), float(LocalW));
-            Cmd.setScissor(LocalX, 0, LocalW, LocalW);
+            Cmd.setViewport(float(LocalX), 0.0f, float(LocalW), float(LocalH));
+            Cmd.setScissor(LocalX, 0, LocalW, LocalH);
             DrawPairs(Cmd, true);
         }
     }

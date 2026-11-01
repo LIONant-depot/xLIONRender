@@ -20,7 +20,11 @@ namespace xlionrender::shadows
     struct setup
     {
         int     m_ClipmapTileSize   = 512;          // texels per clipmap tile; the clipmap is 8x8 tiles
-        int     m_LocalAtlasSize    = 4096;         // the local lights' square part of the atlas
+        int     m_LocalAtlasSize    = 2048;         // the local lights' part of the atlas, right of the sun's pool: its width
+        int     m_LocalAtlasHeight  = 8192;         // its height (1024 slots; as tall as the sun's pool - a 4096 square left 32 MiB unused under it)
+        int     m_SunPoolWidth      = 0;            // the sun's page pool (0: twice the clipmap's width and height - 8192^2, 4096 slots)
+        int     m_SunPoolHeight     = 0;
+        int     m_SunPinnedRadius   = 8;            // the sun's net (vsm::setup::m_PinnedRadius): (2 r)^2 pinned pages, twice that with the previous epoch's
         int     m_MinLocalSize      = 64;           // a light's shadow map size range
         int     m_MaxLocalSize      = 1024;
         int     m_ScratchSize       = 2048;         // the D32F the maps are rendered in before the remap
