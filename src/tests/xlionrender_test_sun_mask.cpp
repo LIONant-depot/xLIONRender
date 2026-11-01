@@ -113,6 +113,22 @@ int main()
     CHECK(nWrong == 0, "%d texels proven lit are shadowed in the full evaluation", nWrong);
     CHECK(MaxEarly <= 1e-6f, "The early-out changed the image (max %g)", MaxEarly);
 
+    // modes 6, 7 (the reuse: last frame's value where the sun, the surface and its pages are unchanged; 7 writes those half): a settled,
+    // still frame keeps most of last frame's, and the image is mode 3's exactly (the same inputs gave the same value)
+    std::vector<float> Reused, Marked;
+    CHECK(Render("6", Reused), "Render with the reuse (settled)");
+    CHECK(Render("7", Marked), "Render with the reused pixels marked (settled)");
+    int nReused = 0;
+    float MaxReuse = 0;
+    for (std::size_t i = 0; i < Mask.size(); ++i)
+    {
+        MaxReuse = std::max(MaxReuse, std::abs(Reused[i] - Mask[i]));
+        if (std::abs(Marked[i] - Mask[i]) > 1e-6f || Mask[i] < Skip[i] * 0.999f) nReused += std::abs(Marked[i] - Mask[i]) > 1e-6f ? 1 : 0;
+    }
+    std::printf("modes 6/7: %d of %d texels kept from last frame (%.1f%%); mode 6 vs 3 max difference %g\n", nReused, int(Mask.size()), 100.0 * nReused / double(Mask.size()), MaxReuse);
+    CHECK(nReused > int(Mask.size()) / 2, "Only %d texels kept from last frame on a still frame", nReused);
+    CHECK(MaxReuse <= 1e-6f, "The reuse changed the image (max %g)", MaxReuse);
+
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");
     return 0;

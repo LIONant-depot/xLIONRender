@@ -2027,7 +2027,7 @@ namespace xlionrender
             auto* pO = static_cast<std::int32_t*>(p);
             for( int i = 0; i < n; ++i ) { pO[2 * i] = m_VSM.m_ToRender[i].m_AtlasX; pO[2 * i + 1] = m_VSM.m_ToRender[i].m_AtlasY; }
         });
-        const std::uint32_t Push[4] = { std::uint32_t(Base), std::uint32_t(n), std::uint32_t(m_VSM.getSetup().SlotsPerRow()), 0u };
+        const std::uint32_t Push[8] = { std::uint32_t(Base), std::uint32_t(n), std::uint32_t(m_VSM.getSetup().SlotsPerRow()), std::uint32_t(m_Device.getFrameIndex()), std::uint32_t(Slots), 0u, 0u, 0u };
         auto Buffers  = std::array<xgpu::buffer*, 2>{ &m_VSMBoundsList, &m_VSMBounds };
         auto Textures = std::array<const xgpu::texture*, 1>{ &m_ShadowAtlas };
         Window.Dispatch(m_VSMBoundsCompute, Buffers, Textures, Push, sizeof(Push), n, 1);
@@ -3057,11 +3057,31 @@ namespace xlionrender
 
             // The sun's shadow mask (XLION_SUN_MASK; S1a measurement): between the G-buffer prepass and the scene pass, the sun's visibility
             // per pixel from the prepass (shaders/xlionrender_sun_mask_frag.glsl); mode 2: the materials skip their own lookup
-            const bool bSunMask = bGPre && m_SunMaskMode > 0 && pLight && pLight->m_VSMParams.m_X != 0.0f && View.m_SunMaskInstance.m_Private;
+            // Mode 6 (the reuse) runs it only while the view holds still - the sun's parameters (the key) and the eye as last frame's: the
+            // first such frame computes it all, the next ones keep what still holds; a moving frame shades inline (the pass costs more than
+            // it saves when nothing can be kept) and leaves no mask to keep
+            const bool bSunMaskOk = bGPre && m_SunMaskMode > 0 && pLight && pLight->m_VSMParams.m_X != 0.0f && View.m_SunMaskInstance.m_Private;
+            std::vector<float> SunKey;
+            if( bSunMaskOk && m_SunMaskMode >= 6 )
+            {
+                const auto Add = [&](const float* p, int n) { SunKey.insert(SunKey.end(), p, p + n); };
+                const auto& L = *pLight;
+                Add(reinterpret_cast<const float*>(&L.m_W2Light), 16);
+                Add(&L.m_VSMParams.m_X, 3); Add(&L.m_VSMParams2.m_X, 3); Add(&L.m_VSMParams3.m_X, 3); Add(&L.m_VSMPrevParams.m_X, 1);
+                for( const auto& Lv : L.m_VSMLevels ) Add(&Lv.m_Z, 2);         // (the windows' origins move with the eye: the pages stay)
+            }
+            const bool bSunStill = SunKey == View.m_SunMaskPrevKey && View.m_SunMaskPrevW == View.m_Width && View.m_SunMaskPrevH == View.m_Height
+                                && Eye.m_X == View.m_SunMaskPrevEye.m_X && Eye.m_Y == View.m_SunMaskPrevEye.m_Y && Eye.m_Z == View.m_SunMaskPrevEye.m_Z;
+            const bool bSunMask = bSunMaskOk && (m_SunMaskMode < 6 || bSunStill);
+            if( m_SunMaskMode >= 6 )
+            {
+                if( !bSunMask ) View.m_bSunMaskValid = false;                   // (nothing kept next frame: it computes it all)
+                View.m_SunMaskPrevKey = SunKey; View.m_SunMaskPrevEye = Eye; View.m_SunMaskPrevW = View.m_Width; View.m_SunMaskPrevH = View.m_Height;
+            }
             if( bSunMask )
             {
                 pLight->m_TailC2W = W2C.Inverse();
-                pLight->m_ShadowLevels[0].m_Y = m_SunMaskMode == 5 ? 2.0f : m_SunMaskMode >= 4 ? 1.0f : 0.0f;       // (the mask pass's early-out; 5: the test's view of it)
+                pLight->m_ShadowLevels[0].m_Y = m_SunMaskMode == 5 ? 2.0f : m_SunMaskMode == 4 ? 1.0f : 0.0f;       // (the mask pass's early-out; 5: the test's view of it)
                 if( m_SunMaskMode == 2 ) pLight->m_VSMParams.m_X = 0.0f;
             }
             const auto SunMask = [&]
@@ -3072,14 +3092,30 @@ namespace xlionrender
                     MCmd.WriteTimestamp(m_SunMaskTimes, 0);          // (in the pass's own command buffer: the window's wrote them around nothing)
                     MCmd.setViewport(0.0f, 0.0f, float(View.m_Width), float(View.m_Height));
                     MCmd.setScissor(0, 0, View.m_Width, View.m_Height);
+                    // the reuse (mode 6, a still view with last frame's mask): how much may be kept - 3 nothing about the pages changed (none
+                    // rendered, evicted, dirtied or re-centred: every pixel at the same surface), 2 none gone (a page not in the table was not
+                    // last frame either: only the ones rendered now change), 0 nothing (the first still frame)
+                    const auto ReuseLevel = [&]() -> std::uint32_t
+                    {
+                        if( m_SunMaskMode < 6 || !View.m_bSunMaskValid ) return 0u;
+                        const auto& St = m_VSM.m_Stats;
+                        if( St.m_Evicted || St.m_Dirtied || St.m_Recentred ) return 1u;
+                        return m_VSM.m_ToRender.empty() ? 3u : 2u;
+                    };
+                    struct { xmath::fmat4 m_Reproject; xmath::fvec4 m_Delta; std::uint32_t m_Params[4]; } Push
+                    { View.m_SunMaskPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_SunMaskPrevEye), xmath::fvec4(Eye - View.m_SunMaskPrevEye, 0.0f)
+                    , { ReuseLevel(), std::uint32_t(m_Device.getFrameIndex()), std::uint32_t(m_VSM.getSetup().Slots()), m_SunMaskMode == 7 ? 1u : 0u } };
                     std::array<xgpu::buffer*, 3> Buffers{ &m_LightRing, &m_CellRing, &m_VSMBounds };
                     MCmd.setPipelineInstance(View.m_SunMaskInstance, Buffers);
                     MCmd.setDynamicUBO(m_LightUBO, 1);
                     MCmd.setBuffer(m_FullscreenVB);
                     MCmd.setBuffer(m_FullscreenIB);
+                    MCmd.setPushConstants(Push);          // (after the pipeline's bind)
                     MCmd.Draw(3);
                     MCmd.WriteTimestamp(m_SunMaskTimes, 1);
                 }
+                Window.CopyTexture(m_SunMaskNew, m_SunMaskTex, View.m_Width, View.m_Height);      // (the materials read it there; next frame's pass reads it as last frame's)
+                View.m_SunMaskPrevW2C = W2C; View.m_bSunMaskValid = true;
                 // mode 3: the materials read it - the flag in the scene's block itself (the light cuts' per draw entries are copies of it) and
                 // that block again (the next binds take the latest entry). A lit pass before this one in the frame sees the flag too: its
                 // fragments are not at the mask's distances (the check) or are last frame's (a still camera). A debug view of the pages

@@ -91,6 +91,11 @@ namespace xlionrender
         xgpu::pipeline_instance m_TailInstance;
         xgpu::renderpass        m_SunMaskPass;
         xgpu::pipeline_instance m_SunMaskInstance;
+        xmath::fmat4            m_SunMaskPrevW2C;       // the reuse (instance::m_SunMaskMode 6): last frame's camera-centred clip, its eye, the sun's parameters
+        xmath::fvec3            m_SunMaskPrevEye;
+        std::vector<float>      m_SunMaskPrevKey;       // (empty: no last frame - its first, a resize)
+        int                     m_SunMaskPrevW = 0, m_SunMaskPrevH = 0;
+        bool                    m_bSunMaskValid = false; // (last frame computed the mask: the reuse may keep it)
         xgpu::buffer            m_TailResult, m_TailTemporal;
         xgpu::buffer            m_ReflTemporal, m_ReflHistory;      // the reflections' reconstruction (xlionrender_refl_denoise_comp.glsl): its pass between, last frame's result
         xmath::fmat4            m_TailPrevC2W = xmath::fmat4::fromIdentity();

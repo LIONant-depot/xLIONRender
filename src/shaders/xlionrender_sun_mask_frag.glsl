@@ -17,7 +17,11 @@ layout(binding = 1) uniform sampler2D GPreDepth;
 layout(binding = 2) uniform sampler2D GPreNormal;      // the vertex normal, octahedral (not turned to the viewer)
 layout(binding = 3) uniform sampler2D GPreId;          // y < 0: a back face
 
-layout(std430, set = 1, binding = 20) readonly buffer vsm_bounds_b { uint VSMBounds[]; };     // per slot: least depth, greatest (xlionrender_vsm_bounds_comp.glsl)
+layout(std430, set = 1, binding = 20) readonly buffer vsm_bounds_b { uint VSMBounds[]; };     // per slot: least depth, greatest; then per slot the frame it rendered (xlionrender_vsm_bounds_comp.glsl)
+// The reuse (XLION_SUN_MASK 6): this view's camera-centred position -> last frame's clip, this eye - last frame's, x what may be kept (0
+// nothing; 1 the pages checked; 2 a page not in the table was not last frame either; 3 no page changed: no check), y this frame's number,
+// z the pool's slots, w the test's view (kept pixels half)
+layout(push_constant) uniform mask_push_t { mat4 Reproject; vec4 Delta; uvec4 Params; } MaskPush;
 
 layout(location = 0) out uint OutMask;          // the visibility in 16 bits, the distance to the eye as a half (xlionrender_shadow_vsm.glsl SunShadowMasked)
 
@@ -46,9 +50,12 @@ vec3 MaskDelta(in const ivec2 p, in const ivec2 Step, in const ivec2 Size, in co
 // plane across the filters' widest reach W, the depth bias taken off) is nearer than the least depth of every page that reach touches.
 // Then ShadowVSM returns exactly 1 (all its weights lit). Anything not known - a page not in the table (it would fall to a coarser
 // level), out of the window, the previous epoch (the moving sun), movers, a debug view, more than 3 x 3 pages a level - is unresolved
-bool VSMProvenLit(in const vec3 World, in const vec3 Ng)
+// The pages ShadowVSM could read for a point (every level its search, filter, disc and blend can use, each the widest reach): bLit - the
+// early-out's test (each page farther than the receiver), else the reuse's (none rendered this frame, no mover page on it). False when
+// a page is not in the table, out of the window, or a level would need more than 3 x 3
+bool VSMReachCheck(in const vec3 World, in const vec3 Ng, in const bool bLit)
 {
-    if (UBOLight.VSMPrevParams.x != 0.0 || UBOLight.VSMParams3.w != 0.0 || UBOLight.VSMParams2.w != 0.0) return false;
+    if (UBOLight.VSMPrevParams.x != 0.0 || UBOLight.VSMParams2.w != 0.0 || (bLit && UBOLight.VSMParams3.w != 0.0)) return false;
     const int   nLevels = int(UBOLight.VSMParams.z);
     const float Lx      = log2(g_VSMFoot / UBOLight.VSMParams.y) + UBOLight.VSMParams3.x;
     const int   First   = clamp(int(floor(Lx)), 0, nLevels - 1);
@@ -75,12 +82,40 @@ bool VSMProvenLit(in const vec3 World, in const vec3 Ng)
         for (int px = PLo.x; px <= PHi.x; ++px)
         {
             const ivec2 P = ivec2(px, py);
-            if (!VSMInWindow(Lev, P)) return false;
+            const bool  bMissingOk = !bLit && MaskPush.Params.x >= 2u;          // (the reuse, the eye still and no page gone: as last frame)
+            if (!VSMInWindow(Lev, P)) { if (bMissingOk) continue; return false; }
             const uint E = VSMEntry(Lv, P, Table);
-            if (E == 0u) return false;
-            if (float(VSMBounds[E - 1u] & 0xFFFFu) / 65535.0 < Need + 1e-5) return false;
+            if (E == 0u) { if (bMissingOk) continue; return false; }
+            if (bLit) { if (float(VSMBounds[E - 1u] & 0xFFFFu) / 65535.0 < Need + 1e-5) return false; }
+            else
+            {
+                if (VSMBounds[MaskPush.Params.z + E - 1u] == MaskPush.Params.y) return false;      // (rendered this frame: changed)
+                ivec2 MB;
+                if (VSMMoverBase(Lv, P, uint(UBOLight.VSMParams3.w), MB)) return false;           // (a mover's page: drawn each frame)
+            }
         }
     }
+    return true;
+}
+
+bool VSMProvenLit(in const vec3 World, in const vec3 Ng) { return VSMReachCheck(World, Ng, true); }
+
+// Last frame's value where it still holds: the same surface there (reprojected; the stored distance to last frame's eye), the distance
+// to the eye within 2% (the level the footprint picks), every page it read unchanged (VSMReachCheck). Else ShadowVSM again
+bool SunMaskReuse(in const vec3 P, in const vec3 Ng, in const ivec2 Size, out float S)
+{
+    S = 1.0;
+    if (MaskPush.Params.x == 0u) return false;
+    const vec4 C = MaskPush.Reproject * vec4(P, 1.0);
+    if (C.w <= 1e-6) return false;
+    const vec2 N = C.xy / C.w;
+    if (any(greaterThan(abs(N), vec2(1.0)))) return false;
+    const ivec2 q     = clamp(ivec2(floor((N * 0.5 + 0.5) * vec2(Size))), ivec2(0), Size - 1);
+    const uint  m     = texelFetch(SamplerSunMask, q, 0).r;
+    const float dPrev = length(P + MaskPush.Delta.xyz), dNow = length(P);
+    if (abs(unpackHalf2x16(m & 0xFFFFu).x - dPrev) > kSunMaskTolerance * dPrev || abs(dPrev - dNow) > 0.02 * dNow) return false;
+    if (MaskPush.Params.x < 3u && !VSMReachCheck(P + UBOLight.CameraPos.xyz, Ng, false)) return false;
+    S = float(m >> 16u) / 65535.0;
     return true;
 }
 
@@ -106,6 +141,8 @@ void main()
     g_VSMFoot = max(min(Fl, Fd), 1e-9);
 
     // (y 2: the test's view - a pixel proven lit written half lit, to count them and check each against the full evaluation)
-    const float S = UBOLight.ShadowLevels[0].y >= 1.0 && VSMProvenLit(P + UBOLight.CameraPos.xyz, FaceN) ? (UBOLight.ShadowLevels[0].y == 2.0 ? 0.5 : 1.0) : ShadowVSM(P + UBOLight.CameraPos.xyz, FaceN);
+    float S;
+    if (SunMaskReuse(P, FaceN, Size, S)) { if (MaskPush.Params.w != 0u) S *= 0.5; }      // (w: the test's view of the reused pixels - half)
+    else S = UBOLight.ShadowLevels[0].y >= 1.0 && VSMProvenLit(P + UBOLight.CameraPos.xyz, FaceN) ? (UBOLight.ShadowLevels[0].y == 2.0 ? 0.5 : 1.0) : ShadowVSM(P + UBOLight.CameraPos.xyz, FaceN);
     OutMask = (uint(clamp(S, 0.0, 1.0) * 65535.0 + 0.5) << 16) | (packHalf2x16(vec2(length(P), 0.0)) & 0xFFFFu);
 }

@@ -450,6 +450,8 @@ namespace xlionrender
         xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
         // The sun's shadow mask (XLION_SUN_MASK, xLION_Docs shadows_gpu_plan.md S1a): 3 the materials read it (UBOLight.ShadowLevels[0].x 1),
         // 4 and its pass skips the filter where every tap is proven lit (S1b: the pages' depth bounds, ShadowLevels[0].y 1; 5 such pixels half lit: tests);
+        // 6 and it keeps last frame's value where it holds (the reuse: the sun unchanged, the same surface, its pages not rendered since; 7 such
+        // pixels half lit: tests);
         // measurement: 1 the pass runs and the materials keep their own lookup (its cost alone), 2 the materials skip theirs (VSMParams.x 0)
         int                         m_SunMaskMode = 0;
         xgpu::pipeline              m_SunMaskPipeline;
@@ -736,6 +738,7 @@ namespace xlionrender
         xgpu::renderpass            m_SunMaskClear;                     // (its first use: a clear - in the read layout before any draw samples it)
         bool                        m_bSunMaskCleared = false;
         xgpu::texture               m_SunMaskTex, m_SunMaskDummy;      // (the dummy: 1 x 1 R32_UINT - slot 11's format whatever the instance)
+        xgpu::texture               m_SunMaskNew;                      // the mask pass's target: copied into m_SunMaskTex after it (the pass reads last frame's there)
         static constexpr int        sun_mask_w_v = 3840, sun_mask_h_v = 2160;
         xgpu::shader                m_DefaultMaterialFrag, m_DefaultMaterialGBFrag;     // (CreateDefaultMaterial: its HDR fragment and its G-buffer variant)
 

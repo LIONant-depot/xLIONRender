@@ -5,9 +5,9 @@
 layout(local_size_x = 16, local_size_y = 16) in;
 const int kPageTexels = 128;
 layout(std430, set = 0, binding = 0) readonly buffer list_b   { ivec2 Pages[]; };       // the pages rendered: their slot's atlas origin
-layout(std430, set = 0, binding = 1)          buffer bounds_b { uint  Bounds[]; };      // per slot: least depth (low 16 bits), greatest (high)
+layout(std430, set = 0, binding = 1)          buffer bounds_b { uint  Bounds[]; };      // per slot: least depth (low 16 bits), greatest (high); then per slot the frame it rendered
 layout(set = 1, binding = 0) uniform sampler2D Atlas;
-layout(push_constant) uniform push_t { uint m_Base, m_Count, m_Row, m_Pad; } Push;    // m_Row: slots per row of the pool
+layout(push_constant) uniform push_t { uint m_Base, m_Count, m_Row, m_Frame, m_Slots, m_Pad0, m_Pad1, m_Pad2; } Push;    // m_Row: slots per row of the pool
 
 shared uint s_Min[256], s_Max[256];
 
@@ -30,5 +30,10 @@ void main()
         if (i < s) { s_Min[i] = min(s_Min[i], s_Min[i + s]); s_Max[i] = max(s_Max[i], s_Max[i + s]); }
         barrier();
     }
-    if (i == 0u) Bounds[uint(O.y / kPageTexels) * Push.m_Row + uint(O.x / kPageTexels)] = s_Min[0] | (s_Max[0] << 16u);
+    if (i == 0u)
+    {
+        const uint Slot = uint(O.y / kPageTexels) * Push.m_Row + uint(O.x / kPageTexels);
+        Bounds[Slot] = s_Min[0] | (s_Max[0] << 16u);
+        Bounds[Push.m_Slots + Slot] = Push.m_Frame;          // (the sun mask's reuse: a page rendered this frame changes what its pixels see)
+    }
 }
