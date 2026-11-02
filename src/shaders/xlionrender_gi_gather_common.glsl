@@ -47,7 +47,7 @@ gather_sample GatherSample(in const ivec2 p)
     S.Slot = uint(Id.x + 0.5) - 1u; S.Cluster = uint((S.bFront ? Id.y : -Id.y - 1.0) + 0.5);
     const uint T = push.TableBase;
     if (S.Slot >= GITable[T + 19u]) return S;
-    const uint First = GITable[T + 20u + S.Slot];
+    const uint First = GITable[T + 40u + S.Slot];
     if (First == 0u || S.Cluster >= GITable[T + First - 1u]) return S;     // (past the instance's clusters - an id from another frame's or LOD's geometry: the next instance's entries, out of its GI buffers' range)
     const uint e = T + First + 4u * S.Cluster;
     if (S.Cluster > 0xFFFFu || e + 3u >= uint(GITable.length())) return S;      // (an id no G-buffer writer gave: a material compiled before XLION_GPRE_OUT writes nothing defined there)

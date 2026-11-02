@@ -23,7 +23,7 @@ namespace xlionrender::gi
     public:
 
         // The SPIR-V of the shaders (shaders/xlionrender_gi_*_comp.glsl)
-        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links, m_Solve, m_Ghosts, m_Probes; };     // (m_Links, m_Solve: optional, experiment D)
+        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links, m_Solve, m_Ghosts, m_Probes, m_Clip, m_Ref; };     // (m_Links, m_Solve: optional, experiment D)
 
         bool Init(xgpu::device& Device, const shaders& S) noexcept
         {
@@ -45,7 +45,9 @@ namespace xlionrender::gi
                 && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 16, 32, 1)) || true)
                 && (S.m_Solve.empty() || (m_bSolve = Make(m_Shader[11], m_SolveC, S.m_Solve, 7, 16)) || true)
                 && (S.m_Ghosts.empty() || (m_bGhosts = Make(m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true)
-                && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true);
+                && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true)
+                && (S.m_Clip.empty() || (m_bClip = Make(m_Shader[14], m_ClipC, S.m_Clip, 8, 48)) || true)
+                && (S.m_Ref.empty() || (m_bRef = Make(m_Shader[15], m_RefC, S.m_Ref, 7, 32)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
@@ -857,6 +859,54 @@ namespace xlionrender::gi
             return true;
         }
 
+        // Experiment X1 (XLION_GI_CLIP, xLION_Docs gi_next_level_analysis.md; xlionrender_gi_clip_comp.glsl): the shown light into a camera-centred
+        // clipmap. A sweep: the target cleared, every surfel splat around the eye it started with, PerFrame a frame; at its end the target
+        // becomes what the gather reads, with that eye. ponytail: the whole clipmap again every sweep, 2 copies (X2 measures the real update)
+        static constexpr int clip_dim_v = 64, clip_levels_v = 4;
+        bool ClipStep(xgpu::window& Window, const v3& Eye, float Cell, int PerFrame, bool bSight) noexcept
+        {
+            if (!m_bClip || m_nShown == 0 || !m_ShownB.m_Private) return false;
+            const std::size_t nEntries = std::size_t(clip_levels_v) * clip_dim_v * clip_dim_v * clip_dim_v * 6;
+            for (auto& B : m_ClipB) if (!B.m_Private && !FitLocal(B, 16, nEntries)) return false;
+            struct { float m_EyeCell[4]; int m_First, m_Count, m_Mode, m_Sight, m_TlasRoot, m_PrimOffset, m_Pad0, m_Pad1; } Push{ { m_ClipEye[0], m_ClipEye[1], m_ClipEye[2], Cell }, 0, 0, 0, bSight ? 1 : 0, m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, 0 };
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_OwnerB, &m_ShownB, &m_ClipB[1 - m_ClipRead] };
+            if (m_ClipCleared < nEntries)                   // (the target cleared, a chunk a frame)
+            {
+                const std::size_t n = std::min<std::size_t>(nEntries - m_ClipCleared, std::size_t(1) << 22);
+                Push.m_Mode = 1; Push.m_First = int(m_ClipCleared); Push.m_Count = int(n);
+                Window.Dispatch(m_ClipC, B, &Push, sizeof(Push), int((n + 63) / 64));
+                m_ClipCleared += n;
+                if (m_ClipCleared >= nEntries) { m_ClipEye = { Eye.m_X, Eye.m_Y, Eye.m_Z }; m_ClipNext = 0; }
+                return true;
+            }
+            const std::size_t n = std::min<std::size_t>(m_nShown - std::min<std::size_t>(m_ClipNext, m_nShown), std::size_t(std::max(PerFrame, 64)));
+            Push.m_Mode = 0; Push.m_First = int(m_ClipNext); Push.m_Count = int(n);
+            Window.Dispatch(m_ClipC, B, &Push, sizeof(Push), int((n + 63) / 64));
+            m_ClipNext += n;
+            if (m_ClipNext >= m_nShown)                     // (done: the gather reads it from now on, the other is the next target)
+            {
+                m_ClipRead = 1 - m_ClipRead; m_ClipReadEye = m_ClipEye; m_bClipValid = true; m_ClipCleared = 0; ++m_nClipSweeps;
+            }
+            return true;
+        }
+        // The GI's ground truth (XLION_GI_REF, xlionrender_gi_ref_comp.glsl): PerFrame paths a frame over the pixels the gather wrote
+        bool RefStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int Bounces, std::uint32_t LightsKey) noexcept
+        {
+            if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
+            if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels))) return false;
+            if (LightsKey != m_RefLightsKey) { m_RefLightsKey = LightsKey; ++m_RefEpoch; }      // (the lights changed: every pixel starts over)
+            const struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), int(m_RefNext % nPixels), PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, Bounces, m_RefEpoch };
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_RefAccumB };
+            Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 63) / 64);
+            m_RefNext += std::size_t(PerFrame);
+            return true;
+        }
+        xgpu::buffer*        RefSamples(void) noexcept { return m_RefSampleB.m_Private ? &m_RefSampleB : nullptr; }
+        xgpu::buffer*        RefAccum(void) noexcept { return m_RefAccumB.m_Private ? &m_RefAccumB : nullptr; }
+        xgpu::buffer*        ClipBuffer(void) noexcept { return m_bClipValid ? &m_ClipB[m_ClipRead] : nullptr; }
+        std::array<float, 3> ClipEye(void) const noexcept { return m_ClipReadEye; }
+        int                  ClipSweeps(void) const noexcept { return m_nClipSweeps; }
+
         // The GPU's light into the world's arrays (InstanceLight, InstanceValid, InstanceMoments, BasisFractions, Estimator, MomentCounts):
         // copied in this frame, there at the next Collect (its frame done). Its tests, its dump, the CPU taking over (m_bGPUOwned off)
         bool ReadBack(xgpu::window& Window, std::uint64_t Frame) noexcept
@@ -1220,7 +1270,19 @@ namespace xlionrender::gi
         }
 
         xgpu::device*                       m_pDevice = nullptr;
-        xgpu::shader                        m_Shader[14];
+        xgpu::shader                        m_Shader[16];
+        xgpu::compute                       m_RefC;             // the ground truth: RefStep
+        xgpu::buffer                        m_RefSampleB, m_RefAccumB;
+        bool                                m_bRef = false;
+        std::size_t                         m_RefNext = 0;
+        std::uint32_t                       m_RefLightsKey = 0;
+        int                                 m_RefEpoch = 1;
+        xgpu::compute                       m_ClipC;            // experiment X1: ClipStep
+        xgpu::buffer                        m_ClipB[2];
+        bool                                m_bClip = false, m_bClipValid = false;
+        int                                 m_ClipRead = 0, m_nClipSweeps = 0;
+        std::size_t                         m_ClipCleared = 0, m_ClipNext = 0;
+        std::array<float, 3>                m_ClipEye{}, m_ClipReadEye{};
         xgpu::compute                       m_LinksC;           // experiment D: the link build (optional: shaders::m_Links)
         xgpu::buffer                        m_LinkItemB, m_LinkB, m_LinkDB, m_LinkNextB;
         xgpu::buffer                        m_LinkDLocalB, m_LinkItemLocalB;     // (the device-local copies: CopyLinksLocal; m_LinkB is device-local)

@@ -771,6 +771,8 @@ namespace xlionrender
         std::array<bool, ring_frames_v>         m_VSMRenderTimed{};         // whether a ring slot's frame rendered sun pages (timed)
         std::array<int, ring_frames_v>          m_VSMRenderPages{};         // how many (the GPU time a page: m_VSMPageMs)
         double                                  m_VSMPageMs     = 0.05;     // a sun page's GPU time (pairs, clears), smoothed - the frame's page budget (renderShadows)
+        xgpu::buffer*                           m_pGatherRefS = nullptr, *m_pGatherRefA = nullptr;     // the ground truth's buffers this frame (XLION_GI_REF)
+        xgpu::buffer*                           m_pGatherClip   = nullptr;  // experiment X1: the clipmap the gather reads this frame (XLION_GI_CLIP)
         float                                   m_LODProjScale  = 0;        // the main view's pixels per unit at distance 1 (its LOD pick: renderScenePass)
         struct { int m_nGroups[4] = {}; int m_nLODs = 0; float m_MinError[4] = { 1e30f, 1e30f, 1e30f, 1e30f }; } m_LODReport;                // the main view's LOD groups by their pick this frame (LOD 0, 1, 2, 3+)
         float                                   m_ShadowPagesMs = 1.3f;     // the pages' share of the shadows' 2.0 ms slice (methodology 3: request pass, bounds, the locals' in the rest, and the pages' spread around their mean cost: 1.6 let 7 of 12.6k Bistro frames pass 2.0); 0: no frame budget

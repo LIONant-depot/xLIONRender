@@ -206,6 +206,7 @@ namespace xlionrender
         int             m_FilterPasses  = 4;        // the shown GI light's spatial filter: each pass blends every surfel with its neighbors (0: none)
         bool            m_bMoments      = true;     // the reads' depth-moment test (a surfel hidden from the point is faded); off: only the plane test
         float           m_TraceAllowanceMs = 1.0f;  // the GI trace's main-thread time per frame (documentation/gi_dynamic_master_plan.md, Phase 1); 0: no limit
+        bool            m_bPathTraced   = false;    // debugging: the indirect light of what the gather reads from a brute path tracer (features/gi: RefStep), converging while the view and the lights hold still - the ground truth to judge the GI against; far too slow for a game
         bool            m_bGPUTrace     = true;     // the GI's rays on the GPU (Part II, G3: gi::gpu_trace); off, or no compute: on the CPU within m_TraceAllowanceMs
         bool            m_bEmitterSampling = true;  // the emitters' light by light sampling in each pass (G5), not the links the CPU builds (a minute for Police)
         bool            m_bHalfRes      = true;     // the opaque pixels' GI read at half resolution, upsampled by depth and normal (the main view; not the debug views)

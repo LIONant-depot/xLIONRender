@@ -31,6 +31,55 @@ float GatherAO(in const ivec2 P, in const uint W, in const uint H, in const floa
     return Wt > 1e-4 ? S / Wt : 1.0;
 }
 
+// Experiment X1 (XLION_GI_CLIP, xlionrender_gi_clip_comp.glsl): the light at a world point for a normal, from the clipmap: the finest level
+// holding it, 8 cells x the 3 faces the normal looks toward (squared cosines), the weighted light over the weights - cells no surfel
+// reaches count for nothing. A level's edge blends into the next
+layout(std430, set = 1, binding = 21) readonly buffer GIClipBuffer { uvec4 GIClip[]; };
+layout(std430, set = 1, binding = 22) buffer GIRefSampleBuffer { vec4 GIRefSample[]; };        // the ground truth (XLION_GI_REF, xlionrender_gi_ref_comp.glsl)
+layout(std430, set = 1, binding = 23) readonly buffer GIRefAccumBuffer { vec4 GIRefAccum[]; };
+const int clip_dim_v = 64, clip_levels_v = 4;
+float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]); }
+vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 EyeL, in const float Cell0)
+{
+    const float Cell = Cell0 * float(1 << L);
+    const ivec3 Org  = ivec3(floor(EyeL / Cell)) - ivec3(clip_dim_v / 2);
+    const vec3  g    = Pw / Cell - vec3(Org) - 0.5;
+    if (any(lessThan(g, vec3(0.0))) || any(greaterThanEqual(g, vec3(clip_dim_v - 1)))) return vec4(0.0);
+    const ivec3 i = ivec3(floor(g));
+    const vec3  f = g - vec3(i);
+    vec3  Sum = vec3(0.0);
+    float SumW = 0.0;
+    for (int a = 0; a < 3; ++a)
+    {
+        const float wa = n[a] * n[a];
+        if (wa < 0.02) continue;
+        const uint Face = uint(2 * a + (n[a] < 0.0 ? 1 : 0));
+        vec3  Num = vec3(0.0);
+        float Den = 0.0;
+        for (int c = 0; c < 8; ++c)
+        {
+            const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), q = i + o;
+            const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
+            const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(q.x) + uint(q.y) * uint(clip_dim_v) + uint(q.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
+            const uvec4 v = GIClip[e];
+            Num += vec3(v.xyz) * t; Den += float(v.w) * t;
+        }
+        if (Den > 1.0) { Sum += Num / Den * wa; SumW += wa; }
+    }
+    return SumW > 0.0 ? vec4(Sum / SumW, SumW) : vec4(0.0);
+}
+vec4 ClipRead(in const vec3 Pcam, in const vec3 n)
+{
+    const vec3 EyeL = vec3(TF(22u), TF(23u), TF(24u)), Eye = vec3(TF(25u), TF(26u), TF(27u));
+    const vec3 Pw   = Pcam + Eye;
+    for (int L = 0; L < clip_levels_v; ++L)
+    {
+        const vec4 R = ClipLevel(L, Pw, n, EyeL, TF(21u));
+        if (R.w > 0.5) return vec4(R.xyz, 1.0);
+    }
+    return vec4(0.0);
+}
+
 const uint screen_header_v  = 8u;
 const uint screen_max_age_v = 3u;
 
@@ -126,7 +175,25 @@ void main()
         vec4 E = vec4(0.0);
         bool bWeak = true;            // (no surfel supports it: the local mean - flagged, the upsample prefers its supported neighbours)
         g_GIRefl = vec4(0.0);
-        if (Ref == gi_probes_v) E = SurfelGIProbes(S.P, N);        // (a skinned surface: the probe grid, GIMesh its buffer)
+        if (GITable[push.TableBase + 20u] == 2u)                   // the ground truth: this pixel's point for the tracer, its mean so far (no reuse, no reflection)
+        {
+            const uint Rw = GITable[push.TableBase + 28u], Ri = uint(P.y) * Rw + uint(P.x);
+            const vec3 Pwr = S.P + vec3(TF(25u), TF(26u), TF(27u));
+            GIRefSample[2u * Ri] = vec4(Pwr, 1.0);
+            GIRefSample[2u * Ri + 1u] = vec4(N, 0.0);
+            const vec4 Ac = GIRefAccum[2u * Ri], Pa = GIRefAccum[2u * Ri + 1u];
+            if (Ac.w > 0.5 && Pa.w > 0.5 && dot(Pa.xyz - Pwr, Pa.xyz - Pwr) < 1e-4) { E = vec4(Ac.rgb / Ac.w, 1.0); bWeak = false; }
+            else E = vec4(0.0, 0.0, 0.0, 1.0);
+        }
+        else if (GITable[push.TableBase + 20u] != 0u)                   // experiment X1: the clipmap, both reads
+        {
+            E = ClipRead(S.P, N);
+            bWeak = E.w < 0.5;
+            const vec4 Rc = ClipRead(S.P, reflect(normalize(S.P), N));
+            g_GIRefl = Rc;
+            if (E.w < 0.5) E = vec4(SurfelGILocalMean(Pm, GFace, Offset, Ref & 0xFFu), 1.0);
+        }
+        else if (Ref == gi_probes_v) E = SurfelGIProbes(S.P, N);        // (a skinned surface: the probe grid, GIMesh its buffer)
         else if ((Ref & gi_per_pixel_v) != 0u)
         {
             g_GIMoments      = (Ref & gi_no_moments_v) == 0u;
@@ -144,6 +211,7 @@ void main()
         if (E.w < 0.5 && (Ref & 0x8000u) == 0u) E = vec4(SurfelGILocalMean(Pm, GFace, Offset, Ref & 0xFFu), 1.0);
         if (push.AO != 0u) E.rgb *= GatherAO(P, W, H, Dist);
         if (any(isnan(E.rgb)) || any(isinf(E.rgb))) E = vec4(0.0);     // (never a non-finite entry: the reprojection would carry it on)      // (a fresh read only: a reprojected one carries last frame's)
+        if (GITable[push.TableBase + 29u] != 0u) g_GIRefl = vec4(0.0);
         const bool bE = E.w > 0.5, bR = g_GIRefl.w > 0.5;
         bKeep = !bE && !bR;           // (no GI here: the AO's own entry stays)
         const vec3 Rr = bR ? g_GIRefl.rgb : vec3(0.0);

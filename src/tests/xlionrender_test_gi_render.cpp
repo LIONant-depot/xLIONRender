@@ -128,6 +128,70 @@ int main()
     CHECK(OnR > OnL * 1.15, "no color bleeding with GI (near red %.2f, near green %.2f)", OnR, OnL);
     CHECK(MOn[1] > MOff[1] * 1.05, "GI adds no light");
 
+    // The GI's ground truth on screen (scene::gi_settings::m_bPathTraced, xlionrender_gi_ref_comp.glsl) against an independent reference: the CPU
+    // path tracer through gi::world, at the same points of the room's grey floor and back wall. Lit by the lamp alone (no ambient), the
+    // difference to the direct light is the albedo / pi x the indirect irradiance
+    {
+        const auto AmbientWas = Scene.m_Ambient;
+        Scene.m_Ambient = { 0, 0, 0 };
+        Scene.m_GI.m_bEnable = false;
+        for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, the direct light");
+        const auto Direct = ReadRGB(Device, View, W, H);
+        Scene.m_GI.m_bEnable = true; Scene.m_GI.m_bHalfRes = true; Scene.m_GI.m_bPathTraced = true;
+        for (int f = 0; f < 120; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, path traced");
+        const auto Traced = ReadRGB(Device, View, W, H);
+        DumpRGB("gi_path_traced", Traced, W, H);
+        Scene.m_GI.m_bPathTraced = false;
+
+        const auto* pW = Renderer.getGIWorld();
+        CHECK(pW != nullptr, "the GI's world");
+        namespace gi = xlionrender::gi;
+        gi::lights L;
+        L.m_SunColor = { 0, 0, 0 }; L.m_SunDirection = Scene.m_Sun.m_Direction.NormalizeCopy(); L.m_Sky = { 0, 0, 0 };
+        L.m_Points.push_back({ Scene.m_LocalLights[0].m_Position, Scene.m_LocalLights[0].m_Color * Scene.m_LocalLights[0].m_Intensity, Scene.m_LocalLights[0].m_Radius });
+        gi::rng Rng(7);
+        Camera.setViewport({ 0, 0, W, H });
+        const xmath::fmat4 C2W = Camera.getW2C().Inverse();
+        const xmath::fvec3 Eye{ 0, 1.6f, -1.9f };
+        double SumGpu = 0, SumCpu = 0, SumAbs = 0; int n = 0;
+        for (int y = 8; y < H - 8; y += 12) for (int x = 8; x < W - 8; x += 12)
+        {
+            const xmath::fvec4 Fh = C2W * xmath::fvec4{ (float(x) + 0.5f) / float(W) * 2 - 1, (float(y) + 0.5f) / float(H) * 2 - 1, 0.5f, 1.0f };
+            const xmath::fvec3 Far{ Fh.m_X / Fh.m_W, Fh.m_Y / Fh.m_W, Fh.m_Z / Fh.m_W };
+            const gi::v3 D = (Far - Eye).NormalizeCopy();
+            const auto Hit = pW->Cast(Eye, D);
+            if (Hit.m_Inst < 0) continue;
+            const gi::v3 P = pW->HitPosition(Hit), N = pW->HitNormal(Hit);
+            const bool bFloor = std::abs(P.m_Y) < 0.05f && N.m_Y > 0.9f && std::abs(P.m_X) < 1.0f, bBack = N.m_Z < -0.9f && P.m_Z > 1.9f && std::abs(P.m_X) < 1.5f;
+            if (x == 8 + 12 * 7 && y >= H / 2) std::printf("  a sample: pixel %d,%d hits %.2f %.2f %.2f normal %.2f %.2f %.2f\n", x, y, P.m_X, P.m_Y, P.m_Z, N.m_X, N.m_Y, N.m_Z);
+            if (!bFloor && !bBack) continue;
+            gi::v3 Sum{ 0, 0, 0 };
+            for (int p = 0; p < 400; ++p)
+            {
+                gi::v3 O = P, Nn = N, Thr{ 1, 1, 1 };
+                for (int d = 0; d < 5; ++d)
+                {
+                    const gi::v3 Dr = gi::world::CosineDir(Nn, Rng);
+                    const auto H2 = pW->Cast(O + Nn * 1e-3f, Dr);
+                    if (H2.m_Inst < 0) break;
+                    const gi::v3 Nh = pW->HitNormal(H2);
+                    if (Nh.Dot(Dr) > 0) break;
+                    O = pW->HitPosition(H2); Nn = Nh;
+                    Thr = Thr * pW->Albedo(H2.m_Inst);
+                    Sum = Sum + Thr * pW->Direct(O, Nn, L);
+                }
+            }
+            const double Cpu = Sum.m_Y / 400.0 * 0.75 / 3.14159265;     // (the green channel: grey here; the grey pieces' albedo)
+            const double Gpu = Traced[std::size_t(y) * W + x][1] - Direct[std::size_t(y) * W + x][1];
+            SumGpu += Gpu; SumCpu += Cpu; SumAbs += std::abs(Gpu - Cpu); ++n;
+        }
+        std::printf("the path traced view against the CPU path tracer, %d grey points: mean %.4f vs %.4f, mean absolute difference %.4f\n", n, SumGpu / std::max(n, 1), SumCpu / std::max(n, 1), SumAbs / std::max(n, 1));
+        CHECK(n > 20, "too few grey points for the path traced view's check: %d", n);
+        CHECK(std::abs(SumGpu - SumCpu) < 0.10 * SumCpu && SumAbs < 0.25 * SumCpu, "the path traced view is off the CPU reference: mean %.4f vs %.4f, absolute %.4f", SumGpu / n, SumCpu / n, SumAbs / n);
+        Scene.m_Ambient = AmbientWas;
+        for (int f = 0; f < 8; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, back to the GI");
+    }
+
     // The ambient occlusion (scene::gi_settings::m_bAO, xlionrender_ao_comp.glsl) on the indirect light, the GI on and off (Tomas: it
     // stands on its own): it only darkens, the room's corners and wall feet most, the open surfaces little
     for (const bool bGI : { true, false })

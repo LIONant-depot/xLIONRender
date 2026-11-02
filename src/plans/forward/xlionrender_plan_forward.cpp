@@ -58,6 +58,12 @@ namespace xlionrender
         constexpr std::uint32_t s_GIProbesComp[] = {        // the probe grid (what has no surfels: skinned meshes)
             #include "xlionrender_gi_probes_comp.h"
         };
+        constexpr std::uint32_t s_GIRefComp[] = {           // the GI's ground truth (XLION_GI_REF)
+            #include "xlionrender_gi_ref_comp.h"
+        };
+        constexpr std::uint32_t s_GIClipComp[] = {          // experiment X1: the clipmap (XLION_GI_CLIP)
+            #include "xlionrender_gi_clip_comp.h"
+        };
 
         // FNV-1a over a caster's identity and state: a different value is a different (or moved) caster
         std::uint64_t Hash(std::uint64_t H, const void* pData, std::size_t Size) noexcept
@@ -203,7 +209,7 @@ namespace xlionrender
         if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
         {
             m_pGITrace = std::make_unique<gi::gpu_trace>();
-            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp, s_GIProbesComp }) )
+            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp, s_GIProbesComp, s_GIClipComp, s_GIRefComp }) )
                 { m_pGITrace.reset(); m_bGITraceFailed = true; }
         }
         // The light lives on the GPU (m_bGPUOwned). Turned off, the GPU's light comes back into the world first (a read back: one frame
@@ -737,6 +743,9 @@ namespace xlionrender
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 2);
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 2);
             XPROFILE_SCOPE("GI: show"); (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation, Scene.m_GI.m_bShowBlend);
+            // Experiment X1 (xLION_Docs gi_next_level_analysis.md): XLION_GI_CLIP=<1 splat, 2 with a sight ray per cell>[,<level 0's cell>[,<surfels a frame>]]
+            static const std::array<float, 3> s_Clip = [] { std::array<float, 3> A{ 0.0f, 0.5f, 4096.0f }; if( const char* p = std::getenv("XLION_GI_CLIP") ) (void)std::sscanf(p, "%f,%f,%f", &A[0], &A[1], &A[2]); return A; }();
+            if( s_Clip[0] > 0.0f ) (void)m_pGITrace->ClipStep(Window, Eye, s_Clip[1], int(s_Clip[2]), s_Clip[0] > 1.5f);
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 3);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 3);
         }
@@ -2828,7 +2837,34 @@ namespace xlionrender
                 {
                     // The gather's table (xlionrender_gi_gather_common.glsl): every visible rigid GI instance's clusters - their GI reference
                     // and GI buffer, the passes' list of buffers (GatherBuffers); the passes run after the G-buffer prepass, below
-                    m_GatherTable.assign(20, 0u);
+                    m_GatherTable.assign(40, 0u);
+                    static const bool s_bNoGatherRefl = std::getenv("XLION_GI_NO_REFL") != nullptr;      // (measurement: the gather's reflection term off - the path traced view has none: read against it fairly)
+                    m_GatherTable[29] = s_bNoGatherRefl ? 1u : 0u;
+                    {   // X1: the clipmap the gather reads instead (words 20 on, xlionrender_gi_gather_frag.glsl); 20: 0 none
+                        static const std::array<float, 2> s_ClipCell = [] { std::array<float, 2> A{ 0.0f, 0.5f }; if( const char* p = std::getenv("XLION_GI_CLIP") ) (void)std::sscanf(p, "%f,%f", &A[0], &A[1]); return A; }();
+                        m_pGatherClip = s_ClipCell[0] > 0.0f && m_pGITrace ? m_pGITrace->ClipBuffer() : nullptr;
+                        if( m_pGatherClip )
+                        {
+                            const auto E = m_pGITrace->ClipEye();
+                            const float C[7] = { s_ClipCell[1], E[0], E[1], E[2], Eye[0], Eye[1], Eye[2] };
+                            m_GatherTable[20] = 1u;
+                            std::memcpy(m_GatherTable.data() + 21, C, sizeof(C));
+                        }
+                        // The ground truth instead (scene::gi_settings::m_bPathTraced, or XLION_GI_REF=<paths a frame>[,<bounces>]): words 20 = 2, 28 the half-size width; the gather writes each pixel's point, reads its mean
+                        static const std::array<int, 2> s_Ref = [] { std::array<int, 2> A{ 0, 4 }; if( const char* p = std::getenv("XLION_GI_REF") ) (void)std::sscanf(p, "%d,%d", &A[0], &A[1]); return A; }();
+                        m_pGatherRefS = m_pGatherRefA = nullptr;
+                        std::uint32_t LightsKey = 2166136261u;         // (the lights' version: a change starts the tracer over)
+                        const auto KeyOf = [&](const void* p, std::size_t n) { const auto* b = static_cast<const std::uint8_t*>(p); for( std::size_t k = 0; k < n; ++k ) LightsKey = (LightsKey ^ b[k]) * 16777619u; };
+                        { const float Sn[7] = { Scene.m_Sun.m_Direction[0], Scene.m_Sun.m_Direction[1], Scene.m_Sun.m_Direction[2], Scene.m_Sun.m_Color[0], Scene.m_Sun.m_Color[1], Scene.m_Sun.m_Color[2], Scene.m_Sun.m_Intensity }; KeyOf(Sn, sizeof(Sn)); }
+                        for( const auto& LL : Scene.m_LocalLights ) { const float Ls[5] = { LL.m_Position[0], LL.m_Position[1], LL.m_Position[2], LL.m_Intensity, LL.m_Radius }; KeyOf(Ls, sizeof(Ls)); }
+                        if( (s_Ref[0] > 0 || Scene.m_GI.m_bPathTraced) && m_pGITrace && m_pGITrace->RefStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), s_Ref[0] > 0 ? s_Ref[0] : 1 << 18, s_Ref[1], LightsKey) )
+                        {
+                            m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum();
+                            const float Ey[3] = { Eye[0], Eye[1], Eye[2] };
+                            m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
+                            std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
+                        }
+                    }
                     {
                         const xmath::fmat4 C2W = W2C.Inverse();
                         std::memcpy(m_GatherTable.data(), &C2W, sizeof(float) * 16);
@@ -2840,7 +2876,7 @@ namespace xlionrender
                     std::uint32_t nSlots = 0;
                     for( const auto& Vis : m_Visible ) if( Vis.m_pMesh->m_bCluster && m_DrawSlot[Vis.m_iDraw] != instance_slots::none_v ) nSlots = std::max(nSlots, m_DrawSlot[Vis.m_iDraw] + 1u);
                     m_GatherTable[19] = nSlots;
-                    m_GatherTable.resize(20 + std::size_t(nSlots), 0u);
+                    m_GatherTable.resize(40 + std::size_t(nSlots), 0u);
                     const auto BufferIndex = [&]( const xgpu::buffer* p ) -> std::uint32_t
                     {
                         for( std::size_t k = 0; k < m_GatherBuffers.size(); ++k ) if( m_GatherBuffers[k] == p ) return std::uint32_t(k);     // ponytail: linear, a few buffers (Bistro's sections ~30); a map if a scene has hundreds
@@ -2859,7 +2895,7 @@ namespace xlionrender
                             const xgpu::buffer* pProbes = Scene.m_GI.m_bEnable && Scene.m_GI.m_bProbes && m_pGITrace ? m_pGITrace->ProbeBuffer() : nullptr;
                             if( pProbes == nullptr || m_GatherTable.size() + 1 + 4 * pMesh->m_Geom.m_Clusters.size() > std::size_t(gather_table_uints_v) ) continue;
                             m_GatherTable.push_back(std::uint32_t(pMesh->m_Geom.m_Clusters.size()));     // (its clusters' count before them: the gather reads no other instance's)
-                            m_GatherTable[20 + Slot] = std::uint32_t(m_GatherTable.size());
+                            m_GatherTable[40 + Slot] = std::uint32_t(m_GatherTable.size());
                             const std::uint32_t k = BufferIndex(pProbes);
                             for( std::size_t c = 0; c < pMesh->m_Geom.m_Clusters.size(); ++c ) m_GatherTable.insert(m_GatherTable.end(), { 0u, 0xFFFFFFFEu, k, 0u });     // (xlionrender_surfel_gi.glsl gi_probes_v)
                             continue;
@@ -2870,7 +2906,7 @@ namespace xlionrender
                         if( !(bSections ? iDraw < m_DrawGISec.size() && !m_DrawGISec[iDraw].empty() : pMesh->m_pGI && GI.second != 0xFFFFFFFFu) ) continue;
                         if( m_GatherTable.size() + 1 + 4 * G.m_Clusters.size() > std::size_t(gather_table_uints_v) ) { bFull = true; continue; }
                         m_GatherTable.push_back(std::uint32_t(G.m_Clusters.size()));
-                        m_GatherTable[20 + Slot] = std::uint32_t(m_GatherTable.size());
+                        m_GatherTable[40 + Slot] = std::uint32_t(m_GatherTable.size());
                         for( std::uint32_t c = 0; c < std::uint32_t(G.m_Clusters.size()); ++c )
                         {
                             std::pair<std::uint32_t, std::uint32_t> R = GI;
@@ -3126,7 +3162,8 @@ namespace xlionrender
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
                     const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()), bAO ? 1u : 0u };
-                    std::array<xgpu::buffer*, 8> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO };
+                    std::array<xgpu::buffer*, 11> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO, m_pGatherClip ? m_pGatherClip : &m_GIDummy
+                                                         , m_pGatherRefS ? m_pGatherRefS : &m_GIDummy, m_pGatherRefA ? m_pGatherRefA : &m_GIDummy };
                     GCmd.setPipelineInstance(View.m_GIClassifyInstance, std::span{ Buffers });
                     GCmd.setPushConstants(Push);
                     GCmd.setBuffer(m_FullscreenVB);

@@ -656,6 +656,9 @@ namespace xlionrender
                     , ub{ .m_BindIndex = 13, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
                     , ub{ .m_BindIndex = 19, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
                     , ub{ .m_BindIndex = 20, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // the ambient occlusion (render_view::m_AO)
+                    , ub{ .m_BindIndex = 21, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // experiment X1: the clipmap (XLION_GI_CLIP)
+                    , ub{ .m_BindIndex = 22, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // the ground truth (XLION_GI_REF): the points
+                    , ub{ .m_BindIndex = 23, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     //   and their means
                     };
                     auto ClassifyShaders = std::array<const xgpu::shader*, 2>{ &ClassifyFrag, &GatherVert };
                     auto GatherShaders   = std::array<const xgpu::shader*, 2>{ &GatherFrag, &GatherVert };
