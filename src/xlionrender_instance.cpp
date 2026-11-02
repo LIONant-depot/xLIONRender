@@ -54,6 +54,12 @@ namespace xlionrender
         constexpr std::uint32_t s_GPreTileFrag[] = {
             #include "xlionrender_gprepass_tile_frag.h"
         };
+        constexpr std::uint32_t s_GPreTileRefFrag[] = {
+            #include "xlionrender_gprepass_tile_ref_frag.h"
+        };
+        constexpr std::uint32_t s_TileRefFrag[] = {
+            #include "xlionrender_tile_standard_ref_frag.h"
+        };
         constexpr std::uint32_t s_TileFrag[] = {
             #include "xlionrender_tile_standard_frag.h"
         };
@@ -639,8 +645,9 @@ namespace xlionrender
                     xgpu::shader GPreFrag;
                     if( std::getenv("XLION_TILE") )      // (the tile pass's prototype: the attributes too; its own shaders)
                     {
-                        if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPreTileFrag) }); Err ) return Err;
-                        if( auto Err = Device.Create(m_TileFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_TileFrag) }); Err ) return Err;
+                        const bool bRef = std::getenv("XLION_TILE")[0] == '3';     // (3: as floats, the reference)
+                        if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = bRef ? SPIRV(s_GPreTileRefFrag) : SPIRV(s_GPreTileFrag) }); Err ) return Err;
+                        if( auto Err = Device.Create(m_TileFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = bRef ? SPIRV(s_TileRefFrag) : SPIRV(s_TileFrag) }); Err ) return Err;
                         if( auto Err = Device.Create(m_TileVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
                     }
                     else if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPrePassFrag) }); Err ) return Err;
@@ -1387,7 +1394,8 @@ namespace xlionrender
         // Slot 0 (shadow map) clamps, the material textures use the default sampler - as the geom editors (a texture-table material: no
         // material texture in set 0)
         assert(M.m_bTable || M.m_Textures.size() <= 8);       // slots 8, 9: the environment
-        const auto Samplers = LitSamplers();
+        auto Samplers = LitSamplers();
+        if( m_bBuildTile ) Samplers[4] = Samplers[5] = Samplers[11];      // (the attributes: integers, not filtered)
 
         auto Shaders      = std::array<const xgpu::shader*, 2>{ bGBuffer ? &M.m_GBufferFragment : &M.m_Fragment, bSkin ? &m_SkinGeomVert : bPairsCut ? &m_ShadowPairsCutVert : bRecords ? &m_StaticGeomGIRecordsVert : &m_StaticGeomGIVert };
         using ub = xgpu::pipeline::uniform_binds;
@@ -1736,9 +1744,10 @@ namespace xlionrender
         auto Attachments = std::vector{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId } };
         if( std::getenv("XLION_TILE") )
         {
+            const bool bRef = std::getenv("XLION_TILE")[0] == '3';
             for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1 } )
             {
-                if( auto Err = m_Device.Create(*p, { .m_Format = xgpu::texture::format::R32G32B32A32_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile attributes" }); Err ) return Err;
+                if( auto Err = m_Device.Create(*p, { .m_Format = bRef ? xgpu::texture::format::R32G32B32A32_SFLOAT : p == &View.m_TileAttr0 ? xgpu::texture::format::R32G32_UINT : xgpu::texture::format::R32_UINT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile attributes" }); Err ) return Err;
                 Attachments.push_back(xgpu::renderpass::attachment{ *p });
             }
             auto TileAttachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR } };
