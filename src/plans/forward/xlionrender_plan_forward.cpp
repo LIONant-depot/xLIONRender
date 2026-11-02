@@ -2863,8 +2863,8 @@ namespace xlionrender
                         // The ground truth instead (scene::gi_settings::m_bPathTraced, or XLION_GI_REF=<paths a frame>[,<bounces>]): words 20 = 2, 28 the half-size width; the gather writes each pixel's point, reads its mean
                         static const std::array<int, 2> s_Ref = [] { std::array<int, 2> A{ 0, 4 }; if( const char* p = std::getenv("XLION_GI_REF") ) (void)std::sscanf(p, "%d,%d", &A[0], &A[1]); return A; }();
                         m_pGatherRefS = m_pGatherRefA = nullptr;
-                        // Experiment X1c: XLION_GI_VOX=<level 0's cell> [<rays a frame> [<samples a face keeps>]], the gather reads voxels of light on the surfaces (xlionrender_gi_ref_comp.glsl VoxMain)
-                        static const std::array<float, 3> s_Vox = [] { std::array<float, 3> A{ 0.0f, 32768.0f, 64.0f }; if( const char* p = std::getenv("XLION_GI_VOX") ) (void)std::sscanf(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }();
+                        // Experiment X1c (gpu_trace::VoxConfig): the gather reads voxels of light on the surfaces (xlionrender_gi_ref_comp.glsl VoxMain), the rays go out in updateGI
+                        const auto& s_Vox = gi::gpu_trace::VoxConfig();
                         std::uint32_t LightsKey = 2166136261u;         // (the lights' version: a change starts the tracer over)
                         const auto KeyOf = [&](const void* p, std::size_t n) { const auto* b = static_cast<const std::uint8_t*>(p); for( std::size_t k = 0; k < n; ++k ) LightsKey = (LightsKey ^ b[k]) * 16777619u; };
                         { const float Sn[7] = { Scene.m_Sun.m_Direction[0], Scene.m_Sun.m_Direction[1], Scene.m_Sun.m_Direction[2], Scene.m_Sun.m_Color[0], Scene.m_Sun.m_Color[1], Scene.m_Sun.m_Color[2], Scene.m_Sun.m_Intensity }; KeyOf(Sn, sizeof(Sn)); }
@@ -2876,7 +2876,25 @@ namespace xlionrender
                             m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
                         }
-                        if( s_Vox[0] > 0.0f && m_pGITrace && m_pGITrace->VoxStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), int(s_Vox[1]), int(s_Vox[2]), s_Vox[0], { Eye[0], Eye[1], Eye[2] }, LightsKey) )
+                        if( s_Vox[0] > 0.0f ) { m_VoxPixels = std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight; m_VoxKey = LightsKey; }
+                        // Experiment X1c: the voxels' rays (here, not in updateGI: at the frame's start they measured 3.4 ms whatever their number), as many as fit their ms a frame by what they measured, a quarter of that when the lights and the eye are still
+                        if( const auto& Vox = s_Vox; Vox[0] > 0.0f && m_pGITrace && m_VoxPixels > 0 )
+                        {
+                            if( !m_bVoxTSTried ) { m_bVoxTSTried = true; m_bVoxTS = m_Device.Create(m_VoxTS, { .m_Count = 2 }) == nullptr; }
+                            if( std::vector<std::uint64_t> Ns; m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
+                            {
+                                const double Ms = double(Ns[1] - Ns[0]) * 1e-6, Budget = double(Vox[1]) * (m_pGITrace->VoxQuiet() ? 0.25 : 1.0);
+                                m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 1024.0, 262144.0);
+                                static const char* s_pFixed = std::getenv("XLION_VOX_RAYS");      // (measurement: the rays' cost against their number)
+                                if( s_pFixed ) m_VoxRays = std::atof(s_pFixed);
+                                static const bool s_bVoxLog = std::getenv("XLION_GPU_TIMES") != nullptr;
+                                if( s_bVoxLog && m_Device.getFrameIndex() % 120 == 0 ) { std::printf("VOXRAYS %.2f ms, %.0f rays, budget %.2f\n", Ms, m_VoxRays, Budget); std::fflush(stdout); }
+                            }
+                            if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
+                            m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, m_Device.getFrameIndex(), int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey);
+                            if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
+                        }
+                        if( s_Vox[0] > 0.0f && m_bVoxOn && m_pGITrace && m_pGITrace->RefSamples() && m_pGITrace->VoxBuffer() )
                         {
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum(); m_pGatherClip = m_pGITrace->VoxBuffer();
                             const auto A = m_pGITrace->VoxAnchor();
@@ -3956,8 +3974,10 @@ namespace xlionrender
                     for( std::uint32_t c = 0; c < Order.size(); ++c ) Order[c] = c;
                     std::sort(Order.begin(), Order.end(), [&](std::uint32_t x, std::uint32_t y) { return Cl[x].m_iIndex < Cl[y].m_iIndex; });
                     std::uint32_t Off = 0;
+                    const auto& Ends = pSlot->m_Geom.m_LODIndexEnd;       // (the section's triangles are LOD 0's, the last in the index buffer: coarser LODs' clusters belong to sections too, and counting them left no table: SURFACE_COLOR black)
+                    const std::uint32_t Lod0First = Ends.size() > 1 ? Ends[1] : 0u;
                     for( const auto c : Order )
-                        if( c < pSlot->m_GIClusterSection.size() && pSlot->m_GIClusterSection[c] == std::uint16_t(J.m_Section) ) { First[c] = Off; Off += Cl[c].m_nIndices / 3; }
+                        if( c < pSlot->m_GIClusterSection.size() && pSlot->m_GIClusterSection[c] == std::uint16_t(J.m_Section) && Cl[c].m_iIndex >= Lod0First ) { First[c] = Off; Off += Cl[c].m_nIndices / 3; }
                     const auto& All = m_pGIWorld->TriangleAlbedo(J.m_GIId);
                     if( Off == All.size() )
                     {

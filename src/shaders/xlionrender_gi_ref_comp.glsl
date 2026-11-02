@@ -92,12 +92,43 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     if (v.w >= float(abs(Push.m_Epoch))) v *= 0.5 * float(abs(Push.m_Epoch)) / v.w;       // (ponytail: another lane's write to this face in this frame can be lost: samples, not light)
     GIRefAccum[e] = v; GIRefAccum[e + 1u] = m;
 }
+// The emitters' light by light sampling at a budget: EmitterIrradianceAt, but over a few of the table picked at random, not all of it per ray (Bistro's table: 3 ms a frame at any
+// number of rays). The pick's weight scaled up by the table over the few. As noisy as it needs; a face averages it
+vec3 VoxEmitters(in const vec3 P, in const vec3 N)
+{
+    const uint Tb = GD[14], nE = GD[15], Few = min(nE, 8u);
+    float Q = 0.0; int Pick = -1;
+    for (uint i = 0u; i < Few; ++i)
+    {
+        const uint k = nE <= 8u ? i : uint(Rnd() * float(nE)) % nE, e = Tb + 12u * k;
+        const vec3 D = GV(e) - P;
+        const float d2 = dot(D, D);
+        if (d2 < 1e-10) continue;
+        const vec3 Dn = D * (1.0 / sqrt(d2));
+        const float cr = dot(N, Dn), ce = -dot(GV(e + 3u), Dn);
+        if (cr <= 0.0 || ce <= 0.0) continue;
+        const float A = GF(e + 6u), w = A * cr * ce / (d2 + A);
+        if (w < 1e-5) continue;
+        const vec3 Le = GV(e + 7u);
+        const float q = w * (0.2126 * Le.x + 0.7152 * Le.y + 0.0722 * Le.z);
+        if (q <= 0.0) continue;
+        Q += q;
+        if (Rnd() * Q < q) Pick = int(k);
+    }
+    if (Pick < 0) return vec3(0.0);
+    const uint e = Tb + 12u * uint(Pick);
+    const vec3 D = GV(e) - P;
+    const float d = length(D);
+    if (Occluded(P + N * 1e-3, D * (1.0 / d), d * 0.98)) return vec3(0.0);
+    const vec3 Le = GV(e + 7u);
+    return Le * (Q / (0.2126 * Le.x + 0.7152 * Le.y + 0.0722 * Le.z)) * (float(nE) / float(Few));
+}
 // A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
 vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out vec3 Nh, out bool bHit)
 {
     bHit = false; Ph = vec3(0.0); Nh = vec3(0.0, 1.0, 0.0);
     // the emitters by light sampling (G5, as the surfels' pass: the table, a shadow ray), this point's own unless lighting shades it; an emission a ray hits is not counted again
-    const vec3 Own = GD[15] > 0u && !EmitterDirectExternal() ? EmitterIrradianceAt(P, N, g_Seed) : vec3(0.0);
+    const vec3 Own = GD[15] > 0u && !EmitterDirectExternal() ? VoxEmitters(P, N) : vec3(0.0);
     const vec3 D = CosineDir(N);
     const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
     if (H.m_Inst < 0) return Own + SkyAt(D) * gi_pi_v;
@@ -111,7 +142,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
     bHit = true;
     vec3 In = Direct(Ph, Nh) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
-    if (GD[15] > 0u) { In += EmitterIrradianceAt(Ph, Nh, g_Seed + 1u); Emission = vec3(0.0); }
+    if (GD[15] > 0u) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
     return Own + (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }
 void VoxMain()

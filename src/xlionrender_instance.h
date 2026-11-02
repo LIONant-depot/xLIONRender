@@ -621,6 +621,11 @@ namespace xlionrender
         // The GI's GPU slice (methodology: 2 ms of the frame's 16): its steady cost (the GPU update and Show, measured while no relight is
         // owed, smoothed) and the relight's budget a frame, what the slice leaves (instance::updateGI)
         float                       m_GISliceMs = 2.0f;
+        xgpu::timestamps            m_VoxTS;                        // experiment X1c: the voxels' rays, by their ms
+        bool                        m_bVoxTS = false, m_bVoxTSTried = false, m_bVoxOn = false;
+        double                      m_VoxRays = 16384.0;
+        std::size_t                 m_VoxPixels = 0;
+        std::uint32_t               m_VoxKey = 0;
         xgpu::timestamps            m_GISliceTS;                    // 0 before Submit, 1 after the probes, 2 before Show, 3 after it, 4 before the probes
         bool                        m_bGISliceTS = false, m_bGISliceTSTried = false;
         double                      m_GISteadyMs = -1;              // (-1: not measured yet)
