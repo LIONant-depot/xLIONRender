@@ -919,14 +919,13 @@ namespace xlionrender::gi
             return true;
         }
         // Experiment X1c (XLION_GI_VOX; xlionrender_gi_ref_comp.glsl VoxMain): rays from the screen's points into voxels of light on the surfaces.
-        // ponytail: 100 MB of mostly empty cells: a hash when it earns it
-        // Keep: the most samples a face keeps. From 64, doubling each second's worth of frames the lights stay as they are (ponytail: a lights' key for the whole scene - one small lamp starts all of it over; per face when lamps move)
-        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, std::uint32_t LightsKey) noexcept
+        // ponytail: 200 MB of mostly empty cells: a hash when it earns it
+        // KeepMax: the most samples a face keeps; a face notices a change of its own light and starts over (VoxStore), the rest stay as they are
+        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye) noexcept
         {
-            if (LightsKey != m_VoxLightsKey) { m_VoxLightsKey = LightsKey; m_VoxStill = 0; }
-            const int Keep = std::min(KeepMax, 64 << std::min(m_VoxStill++ / 60, 14));
+            const int Keep = KeepMax;
             if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
-            const std::size_t nEntries = std::size_t(clip_levels_v) * clip_dim_v * clip_dim_v * clip_dim_v * 6;
+            const std::size_t nEntries = std::size_t(clip_levels_v) * clip_dim_v * clip_dim_v * clip_dim_v * 6 * 2;
             if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0] };
             m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z };
@@ -1344,8 +1343,6 @@ namespace xlionrender::gi
         std::array<std::array<int, 3>, 4>   m_VoxOrg{};
         bool                                m_bVoxOrg = false;
         std::size_t                         m_VoxCleared = 0;
-        std::uint32_t                       m_VoxLightsKey = 0;
-        int                                 m_VoxStill = 0;
         bool                                m_bRef = false;
         std::size_t                         m_RefNext = 0;
         std::uint32_t                       m_RefLightsKey = 0;

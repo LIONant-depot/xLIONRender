@@ -2869,7 +2869,7 @@ namespace xlionrender
                             m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
                         }
-                        if( s_Vox[0] > 0.0f && m_pGITrace && m_pGITrace->VoxStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), int(s_Vox[1]), int(s_Vox[2]), s_Vox[0], { Eye[0], Eye[1], Eye[2] }, LightsKey) )
+                        if( s_Vox[0] > 0.0f && m_pGITrace && m_pGITrace->VoxStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), int(s_Vox[1]), int(s_Vox[2]), s_Vox[0], { Eye[0], Eye[1], Eye[2] }) )
                         {
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum(); m_pGatherClip = m_pGITrace->VoxBuffer();
                             const auto A = m_pGITrace->VoxAnchor();

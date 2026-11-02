@@ -24,8 +24,11 @@ vec3 CosineDir(in const vec3 N)
 // the sum of the samples (rgb) and their count, as floats (GIRefAccum). A ray goes from a real point of the screen (never inside a wall) into a cell
 // around it, a face its normal looks toward, both picked by their read weights. m_Bounces: -1 this, -2 clear, -3 clear slices; m_Epoch: the samples a face keeps (negative: the hits feed too).
 // The store wraps around the eye: a cell's place is its world cell modulo the grid, so the light stays where it is as the eye moves; the slices that enter are cleared.
+// A face is two entries: the kept sum (rgb) and count, what the reads see; a short mean (rgb) and the samples' variance around it, which notice a change: when
+// the short mean leaves the kept one by more than the noise says it can (Wicked's multiscale mean estimator, estimator::Add), the old samples go, in this face only.
 // The header after the pixels (2 entries): the eye and level 0's cell
 const int vox_dim_v = 64, vox_levels_v = 4;
+const float vox_short_v = 0.02, vox_sigmas_v = 5.0;        // (single noisy rays, a test at every one: slower and stricter than estimator::Add's 0.08 and 3)
 bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in const int First, out int L, out ivec3 Org, out vec3 g)
 {
     for (L = First; L < vox_levels_v; ++L)
@@ -37,7 +40,7 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in co
     }
     return false;
 }
-uint VoxEntry(in const int L, in const ivec3 q, in const uint Face) { const ivec3 w = q & ivec3(vox_dim_v - 1); return (uint(L) * uint(vox_dim_v * vox_dim_v * vox_dim_v) + uint(w.x) + uint(w.y) * uint(vox_dim_v) + uint(w.z) * uint(vox_dim_v * vox_dim_v)) * 6u + Face; }
+uint VoxEntry(in const int L, in const ivec3 q, in const uint Face) { const ivec3 w = q & ivec3(vox_dim_v - 1); return ((uint(L) * uint(vox_dim_v * vox_dim_v * vox_dim_v) + uint(w.x) + uint(w.y) * uint(vox_dim_v) + uint(w.z) * uint(vox_dim_v * vox_dim_v)) * 6u + Face) * 2u; }
 vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const float Cell0)
 {
     int L = -1; ivec3 Org; vec3 g;
@@ -72,9 +75,22 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const float r = Rnd() * (w.x + w.y + w.z);
     const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
     const uint  e = VoxEntry(L, Org + q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)));
-    vec4 v = GIRefAccum[e] + vec4(Sample, 1.0);
-    if (v.w >= float(abs(Push.m_Epoch))) v *= 0.5 * float(abs(Push.m_Epoch)) / v.w;       // (the samples it keeps fell, the lights changed: the old ones weigh that much. ponytail: another lane's write to this face in this frame can be lost: samples, not light)
-    GIRefAccum[e] = v;
+    vec4 v = GIRefAccum[e], m = GIRefAccum[e + 1u];
+    const float Ls = dot(Sample, vec3(0.2126, 0.7152, 0.0722));
+    if (v.w <= 0.0) m = vec4(Sample, 0.0);
+    const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
+    m.rgb += (Sample - m.rgb) * vox_short_v;
+    m.w   += (Ds * Ds - m.w) * vox_short_v;
+    if (v.w >= 64.0)
+    {
+        const float Lk = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w, Lm = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
+        const float Noise = sqrt(max(m.w, 0.0) * vox_short_v / (2.0 - vox_short_v));       // (the short mean's own standard deviation)
+        if (abs(Lm - Lk) > vox_sigmas_v * Noise && abs(Lm - Lk) > 0.1 * Lk)
+            v = vec4(m.rgb * 32.0, 32.0);                                                  // (it changed: the short mean is all it knows)
+    }
+    v += vec4(Sample, 1.0);
+    if (v.w >= float(abs(Push.m_Epoch))) v *= 0.5 * float(abs(Push.m_Epoch)) / v.w;       // (ponytail: another lane's write to this face in this frame can be lost: samples, not light)
+    GIRefAccum[e] = v; GIRefAccum[e + 1u] = m;
 }
 // A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
 vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out vec3 Nh, out bool bHit)
@@ -108,7 +124,8 @@ void VoxMain()
         const int  Ax = (Push.m_First >> 6) & 3;
         const uint f = id % 6u, u = (id / 6u) % uint(vox_dim_v), v = id / (6u * uint(vox_dim_v));
         ivec3 q; q[Ax] = Push.m_First & 63; q[(Ax + 1) % 3] = int(u); q[(Ax + 2) % 3] = int(v);
-        GIRefAccum[VoxEntry(Push.m_First >> 8, q, f)] = vec4(0.0);
+        const uint e = VoxEntry(Push.m_First >> 8, q, f);
+        GIRefAccum[e] = vec4(0.0); GIRefAccum[e + 1u] = vec4(0.0);
         return;
     }
     if (int(gl_GlobalInvocationID.x) >= Push.m_Count) return;

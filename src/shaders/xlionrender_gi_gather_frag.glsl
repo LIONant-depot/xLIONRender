@@ -63,7 +63,7 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
             const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), q = i + o;
             const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
             const ivec3 w = g_ClipFloat ? (Org + q) & ivec3(clip_dim_v - 1) : q;      // (X1c's store wraps around the eye)
-            const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(w.x) + uint(w.y) * uint(clip_dim_v) + uint(w.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
+            const uint  e = ((uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(w.x) + uint(w.y) * uint(clip_dim_v) + uint(w.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face) * (g_ClipFloat ? 2u : 1u);       // (X1c: a face is two entries, the read the first)
             const uvec4 v = GIClip[e];
             if (g_ClipFloat) { Num += uintBitsToFloat(v.xyz) * t; Den += uintBitsToFloat(v.w) * t; }
             else             { Num += vec3(v.xyz) * t; Den += float(v.w) * t; }
