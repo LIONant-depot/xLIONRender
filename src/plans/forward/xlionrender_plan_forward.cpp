@@ -2878,14 +2878,14 @@ namespace xlionrender
                         }
                         if( s_Vox[0] > 0.0f ) { m_VoxPixels = std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight; m_VoxKey = LightsKey; }
                         // Experiment X1c: the voxels' rays (here, not in updateGI: at the frame's start they measured 3.4 ms whatever their number), as many as fit their ms a frame by what they measured
-                        // (any rays at all cost about 1.6 ms - the first through the BVH each frame, cold: 64 or 32768 the same -, so with nothing changing, none on most frames, not fewer on each)
+                        // (64 rays cost about as much as 32768 and long rays are what cost - why is not known yet (gi_next_level_analysis.md) -, so with nothing changing, none on most frames, not fewer on each)
             if( const auto& Vox = s_Vox; Vox[0] > 0.0f && m_pGITrace && m_VoxPixels > 0 && !(m_pGITrace->VoxQuiet() && m_Device.getFrameIndex() % 8 != 0) )
                         {
                             if( !m_bVoxTSTried ) { m_bVoxTSTried = true; m_bVoxTS = m_Device.Create(m_VoxTS, { .m_Count = 2 }) == nullptr; }
                             if( std::vector<std::uint64_t> Ns; m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
                             {
                                 const double Ms = double(Ns[1] - Ns[0]) * 1e-6, Budget = double(Vox[1]);
-                                m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 16384.0, 262144.0);     // (the floor: the rays' first 1.6 ms is the same for 64 or 32768: under it the budget only starved them, and the light took longer to arrive)
+                                m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 16384.0, 262144.0);     // (the floor: 64 rays cost about as much as 32768: under it the budget only starved them, and the light took longer to arrive)
                                 static const char* s_pFixed = std::getenv("XLION_VOX_RAYS");      // (measurement: the rays' cost against their number)
                                 if( s_pFixed ) m_VoxRays = std::atof(s_pFixed);
                                 static const bool s_bVoxLog = std::getenv("XLION_GPU_TIMES") != nullptr;
