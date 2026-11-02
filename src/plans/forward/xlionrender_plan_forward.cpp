@@ -4102,7 +4102,17 @@ namespace xlionrender
 
         // Camera-centered world (same as the editors): precision stays near the eye in large worlds
         const xmath::fvec3 Eye     = Camera.getPosition();
-        const xmath::fmat4 W2C     = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
+        const xmath::fmat4 W2CNoJitter = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
+        static const bool s_bEnvTAA = std::getenv("XLION_TAA") != nullptr;      // (measurement)
+        const bool bTAA = s_bEnvTAA || Scene.m_Post.m_bTAA;
+        const xmath::fmat4 W2C = [&]
+        {
+            if( !bTAA ) return W2CNoJitter;
+            // A sub-pixel a frame: Halton 2, 3 over 8 frames
+            const auto Halton = [](int i, int b) { float f = 1.0f, r = 0.0f; for( ; i > 0; i /= b ) { f /= float(b); r += f * float(i % b); } return r; };
+            const int k = (View.m_TAAFrame % 8) + 1;
+            return xmath::fmat4::fromTranslation(xmath::fvec3{ (Halton(k, 2) - 0.5f) * 2.0f / float(View.m_Width), (Halton(k, 3) - 0.5f) * 2.0f / float(View.m_Height), 0.0f }) * W2CNoJitter;
+        }();
 
         const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
         m_LODProjScale = ProjScale;                             // (the main view's LOD pick: renderScenePass)
@@ -4199,6 +4209,34 @@ namespace xlionrender
             static const bool  s_bEnvAuto = std::getenv("XLION_AUTO_EXPOSURE") != nullptr;
             const float Bloom = s_EnvBloom >= 0.0f ? s_EnvBloom : Scene.m_Post.m_Bloom;
             const bool  bAuto = s_bEnvAuto || Scene.m_Post.m_bAutoExposure;
+            const xgpu::texture* pHDR = &View.m_HDR;
+            xgpu::pipeline_instance* pToneMap = &View.m_ToneMapInstance;
+            if( bTAA )
+            {
+                if( !View.m_TAA[0].m_Private )
+                {
+                    bool bOk = true;
+                    for( int i = 0; i < 2; ++i )
+                    {
+                        bOk = bOk && !m_Device.Create(View.m_TAA[i], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: TAA" });
+                        if( !bOk ) break;
+                        auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_TAA[i] }, xgpu::pipeline_instance::sampler_binding{ View.m_Bloom[0] }, xgpu::pipeline_instance::sampler_binding{ View.m_ExposureTex } };
+                        bOk = !m_Device.Create(View.m_ToneMapTAA[i], { .m_PipeLine = m_ToneMapPipeline, .m_SamplersBindings = Bindings });
+                        if( !bOk ) break;
+                        struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Fill{ View.m_Width, View.m_Height, 3, 0.0f };
+                        const xgpu::texture* T[] = { &View.m_HDR }; const xgpu::texture* I[] = { &View.m_TAA[i] };
+                        Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Fill, sizeof(Fill), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
+                    }
+                    View.m_bTAAHistory = false;
+                }
+                const int Cur = View.m_TAAFrame & 1;
+                struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, Scene.m_Post.m_TAABlend, View.m_bTAAHistory ? 1.0f : 0.0f };
+                const xgpu::texture* T[] = { &View.m_HDR, &View.m_Depth, &View.m_TAA[1 - Cur] }; const xgpu::texture* I[] = { &View.m_TAA[Cur] };
+                Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
+                pHDR = &View.m_TAA[Cur]; pToneMap = &View.m_ToneMapTAA[Cur];
+                View.m_TAAPrevW2C = W2CNoJitter; View.m_TAAPrevEye = Eye; View.m_bTAAHistory = true; ++View.m_TAAFrame;
+            }
+            else View.m_bTAAHistory = false;
             {
                 struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{};
                 const auto Run = [&](const xgpu::texture& Src, const xgpu::texture& Dst, int W, int H)
@@ -4220,7 +4258,7 @@ namespace xlionrender
                 {
                     const auto S = Size(i);
                     Push = {}; Push.m_W = S[0]; Push.m_H = S[1]; Push.m_Mode = 0; Push.m_A = i == 0 ? 1.0f : 0.0f;
-                    Run(i == 0 ? View.m_HDR : View.m_Bloom[i - 1], View.m_Bloom[i], S[0], S[1]);
+                    Run(i == 0 ? *pHDR : View.m_Bloom[i - 1], View.m_Bloom[i], S[0], S[1]);
                 }
                 if( bAuto )
                 {
@@ -4238,7 +4276,7 @@ namespace xlionrender
                 }
             }
             auto Cmd = Window.StartRenderPass(View.m_OutputPass);
-            Cmd.setPipelineInstance(View.m_ToneMapInstance);
+            Cmd.setPipelineInstance(*pToneMap);
             Cmd.setPushConstants(details::push_tonemap{ { View.m_Exposure, Bloom, bAuto ? 1.0f : 0.0f, 0 }, View.m_Background });
             Cmd.setBuffer(m_FullscreenVB);
             Cmd.setBuffer(m_FullscreenIB);

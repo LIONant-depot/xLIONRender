@@ -232,6 +232,8 @@ namespace xlionrender
     {
         float   m_Bloom         = 0.0f;     // the share of the blurred image in the final one (0: off; 0.04 is usual)
         bool    m_bAutoExposure = false;
+        bool    m_bTAA          = false;    // temporal antialiasing (the view jitters a sub-pixel a frame)
+        float   m_TAABlend      = 0.1f;     // this frame's share over the history
         float   m_ExposureKey   = 0.18f;    // the middle grey the average is brought to
         float   m_ExposureRate  = 1.5f;     // how fast the eye adapts (1 / seconds)
         float   m_ExposureMin   = 0.03f;

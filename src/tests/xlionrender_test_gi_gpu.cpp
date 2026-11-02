@@ -11,6 +11,9 @@ namespace
     constexpr std::uint32_t s_CastComp[] = {
         #include "xlionrender_gi_cast_comp.h"
     };
+    constexpr std::uint32_t s_TAAComp[] = {
+        #include "xlionrender_taa_comp.h"
+    };
     constexpr std::uint32_t s_PostComp[] = {
         #include "xlionrender_post_comp.h"
     };
@@ -170,6 +173,28 @@ int main()
             for (int i = 0; i < 16 * 16; ++i) CHECK(std::abs(V[4 * i] - 2.0f) < 1e-2f, "bloom: a flat image stays itself");
             CHECK(std::abs(E[0] - 0.18f / 2.0f) < 2e-3f, "exposure: the key over the average");
             std::printf("Bloom and exposure: a flat 2 stays 2 down and up, its exposure %.3f\n", E[0]);
+
+            // TAA (xlionrender_taa_comp.glsl): a flat frame over a black history stays the frame (the clamp), with no history it is the frame
+            xgpu::shader TaaS; xgpu::compute TaaC;
+            CHECK(!App.m_Device.Create(TaaS, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_TAAComp, std::size(s_TAAComp) } } }), "the TAA shader");
+            CHECK(!App.m_Device.Create(TaaC, { .m_pShader = &TaaS, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80 }), "the TAA compute");
+            xgpu::texture Frame16, Hist16, Out16;
+            Target(Frame16, 16); Target(Hist16, 16); Target(Out16, 16);
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            Push = { 16, 16, 3, 3.0f }; Run(Tex, Frame16, 16);
+            Push = { 16, 16, 3, 0.0f }; Run(Tex, Hist16, 16);
+            Run(Tex, Out16, 16);
+            struct { xmath::fmat4 m_R; int m_W, m_H; float m_Blend, m_bHistory; } TP{ xmath::fmat4::fromIdentity(), 16, 16, 0.1f, 1.0f };
+            const xgpu::texture* TT[] = { &Frame16, &Hist16, &Hist16 }; const xgpu::texture* TI[] = { &Out16 };
+            App.m_Window.Dispatch(TaaC, std::span<xgpu::buffer* const>{}, TT, TI, &TP, sizeof(TP), 2, 2);
+            const xgpu::texture* ReadTaa[] = { &Out16 };
+            App.m_Window.Dispatch(ReadC, OutBs, ReadTaa, nullptr, 0, 2, 2);
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+            for (int k = 0; k < 3; ++k) { while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break; { auto Cmd = App.m_Window.getCmdBuffer(); } App.m_Window.PageFlip(); }
+            CHECK(OutB.MemoryMap(0, int(V.size()), [&](void* q) { std::memcpy(V.data(), q, V.size() * sizeof(float)); }) == nullptr, "read the TAA back");
+            for (int i = 0; i < 16 * 16; ++i) CHECK(std::abs(V[4 * i] - 3.0f) < 1e-2f, "TAA: the history stays inside the frame's neighbours");
+            std::printf("TAA: a stale history doesn't show\n");
         }
     }
 

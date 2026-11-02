@@ -452,6 +452,8 @@ namespace xlionrender
         xgpu::compute               m_AOCompute;
         xgpu::shader                m_PostShader;                   // bloom and auto exposure (xlionrender_post_comp.glsl)
         xgpu::compute               m_PostCompute;
+        xgpu::shader                m_TAAShader;                    // xlionrender_taa_comp.glsl
+        xgpu::compute               m_TAACompute;
         xgpu::buffer                m_TailFrames;                   // the denoiser's frame (host visible, a slot a ring frame)
         xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
         // The sun's shadow mask (XLION_SUN_MASK, xLION_Docs shadows_gpu_plan.md S1a): 3 the materials read it (UBOLight.ShadowLevels[0].x 1),

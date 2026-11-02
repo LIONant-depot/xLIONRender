@@ -39,6 +39,13 @@ namespace xlionrender
         xgpu::texture           m_ExposureTex;          // 1 x 1: the adapted exposure
         bool                    m_bPostReady = false;   // (the images written once: they can be sampled)
         std::chrono::steady_clock::time_point m_PostLast{};
+        // Temporal antialiasing (scene::post_settings::m_bTAA; xlionrender_taa_comp.glsl), made the first time it is on: this frame into one, the other last frame's; tone map from either
+        std::array<xgpu::texture, 2> m_TAA;
+        std::array<xgpu::pipeline_instance, 2> m_ToneMapTAA;
+        int                     m_TAAFrame = 0;
+        bool                    m_bTAAHistory = false;
+        xmath::fmat4            m_TAAPrevW2C{};         // without the jitter
+        xmath::fvec3            m_TAAPrevEye{};
         xgpu::pipeline_instance m_BlitInstance;         // samples m_Output, for instance::Blit
         // The selection's outline (instance::renderOutline), made the first time something is selected: the mask (R: covered, G: in plain sight) with a
         // depth of its own, its pass, the casters' pipelines with the mask's fragment (they sample m_Depth), and the composite over m_Output (it samples m_Mask)

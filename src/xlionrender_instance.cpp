@@ -152,6 +152,9 @@ namespace xlionrender
         constexpr std::uint32_t s_FullscreenVert[] = {
             #include "xlionrender_fullscreen_vert.h"
         };
+        constexpr std::uint32_t s_TAAComp[] = {
+            #include "xlionrender_taa_comp.h"
+        };
         constexpr std::uint32_t s_PostComp[] = {
             #include "xlionrender_post_comp.h"
         };
@@ -781,6 +784,8 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_PostShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_PostComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80 }); Err ) return Err;
             // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;
             // the G-buffer's depth and normal
             if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;
@@ -1896,6 +1901,9 @@ namespace xlionrender
         destroyTailTargets(View);
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         for( auto& T : View.m_Bloom ) if( T.m_Private ) m_Device.Destroy(std::move(T));
+        for( auto& I : View.m_ToneMapTAA ) if( I.m_Private ) m_Device.Destroy(std::move(I));
+        for( auto& T : View.m_TAA ) if( T.m_Private ) m_Device.Destroy(std::move(T));
+        View.m_bTAAHistory = false;
         if( View.m_ExposureTex.m_Private ) m_Device.Destroy(std::move(View.m_ExposureTex));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));
