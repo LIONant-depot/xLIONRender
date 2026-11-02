@@ -450,6 +450,9 @@ namespace xlionrender
         xgpu::compute               m_TailDenoise;
         xgpu::shader                m_AOShader;                     // the ambient occlusion (renderScenePass, before the GI gather: xlionrender_ao_comp.glsl)
         xgpu::compute               m_AOCompute;
+        xgpu::shader                m_TileFrag, m_TileVert;         // the material tile pass's prototype (XLION_TILE)
+        xgpu::pipeline              m_TilePipeline;
+        bool                        m_bBuildTile = false;           // (buildMaterialPipeline: the tile pass's, from a material of its family)
         xgpu::shader                m_PostShader;                   // bloom and auto exposure (xlionrender_post_comp.glsl)
         xgpu::compute               m_PostCompute;
         xgpu::shader                m_TAAShader;                    // xlionrender_taa_comp.glsl

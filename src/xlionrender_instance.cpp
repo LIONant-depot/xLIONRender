@@ -51,6 +51,12 @@ namespace xlionrender
         constexpr std::uint32_t s_DepthFrag[] = {
             #include "xlionrender_depth_frag.h"
         };
+        constexpr std::uint32_t s_GPreTileFrag[] = {
+            #include "xlionrender_gprepass_tile_frag.h"
+        };
+        constexpr std::uint32_t s_TileFrag[] = {
+            #include "xlionrender_tile_standard_frag.h"
+        };
         constexpr std::uint32_t s_GPrePassFrag[] = {
             #include "xlionrender_gprepass_frag.h"
         };
@@ -631,7 +637,13 @@ namespace xlionrender
                 }
                 {   // the G-buffer prepass (gi_gbuffer_gather_plan.md): the prepass's vertex shaders, the normal and the submesh instance written
                     xgpu::shader GPreFrag;
-                    if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPrePassFrag) }); Err ) return Err;
+                    if( std::getenv("XLION_TILE") )      // (the tile pass's prototype: the attributes too; its own shaders)
+                    {
+                        if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPreTileFrag) }); Err ) return Err;
+                        if( auto Err = Device.Create(m_TileFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_TileFrag) }); Err ) return Err;
+                        if( auto Err = Device.Create(m_TileVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
+                    }
+                    else if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPrePassFrag) }); Err ) return Err;
                     std::vector<xgpu::pipeline::uniform_binds> RecBinds(UniformBinds.begin(), UniformBinds.end());
                     RecBinds.push_back(RecordsBind);
                     auto CpuShaders = std::array<const xgpu::shader*, 2>{ &GPreFrag, &Vert };
@@ -1402,7 +1414,7 @@ namespace xlionrender
         if( bPairsCut ) UniformBinds.push_back(VertexSSBO(13)); // the pairs' pages
         UniformBinds.push_back(FragmentSSBO(14));               // the denoised screen tail (light_mode::SCREEN)
         const auto Binds = std::span{ UniformBinds };
-        xgpu::pipeline::setup Setup{ .m_VertexDescriptor = bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
+        xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_bBuildTile ? m_FullscreenVD : bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                    , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
                                    , .m_UniformBinds = Binds, .m_Samplers = Samplers, .m_nTextureSlots = TableSlots(M) };
         if( bShadow )       // the casters' state (instance::Init MakeCaster); the fragment cuts out and stops (ubo_lighting m_LightParams.w)
@@ -1414,6 +1426,15 @@ namespace xlionrender
             Setup.m_DepthStencil.m_bDepthClampEnable        = true;
         }
         else ApplyState(Setup, M.m_State);
+        if( m_bBuildTile )       // the tile pass: a full-screen triangle into m_HDR; every other binding as the material's
+        {
+            Shaders = { &m_TileFrag, &m_TileVert };
+            Setup.m_PushConstantsSize = sizeof(xmath::fmat4);
+            Setup.m_Blend = xgpu::pipeline::blend{};
+            Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+            Setup.m_DepthStencil.m_bDepthTestEnable  = false;
+            Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+        }
         // (a masked material is an opaque one with a discard: the same depth test and write in every pass - Tomas; its cutout in the prepass and here run the same test)
         if( bGBuffer )      // the thin G-buffer: opaque, its depth laid and tested (a masked one discards in its own code)
         {
@@ -1712,7 +1733,18 @@ namespace xlionrender
         if( auto Err = m_Device.Create(View.m_GPreId,     { .m_Format = xgpu::texture::format::R32G32B32A32_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: prepass ids" }); Err ) return Err;     // (z: the exact distance to the eye)
         // (the HDR target first, cleared here: the scene pass then loads it as it loads the depth - loaded without a clear this frame it was
         // in no attachment layout: nothing drew)
-        auto Attachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId }, xgpu::renderpass::attachment{ View.m_Depth } };
+        auto Attachments = std::vector{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId } };
+        if( std::getenv("XLION_TILE") )
+        {
+            for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1 } )
+            {
+                if( auto Err = m_Device.Create(*p, { .m_Format = xgpu::texture::format::R32G32B32A32_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile attributes" }); Err ) return Err;
+                Attachments.push_back(xgpu::renderpass::attachment{ *p });
+            }
+            auto TileAttachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR } };
+            if( auto Err = m_Device.Create(View.m_TilePass, { .m_Attachments = TileAttachments, .m_bClearOnRender = false }); Err ) return Err;
+        }
+        Attachments.push_back(xgpu::renderpass::attachment{ View.m_Depth });
         if( auto Err = m_Device.Create(View.m_GPrePass, { .m_Attachments = Attachments, .m_ClearColorR = 0, .m_ClearColorG = 0, .m_ClearColorB = 0, .m_ClearColorA = 0 }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GPrePassLoad, { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
         if( m_SunMaskTex.m_Private && View.m_Width <= sun_mask_w_v && View.m_Height <= sun_mask_h_v )    // the sun's shadow mask (XLION_SUN_MASK): the pass's instance on this view's prepass
@@ -1899,6 +1931,9 @@ namespace xlionrender
         destroyOutlineTargets(View);
         destroyGIScreenTargets(View);
         destroyTailTargets(View);
+        if( View.m_TileInstance.m_Private ) m_Device.Destroy(std::move(View.m_TileInstance));
+        if( View.m_TilePass.m_Private ) m_Device.Destroy(std::move(View.m_TilePass));
+        for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1 } ) if( p->m_Private ) m_Device.Destroy(std::move(*p));
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         for( auto& T : View.m_Bloom ) if( T.m_Private ) m_Device.Destroy(std::move(T));
         for( auto& I : View.m_ToneMapTAA ) if( I.m_Private ) m_Device.Destroy(std::move(I));

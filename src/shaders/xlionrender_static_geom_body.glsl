@@ -38,6 +38,7 @@ layout(location = 11) out vec3 OutGINormal;         //   normal,
 layout(location = 12) flat out uvec2 OutGIRef;      //   the first surfel in GILight, the GI level (xlionrender_surfel_gi.glsl gi_none_v: none)
 layout(location = 13) out vec4 OutGITangent;        //   and the tangent (w: the binormal's sign): the normal-mapped normal in mesh space
 layout(location = 14) out vec4 OutPrevClip;         // last frame's clip position (the screen tail's motion: the G-buffer variants read it; w 0: none)
+layout(location = 16) flat out uint OutMaterialBase;   // the material's base (the G-buffer prepass of the tile pass: xlionrender_gprepass_tile_frag.glsl)
 layout(location = 15) flat out uint OutCluster;      // the cluster drawn (the G-buffer prepass: the submesh instance, xlionrender_gprepass_frag.glsl)
 
 #ifdef XLION_SHADOW_RECORDS
@@ -157,6 +158,11 @@ void main()
     //
     Out.VertColor = VertData.VertColor;
 
+#ifdef XLION_GI
+    OutMaterialBase = push.materialBase;
+#else
+    OutMaterialBase = 0xFFFFFFFFu;
+#endif
     OutCluster  = push.clusterIndex;      // (the G-buffer prepass: both of its vertex shaders, the GI one and not)
 #ifdef XLION_GI
     OutGI       = SurfelGI(VertData.LocalPos.xyz, normalize(VertData.Normal.xyz), L2wRows, (scales.x + scales.y + scales.z) / 3.0);

@@ -62,6 +62,9 @@
 #ifndef XMAT_VARYING_IN
 layout(location = 0) in VaryingFull In;
 #endif
+#ifndef XLION_FRONT
+#define XLION_FRONT gl_FrontFacing
+#endif
 #ifdef XLION_GBUFFER_OUTPUT
 layout(location = 14) in vec4 InPrevClip;      // the G-buffer variant: last frame's clip position (the vertex shaders'; w 0: none)
 layout(location = 1) out vec4 OutGMotion;      // its second target: last frame's ndc xy, clip w, 1 (0: the camera's reprojection)
@@ -74,11 +77,15 @@ layout(location = 1) out vec2 OutGPreNormal;
 layout(location = 2) out vec4 OutGPreId;
 #define XLION_GPRE_OUT() { const vec3 gpn_ = normalize(In.Normal.xyz); vec2 gpo_ = gpn_.xy / (abs(gpn_.x) + abs(gpn_.y) + abs(gpn_.z)); \
     if (gpn_.z < 0.0) gpo_ = (1.0 - abs(gpo_.yx)) * vec2(gpo_.x >= 0.0 ? 1.0 : -1.0, gpo_.y >= 0.0 ? 1.0 : -1.0); \
-    OutGPreNormal = gpo_; OutGPreId = vec4(float(XMAT_PUSH_INSTANCE + 1u), gl_FrontFacing ? float(XMAT_PUSH_CLUSTER) : -float(XMAT_PUSH_CLUSTER) - 1.0, length(In.wSpacePosition.xyz), 0.0); }
+    OutGPreNormal = gpo_; OutGPreId = vec4(float(XMAT_PUSH_INSTANCE + 1u), XLION_FRONT ? float(XMAT_PUSH_CLUSTER) : -float(XMAT_PUSH_CLUSTER) - 1.0, length(In.wSpacePosition.xyz), 0.0); }
 #else
 #define XLION_GPRE_OUT()
 #endif
 #if !defined(XLION_LDR_OUTPUT) && !defined(XLION_TAIL_SCREEN)
+#ifdef XLION_TILE_PIXEL
+vec4 InGI = vec4(0.0); vec3 InGIPos = vec3(0.0), InGINormal = vec3(0.0); uvec2 InGIRef = uvec2(0u); vec4 InGITangent = vec4(0.0);      // (the tile pass: its pixels' GI is the screen buffer's)
+#include "xlionrender_surfel_gi.glsl"
+#else
 layout(location = 9) in vec4 InGI;     // xLIONRender surfel GI: sum(w E), sum(w) from the vertex shader (0 without GI) - divided here, into g_GI
 #ifndef XLION_NO_GI_PIXEL
 layout(location = 10) in vec3 InGIPos;          // the per-pixel read: mesh space position, normal, { first surfel in GILight, GI level }
@@ -86,6 +93,7 @@ layout(location = 11) in vec3 InGINormal;
 layout(location = 12) flat in uvec2 InGIRef;
 layout(location = 13) in vec4 InGITangent;      // mesh space (w: the binormal's sign): the normal map's normal into mesh space
 #include "xlionrender_surfel_gi.glsl"
+#endif
 #endif
 #endif
 #ifndef XLIONRENDER_SURFEL_GI_GLSL
@@ -252,7 +260,7 @@ vec3 TransformNotmalToWorld( vec3 inNormal )
 #ifdef XMAT_BACK_FACE_AS_FRONT
 	return N;                           // Back Face Normal: None (foliage cards lit as the front)
 #else
-	return gl_FrontFacing ? N : -N;     // a back face (double sided: the material's or an instance's setting) is lit by its own side; culled, never taken
+	return XLION_FRONT ? N : -N;     // a back face (double sided: the material's or an instance's setting) is lit by its own side; culled, never taken
 #endif  
 }
 
@@ -360,7 +368,7 @@ float g_CapRoughness = 1.0, g_CapF0 = 0.04;     // (the material's, for the capt
 void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in const vec3 inAlbedo, in const float inMetalic, in const vec3 inEmissiveColor)
 {
 #ifndef XLION_NO_GI_PIXEL
-	if (InGIRef.y == gi_screen_v) { SurfelGIScreen(normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0), length(In.wSpacePosition.xyz)); return; }     // read at half resolution: upsampled
+	if (InGIRef.y == gi_screen_v) { SurfelGIScreen(normalize(In.Normal.xyz) * (XLION_FRONT ? 1.0 : -1.0), length(In.wSpacePosition.xyz)); return; }     // read at half resolution: upsampled
 #endif
 	if (InGI.w > 1e-6) { g_GI = vec4(InGI.rgb / InGI.w, 1.0); g_GISource = 1u; }
 #ifndef XLION_NO_GI_PIXEL
@@ -467,7 +475,7 @@ vec3 PBRLighting
 	// The sun's shadow: offset along, and biased by the slope of, the triangle's own plane (the screen derivatives: Unreal's
 	// EstimatedGeoWorldNormal) - the interpolated normal of a faceted curved surface is not the plane its depth lies in (acne at the terminator)
 	vec3 FaceN = cross(dFdx(In.wSpacePosition.xyz), dFdy(In.wSpacePosition.xyz));
-	const vec3 VtxN = normalize(In.Normal.xyz) * (gl_FrontFacing ? 1.0 : -1.0);
+	const vec3 VtxN = normalize(In.Normal.xyz) * (XLION_FRONT ? 1.0 : -1.0);
 	FaceN = dot(FaceN, FaceN) > 1e-20 ? normalize(FaceN) * sign(dot(FaceN, VtxN) + 1e-9) : VtxN;
 	g_LocalFaceN = FaceN;                                                                  // (the local lights' shadows: LocalShadow)
 	g_LocalFoot  = max(length(dFdx(In.wSpacePosition.xyz)), length(dFdy(In.wSpacePosition.xyz)));

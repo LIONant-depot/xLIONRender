@@ -2791,6 +2791,12 @@ namespace xlionrender
             // (the GI off: the same pass, no GI in it - the ambient occlusion's way to the materials)
             const bool bScreen = bGPre && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
                               && (Scene.m_GI.m_bPerPixel || !Scene.m_GI.m_bEnable) && createGIScreenTargets(View) == nullptr;
+            static const bool s_bTile = [] { const char* p = std::getenv("XLION_TILE"); return p && p[0] != '2'; }();        // (2: the attributes written, no tile pass: the prepass's cost)
+            const bool bTile = s_bTile && bGPre && bScreen && View.m_TilePass.m_Private;
+            // (ponytail: its family by the place of the texture ids in the block: 3, the imported opaque PBR's; the compiler says it when it emits the variant)
+            const auto TileMat = [&]( const material_slot* pMat ) { return bTile && pMat && pMat->m_bTable && pMat->m_IDsAt == 3u && Opaque(pMat); };
+            // What the prepass keeps for the tile pass: the material's base, or nothing (+ 1 in the id's w: 0, the raster path)
+            const auto TileBase = [&]( const material_slot* pMat ) { return TileMat(pMat) ? pMat->m_ParamBase : 0xFFFFFFFFu; };
             // The ambient occlusion (scene::gi_settings::m_bAO; XLION_AO=0/1 overrides): with the half-resolution pass, the GI on or off
             static const int s_AOEnv = [] { const char* p = std::getenv("XLION_AO"); return p ? std::atoi(p) : -1; }();
             const bool bAO = bScreen && (s_AOEnv >= 0 ? s_AOEnv != 0 : Scene.m_GI.m_bAO);
@@ -3095,7 +3101,7 @@ namespace xlionrender
                         for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
                         {
                             if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;      // its box instead, or outside the view (planClusters)
-                            const auto [pBuf, Rec] = GIOf(c, Slot, pMat->m_ParamBase);
+                            const auto [pBuf, Rec] = GIOf(c, Slot, bTile ? TileBase(pMat) : pMat->m_ParamBase);
                             if( Run == ~0u || pBuf != pRunBuf ) { Run = RunOf(pInstance, pMat, &G, pBuf); pRunBuf = pBuf; }
                             ++m_CullRuns[Run].m_Max;
                             if( Prepass != ~0u ) ++m_CullRuns[Prepass].m_Max;
@@ -3335,6 +3341,36 @@ namespace xlionrender
                 Cmd.DrawIndexedIndirectCount(m_pCull->m_Commands, int(R.m_First + (Pass ? CullSecond : 0u)), m_pCull->m_Counts, int(r) + (Pass ? gpu_cull::max_runs_v : 0), int(R.m_Max));
             };
             // The GPU culled prepass runs (a run a geometry), a pass's
+            // The material tile pass's prototype (XLION_TILE): the opaque texture-table materials shaded full-screen from the prepass, before the scene pass; that pass no longer draws them
+            const auto TilePass = [&]
+            {
+                if( !m_TilePipeline.m_Private )
+                {
+                    material_slot* pFirst = nullptr;
+                    for( auto& M : m_Materials ) if( M.m_bAlive && TileMat(&M) ) { pFirst = &M; break; }
+                    if( !pFirst ) return;
+                    m_bBuildTile = true;
+                    const auto* pErr = buildMaterialPipeline(m_TilePipeline, *pFirst, geom_kind::RIGID, false);
+                    m_bBuildTile = false;
+                    if( pErr ) { m_TilePipeline = {}; return; }
+                }
+                if( !View.m_TileInstance.m_Private )
+                {
+                    auto Textures = std::array<xgpu::texture*, 6>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, &View.m_TileAttr0, &View.m_TileAttr1 };
+                    auto Bindings = LitBindings(Textures, true);
+                    if( m_Device.Create(View.m_TileInstance, { .m_PipeLine = m_TilePipeline, .m_SamplersBindings = Bindings }) ) return;
+                }
+                auto C = Window.StartRenderPass(View.m_TilePass);
+                std::array<xgpu::buffer*, 10> Buffers{ &m_GIDummy, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &View.m_GIScreenBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+                C.setPipelineInstance(View.m_TileInstance, std::span{ Buffers });
+                for( auto& M : m_Materials ) if( M.m_bAlive && TileMat(&M) ) { C.setTextureTable(M.m_Table); break; }      // (bindless: the heaps' set, any table of the family)
+                C.setDynamicUBO(m_LightUBO, 1);
+                C.setDynamicUBO(m_StaticGeomUBO, 0);
+                C.setPushConstants(W2C.Inverse());
+                C.setBuffer(m_FullscreenVB);
+                C.setBuffer(m_FullscreenIB);
+                C.Draw(3);
+            };
             const auto PrepassCulled = [&]( int Pass )
             {
                 for( std::size_t r = 0; r < m_CullRuns.size(); ++r )
@@ -3444,7 +3480,7 @@ namespace xlionrender
                     CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
                     PrepassCulled(1);
                 }
-                if( Mode == 2 ) { CmdPass.reset(); if( bScreen ) GatherGI(); if( bSunMask ) SunMask(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
+                if( Mode == 2 ) { CmdPass.reset(); if( bScreen ) GatherGI(); if( bSunMask ) SunMask(); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
@@ -3530,7 +3566,7 @@ namespace xlionrender
                         {
                             if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
                             const auto& C = G.m_Clusters[c];
-                            Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, pCut ? pMat->m_ParamBase : 0u });       // (no GI: the vertex shader's read skipped)
+                            Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, pCut ? pMat->m_ParamBase : TileBase(pMat) });       // (no GI: the vertex shader's read skipped)
                             Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                         }
                     }
@@ -3600,7 +3636,7 @@ namespace xlionrender
                         Blended.push_back({ pMat->m_State.m_SortPriority, ((B.m_Min + B.m_Max) * 0.5f - Eye).LengthSq(), std::uint32_t(iDraw), &Sub, pMat });
                         continue;
                     }
-                    if( !CulledOnGPU(iDraw, pMesh->m_Geom, Sub) ) DrawSubmesh(iDraw, Sub, pMat);
+                    if( !CulledOnGPU(iDraw, pMesh->m_Geom, Sub) && !TileMat(pMat) ) DrawSubmesh(iDraw, Sub, pMat);
                 }
             }
 
@@ -3608,7 +3644,7 @@ namespace xlionrender
             // material sets its table - bindless: nothing - and its material base; the rest: the records the cull wrote)
             {
                 std::vector<std::uint32_t> Order;
-                for( std::uint32_t r = 0; r < std::uint32_t(m_CullRuns.size()); ++r ) if( m_CullRuns[r].m_pInstance ) Order.push_back(r);
+                for( std::uint32_t r = 0; r < std::uint32_t(m_CullRuns.size()); ++r ) if( m_CullRuns[r].m_pInstance && !TileMat(m_CullRuns[r].m_pMat) ) Order.push_back(r);
                 const auto Key = [&]( std::uint32_t r ) { const auto& R = m_CullRuns[r]; return std::tuple{ R.m_pInstance->m_Private.get(), R.m_pGeom, R.m_pGI }; };
                 std::stable_sort(Order.begin(), Order.end(), [&]( std::uint32_t a, std::uint32_t b ) { return Key(a) < Key(b); });
                 const void* pRunBound = nullptr; const cluster_geom* pRunGeom = nullptr; const xgpu::buffer* pRunGI = nullptr;

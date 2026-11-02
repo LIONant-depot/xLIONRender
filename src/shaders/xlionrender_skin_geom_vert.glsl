@@ -37,6 +37,7 @@ layout(location = 12) flat out uvec2 OutGIRef;
 layout(location = 13) out vec4 OutGITangent;
 layout(location = 14) out vec4 OutPrevClip;         // last frame's clip position (the screen tail's motion; w 0: none)
 layout(location = 8) flat out uint OutInstance;     // the slot, for fragment shaders that read the instance record (geom standard)
+layout(location = 16) flat out uint OutMaterialBase;   // (the tile pass's prepass: skinned surfaces stay on the raster path: 0xFFFFFFFF, its + 1 is 0)
 layout(location = 15) flat out uint OutCluster;     // the cluster drawn (the G-buffer prepass: the submesh instance, xlionrender_gprepass_frag.glsl)
 
 
@@ -49,6 +50,7 @@ void main()
     //
     OutInstance             = push.instanceIndex;
     OutCluster              = push.clusterIndex;
+    OutMaterialBase         = 0xFFFFFFFFu;
     const InstanceData I    = instances.Instances[push.instanceIndex];
     const mat3x4 L2wRows    = mat3x4(I.Rows[0], I.Rows[1], I.Rows[2]);
     Out.wSpacePosition      = vec4(VertData.LocalPos * L2wRows + mesh.WorldOffset.xyz, 1.0);

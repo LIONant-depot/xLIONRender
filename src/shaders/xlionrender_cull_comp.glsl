@@ -108,5 +108,5 @@ void main()
 
     Append(K.Runs.x, K.Runs.y, K, K.Rec0, K.Rec1.xy, Pass);
     atomicAdd(Counts[2u * Push.m_RunsCap], K.Draw.y / 3u);         // (the stats: the triangles shaded)
-    if (K.Runs.z != 0xFFFFFFFFu) Append(K.Runs.z, K.Runs.w, K, uvec4(K.Rec0.xy, 0u, 0xFFFFFFFFu), uvec2(0u, 0u), Pass);     // (the prepass: no GI, no material)
+    if (K.Runs.z != 0xFFFFFFFFu) Append(K.Runs.z, K.Runs.w, K, uvec4(K.Rec0.xy, 0u, 0xFFFFFFFFu), uvec2(K.Rec1.x, 0u), Pass);     // (the prepass: no GI; the material's base for the tile pass's id, XLION_TILE)
 }

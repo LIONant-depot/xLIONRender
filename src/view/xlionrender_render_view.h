@@ -39,6 +39,10 @@ namespace xlionrender
         xgpu::texture           m_ExposureTex;          // 1 x 1: the adapted exposure
         bool                    m_bPostReady = false;   // (the images written once: they can be sampled)
         std::chrono::steady_clock::time_point m_PostLast{};
+        // The material tile pass's prototype (XLION_TILE, material_tiles_plan.md): the prepass's attributes, the pass into m_HDR, the pipeline's instance over this view's G-buffer
+        xgpu::texture           m_TileAttr0, m_TileAttr1;   // R32G32B32A32_SFLOAT: the reference; the polar codec after the measurement
+        xgpu::renderpass        m_TilePass;
+        xgpu::pipeline_instance m_TileInstance;
         // Temporal antialiasing (scene::post_settings::m_bTAA; xlionrender_taa_comp.glsl), made the first time it is on: this frame into one, the other last frame's; tone map from either
         std::array<xgpu::texture, 2> m_TAA;
         std::array<xgpu::pipeline_instance, 2> m_ToneMapTAA;
