@@ -164,12 +164,23 @@ void VoxMain()
     const vec4 Hd = GIRefSample[2u * uint(Push.m_nPixels)];
     if (Hd.w <= 0.0) return;
     g_Seed = RHash(gl_GlobalInvocationID.x * 2654435761u + uint(Push.m_Frame) * 97u);
-    const uint px = uint(Rnd() * float(Push.m_nPixels)) % uint(Push.m_nPixels);
-    const vec4 Ps = GIRefSample[2u * px];
-    if (Ps.w < 0.5) return;
-    const vec3 P = Ps.xyz, N = GIRefSample[2u * px + 1u].xyz;
-    int L; ivec3 Org; vec3 g;
-    if (!VoxCell(P, Hd.xyz, Hd.w, 0, L, Org, g)) return;
+    // Of a few pixels, the one whose cell knows least: the rays go where they are needed - the cells a moving eye just brought in - and not, as the screen's area would have it, to the near floor
+    vec3 P = vec3(0.0), N = vec3(0.0, 1.0, 0.0);
+    int L = 0; ivec3 Org = ivec3(0); vec3 g = vec3(0.0);
+    float Least = 1e30;
+    for (int k = 0; k < 4; ++k)
+    {
+        const uint  px = uint(Rnd() * float(Push.m_nPixels)) % uint(Push.m_nPixels);
+        const vec4  Ps = GIRefSample[2u * px];
+        if (Ps.w < 0.5) continue;
+        const vec3  Nk = GIRefSample[2u * px + 1u].xyz;
+        int Lk; ivec3 Ok; vec3 gk;
+        if (!VoxCell(Ps.xyz, Hd.xyz, Hd.w, 0, Lk, Ok, gk)) continue;
+        const int   Ax = abs(Nk.x) >= abs(Nk.y) && abs(Nk.x) >= abs(Nk.z) ? 0 : abs(Nk.y) >= abs(Nk.z) ? 1 : 2;
+        const float n  = GIRefAccum[VoxEntry(Lk, Ok + ivec3(floor(gk + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)))].w;
+        if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; }
+    }
+    if (Least >= 1e30) return;
     vec3 Ph, Nh; bool bHit;
     const vec3 Sample = VoxRay(P, N, Hd, Ph, Nh, bHit);
     if (!any(isnan(Sample)) && all(lessThan(Sample, vec3(1e6))))
