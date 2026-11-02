@@ -2877,13 +2877,14 @@ namespace xlionrender
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
                         }
                         if( s_Vox[0] > 0.0f ) { m_VoxPixels = std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight; m_VoxKey = LightsKey; }
-                        // Experiment X1c: the voxels' rays (here, not in updateGI: at the frame's start they measured 3.4 ms whatever their number), as many as fit their ms a frame by what they measured, a quarter of that when the lights and the eye are still
-                        if( const auto& Vox = s_Vox; Vox[0] > 0.0f && m_pGITrace && m_VoxPixels > 0 )
+                        // Experiment X1c: the voxels' rays (here, not in updateGI: at the frame's start they measured 3.4 ms whatever their number), as many as fit their ms a frame by what they measured
+                        // (any rays at all cost about 1.6 ms - the first through the BVH each frame, cold: 64 or 32768 the same -, so with nothing changing, none on most frames, not fewer on each)
+            if( const auto& Vox = s_Vox; Vox[0] > 0.0f && m_pGITrace && m_VoxPixels > 0 && !(m_pGITrace->VoxQuiet() && m_Device.getFrameIndex() % 8 != 0) )
                         {
                             if( !m_bVoxTSTried ) { m_bVoxTSTried = true; m_bVoxTS = m_Device.Create(m_VoxTS, { .m_Count = 2 }) == nullptr; }
                             if( std::vector<std::uint64_t> Ns; m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
                             {
-                                const double Ms = double(Ns[1] - Ns[0]) * 1e-6, Budget = double(Vox[1]) * (m_pGITrace->VoxQuiet() ? 0.25 : 1.0);
+                                const double Ms = double(Ns[1] - Ns[0]) * 1e-6, Budget = double(Vox[1]);
                                 m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 1024.0, 262144.0);
                                 static const char* s_pFixed = std::getenv("XLION_VOX_RAYS");      // (measurement: the rays' cost against their number)
                                 if( s_pFixed ) m_VoxRays = std::atof(s_pFixed);
