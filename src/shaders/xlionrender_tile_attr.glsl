@@ -1,3 +1,5 @@
+#ifndef XLIONRENDER_TILE_ATTR_GLSL
+#define XLIONRENDER_TILE_ATTR_GLSL
 // What the G-buffer prepass keeps for the material tile pass (material_tiles_plan.md): 64 bits, Tomas's polar codec: U, V 16-bit fixed point (wrapped: the UV's tile is lost, a repeating sampler doesn't mind);
 // each gradient 8 bits of log length, 8 of direction. The tangent 32 bits: octahedral, snorm 16 + 16, the low bit of x its binormal's sign. xlionrender_tile_standard_frag.glsl and xlionrender_gprepass_tile_frag.glsl
 const float tile_log_min_v = -24.0, tile_log_range_v = 32.0, tile_turn_v = 6.28318530718;
@@ -19,3 +21,4 @@ vec2 TileGradDecode(in const uint w)
 uvec2 TileEncode(in const vec2 uv, in const vec2 dx, in const vec2 dy) { return uvec2(packUnorm2x16(fract(uv)), TileGradEncode(dx) | (TileGradEncode(dy) << 16u)); }
 void TileDecode(in const uvec2 w, out vec2 uv, out vec2 dx, out vec2 dy) { uv = unpackUnorm2x16(w.x); dx = TileGradDecode(w.y & 0xFFFFu); dy = TileGradDecode(w.y >> 16u); }
 uint TileTangentEncode(in const vec2 o, in const float Sign) { return (packSnorm2x16(o) & 0xFFFFFFFEu) | (Sign < 0.0 ? 1u : 0u); }
+#endif

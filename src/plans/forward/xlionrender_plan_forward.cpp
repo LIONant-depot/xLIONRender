@@ -2793,7 +2793,12 @@ namespace xlionrender
                               && (Scene.m_GI.m_bPerPixel || !Scene.m_GI.m_bEnable) && createGIScreenTargets(View) == nullptr;
             static const bool s_bTile = [] { const char* p = std::getenv("XLION_TILE"); return p && p[0] != '2'; }();        // (2: the attributes written, no tile pass: the prepass's cost)
             const bool bTile = s_bTile && bGPre && bScreen && View.m_TilePass.m_Private;
-            const auto TileMat = [&]( const material_slot* pMat ) { return bTile && pMat && pMat->m_TileGraph >= 0 && Opaque(pMat); };
+            const auto TileMat = [&]( const material_slot* pMat )       // (opaque or masked, one or two sided: the prepass has them all)
+            {
+                if( !bTile || !pMat || pMat->m_TileGraph < 0 ) return false;
+                const auto& St = pMat->m_State;
+                return (St.m_Blend == material_state::blend::OFF || St.m_Blend == material_state::blend::MASKED) && St.m_bDepthWrite && St.m_bDepthTest && !St.m_bWireframe;
+            };
             // What the prepass keeps for the tile pass: the material's base, or nothing (+ 1 in the id's w: 0, the raster path)
             const auto TileBase = [&]( const material_slot* pMat ) { return TileMat(pMat) ? pMat->m_ParamBase : 0xFFFFFFFFu; };
             // The ambient occlusion (scene::gi_settings::m_bAO; XLION_AO=0/1 overrides): with the half-resolution pass, the GI on or off

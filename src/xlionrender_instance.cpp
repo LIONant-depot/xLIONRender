@@ -1273,6 +1273,7 @@ namespace xlionrender
             M.m_ParamBase  = std::uint32_t(At + 1);
             M.m_ParamCount = std::uint32_t(n);
             m_ParamPending.emplace_back(At + 1, std::vector<float>(Params.begin(), Params.end()));
+            m_ParamPending.emplace_back(At, std::vector<float>{ std::bit_cast<float>(0xFFFFFFFFu), 0.0f, 0.0f, 0.0f });     // (no tile variant: SetMaterialTile)
         }
 
         const auto [Index, Gen] = AddSlot(m_Materials, std::move(M));

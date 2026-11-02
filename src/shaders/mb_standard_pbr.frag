@@ -75,9 +75,16 @@ layout(location = 1) out vec4 OutGMotion;      // its second target: last frame'
 // Elsewhere nothing is attached there: discarded. The graph's cutout calls XLION_GPRE_OUT() before it returns
 layout(location = 1) out vec2 OutGPreNormal;
 layout(location = 2) out vec4 OutGPreId;
+// ... and what the material tile pass reads (xlionrender_gprepass_tile_frag.glsl's targets 3 to 5; the id's w: the material's base + 1)
+#include "xlionrender_tile_attr.glsl"
+layout(location = 3) out uvec2 OutGPreAttr0;
+layout(location = 4) out uint  OutGPreAttr1;
+layout(location = 5) out vec4  OutGPreColor;
 #define XLION_GPRE_OUT() { const vec3 gpn_ = normalize(In.Normal.xyz); vec2 gpo_ = gpn_.xy / (abs(gpn_.x) + abs(gpn_.y) + abs(gpn_.z)); \
     if (gpn_.z < 0.0) gpo_ = (1.0 - abs(gpo_.yx)) * vec2(gpo_.x >= 0.0 ? 1.0 : -1.0, gpo_.y >= 0.0 ? 1.0 : -1.0); \
-    OutGPreNormal = gpo_; OutGPreId = vec4(float(XMAT_PUSH_INSTANCE + 1u), XLION_FRONT ? float(XMAT_PUSH_CLUSTER) : -float(XMAT_PUSH_CLUSTER) - 1.0, length(In.wSpacePosition.xyz), 0.0); }
+    OutGPreNormal = gpo_; OutGPreId = vec4(float(XMAT_PUSH_INSTANCE + 1u), XLION_FRONT ? float(XMAT_PUSH_CLUSTER) : -float(XMAT_PUSH_CLUSTER) - 1.0, length(In.wSpacePosition.xyz), float(XMAT_BASE + 1u)); \
+    OutGPreAttr0 = TileEncode(In.UV, dFdx(In.UV), dFdy(In.UV)); { const vec3 gpt_ = normalize(In.Tangent.xyz); vec2 gpq_ = gpt_.xy / (abs(gpt_.x) + abs(gpt_.y) + abs(gpt_.z)); \
+    if (gpt_.z < 0.0) gpq_ = (1.0 - abs(gpq_.yx)) * vec2(gpq_.x >= 0.0 ? 1.0 : -1.0, gpq_.y >= 0.0 ? 1.0 : -1.0); OutGPreAttr1 = TileTangentEncode(gpq_, In.Tangent.w); } OutGPreColor = In.VertColor; }
 #else
 #define XLION_GPRE_OUT()
 #endif

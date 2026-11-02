@@ -15,6 +15,7 @@ void TilePixelSetup()
     const vec4 Id = texelFetch(TileId, Px, 0);
     if (Id.w < 0.5) discard;       // (nothing, masked, skinned: the raster path)
     const uint Base = uint(Id.w) - 1u;
+    if (Base == 0u) discard;       // (no block: the raster path)
     if (floatBitsToUint(g_Mat.P[Base - 1u].x) != g_Tile.m_Graph) discard;
     g_TileBase = Base; InInstance = uint(Id.x) - 1u; g_TileFront = Id.y >= 0.0;
     // Its textures' ids, read once and checked: the heap's limits (xgpu_vulkan_texture_table.cpp); ponytail: without it the device was lost, the cause is not known
