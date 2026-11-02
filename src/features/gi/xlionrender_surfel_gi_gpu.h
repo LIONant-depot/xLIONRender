@@ -130,6 +130,8 @@ namespace xlionrender::gi
                 if (++m_nCpuTrace % 200 == 0) { std::printf("GICPU ops %.2f refresh %.2f ranges %.2f ms, staged words %zu, run words %zu, run jobs %zu\n", m_CpuTrace[0] / 200, m_CpuTrace[1] / 200, m_CpuTrace[2] / 200, m_Stage.size() / 2, m_RunStage.size(), m_RunJobs.size()); std::fflush(stdout); m_CpuTrace = {}; }
             }
             bool bSlice = false;
+            static const bool s_bProbesOnly = std::getenv("XLION_GI_PROBES_ONLY") != nullptr;     // (experiment X1b: no surfel work at all, the scene's data and lights kept for the probes' rays)
+            if (s_bProbesOnly) return false;
             if (m_LinkState == 2 && m_LinkSolves > 0) return false;      // experiment D: the links own the light (no more slices: they would overwrite it)
             if (m_NextRange >= m_Ranges.size())
             {
@@ -330,19 +332,32 @@ namespace xlionrender::gi
         // Focus (world boxes, lo / hi): the readers' - the meshes without surfels of their own (Lily) -: their probes (each box's cells and
         // one around: the reads' trilinear) first, nearest the eye first, up to FocusMax a frame; then Background slots of the rest, round
         // robin (what appears later finds a lit grid). The grid's 16k probes at 1024 a frame cost 1.45 ms of the GI's 2 (Bistro)
-        bool UpdateProbes(xgpu::window& Window, const v3& Eye, float Spacing, std::array<int, 3> Dim, std::span<const v3> Focus, int FocusMax, int Background, std::uint64_t Frame) noexcept
+        // nCascades (experiment X1b): more grids, each twice the spacing of the last, one after the other in the buffer (header word 11: the next one's
+        // first word, 0: the last); a frame updates one of them. The focus is the first's. bHitsReadProbes: a ray's hit reads the grids for its indirect light, not the surfels
+        bool UpdateProbes(xgpu::window& Window, const v3& Eye, float Spacing0, std::array<int, 3> Dim, std::span<const v3> Focus, int FocusMax, int Background, std::uint64_t Frame, int nCascades = 1, bool bHitsReadProbes = false) noexcept
         {
-            if (!m_bProbes || m_Data.empty() || m_Scene.m_bEmpty || Spacing <= 0) return false;     // (an empty scene's BVH is a placeholder: its root walked off the buffers)
-            const std::size_t n = std::size_t(Dim[0]) * Dim[1] * Dim[2];
-            if (!FitLocal(m_ProbeB, int(sizeof(std::uint32_t)), probe_header_v + probe_words_v * n)) return false;
-            std::array<std::uint32_t, probe_header_v> H{};
+            if (!m_bProbes || m_Data.empty() || m_Scene.m_bEmpty || Spacing0 <= 0) return false;     // (an empty scene's BVH is a placeholder: its root walked off the buffers)
+            nCascades = std::clamp(nCascades, 1, int(m_ProbeCursors.size()));
+            const std::size_t n = std::size_t(Dim[0]) * Dim[1] * Dim[2], CascadeWords = probe_header_v + probe_words_v * n;
+            if (!FitLocal(m_ProbeB, int(sizeof(std::uint32_t)), CascadeWords * nCascades)) return false;
             const float E[3] = { Eye.m_X, Eye.m_Y, Eye.m_Z };
-            for (int k = 0; k < 3; ++k) { H[std::size_t(k)] = std::uint32_t(int(std::floor(E[k] / Spacing)) - Dim[std::size_t(k)] / 2); H[std::size_t(4 + k)] = std::uint32_t(Dim[std::size_t(k)]); H[std::size_t(8 + k)] = std::bit_cast<std::uint32_t>(E[k]); }
-            H[3] = std::bit_cast<std::uint32_t>(Spacing); H[7] = std::uint32_t(n);
+            const int Cascade = int(Frame % std::uint64_t(nCascades));
+            const float Spacing = Spacing0 * float(1 << Cascade);
+            std::vector<std::uint32_t> Hs(probe_header_v * nCascades, 0u);
+            std::array<xgpu::buffer::copy, 4> C{};
+            for (int c = 0; c < nCascades; ++c)
+            {
+                std::uint32_t* H = Hs.data() + probe_header_v * c;
+                const float S = Spacing0 * float(1 << c);
+                for (int k = 0; k < 3; ++k) { H[k] = std::uint32_t(int(std::floor(E[k] / S)) - Dim[std::size_t(k)] / 2); H[4 + k] = std::uint32_t(Dim[std::size_t(k)]); H[8 + k] = std::bit_cast<std::uint32_t>(E[k]); }
+                H[3] = std::bit_cast<std::uint32_t>(S); H[7] = std::uint32_t(n); H[11] = c + 1 < nCascades ? std::uint32_t(CascadeWords * (c + 1)) : 0u;
+                C[std::size_t(c)] = { int(probe_header_v * c), int(CascadeWords * c), int(probe_header_v) };
+            }
             auto& HB = m_ProbeHdrB2[Frame % 2];          // (two: the frame in flight may still read the other; mapped without a wait)
-            if (!Fit(HB, int(sizeof(std::uint32_t)), probe_header_v) || HB.MemoryMapFrameRegion(0, int(probe_header_v), [&](void* p) { std::memcpy(p, H.data(), sizeof(H)); })) return false;
-            const xgpu::buffer::copy C{ 0, 0, int(probe_header_v) };
-            Window.CopyBuffer(HB, m_ProbeB, std::span{ &C, 1 });
+            if (!Fit(HB, int(sizeof(std::uint32_t)), Hs.size()) || HB.MemoryMapFrameRegion(0, int(Hs.size()), [&](void* p) { std::memcpy(p, Hs.data(), Hs.size() * 4); })) return false;
+            Window.CopyBuffer(HB, m_ProbeB, std::span{ C.data(), std::size_t(nCascades) });
+            const std::uint32_t* H = Hs.data() + probe_header_v * Cascade;
+            if (Cascade != 0) { Focus = {}; FocusMax = 0; }
             // this frame's slots: the focus' cells (a cell's slot: its world cell modulo the grid), nearest first, then the round robin's
             const auto Slot = [&](int x, int y, int z) { const int c[3] = { x, y, z }; std::uint32_t s = 0, m = 1; for (int k = 0; k < 3; ++k) { const int d = Dim[std::size_t(k)]; s += std::uint32_t(((c[k] % d) + d) % d) * m; m *= std::uint32_t(d); } return s; };
             const int G0[3] = { int(H[0]), int(H[1]), int(H[2]) };
@@ -367,11 +382,12 @@ namespace xlionrender::gi
             std::sort(Near.begin(), Near.end());
             std::vector<std::uint32_t> List;
             for (const auto& [d, s] : Near) { if (int(List.size()) >= FocusMax) break; if (List.empty() || std::find(List.begin(), List.end(), s) == List.end()) List.push_back(s); }
-            for (int k = 0; k < Background; ++k) { List.push_back(std::uint32_t(m_ProbeCursor)); m_ProbeCursor = (m_ProbeCursor + 1) % n; }
+            auto& Cursor = m_ProbeCursors[std::size_t(Cascade)];
+            for (int k = 0; k < Background; ++k) { List.push_back(std::uint32_t(Cursor)); Cursor = (Cursor + 1) % n; }
             if (List.empty()) return true;
             auto& LB = m_ProbeListB2[Frame % 2];
             if (!Fit(LB, int(sizeof(std::uint32_t)), List.size()) || LB.MemoryMapFrameRegion(0, int(List.size()), [&](void* p) { std::memcpy(p, List.data(), List.size() * 4); })) return false;
-            const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, int(Frame), int(List.size()), 0, 0 };
+            const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, int(Frame), int(List.size()), int(CascadeWords * Cascade), bHitsReadProbes ? 1 : 0 };
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ProbeB, &LB };
             Window.Dispatch(m_ProbesC, B, &Push, sizeof(Push), int(List.size()));
             m_nProbesUpdated = List.size();
@@ -1346,7 +1362,7 @@ namespace xlionrender::gi
         xgpu::compute                       m_ProbesC;          // the probe grid (UpdateProbes)
         xgpu::buffer                        m_ProbeB, m_ProbeHdrB2[2], m_ProbeReadB, m_ProbeListB2[2];     // (the list: this frame's slots)
         std::size_t                         m_nProbesUpdated = 0;
-        std::size_t                         m_ProbeCursor = 0;
+        std::array<std::size_t, 4>          m_ProbeCursors{};
         bool                                m_bProbes = false;
         xgpu::buffer                        m_GhostB;
         std::size_t                         m_nGhosts = 0;
