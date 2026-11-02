@@ -2885,7 +2885,7 @@ namespace xlionrender
                             if( std::vector<std::uint64_t> Ns; m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
                             {
                                 const double Ms = double(Ns[1] - Ns[0]) * 1e-6, Budget = double(Vox[1]);
-                                m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 1024.0, 262144.0);
+                                m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 16384.0, 262144.0);     // (the floor: the rays' first 1.6 ms is the same for 64 or 32768: under it the budget only starved them, and the light took longer to arrive)
                                 static const char* s_pFixed = std::getenv("XLION_VOX_RAYS");      // (measurement: the rays' cost against their number)
                                 if( s_pFixed ) m_VoxRays = std::atof(s_pFixed);
                                 static const bool s_bVoxLog = std::getenv("XLION_GPU_TIMES") != nullptr;
