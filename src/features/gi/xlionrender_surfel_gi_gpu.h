@@ -387,7 +387,8 @@ namespace xlionrender::gi
             if (List.empty()) return true;
             auto& LB = m_ProbeListB2[Frame % 2];
             if (!Fit(LB, int(sizeof(std::uint32_t)), List.size()) || LB.MemoryMapFrameRegion(0, int(List.size()), [&](void* p) { std::memcpy(p, List.data(), List.size() * 4); })) return false;
-            const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, int(Frame), int(List.size()), int(CascadeWords * Cascade), bHitsReadProbes ? 1 : 0 };
+            static const bool s_bFixedRays = std::getenv("XLION_GI_PROBE_FIXED_RAYS") != nullptr;     // (experiment X1b: each probe's rays the same every frame - the temporal noise off)
+            const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, s_bFixedRays ? 0 : int(Frame), int(List.size()), int(CascadeWords * Cascade), bHitsReadProbes ? 1 : 0 };
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ProbeB, &LB };
             Window.Dispatch(m_ProbesC, B, &Push, sizeof(Push), int(List.size()));
             m_nProbesUpdated = List.size();

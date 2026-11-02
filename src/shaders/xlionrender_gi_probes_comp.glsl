@@ -6,7 +6,7 @@
 // into the last (a probe that moved to another cell starts over). A probe whose rays mostly meet back faces is inside a wall: flagged,
 // the reads skip it (xlionrender_surfel_gi.glsl SurfelGIProbes)
 // The probe buffer (words): a header (16) - its first cell (ivec3), the spacing, the grid's size (ivec3), the probes' count; then per
-// probe 16: the SH (4 coefficients x RGB, floats), its world cell (ivec3), its flags (bit 0: lit, bit 1: inside). Cascades: more such grids after
+// probe 16: the SH (4 coefficients x RGB, floats), its world cell (ivec3), its flags (bit 0: lit, bit 1: inside, bits 8-15: the share of its rays on back faces, blended: the reads' weight - a yes or no flipped with each update's random rays, whole patches jumped). Cascades: more such grids after
 // it (header word 11: the next one's first word, 0: the last); m_Base: this dispatch's
 layout(local_size_x = 64) in;
 
@@ -48,7 +48,7 @@ vec3 ProbesAt(in const vec3 P, in const vec3 N)
         const ivec3 Org = ivec3(int(GP[G0]), int(GP[G0 + 1u]), int(GP[G0 + 2u])), Dim = ivec3(int(GP[G0 + 4u]), int(GP[G0 + 5u]), int(GP[G0 + 6u]));
         const float Sp = uintBitsToFloat(GP[G0 + 3u]);
         const vec3  F = P / Sp, B = floor(F), Fr = F - B;
-        vec3 Sum = vec3(0.0), SumIn = vec3(0.0); float W = 0.0, WIn = 0.0;
+        vec3 Sum = vec3(0.0); float W = 0.0;
         for (int k = 0; k < 8; ++k)
         {
             const ivec3 O = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1), C = ivec3(B) + O;
@@ -59,16 +59,15 @@ vec3 ProbesAt(in const vec3 P, in const vec3 N)
             const vec3  T = mix(vec3(1.0) - Fr, Fr, vec3(O));
             const vec3  Dp = vec3(C) * Sp - P;
             const float Face = dot(Dp, Dp) > 1e-8 ? 0.5 * (dot(normalize(Dp), N) + 1.0) : 1.0;
-            const float w = T.x * T.y * T.z * (Face * Face + 0.05);
+            const float Open = 1.0 - float((GP[b + 15u] >> 8u) & 255u) / 255.0;
+            const float w = T.x * T.y * T.z * (Face * Face + 0.05) * (Open * Open + 1e-3);
             const vec3 c0 = vec3(uintBitsToFloat(GP[b]),      uintBitsToFloat(GP[b + 1u]),  uintBitsToFloat(GP[b + 2u]));
             const vec3 c1 = vec3(uintBitsToFloat(GP[b + 3u]), uintBitsToFloat(GP[b + 4u]),  uintBitsToFloat(GP[b + 5u]));
             const vec3 c2 = vec3(uintBitsToFloat(GP[b + 6u]), uintBitsToFloat(GP[b + 7u]),  uintBitsToFloat(GP[b + 8u]));
             const vec3 c3 = vec3(uintBitsToFloat(GP[b + 9u]), uintBitsToFloat(GP[b + 10u]), uintBitsToFloat(GP[b + 11u]));
-            if ((GP[b + 15u] & 2u) != 0u) { SumIn += ProbeIrradiance(c0, c1, c2, c3, N) * w; WIn += w; }
-            else { Sum += ProbeIrradiance(c0, c1, c2, c3, N) * w; W += w; }
+            Sum += ProbeIrradiance(c0, c1, c2, c3, N) * w; W += w;
         }
-        if (W > 1e-4) return Sum / W;
-        if (WIn > 1e-4) return SumIn / WIn;
+        if (W > 1e-6) return Sum / W;
         G0 = GP[G0 + 11u];
         if (G0 == 0u) break;
     }
@@ -134,5 +133,6 @@ void main()
         GP[B + 3u * uint(k)] = floatBitsToUint(New.x); GP[B + 3u * uint(k) + 1u] = floatBitsToUint(New.y); GP[B + 3u * uint(k) + 2u] = floatBitsToUint(New.z);
     }
     GP[B + 12u] = uint(Cell.x); GP[B + 13u] = uint(Cell.y); GP[B + 14u] = uint(Cell.z);
-    GP[B + 15u] = 1u | (s_Back > 16u ? 2u : 0u);      // (a quarter of its rays on back faces: inside)
+    const float Back = mix(bSame ? float((GP[B + 15u] >> 8u) & 255u) / 255.0 : 0.0, float(s_Back) / 64.0, a);
+    GP[B + 15u] = 1u | (Back > 0.25 ? 2u : 0u) | (uint(Back * 255.0 + 0.5) << 8u);      // (a quarter of its rays on back faces: inside)
 }

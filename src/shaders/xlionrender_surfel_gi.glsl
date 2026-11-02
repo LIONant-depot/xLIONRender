@@ -302,7 +302,7 @@ vec4 SurfelGIProbeGrid(in const uint G0, in const vec3 P, in const vec3 N, out f
     const vec3  F = Pw / Sp, B = floor(F), Fr = F - B;
     const vec3  Inside = min(F - vec3(Org), vec3(Org + Dim - ivec3(1)) - F);       // (cells to the grid's edge: the last 2 fade to the next cascade)
     Fade = GIMesh[G0 + 11u] == 0u ? 1.0 : clamp(min(Inside.x, min(Inside.y, Inside.z)) * 0.5, 0.0, 1.0);
-    vec3 Sum = vec3(0.0), SumIn = vec3(0.0); float W = 0.0, WIn = 0.0;      // (the probes flagged inside: only if there is nothing else - single sided walls flag the probes in front of them too)
+    vec3 Sum = vec3(0.0); float W = 0.0;      // (a probe's weight falls with its share of rays on back faces, never to nothing: single sided walls have probes in front of them see their backs)
     for (int k = 0; k < 8; ++k)
     {
         const ivec3 O = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1), C = ivec3(B) + O;
@@ -314,15 +314,15 @@ vec4 SurfelGIProbeGrid(in const uint G0, in const vec3 P, in const vec3 N, out f
         const vec3  T = mix(vec3(1.0) - Fr, Fr, vec3(O));
         const vec3  Dp = vec3(C) * Sp - Pw;
         const float Face = dot(Dp, Dp) > 1e-8 ? 0.5 * (dot(normalize(Dp), N) + 1.0) : 1.0;
-        const float w = T.x * T.y * T.z * (Face * Face + 0.05);
+        const float Open = 1.0 - float((GIMesh[b + 15u] >> 8u) & 255u) / 255.0;
+        const float w = T.x * T.y * T.z * (Face * Face + 0.05) * (Open * Open + 1e-3);
         const vec3 c0 = vec3(uintBitsToFloat(GIMesh[b]),      uintBitsToFloat(GIMesh[b + 1u]),  uintBitsToFloat(GIMesh[b + 2u]));
         const vec3 c1 = vec3(uintBitsToFloat(GIMesh[b + 3u]), uintBitsToFloat(GIMesh[b + 4u]),  uintBitsToFloat(GIMesh[b + 5u]));
         const vec3 c2 = vec3(uintBitsToFloat(GIMesh[b + 6u]), uintBitsToFloat(GIMesh[b + 7u]),  uintBitsToFloat(GIMesh[b + 8u]));
         const vec3 c3 = vec3(uintBitsToFloat(GIMesh[b + 9u]), uintBitsToFloat(GIMesh[b + 10u]), uintBitsToFloat(GIMesh[b + 11u]));
-        if ((GIMesh[b + 15u] & 2u) != 0u) { SumIn += ProbeIrradiance(c0, c1, c2, c3, N) * w; WIn += w; }
-        else { Sum += ProbeIrradiance(c0, c1, c2, c3, N) * w; W += w; }
+        Sum += ProbeIrradiance(c0, c1, c2, c3, N) * w; W += w;
     }
-    return W > 1e-4 ? vec4(Sum / W, 1.0) : WIn > 1e-4 ? vec4(SumIn / WIn, 1.0) : vec4(0.0);
+    return W > 1e-6 ? vec4(Sum / W, 1.0) : vec4(0.0);
 }
 // The grids from the finest: each fades out over its last cells into the next
 vec4 SurfelGIProbes(in const vec3 P, in const vec3 N)
