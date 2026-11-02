@@ -920,8 +920,11 @@ namespace xlionrender::gi
         }
         // Experiment X1c (XLION_GI_VOX; xlionrender_gi_ref_comp.glsl VoxMain): rays from the screen's points into voxels of light on the surfaces.
         // ponytail: an anchor, cleared when the eye has moved 16 cells of level 0 - for stills; toroidal or a hash when it earns it. 100 MB of mostly empty cells (a hash, too)
-        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int Keep, float Cell, const v3& Eye) noexcept
+        // Keep: the most samples a face keeps. From 64, doubling each second's worth of frames the lights stay as they are (ponytail: a lights' key for the whole scene - one small lamp starts all of it over; per face when lamps move)
+        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, std::uint32_t LightsKey) noexcept
         {
+            if (LightsKey != m_VoxLightsKey) { m_VoxLightsKey = LightsKey; m_VoxStill = 0; }
+            const int Keep = std::min(KeepMax, 64 << std::min(m_VoxStill++ / 60, 14));
             if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
             const std::size_t nEntries = std::size_t(clip_levels_v) * clip_dim_v * clip_dim_v * clip_dim_v * 6;
             if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
@@ -1317,6 +1320,8 @@ namespace xlionrender::gi
         std::array<float, 3>                m_VoxAnchor{};
         bool                                m_bVoxAnchored = false;
         std::size_t                         m_VoxCleared = 0;
+        std::uint32_t                       m_VoxLightsKey = 0;
+        int                                 m_VoxStill = 0;
         bool                                m_bRef = false;
         std::size_t                         m_RefNext = 0;
         std::uint32_t                       m_RefLightsKey = 0;

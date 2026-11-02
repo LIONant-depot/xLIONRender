@@ -25,9 +25,9 @@ vec3 CosineDir(in const vec3 N)
 // around it, a face its normal looks toward, both picked by their read weights. m_Bounces: -1 this, -2 clear; m_Epoch: the samples a face keeps.
 // The header after the pixels (2 entries): the anchor and level 0's cell, the eye
 const int vox_dim_v = 64, vox_levels_v = 4;
-bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, out int L, out ivec3 Org, out vec3 g)
+bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in const int First, out int L, out ivec3 Org, out vec3 g)
 {
-    for (L = 0; L < vox_levels_v; ++L)
+    for (L = First; L < vox_levels_v; ++L)
     {
         const float Cell = Cell0 * float(1 << L);
         Org = ivec3(floor(Anchor / Cell)) - ivec3(vox_dim_v / 2);
@@ -39,25 +39,41 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, out i
 uint VoxEntry(in const int L, in const ivec3 q, in const uint Face) { return (uint(L) * uint(vox_dim_v * vox_dim_v * vox_dim_v) + uint(q.x) + uint(q.y) * uint(vox_dim_v) + uint(q.z) * uint(vox_dim_v * vox_dim_v)) * 6u + Face; }
 vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const float Cell0)
 {
-    int L; ivec3 Org; vec3 g;
-    if (!VoxCell(Pw, Anchor, Cell0, L, Org, g)) return vec3(0.0);
-    const ivec3 i = ivec3(floor(g)); const vec3 f = g - vec3(i);
-    vec3 Sum = vec3(0.0); float SumW = 0.0;
-    for (int a = 0; a < 3; ++a)
+    int L = -1; ivec3 Org; vec3 g;
+    while (VoxCell(Pw, Anchor, Cell0, L + 1, L, Org, g))          // (nothing here: the parents - the samples feed them too)
     {
-        const float wa = n[a] * n[a];
-        if (wa < 0.02) continue;
-        vec3 Num = vec3(0.0); float Den = 0.0;
-        for (int c = 0; c < 8; ++c)
+        const ivec3 i = ivec3(floor(g)); const vec3 f = g - vec3(i);
+        vec3 Sum = vec3(0.0); float SumW = 0.0;
+        for (int a = 0; a < 3; ++a)
         {
-            const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
-            const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-            const vec4  v = GIRefAccum[VoxEntry(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)))];
-            Num += v.rgb * t; Den += v.w * t;
+            const float wa = n[a] * n[a];
+            if (wa < 0.02) continue;
+            vec3 Num = vec3(0.0); float Den = 0.0;
+            for (int c = 0; c < 8; ++c)
+            {
+                const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
+                const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
+                const vec4  v = GIRefAccum[VoxEntry(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)))];
+                Num += v.rgb * t; Den += v.w * t;
+            }
+            if (Den > 1e-3) { Sum += Num / Den * wa; SumW += wa; }
         }
-        if (Den > 1e-3) { Sum += Num / Den * wa; SumW += wa; }
+        if (SumW > 0.5) return Sum / SumW;
     }
-    return SumW > 0.0 ? Sum / SumW : vec3(0.0);
+    return vec3(0.0);
+}
+// A sample into a level: a cell around the point and a face its normal looks toward, by the read's weights: it lands where the reads look for it
+void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
+{
+    const ivec3 i = ivec3(floor(g)); const vec3 f = g - vec3(i);
+    const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
+    const vec3  w = N * N;
+    const float r = Rnd() * (w.x + w.y + w.z);
+    const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
+    const uint  e = VoxEntry(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)));
+    vec4 v = GIRefAccum[e] + vec4(Sample * gi_pi_v, 1.0);
+    if (v.w >= float(Push.m_Epoch)) v *= 0.5 * float(Push.m_Epoch) / v.w;       // (the samples it keeps fell, the lights changed: the old ones weigh that much. ponytail: another lane's write to this face in this frame can be lost: samples, not light)
+    GIRefAccum[e] = v;
 }
 void VoxMain()
 {
@@ -72,7 +88,7 @@ void VoxMain()
     if (Ps.w < 0.5) return;
     const vec3 P = Ps.xyz, N = GIRefSample[2u * px + 1u].xyz;
     int L; ivec3 Org; vec3 g;
-    if (!VoxCell(P, Hd.xyz, Hd.w, L, Org, g)) return;
+    if (!VoxCell(P, Hd.xyz, Hd.w, 0, L, Org, g)) return;
     const vec3 D = CosineDir(N);
     const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
     vec3 Sample = vec3(0.0);
@@ -94,16 +110,9 @@ void VoxMain()
         }
     }
     if (any(isnan(Sample)) || !all(lessThan(Sample, vec3(1e6)))) return;
-    // the cell and the face, by the read's weights: the samples land where the reads look for them
-    const ivec3 i = ivec3(floor(g)); const vec3 f = g - vec3(i);
-    const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
-    const vec3  w = N * N;
-    const float r = Rnd() * (w.x + w.y + w.z);
-    const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
-    const uint  e = VoxEntry(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)));
-    vec4 v = GIRefAccum[e] + vec4(Sample * gi_pi_v, 1.0);
-    if (v.w >= float(Push.m_Epoch)) v *= 0.5;       // (ponytail: another lane's write to this face in this frame can be lost: samples, not light)
-    GIRefAccum[e] = v;
+    VoxStore(L, Org, g, N, Sample);
+    int Lp; ivec3 Op; vec3 gp;
+    if (VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) VoxStore(Lp, Op, gp, N, Sample);
 }
 
 void main()
