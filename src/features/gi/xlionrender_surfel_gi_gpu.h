@@ -919,7 +919,7 @@ namespace xlionrender::gi
             return true;
         }
         // Experiment X1c (XLION_GI_VOX; xlionrender_gi_ref_comp.glsl VoxMain): rays from the screen's points into voxels of light on the surfaces.
-        // ponytail: 200 MB of mostly empty cells: a hash when it earns it
+        // A sparse store: vox_slots_v faces of 3 entries, 50 MB whatever the scene
         // KeepMax: the most samples a face keeps; a face notices a change of its own light and starts over (VoxStore), the rest stay as they are
         bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, std::uint32_t LightsKey) noexcept
         {
@@ -932,7 +932,7 @@ namespace xlionrender::gi
             ++m_VoxEyeStill;
             const int Keep = KeepMax;
             if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
-            const std::size_t nEntries = std::size_t(clip_levels_v) * clip_dim_v * clip_dim_v * clip_dim_v * 6 * 2;
+            const std::size_t nEntries = std::size_t(vox_slots_v) * 3;
             if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0] };
             m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z };
@@ -943,30 +943,8 @@ namespace xlionrender::gi
                 Push.m_Bounces = -2; Push.m_First = int(m_VoxCleared); Push.m_Count = int(n);
                 Window.Dispatch(m_RefC, B, &Push, sizeof(Push), int((n + 63) / 64));
                 m_VoxCleared += n;
-                if (m_VoxCleared >= nEntries) m_bVoxOrg = false;
                 return true;
             }
-            // the slices the eye's move brought in, cleared (a big jump: all of them)
-            const float E[3] = { Eye.m_X, Eye.m_Y, Eye.m_Z };
-            for (int L = 0; L < clip_levels_v; ++L)
-                for (int a = 0; a < 3; ++a)
-                {
-                    const int Org = int(std::floor(E[a] / (Cell * float(1 << L)))) - clip_dim_v / 2;
-                    int& Old = m_VoxOrg[std::size_t(L)][std::size_t(a)];
-                    if (m_bVoxOrg && Org != Old)
-                    {
-                        const int d = Org - Old;
-                        const int n = std::min(std::abs(d), clip_dim_v);
-                        for (int k = 0; k < n; ++k)
-                        {
-                            const int World = d > 0 ? Old + clip_dim_v + k : Old - 1 - k;
-                            const decltype(Push) S{ int(nPixels), (L << 8) | (a << 6) | (World & (clip_dim_v - 1)), 0, 0, 0, 0, -3, 0 };
-                            Window.Dispatch(m_RefC, B, &S, sizeof(S), clip_dim_v * clip_dim_v * 6 / 64);
-                        }
-                    }
-                    Old = Org;
-                }
-            m_bVoxOrg = true;
             static const bool s_bHits = std::getenv("XLION_GI_VOX_HITS") != nullptr;     // (the rays' hits feed the voxels too)
             if (s_bHits) Push.m_Epoch = -Push.m_Epoch;
             Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 63) / 64);
@@ -1350,8 +1328,7 @@ namespace xlionrender::gi
         xgpu::compute                       m_RefC;             // the ground truth: RefStep
         xgpu::buffer                        m_RefSampleB, m_RefAccumB;
         std::array<float, 3>                m_VoxAnchor{};
-        std::array<std::array<int, 3>, 4>   m_VoxOrg{};
-        bool                                m_bVoxOrg = false;
+        static constexpr std::uint32_t      vox_slots_v = 1u << 21;     // (xlionrender_gi_ref_comp.glsl, _gather_frag.glsl)
         std::size_t                         m_VoxCleared = 0;
         std::uint32_t                       m_VoxLightsKey = 0;
         int                                 m_VoxStill = 0, m_VoxEyeStill = 0;

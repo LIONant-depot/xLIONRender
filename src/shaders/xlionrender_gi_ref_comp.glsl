@@ -22,12 +22,13 @@ vec3 CosineDir(in const vec3 N)
 
 // Experiment X1c (XLION_GI_VOX, Tomas's offset voxels lit by rays): light kept only where a surface is. Levels of 64^3 cells, 6 faces a cell, a face
 // the sum of the samples (rgb) and their count, as floats (GIRefAccum). A ray goes from a real point of the screen (never inside a wall) into a cell
-// around it, a face its normal looks toward, both picked by their read weights. m_Bounces: -1 this, -2 clear, -3 clear slices; m_Epoch: the samples a face keeps (negative: the hits feed too).
-// The store wraps around the eye: a cell's place is its world cell modulo the grid, so the light stays where it is as the eye moves; the slices that enter are cleared.
-// A face is two entries: the kept sum (rgb) and count, what the reads see; a short mean (rgb) and the samples' variance around it, which notice a change: when
+// around it, a face its normal looks toward, both picked by their read weights. m_Bounces: -1 this, -2 clear; m_Epoch: the samples a face keeps (negative: the hits feed too).
+// The store is sparse (Tomas): a pool of faces by their world cell, nothing where no surface fed it; the light stays where it is as the eye moves.
+// A face is three entries: its tag and the frame it last took a sample; the kept sum (rgb) and count, what the reads see; a short mean (rgb) and the samples' variance around it, which notice a change: when
 // the short mean leaves the kept one by more than the noise says it can (Wicked's multiscale mean estimator, estimator::Add), the old samples go, in this face only.
 // The header after the pixels (2 entries): the eye and level 0's cell
 const int vox_dim_v = 64, vox_levels_v = 4;
+const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
 const float vox_short_v = 0.02, vox_sigmas_v = 8.0;        // (single noisy rays, a test at every one: slower and stricter than estimator::Add's 0.08 and 3)
 bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in const int First, out int L, out ivec3 Org, out vec3 g)
 {
@@ -40,7 +41,11 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in co
     }
     return false;
 }
-uint VoxEntry(in const int L, in const ivec3 q, in const uint Face) { const ivec3 w = q & ivec3(vox_dim_v - 1); return ((uint(L) * uint(vox_dim_v * vox_dim_v * vox_dim_v) + uint(w.x) + uint(w.y) * uint(vox_dim_v) + uint(w.z) * uint(vox_dim_v * vox_dim_v)) * 6u + Face) * 2u; }
+// Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 6u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
+float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
+vec4 VoxFace(in const int L, in const ivec3 q, in const uint Face) { const uint h = VoxHash(L, q, Face), e = VoxEntryOf(h); return GIRefAccum[e + 2u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0); }
 vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const float Cell0)
 {
     int L = -1; ivec3 Org; vec3 g;
@@ -57,7 +62,7 @@ vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const f
             {
                 const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
                 const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-                const vec4  v = GIRefAccum[VoxEntry(L, Org + i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)))];
+                const vec4  v = VoxFace(L, Org + i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)));
                 Num += v.rgb * t; Den += v.w * t;
             }
             if (Den > 1e-3) { Sum += Num / Den * wa; SumW += wa; }
@@ -74,8 +79,16 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const vec3  w = N * N;
     const float r = Rnd() * (w.x + w.y + w.z);
     const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
-    const uint  e = VoxEntry(L, Org + q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)));
+    const uint  h = VoxHash(L, Org + q, uint(2 * a + (N[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+    const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     vec4 v = GIRefAccum[e], m = GIRefAccum[e + 1u];
+    const vec4 d = GIRefAccum[e + 2u];
+    if (d.x != Tag)
+    {
+        // someone else's: taken if nobody has fed it for 2 seconds or so, or now and then (a pool too small must still follow the eye)
+        if (d.x != 0.0 && abs(Now - d.y) < 120.0 && Rnd() >= 1.0 / 16.0) return;
+        v = vec4(0.0); m = vec4(0.0);
+    }
     const float Ls = dot(Sample, vec3(0.2126, 0.7152, 0.0722));
     if (v.w <= 0.0) m = vec4(Sample, 0.0);
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -90,7 +103,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     }
     v += vec4(Sample, 1.0);
     if (v.w >= float(abs(Push.m_Epoch))) v *= 0.5 * float(abs(Push.m_Epoch)) / v.w;       // (ponytail: another lane's write to this face in this frame can be lost: samples, not light)
-    GIRefAccum[e] = v; GIRefAccum[e + 1u] = m;
+    GIRefAccum[e] = v; GIRefAccum[e + 1u] = m; GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
 }
 // The emitters' light by light sampling at a budget: EmitterIrradianceAt, but over a few of the table picked at random, not all of it per ray (Bistro's table: 3 ms a frame at any
 // number of rays). The pick's weight scaled up by the table over the few. As noisy as it needs; a face averages it
@@ -148,17 +161,6 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
 void VoxMain()
 {
     if (Push.m_Bounces == -2) { if (int(gl_GlobalInvocationID.x) < Push.m_Count) GIRefAccum[uint(Push.m_First) + gl_GlobalInvocationID.x] = vec4(0.0); return; }
-    if (Push.m_Bounces == -3)      // a slice: m_First level x 256 + axis x 64 + its place along the axis (a place in the grid)
-    {
-        const uint id = gl_GlobalInvocationID.x;
-        if (id >= uint(vox_dim_v * vox_dim_v * 6)) return;
-        const int  Ax = (Push.m_First >> 6) & 3;
-        const uint f = id % 6u, u = (id / 6u) % uint(vox_dim_v), v = id / (6u * uint(vox_dim_v));
-        ivec3 q; q[Ax] = Push.m_First & 63; q[(Ax + 1) % 3] = int(u); q[(Ax + 2) % 3] = int(v);
-        const uint e = VoxEntry(Push.m_First >> 8, q, f);
-        GIRefAccum[e] = vec4(0.0); GIRefAccum[e + 1u] = vec4(0.0);
-        return;
-    }
     if (int(gl_GlobalInvocationID.x) >= Push.m_Count) return;
     g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
     const vec4 Hd = GIRefSample[2u * uint(Push.m_nPixels)];
@@ -177,7 +179,7 @@ void VoxMain()
         int Lk; ivec3 Ok; vec3 gk;
         if (!VoxCell(Ps.xyz, Hd.xyz, Hd.w, 0, Lk, Ok, gk)) continue;
         const int   Ax = abs(Nk.x) >= abs(Nk.y) && abs(Nk.x) >= abs(Nk.z) ? 0 : abs(Nk.y) >= abs(Nk.z) ? 1 : 2;
-        const float n  = GIRefAccum[VoxEntry(Lk, Ok + ivec3(floor(gk + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)))].w;
+        const float n  = VoxFace(Lk, Ok + ivec3(floor(gk + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))).w;
         if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; }
     }
     if (Least >= 1e30) return;

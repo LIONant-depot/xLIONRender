@@ -39,6 +39,11 @@ layout(std430, set = 1, binding = 22) buffer GIRefSampleBuffer { vec4 GIRefSampl
 layout(std430, set = 1, binding = 23) readonly buffer GIRefAccumBuffer { vec4 GIRefAccum[]; };
 const int clip_dim_v = 64, clip_levels_v = 4;
 float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]); }
+const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
+// Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 6u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
+float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
 bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
 float g_ClipTrust = 0.0;       // (X1c: how much the last ClipLevel can be believed: its samples, how far from its edge)
 vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 EyeL, in const float Cell0)
@@ -62,11 +67,15 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
         {
             const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), q = i + o;
             const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-            const ivec3 w = g_ClipFloat ? (Org + q) & ivec3(clip_dim_v - 1) : q;      // (X1c's store wraps around the eye)
-            const uint  e = ((uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(w.x) + uint(w.y) * uint(clip_dim_v) + uint(w.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face) * (g_ClipFloat ? 2u : 1u);       // (X1c: a face is two entries, the read the first)
+            if (g_ClipFloat)      // (X1c: the sparse store: a face no surface fed, or lost to another, adds nothing)
+            {
+                const uint h = VoxHash(L, Org + q, Face), e = VoxEntryOf(h);
+                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); Num += v.rgb * t; Den += v.w * t; }
+                continue;
+            }
+            const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(q.x) + uint(q.y) * uint(clip_dim_v) + uint(q.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
             const uvec4 v = GIClip[e];
-            if (g_ClipFloat) { Num += uintBitsToFloat(v.xyz) * t; Den += uintBitsToFloat(v.w) * t; }
-            else             { Num += vec3(v.xyz) * t; Den += float(v.w) * t; }
+            Num += vec3(v.xyz) * t; Den += float(v.w) * t;
         }
         if (Den > (g_ClipFloat ? 1e-3 : 1.0)) { Sum += Num / Den * wa; SumW += wa; Samples += Den * wa; }
     }
