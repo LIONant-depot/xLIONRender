@@ -40,7 +40,7 @@ layout(std430, set = 1, binding = 23) readonly buffer GIRefAccumBuffer { vec4 GI
 const int clip_dim_v = 64, clip_levels_v = 4;
 float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]); }
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
-const float vox_layers_v = 4.0;            // (xlionrender_gi_ref_comp.glsl)
+const float vox_layers_v = 8.0;            // (xlionrender_gi_ref_comp.glsl)
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
 uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 6u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
 uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }

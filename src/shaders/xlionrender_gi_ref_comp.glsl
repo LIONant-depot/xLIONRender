@@ -30,7 +30,7 @@ vec3 CosineDir(in const vec3 N)
 const int vox_dim_v = 64, vox_levels_v = 4;
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
 // A face's cell is finer along the face's own axis: surfaces that look the same way at different depths (a bench's front, a wall behind it) are told apart; a surface only fills the few layers it crosses
-const float vox_layers_v = 4.0;
+const float vox_layers_v = 8.0;
 const float vox_short_v = 0.02, vox_sigmas_v = 8.0;        // (single noisy rays, a test at every one: slower and stricter than estimator::Add's 0.08 and 3)
 bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in const int First, out int L, out ivec3 Org, out vec3 g)
 {
