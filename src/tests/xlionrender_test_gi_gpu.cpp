@@ -11,6 +11,12 @@ namespace
     constexpr std::uint32_t s_CastComp[] = {
         #include "xlionrender_gi_cast_comp.h"
     };
+    constexpr std::uint32_t s_StorageComp[] = {
+        #include "xlionrender_test_storage_comp.h"
+    };
+    constexpr std::uint32_t s_StorageReadComp[] = {
+        #include "xlionrender_test_storage_read_comp.h"
+    };
 
     struct gpu_ray { float m_O[4]; float m_D[4]; };
     struct gpu_hit { float m_TUV[4]; int m_Ids[4]; };
@@ -93,6 +99,39 @@ int main()
     CHECK(!App.m_Device.Create(Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_CastComp, std::size(s_CastComp) } } }), "the cast shader");
     xgpu::compute Cast;
     CHECK(!App.m_Device.Create(Cast, { .m_pShader = &Shader, .m_nBuffers = 6, .m_PushConstantsSize = 16 }), "the cast compute");
+
+    // xGPU's storage images: a compute writes a texture, another samples it after; a second dispatch over the first's (from where the first left it)
+    {
+        xgpu::shader WriteS, ReadS;
+        CHECK(!App.m_Device.Create(WriteS, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_StorageComp, std::size(s_StorageComp) } } }), "the storage shader");
+        CHECK(!App.m_Device.Create(ReadS, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_StorageReadComp, std::size(s_StorageReadComp) } } }), "the storage read shader");
+        xgpu::compute WriteC, ReadC;
+        CHECK(!App.m_Device.Create(WriteC, { .m_pShader = &WriteS, .m_nBuffers = 0, .m_nImages = 1, .m_PushConstantsSize = 4 }), "the storage compute");
+        CHECK(!App.m_Device.Create(ReadC, { .m_pShader = &ReadS, .m_nBuffers = 1, .m_nTextures = 1 }), "the storage read compute");
+        xgpu::texture Tex;
+        CHECK(!App.m_Device.Create(Tex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 16, .m_Height = 16, .m_isGamma = false, .m_bStorage = true }), "the storage texture");
+        xgpu::buffer OutB;
+        CHECK(MakeBuffer(App.m_Device, OutB, std::vector<float>{}, 16 * 16 * 4), "the storage read back");
+        const xgpu::texture* Images[] = { &Tex };
+        xgpu::buffer* OutBs[] = { &OutB };
+        for (const float Value : { 0.25f, 0.75f })
+        {
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            App.m_Window.Dispatch(WriteC, std::span<xgpu::buffer* const>{}, std::span<const xgpu::texture* const>{}, Images, &Value, sizeof(Value), 2, 2);
+            App.m_Window.Dispatch(ReadC, OutBs, Images, nullptr, 0, 2, 2);
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+            for (int k = 0; k < 3; ++k) { while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break; { auto Cmd = App.m_Window.getCmdBuffer(); } App.m_Window.PageFlip(); }      // (done on the GPU)
+            std::vector<float> V(16 * 16 * 4);
+            CHECK(OutB.MemoryMap(0, int(V.size()), [&](void* q) { std::memcpy(V.data(), q, V.size() * sizeof(float)); }) == nullptr, "read the storage image back");
+            for (int y = 0; y < 16; ++y) for (int x = 0; x < 16; ++x)
+            {
+                const float* T = V.data() + 4 * (y * 16 + x);
+                CHECK(std::abs(T[0] - float(x + 1) / 16.0f) < 1e-3f && std::abs(T[1] - float(y + 1) / 16.0f) < 1e-3f && std::abs(T[2] - Value) < 1e-3f && T[3] == 1.0f, "storage image: texel %d,%d reads %.3f %.3f %.3f %.3f (value %.2f)", x, y, T[0], T[1], T[2], T[3], Value);
+            }
+        }
+        std::printf("xGPU storage images: written and sampled back, twice\n");
+    }
 
     // Dense meshes: a 96 x 96 sphere, a rounded cube, a cylinder
     const auto Sphere = MakeSurfels(xprim_geom::uvsphere::Generate(96, 96, 1, 0.5f), 0.3f, 0.9f);
