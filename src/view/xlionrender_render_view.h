@@ -6,6 +6,9 @@
 // RGBA8 output (for ImGui::Image, thumbnails, captures). Cameras are xgpu::tools::view, with its conventions (Y-up NDC,
 // depth 0 near -> 1 far). Named render_view because xlionrender::view is still the old SCENE/GAME enum.
 
+#include <array>
+#include <chrono>
+
 #include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xmath/source/xmath.h"
 
@@ -30,7 +33,12 @@ namespace xlionrender
         xgpu::renderpass        m_ScenePass;
         xgpu::renderpass        m_OutputPass;
         xgpu::renderpass        m_OverlayPass;          // m_Output + m_Depth, loaded (not cleared): instance::Render's Overlay
-        xgpu::pipeline_instance m_ToneMapInstance;      // samples m_HDR
+        xgpu::pipeline_instance m_ToneMapInstance;      // samples m_HDR, m_Bloom[0], m_ExposureTex
+        // scene::post_settings (xlionrender_post_comp.glsl). ponytail: made with the view, on or off: half a view's RGBA16F and its smaller levels; on demand if views multiply
+        std::array<xgpu::texture, 6> m_Bloom;           // half the view's size, and half again
+        xgpu::texture           m_ExposureTex;          // 1 x 1: the adapted exposure
+        bool                    m_bPostReady = false;   // (the images written once: they can be sampled)
+        std::chrono::steady_clock::time_point m_PostLast{};
         xgpu::pipeline_instance m_BlitInstance;         // samples m_Output, for instance::Blit
         // The selection's outline (instance::renderOutline), made the first time something is selected: the mask (R: covered, G: in plain sight) with a
         // depth of its own, its pass, the casters' pipelines with the mask's fragment (they sample m_Depth), and the composite over m_Output (it samples m_Mask)

@@ -152,6 +152,9 @@ namespace xlionrender
         constexpr std::uint32_t s_FullscreenVert[] = {
             #include "xlionrender_fullscreen_vert.h"
         };
+        constexpr std::uint32_t s_PostComp[] = {
+            #include "xlionrender_post_comp.h"
+        };
         constexpr std::uint32_t s_ToneMapFrag[] = {
             #include "xlionrender_tonemap_frag.h"
         };
@@ -693,7 +696,7 @@ namespace xlionrender
             if( auto Err = Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_ToneMapFrag) }); Err ) return Err;
 
             auto Shaders  = std::array<const xgpu::shader*, 2>{ &Frag, &Vert };
-            auto Samplers = std::array{ xgpu::pipeline::sampler{} };
+            auto Samplers = std::array{ xgpu::pipeline::sampler{}, xgpu::pipeline::sampler{}, xgpu::pipeline::sampler{} };
             xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_tonemap), .m_Samplers = Samplers };
             Setup.m_Primitive.m_Cull                 = xgpu::pipeline::primitive::cull::NONE;
             Setup.m_DepthStencil.m_bDepthTestEnable  = false;
@@ -704,7 +707,8 @@ namespace xlionrender
             xgpu::shader Blit;
             if( auto Err = Device.Create(Blit, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_BlitFrag) }); Err ) return Err;
             auto BlitShaders = std::array<const xgpu::shader*, 2>{ &Blit, &Vert };
-            xgpu::pipeline::setup BlitSetup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = BlitShaders, .m_Samplers = Samplers, .m_Blend = xgpu::pipeline::blend::getAlphaOriginal() };
+            auto BlitSamplers = std::array{ xgpu::pipeline::sampler{} };
+            xgpu::pipeline::setup BlitSetup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = BlitShaders, .m_Samplers = BlitSamplers, .m_Blend = xgpu::pipeline::blend::getAlphaOriginal() };
             BlitSetup.m_Primitive.m_Cull                 = xgpu::pipeline::primitive::cull::NONE;
             BlitSetup.m_DepthStencil.m_bDepthTestEnable  = false;
             BlitSetup.m_DepthStencil.m_bDepthWriteEnable = false;
@@ -775,6 +779,8 @@ namespace xlionrender
             // the screen tail's denoiser (shaders/xlionrender_tail_denoise_comp.glsl): its frame a ring slot each (3 mat4 + a vec4)
             if( auto Err = Device.Create(m_TailDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TailDenoiseComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_PostShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_PostComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
             // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;
             // the G-buffer's depth and normal
             if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;
@@ -1573,7 +1579,12 @@ namespace xlionrender
             if( auto Err = m_Device.Create(View.m_OverlayPass, { .m_Attachments = Attachments, .m_bClearOnRender = false }); Err ) return Err;
         }
 
-        auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_HDR } };
+        for( int i = 0; i < int(View.m_Bloom.size()); ++i )
+            if( auto Err = m_Device.Create(View.m_Bloom[i], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = std::max(Setup.m_Width >> (i + 1), 1), .m_Height = std::max(Setup.m_Height >> (i + 1), 1), .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: bloom" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_ExposureTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 1, .m_Height = 1, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: exposure" }); Err ) return Err;
+        View.m_bPostReady = false;
+
+        auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_HDR }, xgpu::pipeline_instance::sampler_binding{ View.m_Bloom[0] }, xgpu::pipeline_instance::sampler_binding{ View.m_ExposureTex } };
         if( auto Err = m_Device.Create(View.m_ToneMapInstance, { .m_PipeLine = m_ToneMapPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
 
         auto BlitBindings = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_Output } };
@@ -1884,6 +1895,8 @@ namespace xlionrender
         destroyGIScreenTargets(View);
         destroyTailTargets(View);
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
+        for( auto& T : View.m_Bloom ) if( T.m_Private ) m_Device.Destroy(std::move(T));
+        if( View.m_ExposureTex.m_Private ) m_Device.Destroy(std::move(View.m_ExposureTex));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));
         if( View.m_ScenePassLoad.m_Private )   m_Device.Destroy(std::move(View.m_ScenePassLoad));

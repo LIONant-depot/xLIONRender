@@ -4192,12 +4192,54 @@ namespace xlionrender
         }
         const auto T2c = clock::now();
 
-        // HDR -> exposure -> LionMapper -> sRGB output (alpha = coverage)
+        // HDR -> bloom, exposure -> LionMapper -> sRGB output (alpha = coverage)
         {
             XPROFILE_SCOPE("Render: tone map"); XPROFILE_GPU_SCOPE(Window, "Render: tone map");
+            static const float s_EnvBloom = [] { const char* p = std::getenv("XLION_BLOOM"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement)
+            static const bool  s_bEnvAuto = std::getenv("XLION_AUTO_EXPOSURE") != nullptr;
+            const float Bloom = s_EnvBloom >= 0.0f ? s_EnvBloom : Scene.m_Post.m_Bloom;
+            const bool  bAuto = s_bEnvAuto || Scene.m_Post.m_bAutoExposure;
+            {
+                struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{};
+                const auto Run = [&](const xgpu::texture& Src, const xgpu::texture& Dst, int W, int H)
+                {
+                    const xgpu::texture* T[] = { &Src }; const xgpu::texture* I[] = { &Dst };
+                    Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
+                };
+                const auto Size = [&](int i) { return std::array<int, 2>{ std::max(View.m_Width >> (i + 1), 1), std::max(View.m_Height >> (i + 1), 1) }; };
+                if( !View.m_bPostReady )
+                {
+                    Push.m_Mode = 3; Push.m_A = 0.0f;
+                    for( int i = 0; i < int(View.m_Bloom.size()); ++i ) { const auto S = Size(i); Push.m_W = S[0]; Push.m_H = S[1]; Run(View.m_HDR, View.m_Bloom[i], S[0], S[1]); }
+                    Push.m_W = Push.m_H = 1; Run(View.m_HDR, View.m_ExposureTex, 1, 1);
+                    View.m_bPostReady = true;
+                }
+                // (the exposure reads the 5th level, the bloom needs them all)
+                const int nLevels = Bloom > 0.0f ? int(View.m_Bloom.size()) : bAuto ? 5 : 0;
+                for( int i = 0; i < nLevels; ++i )
+                {
+                    const auto S = Size(i);
+                    Push = {}; Push.m_W = S[0]; Push.m_H = S[1]; Push.m_Mode = 0; Push.m_A = i == 0 ? 1.0f : 0.0f;
+                    Run(i == 0 ? View.m_HDR : View.m_Bloom[i - 1], View.m_Bloom[i], S[0], S[1]);
+                }
+                if( bAuto )
+                {
+                    const auto Now = clock::now();
+                    const float Dt = View.m_PostLast == clock::time_point{} ? 0.0f : std::min(std::chrono::duration<float>(Now - View.m_PostLast).count(), 0.25f);
+                    View.m_PostLast = Now;
+                    Push = { 1, 1, 2, Dt, Scene.m_Post.m_ExposureRate, Scene.m_Post.m_ExposureKey, Scene.m_Post.m_ExposureMin, Scene.m_Post.m_ExposureMax };
+                    Run(View.m_Bloom[4], View.m_ExposureTex, 1, 1);
+                }
+                if( Bloom > 0.0f ) for( int i = int(View.m_Bloom.size()) - 2; i >= 0; --i )
+                {
+                    const auto S = Size(i);
+                    Push = {}; Push.m_W = S[0]; Push.m_H = S[1]; Push.m_Mode = 1;
+                    Run(View.m_Bloom[i + 1], View.m_Bloom[i], S[0], S[1]);
+                }
+            }
             auto Cmd = Window.StartRenderPass(View.m_OutputPass);
             Cmd.setPipelineInstance(View.m_ToneMapInstance);
-            Cmd.setPushConstants(details::push_tonemap{ { View.m_Exposure, 0, 0, 0 }, View.m_Background });
+            Cmd.setPushConstants(details::push_tonemap{ { View.m_Exposure, Bloom, bAuto ? 1.0f : 0.0f, 0 }, View.m_Background });
             Cmd.setBuffer(m_FullscreenVB);
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);

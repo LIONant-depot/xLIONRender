@@ -261,7 +261,7 @@ namespace xlionrender::details
     // xlionrender_tonemap_frag.glsl
     struct push_tonemap
     {
-        xmath::fvec4    m_Params;               // x = exposure
+        xmath::fvec4    m_Params;               // x = exposure, y = the bloom's share, z = 1: auto exposure
         xmath::fvec4    m_Background;           // render_view::m_Background
     };
 }

@@ -227,6 +227,17 @@ namespace xlionrender
         bool            m_bEmitterLights = false;   // the GI's emitters as lighting's lights (instance::m_bEmitterLights): their direct light shaded by lighting, the GI keeps their bounces
     };
 
+    // The frame's bloom and auto exposure (xlionrender_post_comp.glsl), off by default
+    struct post_settings
+    {
+        float   m_Bloom         = 0.0f;     // the share of the blurred image in the final one (0: off; 0.04 is usual)
+        bool    m_bAutoExposure = false;
+        float   m_ExposureKey   = 0.18f;    // the middle grey the average is brought to
+        float   m_ExposureRate  = 1.5f;     // how fast the eye adapts (1 / seconds)
+        float   m_ExposureMin   = 0.03f;
+        float   m_ExposureMax   = 30.0f;
+    };
+
     struct scene
     {
         std::vector<draw>           m_Draws;
@@ -236,6 +247,7 @@ namespace xlionrender
         sky                         m_Sky;
         std::uint64_t               m_SelectedUser = ~0ull;     // the draw (its m_UserID) the editor has selected: outlined with the editor's outline shader (xlionrender_outline_obb_*)
         gi_settings                 m_GI;
+        post_settings               m_Post;
         std::vector<reflection_probe> m_Probes;           // any number: the nearest 32 (instance::probe_slots_v) are resident
         bool                        m_bDebugReflection = false;  // debug: every lit pixel shows only its environment / probe / reflection specular (R^ of documentation/reflections_strategy.md sec. 5)
         // Reflections (documentation/reflections_strategy.md, milestone B): the main view traces a ray a thin G-buffer texel through the GI's
