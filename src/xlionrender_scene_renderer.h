@@ -211,6 +211,7 @@ namespace xlionrender
             }
             material_id Id;
             if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, xmaterial::RenderState(pMat->m_Render, pMI->m_DoubleSided), { pMI->m_pParams, pMI->m_BlockBytes / 4u }, pMat->m_Flags.m_bTextureTable)) return {};
+            if (pMat->getShaderTile().m_Private) (void)m_Renderer.SetMaterialTile(Id, pMat->getShaderTile());
             if (pMat->getShaderGBuffer().m_Private) (void)m_Renderer.SetMaterialGBuffer(Id, pMat->getShaderGBuffer());     // (the screen tail's thin G-buffer)
             m_Materials[MIInstance] = { Id, std::move(From) };
             return Id;

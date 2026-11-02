@@ -221,6 +221,8 @@ namespace xlionrender
         // A material's G-buffer variant (its fragment compiled with XLION_GBUFFER_OUTPUT): it is drawn into the screen tail's thin G-buffer
         // (without one, a material shades its tail inline - the sampled path)
         [[nodiscard]] xgpu::device::error* SetMaterialGBuffer( material_id Id, const xgpu::shader& FragmentGBuffer ) noexcept;
+        // The material's tile variant (the material compiler's XLION_TILE_PIXEL), for the tile pass under XLION_TILE
+        [[nodiscard]] xgpu::device::error* SetMaterialTile( material_id Id, const xgpu::shader& FragmentTile ) noexcept;
         // The sun's GPU page/caster pairs (P1c): this frame's candidates and runs, whether the GPU drew the pages; a ring late the pairs, those
         // dropped and the triangles
                       const pairs_report&  getPairsReport( void ) const                                         noexcept { return m_PairsReport; }
@@ -392,6 +394,7 @@ namespace xlionrender
             // Per vertex path (geom_kind), the GI capture, the shadow casters per vertex path, the records path: built on first use. Its own
             // textures; the pipeline is shared with every material of the same fragment and state (m_SharedPipelines)
             std::array<xgpu::pipeline_instance, pairs_cut_path_v + 1> m_Instance;
+            int                     m_TileGraph     = -1;           // SetMaterialTile: its graph in m_TileGraphs (-1: the raster path)
             xgpu::shader            m_GBufferFragment;              // SetMaterialGBuffer: its G-buffer variant (none: not in the thin G-buffer)
             std::uint32_t           m_Generation    = 0;
             bool                    m_bAlive        = false;
@@ -450,9 +453,11 @@ namespace xlionrender
         xgpu::compute               m_TailDenoise;
         xgpu::shader                m_AOShader;                     // the ambient occlusion (renderScenePass, before the GI gather: xlionrender_ao_comp.glsl)
         xgpu::compute               m_AOCompute;
-        xgpu::shader                m_TileFrag, m_TileVert;         // the material tile pass's prototype (XLION_TILE)
-        xgpu::pipeline              m_TilePipeline;
-        bool                        m_bBuildTile = false;           // (buildMaterialPipeline: the tile pass's, from a material of its family)
+        // The material tile pass (XLION_TILE; SetMaterialTile): a graph's tile variant and its full-screen pipeline, made from a material of the graph
+        struct tile_graph { xgpu::shader m_Frag; xgpu::pipeline m_Pipeline; };
+        std::vector<tile_graph>     m_TileGraphs;
+        xgpu::shader                m_TileVert;
+        const tile_graph*           m_pBuildTile = nullptr;         // (buildMaterialPipeline: that pipeline)
         xgpu::shader                m_PostShader;                   // bloom and auto exposure (xlionrender_post_comp.glsl)
         xgpu::compute               m_PostCompute;
         xgpu::shader                m_TAAShader;                    // xlionrender_taa_comp.glsl

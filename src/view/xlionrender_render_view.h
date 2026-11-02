@@ -8,6 +8,7 @@
 
 #include <array>
 #include <chrono>
+#include <vector>
 
 #include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xmath/source/xmath.h"
@@ -40,9 +41,9 @@ namespace xlionrender
         bool                    m_bPostReady = false;   // (the images written once: they can be sampled)
         std::chrono::steady_clock::time_point m_PostLast{};
         // The material tile pass's prototype (XLION_TILE, material_tiles_plan.md): the prepass's attributes, the pass into m_HDR, the pipeline's instance over this view's G-buffer
-        xgpu::texture           m_TileAttr0, m_TileAttr1;   // R32G32_UINT, R32_UINT: the polar codec (xlionrender_tile_attr.glsl); XLION_TILE=3: R32G32B32A32_SFLOAT, the reference
+        xgpu::texture           m_TileAttr0, m_TileAttr1;   // R32G32_UINT, R32_UINT: the polar codec (xlionrender_tile_attr.glsl)
         xgpu::renderpass        m_TilePass;
-        xgpu::pipeline_instance m_TileInstance;
+        std::vector<xgpu::pipeline_instance> m_TileInstances;   // a graph each
         // Temporal antialiasing (scene::post_settings::m_bTAA; xlionrender_taa_comp.glsl), made the first time it is on: this frame into one, the other last frame's; tone map from either
         std::array<xgpu::texture, 2> m_TAA;
         std::array<xgpu::pipeline_instance, 2> m_ToneMapTAA;

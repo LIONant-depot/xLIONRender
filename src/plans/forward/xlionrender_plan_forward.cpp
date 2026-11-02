@@ -2793,8 +2793,7 @@ namespace xlionrender
                               && (Scene.m_GI.m_bPerPixel || !Scene.m_GI.m_bEnable) && createGIScreenTargets(View) == nullptr;
             static const bool s_bTile = [] { const char* p = std::getenv("XLION_TILE"); return p && p[0] != '2'; }();        // (2: the attributes written, no tile pass: the prepass's cost)
             const bool bTile = s_bTile && bGPre && bScreen && View.m_TilePass.m_Private;
-            // (ponytail: its family by the place of the texture ids in the block: 3, the imported opaque PBR's; the compiler says it when it emits the variant)
-            const auto TileMat = [&]( const material_slot* pMat ) { return bTile && pMat && pMat->m_bTable && pMat->m_IDsAt == 3u && Opaque(pMat); };
+            const auto TileMat = [&]( const material_slot* pMat ) { return bTile && pMat && pMat->m_TileGraph >= 0 && Opaque(pMat); };
             // What the prepass keeps for the tile pass: the material's base, or nothing (+ 1 in the id's w: 0, the raster path)
             const auto TileBase = [&]( const material_slot* pMat ) { return TileMat(pMat) ? pMat->m_ParamBase : 0xFFFFFFFFu; };
             // The ambient occlusion (scene::gi_settings::m_bAO; XLION_AO=0/1 overrides): with the half-resolution pass, the GI on or off
@@ -3344,32 +3343,40 @@ namespace xlionrender
             // The material tile pass's prototype (XLION_TILE): the opaque texture-table materials shaded full-screen from the prepass, before the scene pass; that pass no longer draws them
             const auto TilePass = [&]
             {
-                if( !m_TilePipeline.m_Private )
+                View.m_TileInstances.resize(m_TileGraphs.size());
+                std::optional<xgpu::cmd_buffer> C;
+                for( std::size_t g = 0; g < m_TileGraphs.size(); ++g )
                 {
                     material_slot* pFirst = nullptr;
-                    for( auto& M : m_Materials ) if( M.m_bAlive && TileMat(&M) ) { pFirst = &M; break; }
-                    if( !pFirst ) return;
-                    m_bBuildTile = true;
-                    const auto* pErr = buildMaterialPipeline(m_TilePipeline, *pFirst, geom_kind::RIGID, false);
-                    m_bBuildTile = false;
-                    if( pErr ) { m_TilePipeline = {}; return; }
+                    for( auto& M : m_Materials ) if( M.m_bAlive && M.m_TileGraph == int(g) && TileMat(&M) ) { pFirst = &M; break; }
+                    if( !pFirst ) continue;
+                    auto& G = m_TileGraphs[g];
+                    if( !G.m_Pipeline.m_Private )
+                    {
+                        m_pBuildTile = &G;
+                        const auto* pErr = buildMaterialPipeline(G.m_Pipeline, *pFirst, geom_kind::RIGID, false);
+                        m_pBuildTile = nullptr;
+                        if( pErr ) { G.m_Pipeline = {}; continue; }
+                    }
+                    auto& Inst = View.m_TileInstances[g];
+                    if( !Inst.m_Private )
+                    {
+                        auto Textures = std::array<xgpu::texture*, 6>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, &View.m_TileAttr0, &View.m_TileAttr1 };
+                        auto Bindings = LitBindings(Textures, true);
+                        if( m_Device.Create(Inst, { .m_PipeLine = G.m_Pipeline, .m_SamplersBindings = Bindings }) ) continue;
+                    }
+                    if( !C ) C.emplace(Window.StartRenderPass(View.m_TilePass));
+                    std::array<xgpu::buffer*, 10> Buffers{ &m_GIDummy, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &View.m_GIScreenBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+                    C->setPipelineInstance(Inst, std::span{ Buffers });
+                    C->setTextureTable(pFirst->m_Table);      // (bindless: the heaps' set)
+                    C->setDynamicUBO(m_LightUBO, 1);
+                    C->setDynamicUBO(m_StaticGeomUBO, 0);
+                    struct { xmath::fmat4 m_C2W; std::uint32_t m_Graph, m_Pad[3]; } Push{ W2C.Inverse(), std::uint32_t(g), {} };
+                    C->setPushConstants(Push);
+                    C->setBuffer(m_FullscreenVB);
+                    C->setBuffer(m_FullscreenIB);
+                    C->Draw(3);
                 }
-                if( !View.m_TileInstance.m_Private )
-                {
-                    auto Textures = std::array<xgpu::texture*, 6>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, &View.m_TileAttr0, &View.m_TileAttr1 };
-                    auto Bindings = LitBindings(Textures, true);
-                    if( m_Device.Create(View.m_TileInstance, { .m_PipeLine = m_TilePipeline, .m_SamplersBindings = Bindings }) ) return;
-                }
-                auto C = Window.StartRenderPass(View.m_TilePass);
-                std::array<xgpu::buffer*, 10> Buffers{ &m_GIDummy, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &View.m_GIScreenBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
-                C.setPipelineInstance(View.m_TileInstance, std::span{ Buffers });
-                for( auto& M : m_Materials ) if( M.m_bAlive && TileMat(&M) ) { C.setTextureTable(M.m_Table); break; }      // (bindless: the heaps' set, any table of the family)
-                C.setDynamicUBO(m_LightUBO, 1);
-                C.setDynamicUBO(m_StaticGeomUBO, 0);
-                C.setPushConstants(W2C.Inverse());
-                C.setBuffer(m_FullscreenVB);
-                C.setBuffer(m_FullscreenIB);
-                C.Draw(3);
             };
             const auto PrepassCulled = [&]( int Pass )
             {

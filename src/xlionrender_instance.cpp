@@ -54,15 +54,6 @@ namespace xlionrender
         constexpr std::uint32_t s_GPreTileFrag[] = {
             #include "xlionrender_gprepass_tile_frag.h"
         };
-        constexpr std::uint32_t s_GPreTileRefFrag[] = {
-            #include "xlionrender_gprepass_tile_ref_frag.h"
-        };
-        constexpr std::uint32_t s_TileRefFrag[] = {
-            #include "xlionrender_tile_standard_ref_frag.h"
-        };
-        constexpr std::uint32_t s_TileFrag[] = {
-            #include "xlionrender_tile_standard_frag.h"
-        };
         constexpr std::uint32_t s_GPrePassFrag[] = {
             #include "xlionrender_gprepass_frag.h"
         };
@@ -645,9 +636,7 @@ namespace xlionrender
                     xgpu::shader GPreFrag;
                     if( std::getenv("XLION_TILE") )      // (the tile pass's prototype: the attributes too; its own shaders)
                     {
-                        const bool bRef = std::getenv("XLION_TILE")[0] == '3';     // (3: as floats, the reference)
-                        if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = bRef ? SPIRV(s_GPreTileRefFrag) : SPIRV(s_GPreTileFrag) }); Err ) return Err;
-                        if( auto Err = Device.Create(m_TileFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = bRef ? SPIRV(s_TileRefFrag) : SPIRV(s_TileFrag) }); Err ) return Err;
+                        if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPreTileFrag) }); Err ) return Err;
                         if( auto Err = Device.Create(m_TileVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
                     }
                     else if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPrePassFrag) }); Err ) return Err;
@@ -1274,16 +1263,16 @@ namespace xlionrender
         Params = Block;
         if( const int n = int(Params.size() / 4); n > 0 )
         {
-            M.m_ParamRange = m_ParamAlloc.allocate(std::uint32_t(n));
+            M.m_ParamRange = m_ParamAlloc.allocate(std::uint32_t(n + 1));     // (the vec4 before the block: its graph, SetMaterialTile)
             const int At = M.m_ParamRange.offset == OffsetAllocator::Allocation::NO_SPACE ? -1 : int(M.m_ParamRange.offset);
             if( At < 0 )
             {
                 releaseInstances(M);
                 return VGPU_ERROR(xgpu::device::error::FAILURE, "No room left in MaterialParams for the material's parameters");
             }
-            M.m_ParamBase  = std::uint32_t(At);
+            M.m_ParamBase  = std::uint32_t(At + 1);
             M.m_ParamCount = std::uint32_t(n);
-            m_ParamPending.emplace_back(At, std::vector<float>(Params.begin(), Params.end()));
+            m_ParamPending.emplace_back(At + 1, std::vector<float>(Params.begin(), Params.end()));
         }
 
         const auto [Index, Gen] = AddSlot(m_Materials, std::move(M));
@@ -1395,7 +1384,7 @@ namespace xlionrender
         // material texture in set 0)
         assert(M.m_bTable || M.m_Textures.size() <= 8);       // slots 8, 9: the environment
         auto Samplers = LitSamplers();
-        if( m_bBuildTile ) Samplers[4] = Samplers[5] = Samplers[11];      // (the attributes: integers, not filtered)
+        if( m_pBuildTile ) Samplers[4] = Samplers[5] = Samplers[11];      // (the attributes: integers, not filtered)
 
         auto Shaders      = std::array<const xgpu::shader*, 2>{ bGBuffer ? &M.m_GBufferFragment : &M.m_Fragment, bSkin ? &m_SkinGeomVert : bPairsCut ? &m_ShadowPairsCutVert : bRecords ? &m_StaticGeomGIRecordsVert : &m_StaticGeomGIVert };
         using ub = xgpu::pipeline::uniform_binds;
@@ -1422,7 +1411,7 @@ namespace xlionrender
         if( bPairsCut ) UniformBinds.push_back(VertexSSBO(13)); // the pairs' pages
         UniformBinds.push_back(FragmentSSBO(14));               // the denoised screen tail (light_mode::SCREEN)
         const auto Binds = std::span{ UniformBinds };
-        xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_bBuildTile ? m_FullscreenVD : bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
+        xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_pBuildTile ? m_FullscreenVD : bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                    , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
                                    , .m_UniformBinds = Binds, .m_Samplers = Samplers, .m_nTextureSlots = TableSlots(M) };
         if( bShadow )       // the casters' state (instance::Init MakeCaster); the fragment cuts out and stops (ubo_lighting m_LightParams.w)
@@ -1434,10 +1423,10 @@ namespace xlionrender
             Setup.m_DepthStencil.m_bDepthClampEnable        = true;
         }
         else ApplyState(Setup, M.m_State);
-        if( m_bBuildTile )       // the tile pass: a full-screen triangle into m_HDR; every other binding as the material's
+        if( m_pBuildTile )       // the tile pass: a full-screen triangle into m_HDR; every other binding as the material's
         {
-            Shaders = { &m_TileFrag, &m_TileVert };
-            Setup.m_PushConstantsSize = sizeof(xmath::fmat4);
+            Shaders = { &m_pBuildTile->m_Frag, &m_TileVert };
+            Setup.m_PushConstantsSize = 80;
             Setup.m_Blend = xgpu::pipeline::blend{};
             Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
             Setup.m_DepthStencil.m_bDepthTestEnable  = false;
@@ -1565,6 +1554,18 @@ namespace xlionrender
         if( pM == nullptr ) return nullptr;
         releaseInstances(*pM);                  // (its pipelines are keyed by their fragments: made again on use)
         pM->m_GBufferFragment = FragmentGBuffer;
+        return nullptr;
+    }
+
+    xgpu::device::error* instance::SetMaterialTile( material_id Id, const xgpu::shader& FragmentTile ) noexcept
+    {
+        auto* pM = findMaterial(Id);
+        if( pM == nullptr || pM->m_ParamBase == 0 || !m_TileVert.m_Private ) return nullptr;
+        auto It = std::ranges::find_if(m_TileGraphs, [&](const tile_graph& G) { return G.m_Frag.m_Private == FragmentTile.m_Private; });
+        if( It == m_TileGraphs.end() ) { m_TileGraphs.push_back({ FragmentTile, {} }); It = std::prev(m_TileGraphs.end()); }
+        pM->m_TileGraph = int(It - m_TileGraphs.begin());
+        const float Graph = std::bit_cast<float>(std::uint32_t(pM->m_TileGraph));
+        m_ParamPending.emplace_back(int(pM->m_ParamBase) - 1, std::vector<float>{ Graph, 0.0f, 0.0f, 0.0f });
         return nullptr;
     }
 
@@ -1744,10 +1745,9 @@ namespace xlionrender
         auto Attachments = std::vector{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId } };
         if( std::getenv("XLION_TILE") )
         {
-            const bool bRef = std::getenv("XLION_TILE")[0] == '3';
             for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1 } )
             {
-                if( auto Err = m_Device.Create(*p, { .m_Format = bRef ? xgpu::texture::format::R32G32B32A32_SFLOAT : p == &View.m_TileAttr0 ? xgpu::texture::format::R32G32_UINT : xgpu::texture::format::R32_UINT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile attributes" }); Err ) return Err;
+                if( auto Err = m_Device.Create(*p, { .m_Format = p == &View.m_TileAttr0 ? xgpu::texture::format::R32G32_UINT : xgpu::texture::format::R32_UINT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile attributes" }); Err ) return Err;
                 Attachments.push_back(xgpu::renderpass::attachment{ *p });
             }
             auto TileAttachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR } };
@@ -1940,7 +1940,8 @@ namespace xlionrender
         destroyOutlineTargets(View);
         destroyGIScreenTargets(View);
         destroyTailTargets(View);
-        if( View.m_TileInstance.m_Private ) m_Device.Destroy(std::move(View.m_TileInstance));
+        for( auto& I : View.m_TileInstances ) if( I.m_Private ) m_Device.Destroy(std::move(I));
+        View.m_TileInstances.clear();
         if( View.m_TilePass.m_Private ) m_Device.Destroy(std::move(View.m_TilePass));
         for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1 } ) if( p->m_Private ) m_Device.Destroy(std::move(*p));
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
