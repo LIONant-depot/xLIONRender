@@ -39,7 +39,8 @@ layout(std430, set = 1, binding = 22) buffer GIRefSampleBuffer { vec4 GIRefSampl
 layout(std430, set = 1, binding = 23) readonly buffer GIRefAccumBuffer { vec4 GIRefAccum[]; };
 const int clip_dim_v = 64, clip_levels_v = 4;
 float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]); }
-bool g_ClipFloat = false;      // (experiment X1c: the faces hold floats)
+bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
+float g_ClipTrust = 0.0;       // (X1c: how much the last ClipLevel can be believed: its samples, how far from its edge)
 vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 EyeL, in const float Cell0)
 {
     const float Cell = Cell0 * float(1 << L);
@@ -49,7 +50,7 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
     const ivec3 i = ivec3(floor(g));
     const vec3  f = g - vec3(i);
     vec3  Sum = vec3(0.0);
-    float SumW = 0.0;
+    float SumW = 0.0, Samples = 0.0;
     for (int a = 0; a < 3; ++a)
     {
         const float wa = n[a] * n[a];
@@ -61,14 +62,34 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
         {
             const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), q = i + o;
             const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-            const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(q.x) + uint(q.y) * uint(clip_dim_v) + uint(q.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
+            const ivec3 w = g_ClipFloat ? (Org + q) & ivec3(clip_dim_v - 1) : q;      // (X1c's store wraps around the eye)
+            const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(w.x) + uint(w.y) * uint(clip_dim_v) + uint(w.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
             const uvec4 v = GIClip[e];
             if (g_ClipFloat) { Num += uintBitsToFloat(v.xyz) * t; Den += uintBitsToFloat(v.w) * t; }
             else             { Num += vec3(v.xyz) * t; Den += float(v.w) * t; }
         }
-        if (Den > (g_ClipFloat ? 1e-3 : 1.0)) { Sum += Num / Den * wa; SumW += wa; }
+        if (Den > (g_ClipFloat ? 1e-3 : 1.0)) { Sum += Num / Den * wa; SumW += wa; Samples += Den * wa; }
+    }
+    if (g_ClipFloat && SumW > 0.0)
+    {
+        const vec3 Inside = min(g, vec3(clip_dim_v - 1) - g);
+        g_ClipTrust = clamp(Samples / SumW / 32.0, 0.0, 1.0) * clamp(min(Inside.x, min(Inside.y, Inside.z)) / 4.0, 0.0, 1.0);
     }
     return SumW > 0.0 ? vec4(Sum / SumW, SumW) : vec4(0.0);
+}
+// X1c's read: from the finest level, each as much as it can be believed, the rest from its parent: new cells and a level's edge fade in
+vec4 VoxReadLevels(in const vec3 Pcam, in const vec3 n)
+{
+    const vec3 EyeL = vec3(TF(22u), TF(23u), TF(24u)), Pw = Pcam + vec3(TF(25u), TF(26u), TF(27u));
+    vec3 Sum = vec3(0.0), Last = vec3(0.0); float Left = 1.0; bool bAny = false;
+    for (int L = 0; L < clip_levels_v && Left > 1e-3; ++L)
+    {
+        const vec4 R = ClipLevel(L, Pw, n, EyeL, TF(21u));
+        if (R.w <= 0.0) continue;
+        Sum += R.xyz * (Left * g_ClipTrust); Left *= 1.0 - g_ClipTrust;
+        Last = R.xyz; bAny = true;
+    }
+    return bAny ? vec4(Sum + Last * Left, 1.0) : vec4(0.0);      // (what no level vouches for: the coarsest that has anything)
 }
 vec4 ClipRead(in const vec3 Pcam, in const vec3 n)
 {
@@ -195,7 +216,7 @@ void main()
             GIRefSample[2u * Ri + 1u] = vec4(N, 0.0);
             GIRefSample[2u * W * H] = vec4(TF(22u), TF(23u), TF(24u), TF(21u));
             g_ClipFloat = true;
-            E = ClipRead(S.P, N);
+            E = VoxReadLevels(S.P, N);
             bWeak = E.w < 0.5;
             E.w = 1.0;
         }

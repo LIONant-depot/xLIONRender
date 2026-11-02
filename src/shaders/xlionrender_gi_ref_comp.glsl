@@ -22,8 +22,9 @@ vec3 CosineDir(in const vec3 N)
 
 // Experiment X1c (XLION_GI_VOX, Tomas's offset voxels lit by rays): light kept only where a surface is. Levels of 64^3 cells, 6 faces a cell, a face
 // the sum of the samples (rgb) and their count, as floats (GIRefAccum). A ray goes from a real point of the screen (never inside a wall) into a cell
-// around it, a face its normal looks toward, both picked by their read weights. m_Bounces: -1 this, -2 clear; m_Epoch: the samples a face keeps.
-// The header after the pixels (2 entries): the anchor and level 0's cell, the eye
+// around it, a face its normal looks toward, both picked by their read weights. m_Bounces: -1 this, -2 clear, -3 clear slices; m_Epoch: the samples a face keeps (negative: the hits feed too).
+// The store wraps around the eye: a cell's place is its world cell modulo the grid, so the light stays where it is as the eye moves; the slices that enter are cleared.
+// The header after the pixels (2 entries): the eye and level 0's cell
 const int vox_dim_v = 64, vox_levels_v = 4;
 bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in const int First, out int L, out ivec3 Org, out vec3 g)
 {
@@ -36,7 +37,7 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in co
     }
     return false;
 }
-uint VoxEntry(in const int L, in const ivec3 q, in const uint Face) { return (uint(L) * uint(vox_dim_v * vox_dim_v * vox_dim_v) + uint(q.x) + uint(q.y) * uint(vox_dim_v) + uint(q.z) * uint(vox_dim_v * vox_dim_v)) * 6u + Face; }
+uint VoxEntry(in const int L, in const ivec3 q, in const uint Face) { const ivec3 w = q & ivec3(vox_dim_v - 1); return (uint(L) * uint(vox_dim_v * vox_dim_v * vox_dim_v) + uint(w.x) + uint(w.y) * uint(vox_dim_v) + uint(w.z) * uint(vox_dim_v * vox_dim_v)) * 6u + Face; }
 vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const float Cell0)
 {
     int L = -1; ivec3 Org; vec3 g;
@@ -53,7 +54,7 @@ vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const f
             {
                 const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
                 const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-                const vec4  v = GIRefAccum[VoxEntry(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)))];
+                const vec4  v = GIRefAccum[VoxEntry(L, Org + i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)))];
                 Num += v.rgb * t; Den += v.w * t;
             }
             if (Den > 1e-3) { Sum += Num / Den * wa; SumW += wa; }
@@ -70,14 +71,44 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const vec3  w = N * N;
     const float r = Rnd() * (w.x + w.y + w.z);
     const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
-    const uint  e = VoxEntry(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)));
-    vec4 v = GIRefAccum[e] + vec4(Sample * gi_pi_v, 1.0);
-    if (v.w >= float(Push.m_Epoch)) v *= 0.5 * float(Push.m_Epoch) / v.w;       // (the samples it keeps fell, the lights changed: the old ones weigh that much. ponytail: another lane's write to this face in this frame can be lost: samples, not light)
+    const uint  e = VoxEntry(L, Org + q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)));
+    vec4 v = GIRefAccum[e] + vec4(Sample, 1.0);
+    if (v.w >= float(abs(Push.m_Epoch))) v *= 0.5 * float(abs(Push.m_Epoch)) / v.w;       // (the samples it keeps fell, the lights changed: the old ones weigh that much. ponytail: another lane's write to this face in this frame can be lost: samples, not light)
     GIRefAccum[e] = v;
+}
+// A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
+vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out vec3 Nh, out bool bHit)
+{
+    bHit = false; Ph = vec3(0.0); Nh = vec3(0.0, 1.0, 0.0);
+    const vec3 D = CosineDir(N);
+    const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
+    if (H.m_Inst < 0) return SkyAt(D) * gi_pi_v;
+    const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
+    const uvec3 HT = MTri(HM, H.m_Tri);
+    const float B0 = 1.0 - H.m_U - H.m_V;
+    Nh = NormalToWorld(HR, MNrm(HM, HT.x) * B0 + MNrm(HM, HT.y) * H.m_U + MNrm(HM, HT.z) * H.m_V);
+    if (dot(Nh, D) > 0.0) return vec3(0.0);
+    vec3 Albedo, Emission;
+    SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
+    Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
+    bHit = true;
+    vec3 In = Direct(Ph, Nh) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
+    if (EmitterDirectExternal()) { In += EmitterIrradianceAt(Ph, Nh, g_Seed); Emission = vec3(0.0); }
+    return (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }
 void VoxMain()
 {
     if (Push.m_Bounces == -2) { if (int(gl_GlobalInvocationID.x) < Push.m_Count) GIRefAccum[uint(Push.m_First) + gl_GlobalInvocationID.x] = vec4(0.0); return; }
+    if (Push.m_Bounces == -3)      // a slice: m_First level x 256 + axis x 64 + its place along the axis (a place in the grid)
+    {
+        const uint id = gl_GlobalInvocationID.x;
+        if (id >= uint(vox_dim_v * vox_dim_v * 6)) return;
+        const int  Ax = (Push.m_First >> 6) & 3;
+        const uint f = id % 6u, u = (id / 6u) % uint(vox_dim_v), v = id / (6u * uint(vox_dim_v));
+        ivec3 q; q[Ax] = Push.m_First & 63; q[(Ax + 1) % 3] = int(u); q[(Ax + 2) % 3] = int(v);
+        GIRefAccum[VoxEntry(Push.m_First >> 8, q, f)] = vec4(0.0);
+        return;
+    }
     if (int(gl_GlobalInvocationID.x) >= Push.m_Count) return;
     g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
     const vec4 Hd = GIRefSample[2u * uint(Push.m_nPixels)];
@@ -89,30 +120,21 @@ void VoxMain()
     const vec3 P = Ps.xyz, N = GIRefSample[2u * px + 1u].xyz;
     int L; ivec3 Org; vec3 g;
     if (!VoxCell(P, Hd.xyz, Hd.w, 0, L, Org, g)) return;
-    const vec3 D = CosineDir(N);
-    const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
-    vec3 Sample = vec3(0.0);
-    if (H.m_Inst < 0) Sample = SkyAt(D);
-    else
+    vec3 Ph, Nh; bool bHit;
+    const vec3 Sample = VoxRay(P, N, Hd, Ph, Nh, bHit);
+    if (!any(isnan(Sample)) && all(lessThan(Sample, vec3(1e6))))
     {
-        const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
-        const uvec3 HT = MTri(HM, H.m_Tri);
-        const float B0 = 1.0 - H.m_U - H.m_V;
-        const vec3 Nh = NormalToWorld(HR, MNrm(HM, HT.x) * B0 + MNrm(HM, HT.y) * H.m_U + MNrm(HM, HT.z) * H.m_V);
-        if (dot(Nh, D) <= 0.0)
-        {
-            vec3 Albedo, Emission;
-            SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
-            const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
-            vec3 In = Direct(Ph, Nh) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
-            if (EmitterDirectExternal()) { In += EmitterIrradianceAt(Ph, Nh, g_Seed); Emission = vec3(0.0); }
-            Sample = Albedo * In * (1.0 / gi_pi_v) + Emission;
-        }
+        VoxStore(L, Org, g, N, Sample);
+        int Lp; ivec3 Op; vec3 gp;
+        if (VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) VoxStore(Lp, Op, gp, N, Sample);
     }
-    if (any(isnan(Sample)) || !all(lessThan(Sample, vec3(1e6)))) return;
-    VoxStore(L, Org, g, N, Sample);
-    int Lp; ivec3 Op; vec3 gp;
-    if (VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) VoxStore(Lp, Op, gp, N, Sample);
+    // the surface it hit too, seen yet or not: one more ray from there is a sample of that surface's own indirect light. Off screen surfaces are lit before the eye turns to them
+    if (Push.m_Epoch < 0 && bHit && VoxCell(Ph, Hd.xyz, Hd.w, 0, L, Org, g))
+    {
+        vec3 Ph2, Nh2; bool bHit2;
+        const vec3 S2 = VoxRay(Ph, Nh, Hd, Ph2, Nh2, bHit2);
+        if (!any(isnan(S2)) && all(lessThan(S2, vec3(1e6)))) VoxStore(L, Org, g, Nh, S2);
+    }
 }
 
 void main()
