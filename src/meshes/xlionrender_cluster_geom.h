@@ -50,7 +50,24 @@ namespace xlionrender
         // Per LOD k (0 the finest): every mesh's submeshes at k (a mesh with fewer repeats its coarsest) - the same count and order at each
         // k (submesh s is the same material slot): a pass may draw a coarser LOD (the shadow pages by their texel size)
         std::vector<std::vector<submesh>> m_LODSubmeshes;
-        const std::vector<submesh>& LODSubmeshes( int k ) const noexcept { return m_LODSubmeshes.empty() ? m_Submeshes : m_LODSubmeshes[std::size_t(std::clamp(k, 0, int(m_LODSubmeshes.size()) - 1))]; }
+        const std::vector<submesh>& LODSubmeshes( int k ) const noexcept { return m_LODSubmeshes.empty() ? m_Submeshes : m_LODSubmeshes[std::size_t(std::clamp(std::max(k, m_FinestLOD), 0, int(m_LODSubmeshes.size()) - 1))]; }
+        // The geometry's residency (xgeom_static_residency): its buffers may hold only the coarser LODs (the compiler puts LOD 0 last). Per LOD
+        // the end of its clusters' indices; Refresh compares the index buffer's size, sets the finest LOD resident (nothing finer is drawn:
+        // LODSubmeshes clamps) and the drawn list. True: it changed
+        std::vector<std::uint32_t>        m_LODIndexEnd;
+        int                               m_FinestLOD   = 0;
+        int                               m_DrawnLOD    = 0;        // (MakeClusterGeom's iLOD)
+        bool Refresh( void ) noexcept
+        {
+            if( m_pStreams == nullptr || m_pStreams[0].m_Private == nullptr || m_LODIndexEnd.size() < 2 ) return false;
+            const std::uint32_t n = std::uint32_t(m_pStreams[0].getEntryCount());
+            int k = 0;
+            while( std::size_t(k + 1) < m_LODIndexEnd.size() && m_LODIndexEnd[std::size_t(k)] > n ) ++k;
+            if( k == m_FinestLOD ) return false;
+            m_FinestLOD = k;
+            m_Submeshes = m_LODSubmeshes[std::size_t(std::clamp(std::max(k, m_DrawnLOD), 0, int(m_LODSubmeshes.size()) - 1))];
+            return true;
+        }
         // The main view's LOD pick (instance: by projected error): per LOD k each submesh's error, object space (its mesh's LOD error: the
         // geometry's lod::m_Error, 0 without one), and per submesh s the box of its LOD 0 clusters (a LOD group: xgeom_static's compiler)
         std::vector<std::vector<float>>   m_LODErrors;
@@ -101,7 +118,15 @@ namespace xlionrender
             }
             G.m_SubBoxes.push_back(B);
         }
-        G.m_Submeshes = G.m_LODSubmeshes[std::size_t(std::clamp(iLOD, 0, nLODs - 1))];
+        for( const auto& Subs : G.m_LODSubmeshes )
+        {
+            std::uint32_t End = 0;
+            for( const auto& Sub : Subs ) for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters && c < G.m_Clusters.size(); ++c ) End = std::max(End, G.m_Clusters[c].m_iIndex + G.m_Clusters[c].m_nIndices);
+            G.m_LODIndexEnd.push_back(End);
+        }
+        G.m_DrawnLOD  = std::clamp(iLOD, 0, nLODs - 1);
+        G.m_Submeshes = G.m_LODSubmeshes[std::size_t(G.m_DrawnLOD)];
+        (void)G.Refresh();                                      // (a geometry loaded with its residency reduced: XGEOM_STATIC_FINEST_LOD)
         return G;
     }
 

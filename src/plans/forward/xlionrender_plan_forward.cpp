@@ -4029,6 +4029,8 @@ namespace xlionrender
         const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
         const auto T0 = clock::now();
         m_nSceneBinds = 0;
+        // the geometries' residency (cluster_geom::Refresh): a geometry whose buffers dropped or regained LOD 0 draws what they hold
+        for( auto& M : m_Meshes ) if( M.m_bAlive && M.m_bCluster ) (void)M.m_Geom.Refresh();
         // Measurement only (XLION_GPU_TIMES): the whole Render on the GPU (its start, after the GI and the captures, after the tone map, its end)
         static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
         static std::unordered_map<const void*, xgpu::timestamps> s_TS;      // ponytail: per renderer, never erased (a measurement hook)
