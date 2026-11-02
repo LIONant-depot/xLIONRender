@@ -80,21 +80,23 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
 vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out vec3 Nh, out bool bHit)
 {
     bHit = false; Ph = vec3(0.0); Nh = vec3(0.0, 1.0, 0.0);
+    // the emitters by light sampling (G5, as the surfels' pass: the table, a shadow ray), this point's own unless lighting shades it; an emission a ray hits is not counted again
+    const vec3 Own = GD[15] > 0u && !EmitterDirectExternal() ? EmitterIrradianceAt(P, N, g_Seed) : vec3(0.0);
     const vec3 D = CosineDir(N);
     const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
-    if (H.m_Inst < 0) return SkyAt(D) * gi_pi_v;
+    if (H.m_Inst < 0) return Own + SkyAt(D) * gi_pi_v;
     const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
     const uvec3 HT = MTri(HM, H.m_Tri);
     const float B0 = 1.0 - H.m_U - H.m_V;
     Nh = NormalToWorld(HR, MNrm(HM, HT.x) * B0 + MNrm(HM, HT.y) * H.m_U + MNrm(HM, HT.z) * H.m_V);
-    if (dot(Nh, D) > 0.0) return vec3(0.0);
+    if (dot(Nh, D) > 0.0) return Own;
     vec3 Albedo, Emission;
     SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
     Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
     bHit = true;
     vec3 In = Direct(Ph, Nh) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
-    if (EmitterDirectExternal()) { In += EmitterIrradianceAt(Ph, Nh, g_Seed); Emission = vec3(0.0); }
-    return (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
+    if (GD[15] > 0u) { In += EmitterIrradianceAt(Ph, Nh, g_Seed + 1u); Emission = vec3(0.0); }
+    return Own + (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }
 void VoxMain()
 {
@@ -148,6 +150,7 @@ void main()
     const vec3 N0 = GIRefSample[2u * i + 1u].xyz;
     g_Seed = RHash(i * 2654435761u + uint(Push.m_Frame) * 97u);
     vec3 P = Ps.xyz, N = N0, Th = vec3(1.0), Sum = vec3(0.0);
+    if (GD[15] > 0u && !EmitterDirectExternal()) Sum += EmitterIrradianceAt(P, N, g_Seed) * (1.0 / gi_pi_v);      // (the point's own: lighting doesn't shade them, the GI shows them)
     for (int b = 0; b <= Push.m_Bounces; ++b)
     {
         const vec3 D = CosineDir(N);
@@ -162,7 +165,7 @@ void main()
         SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
         const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
         vec3 In = Direct(Ph, Nh);
-        if (EmitterDirectExternal()) { In += EmitterIrradianceAt(Ph, Nh, g_Seed); Emission = vec3(0.0); }
+        if (GD[15] > 0u) { In += EmitterIrradianceAt(Ph, Nh, g_Seed); Emission = vec3(0.0); g_Seed = RHash(g_Seed); }        // (G5: the emitters by light sampling; not counted again when a ray hits one)
         Sum += Th * (Albedo * In * (1.0 / gi_pi_v) + Emission);
         Th *= Albedo;
         P = Ph; N = Nh;
