@@ -3346,6 +3346,30 @@ namespace xlionrender
             };
             // The GPU culled prepass runs (a run a geometry), a pass's
             // The material tile pass's prototype (XLION_TILE): the opaque texture-table materials shaded full-screen from the prepass, before the scene pass; that pass no longer draws them
+            // The sun's contact shadow (XLION_CONTACT="length steps thickness fade div", world units; xlionrender_contact_comp.glsl): before the shading reads it
+            static const std::array<float, 5> s_Contact = [] { std::array<float, 5> A{ 0.0f, 8.0f, 0.15f, 30.0f, 1.0f }; if( const char* p = std::getenv("XLION_CONTACT") ) (void)std::sscanf(p, "%f %f %f %f %f", &A[0], &A[1], &A[2], &A[3], &A[4]); return A; }();
+            const bool bContact = s_Contact[0] > 0.0f && bGPre && bScreen && pLight && m_ContactTex.m_Private && View.m_Width <= sun_mask_w_v && View.m_Height <= sun_mask_h_v && Scene.m_Sun.m_bCastShadows;
+            const auto ContactPass = [&]
+            {
+                static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static double s_Sum = 0.0; static int s_n = 0;
+                if( std::vector<std::uint64_t> Ns; s_bTimes && m_ContactTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
+                {
+                    s_Sum += double(Ns[1] - Ns[0]) * 1e-6;
+                    if( ++s_n == 120 ) { std::printf("CONTACTMS %.3f ms\n", s_Sum / 120.0); std::fflush(stdout); s_Sum = 0.0; s_n = 0; }
+                }
+                const std::uint32_t Div = std::uint32_t(s_Contact[4]);
+                struct { xmath::fmat4 m_W2C; xmath::fvec4 m_ToSun, m_Params; std::uint32_t m_Size[4]; } Push{ W2C, xmath::fvec4(-Scene.m_Sun.m_Direction.NormalizeCopy(), -1.0f), { s_Contact[0], s_Contact[1], s_Contact[2], s_Contact[3] }, { std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), Div, m_GatherTableBase } };
+                auto Buffers  = std::array<xgpu::buffer*, 1>{ &View.m_GIGatherTable };
+                auto Textures = std::array<const xgpu::texture*, 1>{ &View.m_Depth };
+                auto Images   = std::array<const xgpu::texture*, 1>{ &m_ContactTex };
+                const int GX = (View.m_Width / int(Div) + 7) / 8, GY = (View.m_Height / int(Div) + 7) / 8;
+                if( s_bTimes ) Window.WriteTimestamp(m_ContactTimes, 0);
+                Window.Dispatch(m_ContactCompute, Buffers, Textures, Images, &Push, sizeof(Push), GX, GY);
+                if( s_bTimes ) Window.WriteTimestamp(m_ContactTimes, 1);
+                pLight->m_ShadowLevels[0].m_Z = s_Contact[4];
+                m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;      // (the scene's block, with its flag)
+            };
             const auto TilePass = [&]
             {
                 View.m_TileInstances.resize(m_TileGraphs.size());
@@ -3492,7 +3516,7 @@ namespace xlionrender
                     CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
                     PrepassCulled(1);
                 }
-                if( Mode == 2 ) { CmdPass.reset(); if( bScreen ) GatherGI(); if( bSunMask ) SunMask(); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
+                if( Mode == 2 ) { CmdPass.reset(); if( bScreen ) GatherGI(); if( bSunMask ) SunMask(); if( bContact ) ContactPass(); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
@@ -4168,6 +4192,15 @@ namespace xlionrender
         const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
         const auto T0 = clock::now();
         m_nSceneBinds = 0;
+        if( m_ContactTex.m_Private && !m_bContactReady )       // (written once, white, before anything samples it: every view's shaders bind it)
+        {
+            m_bContactReady = true;
+            struct { xmath::fmat4 m_W2C; xmath::fvec4 m_ToSun, m_Params; std::uint32_t m_Size[4]; } Fill{ W2C, { 0.0f, 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 0.0f, 0.0f }, { std::uint32_t(sun_mask_w_v), std::uint32_t(sun_mask_h_v), 1u, 0u } };
+            auto Buffers  = std::array<xgpu::buffer*, 1>{ &m_GIDummy };
+            auto Textures = std::array<const xgpu::texture*, 1>{ &m_WhiteTexture };
+            auto Images   = std::array<const xgpu::texture*, 1>{ &m_ContactTex };
+            Window.Dispatch(m_ContactCompute, Buffers, Textures, Images, &Fill, sizeof(Fill), (sun_mask_w_v + 7) / 8, (sun_mask_h_v + 7) / 8);
+        }
         // the geometries' residency (cluster_geom::Refresh): a geometry whose buffers dropped or regained LOD 0 draws what they hold
         for( auto& M : m_Meshes ) if( M.m_bAlive && M.m_bCluster ) (void)M.m_Geom.Refresh();
         // Measurement only (XLION_GPU_TIMES): the whole Render on the GPU (its start, after the GI and the captures, after the tone map, its end)

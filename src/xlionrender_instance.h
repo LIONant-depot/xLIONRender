@@ -458,6 +458,11 @@ namespace xlionrender
         std::vector<tile_graph>     m_TileGraphs;
         xgpu::shader                m_TileVert;
         const tile_graph*           m_pBuildTile = nullptr;         // (buildMaterialPipeline: that pipeline)
+        xgpu::shader                m_ContactShader;                // the sun's contact shadow (XLION_CONTACT; xlionrender_contact_comp.glsl)
+        xgpu::compute               m_ContactCompute;
+        xgpu::texture               m_ContactTex;                   // R32_SFLOAT, sun_mask_w_v x sun_mask_h_v
+        xgpu::timestamps            m_ContactTimes;
+        bool                        m_bContactReady = false;
         xgpu::shader                m_PostShader;                   // bloom and auto exposure (xlionrender_post_comp.glsl)
         xgpu::compute               m_PostCompute;
         xgpu::shader                m_TAAShader;                    // xlionrender_taa_comp.glsl
@@ -844,7 +849,7 @@ namespace xlionrender
         // The environment probe (features/environment; shaders/xlionrender_environment*.glsl): the sky into an octahedral source, the
         // source prefiltered into a roughness atlas, the split-sum DFG table. Lit pipelines bind the atlas and the table at samplers
         // 8 and 9 (0-7: the shadow atlas and the material's textures, padded with white).
-        static constexpr int        lit_samplers_v          = 12;           // + 10: the probe atlas, 11: the sun's shadow mask
+        static constexpr int        lit_samplers_v          = 13;           // + 10: the probe atlas, 11: the sun's shadow mask, 12: its contact shadow
         static constexpr int        env_source_size_v       = 256;
         static constexpr int        env_dfg_size_v          = 64;
         static constexpr int        env_source_levels_v     = 6;            // the source pyramid: 256 .. 8 (filtered importance sampling)

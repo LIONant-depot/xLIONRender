@@ -155,6 +155,9 @@ namespace xlionrender
         constexpr std::uint32_t s_FullscreenVert[] = {
             #include "xlionrender_fullscreen_vert.h"
         };
+        constexpr std::uint32_t s_ContactComp[] = {
+            #include "xlionrender_contact_comp.h"
+        };
         constexpr std::uint32_t s_TAAComp[] = {
             #include "xlionrender_taa_comp.h"
         };
@@ -321,6 +324,7 @@ namespace xlionrender
         Samplers[8] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
         Samplers[9]  = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
         Samplers[10] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
+        Samplers[12] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp };
         Samplers[11] = { .m_bDisableAnisotropy = true, .m_AddressMode = Clamp, .m_MipmapMag = xgpu::pipeline::sampler::mipmap_sampler::NEAREST, .m_MipmapMin = xgpu::pipeline::sampler::mipmap_sampler::NEAREST, .m_MipmapMode = xgpu::pipeline::sampler::mipmap_mode::NEAREST };
         return Samplers;
     }
@@ -335,6 +339,7 @@ namespace xlionrender
         Bindings.emplace_back(m_EnvDFG);
         Bindings.emplace_back(m_ProbeAtlas);
         Bindings.emplace_back(m_SunMaskTex.m_Private ? m_SunMaskTex : m_SunMaskDummy);
+        Bindings.emplace_back(m_ContactTex.m_Private ? m_ContactTex : m_WhiteTexture);
         return Bindings;
     }
 
@@ -394,6 +399,8 @@ namespace xlionrender
         {
             const std::uint32_t Zero = 0u;
             const auto          Mips = std::array{ xgpu::texture::setup::mip_size{ sizeof(Zero) } };
+            if( std::getenv("XLION_CONTACT") )      // (before anything binds LitBindings)
+                if( auto Err = Device.Create(m_ContactTex, { .m_Format = xgpu::texture::format::R32_SFLOAT, .m_Width = sun_mask_w_v, .m_Height = sun_mask_h_v, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: contact shadow" }); Err ) return Err;
             if( auto Err = Device.Create(m_SunMaskDummy, { .m_Format = xgpu::texture::format::R32_UINT, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
                                                          , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Zero), sizeof(Zero) }, .m_isGamma = false, .m_pName = "Shadows: sun mask dummy" }); Err ) return Err;
         }
@@ -792,6 +799,9 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_PostShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_PostComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ContactShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ContactComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_ContactCompute, { .m_pShader = &m_ContactShader, .m_nBuffers = 1, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 112 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80 }); Err ) return Err;
             // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;

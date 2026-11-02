@@ -401,8 +401,10 @@ float SunShadow(in const vec3 World, in const vec3 Ng)
 // reads it (UBOLight.ShadowLevels[0].x 1: this pass has the mask); any other (blended, not in the prepass) shades inline
 layout(binding = 11) uniform usampler2D SamplerSunMask;
 const float kSunMaskTolerance = 0.003;
+// The sun's contact shadow (xlionrender_contact_comp.glsl, slot 12; UBOLight.ShadowLevels[0].z: its Div, 0 none)
+layout(binding = 12) uniform sampler2D SamplerContact;
 #ifndef XLION_TAIL_SCREEN
-float SunShadowMasked(in const vec3 World, in const vec3 Ng)
+float SunShadowMaskedOnly(in const vec3 World, in const vec3 Ng)
 {
     if (UBOLight.ShadowLevels[0].x == 1.0)
     {
@@ -411,5 +413,12 @@ float SunShadowMasked(in const vec3 World, in const vec3 Ng)
         if (abs(unpackHalf2x16(m & 0xFFFFu).x - d) <= kSunMaskTolerance * d) return float(m >> 16u) / 65535.0;
     }
     return SunShadow(World, Ng);
+}
+float SunShadowMasked(in const vec3 World, in const vec3 Ng)
+{
+    const float S = SunShadowMaskedOnly(World, Ng);
+    const float Div = UBOLight.ShadowLevels[0].z;
+    if (Div <= 0.0 || S <= 0.0) return S;
+    return S * (Div == 1.0 ? texelFetch(SamplerContact, ivec2(gl_FragCoord.xy), 0).r : textureLod(SamplerContact, gl_FragCoord.xy / (Div * vec2(textureSize(SamplerContact, 0))), 0.0).r);
 }
 #endif
