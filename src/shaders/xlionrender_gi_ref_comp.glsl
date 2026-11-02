@@ -29,6 +29,8 @@ vec3 CosineDir(in const vec3 N)
 // The header after the pixels (2 entries): the eye and level 0's cell
 const int vox_dim_v = 64, vox_levels_v = 4;
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
+// A face's cell is finer along the face's own axis: surfaces that look the same way at different depths (a bench's front, a wall behind it) are told apart; a surface only fills the few layers it crosses
+const float vox_layers_v = 4.0;
 const float vox_short_v = 0.02, vox_sigmas_v = 8.0;        // (single noisy rays, a test at every one: slower and stricter than estimator::Add's 0.08 and 3)
 bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in const int First, out int L, out ivec3 Org, out vec3 g)
 {
@@ -51,19 +53,20 @@ vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const f
     int L = -1; ivec3 Org; vec3 g;
     while (VoxCell(Pw, Anchor, Cell0, L + 1, L, Org, g))          // (nothing here: the parents - the samples feed them too)
     {
-        const ivec3 i = ivec3(floor(g)); const vec3 f = g - vec3(i);
         vec3 Sum = vec3(0.0); float SumW = 0.0;
         for (int a = 0; a < 3; ++a)
         {
             const float wa = n[a] * n[a];
             if (wa < 0.02) continue;
             vec3 Num = vec3(0.0); float Den = 0.0;
+            vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;
+            const ivec3 i = ivec3(floor(gv)); const vec3 f = gv - vec3(i);
             for (int c = 0; c < 8; ++c)
             {
                 const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
                 const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-                const vec4  v = VoxFace(L, Org + i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)));
-                Num += v.rgb * t; Den += v.w * t;
+                const vec4  v = VoxFace(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)));
+                if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * cw; Den += cw; }     // (as the read: each corner its mean, trusted up to 32 samples)
             }
             if (Den > 1e-3) { Sum += Num / Den * wa; SumW += wa; }
         }
@@ -74,12 +77,13 @@ vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const f
 // A sample into a level: a cell around the point and a face its normal looks toward, by the read's weights: it lands where the reads look for it
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
-    const ivec3 i = ivec3(floor(g)); const vec3 f = g - vec3(i);
-    const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
     const vec3  w = N * N;
     const float r = Rnd() * (w.x + w.y + w.z);
     const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
-    const uint  h = VoxHash(L, Org + q, uint(2 * a + (N[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+    vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;
+    const ivec3 i = ivec3(floor(gv)); const vec3 f = gv - vec3(i);
+    const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
+    const uint  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     vec4 v = GIRefAccum[e], m = GIRefAccum[e + 1u];
     const vec4 d = GIRefAccum[e + 2u];
@@ -179,7 +183,8 @@ void VoxMain()
         int Lk; ivec3 Ok; vec3 gk;
         if (!VoxCell(Ps.xyz, Hd.xyz, Hd.w, 0, Lk, Ok, gk)) continue;
         const int   Ax = abs(Nk.x) >= abs(Nk.y) && abs(Nk.x) >= abs(Nk.z) ? 0 : abs(Nk.y) >= abs(Nk.z) ? 1 : 2;
-        const float n  = VoxFace(Lk, Ok + ivec3(floor(gk + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))).w;
+        vec3 gq = vec3(Ok) + gk; gq[Ax] *= vox_layers_v;
+        const float n  = VoxFace(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))).w;
         if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; }
     }
     if (Least >= 1e30) return;
