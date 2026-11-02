@@ -39,6 +39,7 @@ layout(std430, set = 1, binding = 22) buffer GIRefSampleBuffer { vec4 GIRefSampl
 layout(std430, set = 1, binding = 23) readonly buffer GIRefAccumBuffer { vec4 GIRefAccum[]; };
 const int clip_dim_v = 64, clip_levels_v = 4;
 float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]); }
+bool g_ClipFloat = false;      // (experiment X1c: the faces hold floats)
 vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 EyeL, in const float Cell0)
 {
     const float Cell = Cell0 * float(1 << L);
@@ -62,9 +63,10 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
             const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
             const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(q.x) + uint(q.y) * uint(clip_dim_v) + uint(q.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
             const uvec4 v = GIClip[e];
-            Num += vec3(v.xyz) * t; Den += float(v.w) * t;
+            if (g_ClipFloat) { Num += uintBitsToFloat(v.xyz) * t; Den += uintBitsToFloat(v.w) * t; }
+            else             { Num += vec3(v.xyz) * t; Den += float(v.w) * t; }
         }
-        if (Den > 1.0) { Sum += Num / Den * wa; SumW += wa; }
+        if (Den > (g_ClipFloat ? 1e-3 : 1.0)) { Sum += Num / Den * wa; SumW += wa; }
     }
     return SumW > 0.0 ? vec4(Sum / SumW, SumW) : vec4(0.0);
 }
@@ -184,6 +186,18 @@ void main()
             const vec4 Ac = GIRefAccum[2u * Ri], Pa = GIRefAccum[2u * Ri + 1u];
             if (Ac.w > 0.5 && Pa.w > 0.5 && dot(Pa.xyz - Pwr, Pa.xyz - Pwr) < 1e-4) { E = vec4(Ac.rgb / Ac.w, 1.0); bWeak = false; }
             else E = vec4(0.0, 0.0, 0.0, 1.0);
+        }
+        else if (GITable[push.TableBase + 20u] == 3u)                   // experiment X1c: voxels of light on the surfaces, this pixel a place rays start from
+        {
+            const uint Rw = GITable[push.TableBase + 28u], Ri = uint(P.y) * Rw + uint(P.x);
+            const vec3 Eyw = vec3(TF(25u), TF(26u), TF(27u));
+            GIRefSample[2u * Ri] = vec4(S.P + Eyw, 1.0);
+            GIRefSample[2u * Ri + 1u] = vec4(N, 0.0);
+            GIRefSample[2u * W * H] = vec4(TF(22u), TF(23u), TF(24u), TF(21u));
+            g_ClipFloat = true;
+            E = ClipRead(S.P, N);
+            bWeak = E.w < 0.5;
+            E.w = 1.0;
         }
         else if (GITable[push.TableBase + 20u] != 0u)                   // experiment X1: the clipmap, both reads
         {

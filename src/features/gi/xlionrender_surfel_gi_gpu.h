@@ -918,6 +918,30 @@ namespace xlionrender::gi
             m_RefNext += std::size_t(PerFrame);
             return true;
         }
+        // Experiment X1c (XLION_GI_VOX; xlionrender_gi_ref_comp.glsl VoxMain): rays from the screen's points into voxels of light on the surfaces.
+        // ponytail: an anchor, cleared when the eye has moved 16 cells of level 0 - for stills; toroidal or a hash when it earns it. 100 MB of mostly empty cells (a hash, too)
+        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int Keep, float Cell, const v3& Eye) noexcept
+        {
+            if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
+            const std::size_t nEntries = std::size_t(clip_levels_v) * clip_dim_v * clip_dim_v * clip_dim_v * 6;
+            if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
+            const v3 d{ Eye.m_X - m_VoxAnchor[0], Eye.m_Y - m_VoxAnchor[1], Eye.m_Z - m_VoxAnchor[2] };
+            if (!m_bVoxAnchored || d.Dot(d) > 16.0f * Cell * Cell * 16.0f) { m_bVoxAnchored = true; m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z }; m_VoxCleared = 0; }
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0] };
+            struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), 0, PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, -1, Keep };
+            if (m_VoxCleared < nEntries)
+            {
+                const std::size_t n = std::min<std::size_t>(nEntries - m_VoxCleared, std::size_t(1) << 22);
+                Push.m_Bounces = -2; Push.m_First = int(m_VoxCleared); Push.m_Count = int(n);
+                Window.Dispatch(m_RefC, B, &Push, sizeof(Push), int((n + 63) / 64));
+                m_VoxCleared += n;
+                return true;
+            }
+            Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 63) / 64);
+            return true;
+        }
+        std::array<float, 3> VoxAnchor(void) const noexcept { return m_VoxAnchor; }
+        xgpu::buffer*        VoxBuffer(void) noexcept { return m_ClipB[0].m_Private ? &m_ClipB[0] : nullptr; }
         xgpu::buffer*        RefSamples(void) noexcept { return m_RefSampleB.m_Private ? &m_RefSampleB : nullptr; }
         xgpu::buffer*        RefAccum(void) noexcept { return m_RefAccumB.m_Private ? &m_RefAccumB : nullptr; }
         xgpu::buffer*        ClipBuffer(void) noexcept { return m_bClipValid ? &m_ClipB[m_ClipRead] : nullptr; }
@@ -1290,6 +1314,9 @@ namespace xlionrender::gi
         xgpu::shader                        m_Shader[16];
         xgpu::compute                       m_RefC;             // the ground truth: RefStep
         xgpu::buffer                        m_RefSampleB, m_RefAccumB;
+        std::array<float, 3>                m_VoxAnchor{};
+        bool                                m_bVoxAnchored = false;
+        std::size_t                         m_VoxCleared = 0;
         bool                                m_bRef = false;
         std::size_t                         m_RefNext = 0;
         std::uint32_t                       m_RefLightsKey = 0;

@@ -2856,6 +2856,9 @@ namespace xlionrender
                         // The ground truth instead (scene::gi_settings::m_bPathTraced, or XLION_GI_REF=<paths a frame>[,<bounces>]): words 20 = 2, 28 the half-size width; the gather writes each pixel's point, reads its mean
                         static const std::array<int, 2> s_Ref = [] { std::array<int, 2> A{ 0, 4 }; if( const char* p = std::getenv("XLION_GI_REF") ) (void)std::sscanf(p, "%d,%d", &A[0], &A[1]); return A; }();
                         m_pGatherRefS = m_pGatherRefA = nullptr;
+                        // Experiment X1c: XLION_GI_VOX=<level 0's cell> [<rays a frame> [<samples a face keeps>]], the gather reads voxels of light on the surfaces (xlionrender_gi_ref_comp.glsl VoxMain)
+                        static const std::array<float, 3> s_Vox = [] { std::array<float, 3> A{ 0.0f, 32768.0f, 64.0f }; if( const char* p = std::getenv("XLION_GI_VOX") ) (void)std::sscanf(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }();
+                        const bool bVox = s_Vox[0] > 0.0f && m_pGITrace && m_pGITrace->VoxStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), int(s_Vox[1]), int(s_Vox[2]), s_Vox[0], { Eye[0], Eye[1], Eye[2] });
                         std::uint32_t LightsKey = 2166136261u;         // (the lights' version: a change starts the tracer over)
                         const auto KeyOf = [&](const void* p, std::size_t n) { const auto* b = static_cast<const std::uint8_t*>(p); for( std::size_t k = 0; k < n; ++k ) LightsKey = (LightsKey ^ b[k]) * 16777619u; };
                         { const float Sn[7] = { Scene.m_Sun.m_Direction[0], Scene.m_Sun.m_Direction[1], Scene.m_Sun.m_Direction[2], Scene.m_Sun.m_Color[0], Scene.m_Sun.m_Color[1], Scene.m_Sun.m_Color[2], Scene.m_Sun.m_Intensity }; KeyOf(Sn, sizeof(Sn)); }
@@ -2866,6 +2869,14 @@ namespace xlionrender
                             const float Ey[3] = { Eye[0], Eye[1], Eye[2] };
                             m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
+                        }
+                        if( bVox )
+                        {
+                            m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum(); m_pGatherClip = m_pGITrace->VoxBuffer();
+                            const auto A = m_pGITrace->VoxAnchor();
+                            const float C[7] = { s_Vox[0], A[0], A[1], A[2], Eye[0], Eye[1], Eye[2] };
+                            m_GatherTable[20] = 3u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
+                            std::memcpy(m_GatherTable.data() + 21, C, sizeof(C));
                         }
                     }
                     {
