@@ -3,7 +3,7 @@
 // the points the gather wrote last frame (no surfels read: the sun, lamps, sky and emission at each hit, Bounces diffuse bounces with the
 // hits' albedo). Each pixel's irradiance averaged over the frames while its point stays where it is. Slow on purpose; never for a game.
 // A pixel a lane; m_First: the next pixel (wraps); m_Epoch: the lights' version (another: the pixel starts over)
-layout(local_size_x = 64) in;
+layout(local_size_x = 4) in;      // (a few lanes: lanes in a group pay for each other: 64 rays cost 0.9 ms in groups of 4, 2.9 in one of 64; 32768 cost 9 and 4: launching groups isn't free)
 
 layout(std430, set = 0, binding = 5) readonly buffer samples_b { vec4 GIRefSample[]; };     // per pixel: its world point, w 1 (0: none); then its normal
 layout(std430, set = 0, binding = 6)          buffer accum_b   { vec4 GIRefAccum[]; };      // per pixel 2: the sum (rgb) and count, its point
@@ -164,7 +164,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
 }
 void VoxMain()
 {
-    if (Push.m_Bounces == -2) { if (int(gl_GlobalInvocationID.x) < Push.m_Count) GIRefAccum[uint(Push.m_First) + gl_GlobalInvocationID.x] = vec4(0.0); return; }
+    if (Push.m_Bounces == -2) { for (uint k = 0u; k < 16u; ++k) { const uint i = gl_GlobalInvocationID.x * 16u + k; if (int(i) < Push.m_Count) GIRefAccum[uint(Push.m_First) + i] = vec4(0.0); } return; }     // (a lane clears 16: not a million groups)
     if (int(gl_GlobalInvocationID.x) >= Push.m_Count) return;
     g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
     const vec4 Hd = GIRefSample[2u * uint(Push.m_nPixels)];

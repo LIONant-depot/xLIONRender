@@ -2885,7 +2885,7 @@ namespace xlionrender
                             if( std::vector<std::uint64_t> Ns; m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
                             {
                                 const double Ms = double(Ns[1] - Ns[0]) * 1e-6, Budget = double(Vox[1]);
-                                m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 16384.0, 262144.0);     // (the floor: 64 rays cost about as much as 32768: under it the budget only starved them, and the light took longer to arrive)
+                                m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 2048.0, 65536.0);     // (groups of 4 lanes: the cost follows the rays - in groups of 64 a dispatch cost 2 ms and more with any rays at all, and the budget could only starve them. The top: past it many small groups cost more than the rays)
                                 static const char* s_pFixed = std::getenv("XLION_VOX_RAYS");      // (measurement: the rays' cost against their number)
                                 if( s_pFixed ) m_VoxRays = std::atof(s_pFixed);
                                 static const bool s_bVoxLog = std::getenv("XLION_GPU_TIMES") != nullptr;

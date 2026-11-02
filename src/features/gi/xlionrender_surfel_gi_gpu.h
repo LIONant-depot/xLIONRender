@@ -914,7 +914,7 @@ namespace xlionrender::gi
             if (LightsKey != m_RefLightsKey) { m_RefLightsKey = LightsKey; ++m_RefEpoch; }      // (the lights changed: every pixel starts over)
             const struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), int(m_RefNext % nPixels), PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, Bounces, m_RefEpoch };
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_RefAccumB };
-            Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 63) / 64);
+            Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
             m_RefNext += std::size_t(PerFrame);
             return true;
         }
@@ -947,7 +947,7 @@ namespace xlionrender::gi
             }
             static const bool s_bHits = std::getenv("XLION_GI_VOX_HITS") != nullptr;     // (the rays' hits feed the voxels too)
             if (s_bHits) Push.m_Epoch = -Push.m_Epoch;
-            Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 63) / 64);
+            Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
             return true;
         }
         bool                 VoxQuiet(void) const noexcept { return m_VoxStill > 600 && m_VoxEyeStill > 600; }
