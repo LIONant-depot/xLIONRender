@@ -140,7 +140,7 @@ namespace xlionrender
         float           m_SourceAngle   = 0.5357f;                  // the sun's disc, degrees across (Unreal's default): contact-hardening shadows,
                                                                     // sharp at the contact and wider with the distance to the caster; 0: hard
         float           m_ShadowLevelBlend = 0.1f;                  // the share of a shadow level that cross-fades into the next, smoothly (the components' default 0.5: Unreal's long blends, Tomas)
-        int             m_ShadowDiscTaps = 8;                       // the soft edge's samples a pixel (the sun's disc, m_SourceAngle > 0): fewer, cheaper, coarser
+        int             m_ShadowDiscTaps = 4;                       // the soft edge's samples a pixel (the sun's disc, m_SourceAngle > 0): fewer, cheaper, coarser
         float           m_ShadowDetailDistance = 1.0f;             // how far each shadow level keeps its detail: each switches this many times farther (1: texels half the pixel; the components' default 10, Tomas)
     };
 

@@ -181,7 +181,7 @@ float ShadowVSMAt(in const int Level, in const vec3 World, in const vec3 Ng, in 
 // switched resolution with the blocker distance inside a shadow's edge, a sharp version overtaken by a blurred one while moving (Tomas).
 // Unreal's SMRT samples its finest level over the sun's disc likewise (rays, TSR averaging their noise); without a TAA the disc's rotation
 // is fixed per point (a hash of its place on the finest grid: no flicker). Each tap moved along the receiver's plane
-const int kVSMDiscTaps = 8;
+const int kVSMDiscTaps = 4;
 float ShadowVSMDisc(in const int Level, in const vec3 World, in const vec3 Ng, in const vec2 Slope, in const vec2 SlopeP, in const float Grazing, in const float R)
 {
     const vec3  Ax = vec3(UBOLight.W2Light[0][0], UBOLight.W2Light[1][0], UBOLight.W2Light[2][0]);     // the light's x, y, z in world
