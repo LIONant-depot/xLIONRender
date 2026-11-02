@@ -85,8 +85,8 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const vec4 d = GIRefAccum[e + 2u];
     if (d.x != Tag)
     {
-        // someone else's: taken if nobody has fed it for 2 seconds or so, or now and then (a pool too small must still follow the eye)
-        if (d.x != 0.0 && abs(Now - d.y) < 120.0 && Rnd() >= 1.0 / 16.0) return;
+        // someone else's: taken only if nobody has fed it for 2 seconds or so: a face in use keeps its slot and its history (a face that finds no room waits)
+        if (d.x != 0.0 && abs(Now - d.y) < 120.0) return;
         v = vec4(0.0); m = vec4(0.0);
     }
     const float Ls = dot(Sample, vec3(0.2126, 0.7152, 0.0722));
