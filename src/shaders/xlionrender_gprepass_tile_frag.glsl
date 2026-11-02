@@ -14,6 +14,7 @@ layout(location = 2) out vec4 OutId;
 #include "xlionrender_tile_attr.glsl"
 layout(location = 3) out uvec2 OutAttr0;
 layout(location = 4) out uint  OutAttr1;
+layout(location = 5) out vec4  OutColor;            // the vertex color
 
 vec2 Oct(in const vec3 n)
 {
@@ -30,4 +31,5 @@ void main()
     const vec2 t  = Oct(normalize(In.Tangent.xyz));
     OutAttr0 = TileEncode(In.UV, dx, dy);
     OutAttr1 = TileTangentEncode(t, In.Tangent.w);
+    OutColor = In.VertColor;
 }

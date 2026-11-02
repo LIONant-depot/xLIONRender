@@ -41,7 +41,7 @@ namespace xlionrender
         bool                    m_bPostReady = false;   // (the images written once: they can be sampled)
         std::chrono::steady_clock::time_point m_PostLast{};
         // The material tile pass's prototype (XLION_TILE, material_tiles_plan.md): the prepass's attributes, the pass into m_HDR, the pipeline's instance over this view's G-buffer
-        xgpu::texture           m_TileAttr0, m_TileAttr1;   // R32G32_UINT, R32_UINT: the polar codec (xlionrender_tile_attr.glsl)
+        xgpu::texture           m_TileAttr0, m_TileAttr1, m_TileColor;   // R32G32_UINT, R32_UINT: the polar codec (xlionrender_tile_attr.glsl); R8G8B8A8_UNORM: the vertex color
         xgpu::renderpass        m_TilePass;
         std::vector<xgpu::pipeline_instance> m_TileInstances;   // a graph each
         // Temporal antialiasing (scene::post_settings::m_bTAA; xlionrender_taa_comp.glsl), made the first time it is on: this frame into one, the other last frame's; tone map from either

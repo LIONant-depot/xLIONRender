@@ -1750,6 +1750,8 @@ namespace xlionrender
                 if( auto Err = m_Device.Create(*p, { .m_Format = p == &View.m_TileAttr0 ? xgpu::texture::format::R32G32_UINT : xgpu::texture::format::R32_UINT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile attributes" }); Err ) return Err;
                 Attachments.push_back(xgpu::renderpass::attachment{ *p });
             }
+            if( auto Err = m_Device.Create(View.m_TileColor, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile attributes" }); Err ) return Err;
+            Attachments.push_back(xgpu::renderpass::attachment{ View.m_TileColor });
             auto TileAttachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR } };
             if( auto Err = m_Device.Create(View.m_TilePass, { .m_Attachments = TileAttachments, .m_bClearOnRender = false }); Err ) return Err;
         }
@@ -1943,7 +1945,7 @@ namespace xlionrender
         for( auto& I : View.m_TileInstances ) if( I.m_Private ) m_Device.Destroy(std::move(I));
         View.m_TileInstances.clear();
         if( View.m_TilePass.m_Private ) m_Device.Destroy(std::move(View.m_TilePass));
-        for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1 } ) if( p->m_Private ) m_Device.Destroy(std::move(*p));
+        for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1, &View.m_TileColor } ) if( p->m_Private ) m_Device.Destroy(std::move(*p));
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         for( auto& T : View.m_Bloom ) if( T.m_Private ) m_Device.Destroy(std::move(T));
         for( auto& I : View.m_ToneMapTAA ) if( I.m_Private ) m_Device.Destroy(std::move(I));

@@ -3361,7 +3361,7 @@ namespace xlionrender
                     auto& Inst = View.m_TileInstances[g];
                     if( !Inst.m_Private )
                     {
-                        auto Textures = std::array<xgpu::texture*, 6>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, &View.m_TileAttr0, &View.m_TileAttr1 };
+                        auto Textures = std::array<xgpu::texture*, 7>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, &View.m_TileAttr0, &View.m_TileAttr1, &View.m_TileColor };
                         auto Bindings = LitBindings(Textures, true);
                         if( m_Device.Create(Inst, { .m_PipeLine = G.m_Pipeline, .m_SamplersBindings = Bindings }) ) continue;
                     }
