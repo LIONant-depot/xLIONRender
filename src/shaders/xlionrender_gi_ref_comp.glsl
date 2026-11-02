@@ -28,7 +28,7 @@ vec3 CosineDir(in const vec3 N)
 // the short mean leaves the kept one by more than the noise says it can (Wicked's multiscale mean estimator, estimator::Add), the old samples go, in this face only.
 // The header after the pixels (2 entries): the eye and level 0's cell
 const int vox_dim_v = 64, vox_levels_v = 4;
-const float vox_short_v = 0.02, vox_sigmas_v = 5.0;        // (single noisy rays, a test at every one: slower and stricter than estimator::Add's 0.08 and 3)
+const float vox_short_v = 0.02, vox_sigmas_v = 8.0;        // (single noisy rays, a test at every one: slower and stricter than estimator::Add's 0.08 and 3)
 bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in const int First, out int L, out ivec3 Org, out vec3 g)
 {
     for (L = First; L < vox_levels_v; ++L)
