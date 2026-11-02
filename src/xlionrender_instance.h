@@ -229,6 +229,7 @@ namespace xlionrender
         // Invariant 1 on this frame's table (tests): every entry names a VALID slot holding exactly that page
                       bool                 validateVSM ( void ) const                                           noexcept { std::vector<std::uint32_t> T; m_VSM.BuildTable(T); return m_VSM.Validate(T); }
         // The pages' CPU side, read only (tests: levels, texel size)
+                      void                 setShadowInstantTris( int n )                                        noexcept { m_ShadowInstantTris = n; }     // (a small scene's sun shadows within the frame: at most n triangles; 0 never)
                       const shadows::vsm&  getVSM      ( void ) const                                           noexcept { return m_VSM; }
 
         // The lighting lab (features/lights/xlionrender_light_cells.h): how local lights are found per pixel
@@ -775,6 +776,7 @@ namespace xlionrender
         xgpu::buffer*                           m_pGatherClip   = nullptr;  // experiment X1: the clipmap the gather reads this frame (XLION_GI_CLIP)
         float                                   m_LODProjScale  = 0;        // the main view's pixels per unit at distance 1 (its LOD pick: renderScenePass)
         struct { int m_nGroups[4] = {}; int m_nLODs = 0; float m_MinError[4] = { 1e30f, 1e30f, 1e30f, 1e30f }; } m_LODReport;                // the main view's LOD groups by their pick this frame (LOD 0, 1, 2, 3+)
+        int                                     m_ShadowInstantTris = 300000;       // a scene with at most this many triangles: its sun shadows within the frame (setShadowInstantTris; XLION_SH_INSTANT_TRIS)
         float                                   m_ShadowPagesMs = 1.3f;     // the pages' share of the shadows' 2.0 ms slice (methodology 3: request pass, bounds, the locals' in the rest, and the pages' spread around their mean cost: 1.6 let 7 of 12.6k Bistro frames pass 2.0); 0: no frame budget
         std::array<shadows::vsm::snapshot, ring_frames_v> m_VSMSnap{};
         std::vector<shadows::vsm::key>          m_VSMRequests;

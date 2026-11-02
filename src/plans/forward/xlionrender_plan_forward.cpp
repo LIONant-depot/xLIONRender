@@ -1625,7 +1625,14 @@ namespace xlionrender
             // The frame's pages by their measured cost: what fits the pages' share of the shadows' slice (XLION_SH_PAGES_MS overrides; 0 off)
             static const float s_PagesMs = [] { const char* p = std::getenv("XLION_SH_PAGES_MS"); return p ? float(std::atof(p)) : -1.0f; }();
             const float PagesMs = s_PagesMs >= 0 ? s_PagesMs : m_ShadowPagesMs;
-            m_VSM.SetFrameBudget(PagesMs > 0 ? std::clamp(int(PagesMs / std::max(m_VSMPageMs, 1e-3)), 8, 1024) : 0);
+            // a small scene needs no budget: every page within the frame costs less than the budget's own bookkeeping would allow for
+            static const int s_InstantEnv = [] { const char* p = std::getenv("XLION_SH_INSTANT_TRIS"); return p ? std::atoi(p) : -1; }();
+            std::int64_t nCasterTris = 0;
+            for( const auto& Dr : Draws ) nCasterTris += Dr.m_pMesh->m_bCluster ? std::int64_t(Dr.m_pMesh->m_Geom.m_Clusters.size()) * 256 : Dr.m_pMesh->m_nIndices / 3;      // (ponytail: a cluster taken as half its 512 triangle cap, near enough for this choice)
+            const int  InstantTris = s_InstantEnv >= 0 ? s_InstantEnv : m_ShadowInstantTris;
+            const bool bInstant = InstantTris > 0 && nCasterTris <= std::int64_t(InstantTris);
+            m_VSM.SetInstant(bInstant);
+            m_VSM.SetFrameBudget(!bInstant && PagesMs > 0 ? std::clamp(int(PagesMs / std::max(m_VSMPageMs, 1e-3)), 8, 1024) : 0);
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
             ShCpu.Lap();
@@ -2869,7 +2876,7 @@ namespace xlionrender
                             m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
                         }
-                        if( s_Vox[0] > 0.0f && m_pGITrace && m_pGITrace->VoxStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), int(s_Vox[1]), int(s_Vox[2]), s_Vox[0], { Eye[0], Eye[1], Eye[2] }) )
+                        if( s_Vox[0] > 0.0f && m_pGITrace && m_pGITrace->VoxStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), int(s_Vox[1]), int(s_Vox[2]), s_Vox[0], { Eye[0], Eye[1], Eye[2] }, LightsKey) )
                         {
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum(); m_pGatherClip = m_pGITrace->VoxBuffer();
                             const auto A = m_pGITrace->VoxAnchor();

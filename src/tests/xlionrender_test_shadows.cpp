@@ -38,6 +38,7 @@ int main()
     constexpr int size_v = 128;
     xlionrender::render_view View;
     CHECK(!Renderer.CreateView(View, { .m_Width = size_v, .m_Height = size_v }), "CreateView");
+    Renderer.setShadowInstantTris(0);           // (the budgets' checks; test_vsm has a small scene's)
 
     xgpu::tools::view Camera;
     Camera.setFov(xmath::radian{ 1.0f });

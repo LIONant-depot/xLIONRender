@@ -172,6 +172,8 @@ namespace xlionrender::shadows
         }
 
         const setup& getSetup( void ) const noexcept { return m_Setup; }
+        // A small scene: no count, no quantized epochs, no fade: its pages cost next to nothing, its shadows follow the sun within the frame (Tomas)
+        void         SetInstant( bool b ) noexcept { m_bInstant = b; }
         void         SetFrameBudget( int nPages ) noexcept { m_Setup.m_FrameBudget = nPages; }     // (setup::m_FrameBudget, set every frame - no re-Init)
 
         static std::uint64_t Pack(const key& K) noexcept
@@ -260,9 +262,9 @@ namespace xlionrender::shadows
         bool OpenEpoch(const xmath::fvec3& LightDir, float Level0Texel, std::uint64_t Frame) noexcept
         {
             const xmath::fvec3 Z = LightDir.NormalizeCopy();
-            const float EpochCos = std::cos(m_Setup.m_EpochDegrees * 3.14159265f / 180.0f);
+            const float EpochCos = std::cos((m_bInstant ? 0.05f : m_Setup.m_EpochDegrees) * 3.14159265f / 180.0f);
             if (m_bHasBasis && Z.Dot(m_Z) >= EpochCos && Level0Texel == m_Level0Texel) return false;
-            if (m_Setup.m_NetBudget > 0 && m_bHasPrev && Frame - m_EpochFrame <= std::uint64_t(m_Setup.m_MaxPrevFrames)) return false;     // (the last one not complete yet)
+            if (!m_bInstant && m_Setup.m_NetBudget > 0 && m_bHasPrev && Frame - m_EpochFrame <= std::uint64_t(m_Setup.m_MaxPrevFrames)) return false;     // (the last one not complete yet)
             m_PX = m_X; m_PY = m_Y; m_PZ = m_Z; m_PrevLevels = m_Levels; m_PrevLevel0Texel = m_Level0Texel;   // (the epoch now ending)
             m_bPrevUsable = m_bHasBasis;
             const xmath::fvec3 Up = std::abs(Z.m_Y) < 0.99f ? xmath::fvec3(0, 1, 0) : xmath::fvec3(1, 0, 0);
@@ -371,7 +373,7 @@ namespace xlionrender::shadows
                     if (s < 0 || !m_Slots[s].m_bValid) Net.push_back(K);
                 }
                 std::sort(Net.begin(), Net.end(), [&](const key& a, const key& b) { return PageDistance2(a, C) < PageDistance2(b, C); });
-                int NetBudget = m_Setup.m_NetBudget > 0 && m_bHasPrev ? m_Setup.m_NetBudget : int(Net.size());     // (no previous net to show: all of it - the first)
+                int NetBudget = !m_bInstant && m_Setup.m_NetBudget > 0 && m_bHasPrev ? m_Setup.m_NetBudget : int(Net.size());     // (no previous net to show: all of it - the first)
                 if (m_Setup.m_FrameBudget > 0 && bCache && m_bHasPrev) NetBudget = std::min(NetBudget, m_Setup.m_FrameBudget);
                 for (const auto& K : Net)
                 {
@@ -407,7 +409,7 @@ namespace xlionrender::shadows
                 if (a.m_Level != b.m_Level) return a.m_Level > b.m_Level;
                 return PageDistance2(a, C) < PageDistance2(b, C);
             });
-            int Budget = m_bHasPrev || m_Setup.m_SteadyBudget <= 0 ? m_Setup.m_Budget : m_Setup.m_SteadyBudget;     // (a previous epoch bridges a rebuild: the budget)
+            int Budget = m_bInstant ? int(Want.size()) : m_bHasPrev || m_Setup.m_SteadyBudget <= 0 ? m_Setup.m_Budget : m_Setup.m_SteadyBudget;     // (a previous epoch bridges a rebuild: the budget)
             // (the net's first - a budgeted one's: the first net, all of it at once, leaves the fine pages their budget; 4 at least: the rebuild moves on)
             if (m_Setup.m_FrameBudget > 0 && bCache) Budget = std::min(Budget, std::max(m_Setup.m_FrameBudget - (m_bHasPrev ? m_Stats.m_RenderedPinned : 0), 4));
             for (const auto& K : Want)
@@ -471,7 +473,8 @@ namespace xlionrender::shadows
             // previous epoch's pages go
             if (m_bHasPrev)
             {
-                if ((m_Stats.m_Deferred == 0 && m_Stats.m_Rejected == 0 && Frame > m_EpochFrame) || Frame - m_EpochFrame > std::uint64_t(m_Setup.m_MaxPrevFrames))
+                if (m_bInstant && m_Stats.m_Deferred == 0 && m_Stats.m_Rejected == 0) m_Fade = 1.0f;
+                else if ((m_Stats.m_Deferred == 0 && m_Stats.m_Rejected == 0 && Frame > m_EpochFrame) || Frame - m_EpochFrame > std::uint64_t(m_Setup.m_MaxPrevFrames))
                     m_Fade = std::min(1.0f, m_Fade + 1.0f / float(std::max(1, m_Setup.m_FadeFrames)));
                 if (m_Fade >= 1.0f) DropPrevious();
             }
@@ -738,7 +741,7 @@ namespace xlionrender::shadows
         std::uint64_t                           m_EpochFrame = 0;
         int                                     m_FrameEpochs = 0, m_FrameRemapped = 0;     // (this frame's, before Update resets the stats)
         float                                   m_Fade = 1;
-        bool                                    m_bHasPrev = false, m_bPrevUsable = false;
+        bool                                    m_bHasPrev = false, m_bPrevUsable = false, m_bInstant = false;
         std::array<bool, max_levels_v>          m_bDepthSet{};
         std::uint64_t                           m_Epoch = 0;
         float                                   m_Level0Texel = 0;

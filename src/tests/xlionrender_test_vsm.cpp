@@ -258,6 +258,7 @@ int main()
     constexpr int size_v = 256;
     xlionrender::render_view View;
     CHECK(!Renderer.CreateView(View, { .m_Width = size_v, .m_Height = size_v }), "CreateView");
+    Renderer.setShadowInstantTris(0);           // (the budgets' checks below; a small scene's own is after them)
     xgpu::tools::view Camera;
     Camera.setFov(xmath::radian{ 1.1f });
     Camera.setViewport({ 0, 0, size_v, size_v });
@@ -643,6 +644,25 @@ int main()
         const double DisDrag  = Moving("drag", 1.5f, 12);
         const double DisCycle = Moving("cycle", 0.1f, 60);
         CHECK(DisDrag < 1.0 && DisCycle < 1.0, "the moving sun's image: %.2f%% (drag), %.2f%% (cycle) of the pixels differ from the settled one", DisDrag, DisCycle);
+        {   // A small scene's sun shadows within the frame (Tomas: no reason for a small object's to wait): a new direction, in one frame every page the net and the requests
+            // asked for, no previous epoch left, even for a turn under the epochs' quantization
+            Renderer.setShadowInstantTris(1000000);
+            CHECK(Settle(4), "settle, small scene");
+            const auto Dir0 = Scene.m_Sun.m_Direction;
+            for (const float Yaw : { 25.0f, 0.5f })
+            {
+                const float c = std::cos(Yaw * 3.14159265f / 180.0f), s = std::sin(Yaw * 3.14159265f / 180.0f);
+                const auto  D = Scene.m_Sun.m_Direction;
+                Scene.m_Sun.m_Direction = xmath::fvec3{ D.m_X * c - D.m_Z * s, D.m_Y, D.m_X * s + D.m_Z * c };
+                CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateVSM(), "small scene, sun turned %.1f", Yaw);
+                const auto& P = Renderer.getVSMReport().m_Pages;
+                std::printf("small scene, the sun turned %.1f degrees: epochs %d, net %d, fine %d, deferred %d, previous resident %d, fade %.2f\n", Yaw, P.m_Epochs, P.m_RenderedPinned, P.m_Rendered, P.m_Deferred, P.m_ResidentPrev, P.m_Fade);
+                CHECK(P.m_Epochs == 1 && P.m_Deferred == 0 && P.m_NetDeferred == 0 && P.m_Fade >= 1.0f, "small scene: the turn of %.1f degrees not done in its frame", Yaw);
+            }
+            Scene.m_Sun.m_Direction = Dir0;
+            Renderer.setShadowInstantTris(0);
+            CHECK(Settle(30), "settle, the budgets again");
+        }
         CHECK(MaxPop < 0.5, "the slow sun pops: %.2f%% of the pixels change by half from one frame to the next", MaxPop);
         Renderer.configureVSM({ .m_PoolTexels = 8192, .m_PoolHeight = 4096, .m_Budget = 100000, .m_ResolutionBias = Bias });
         CHECK(Settle(12), "settle after B5b");

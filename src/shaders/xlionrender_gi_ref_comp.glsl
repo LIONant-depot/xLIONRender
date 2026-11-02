@@ -81,7 +81,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
     m.rgb += (Sample - m.rgb) * vox_short_v;
     m.w   += (Ds * Ds - m.w) * vox_short_v;
-    if (v.w >= 64.0)
+    if (v.w >= 64.0 && Push.m_First != 0)       // (m_First: the lights changed lately)
     {
         const float Lk = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w, Lm = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
         const float Noise = sqrt(max(m.w, 0.0) * vox_short_v / (2.0 - vox_short_v));       // (the short mean's own standard deviation)

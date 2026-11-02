@@ -921,15 +921,19 @@ namespace xlionrender::gi
         // Experiment X1c (XLION_GI_VOX; xlionrender_gi_ref_comp.glsl VoxMain): rays from the screen's points into voxels of light on the surfaces.
         // ponytail: 200 MB of mostly empty cells: a hash when it earns it
         // KeepMax: the most samples a face keeps; a face notices a change of its own light and starts over (VoxStore), the rest stay as they are
-        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye) noexcept
+        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, std::uint32_t LightsKey) noexcept
         {
+            // The lights still for a while: no face can have changed, the noise can't start one over: the light settles and the flicker dies out, with fewer rays too (ponytail: moving objects aren't in the key)
+            if (LightsKey != m_VoxLightsKey) { m_VoxLightsKey = LightsKey; m_VoxStill = 0; }
+            const bool bStill = ++m_VoxStill > 60;
+            if (m_VoxStill > 600) PerFrame = std::max(PerFrame / 4, 64);
             const int Keep = KeepMax;
             if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
             const std::size_t nEntries = std::size_t(clip_levels_v) * clip_dim_v * clip_dim_v * clip_dim_v * 6 * 2;
             if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0] };
             m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z };
-            struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), 0, PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, -1, Keep };
+            struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), bStill ? 0 : 1, PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, -1, Keep };
             if (m_VoxCleared < nEntries)
             {
                 const std::size_t n = std::min<std::size_t>(nEntries - m_VoxCleared, std::size_t(1) << 22);
@@ -1343,6 +1347,8 @@ namespace xlionrender::gi
         std::array<std::array<int, 3>, 4>   m_VoxOrg{};
         bool                                m_bVoxOrg = false;
         std::size_t                         m_VoxCleared = 0;
+        std::uint32_t                       m_VoxLightsKey = 0;
+        int                                 m_VoxStill = 0;
         bool                                m_bRef = false;
         std::size_t                         m_RefNext = 0;
         std::uint32_t                       m_RefLightsKey = 0;
