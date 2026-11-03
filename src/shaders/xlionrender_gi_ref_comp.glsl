@@ -60,8 +60,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;
     const ivec3 i = ivec3(floor(gv)); const vec3 f = gv - vec3(i);
     const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
-    const int   ua = (a + 1) % 3, va = (a + 2) % 3;
-    const uint  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)) + 36u * (1u + (gv[ua] >= float(q[ua]) ? 1u : 0u) + (gv[va] >= float(q[va]) ? 2u : 0u))), e = VoxEntryOf(h);
+    const uint  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     vec4 v = GIRefAccum[e], m = GIRefAccum[e + 1u];
     const vec4 d = GIRefAccum[e + 2u];
@@ -190,8 +189,7 @@ void VoxMain()
         if (!VoxCell(Ps.xyz, Hd.xyz, Hd.w, 0, Lk, Ok, gk)) continue;
         const int   Ax = abs(Nk.x) >= abs(Nk.y) && abs(Nk.x) >= abs(Nk.z) ? 0 : abs(Nk.y) >= abs(Nk.z) ? 1 : 2;
         vec3 gq = vec3(Ok) + gk; gq[Ax] *= vox_layers_v;
-        const ivec3 qk = ivec3(floor(gq + 0.5)); const int ux = (Ax + 1) % 3, vx = (Ax + 2) % 3;
-        const float n  = VoxFace(Lk, qk, uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)) + 36u * (1u + (gq[ux] >= float(qk[ux]) ? 1u : 0u) + (gq[vx] >= float(qk[vx]) ? 2u : 0u))).w;
+        const float n  = VoxFace(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))).w;
         if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; }
     }
     if (Least >= 1e30) return;

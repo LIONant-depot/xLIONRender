@@ -16,11 +16,9 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in co
     return false;
 }
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 180u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 36u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
 uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
-// A corner's light by the side of it its samples came from (the two axes in the face's plane): a floor reads a corner from its own side, so a wall through the cell doesn't pass the other room's light
-uint VoxSideRead(in const int a, in const ivec3 o) { const int u = (a + 1) % 3, v = (a + 2) % 3; return 36u * (1u + (o[u] == 0 ? 1u : 0u) + (o[v] == 0 ? 2u : 0u)); }
 vec4 VoxFace(in const int L, in const ivec3 q, in const uint Face) { const uint h = VoxHash(L, q, Face), e = VoxEntryOf(h); return GIRefAccum[e + 2u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0); }
 vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const float Cell0)
 {
@@ -39,7 +37,7 @@ vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const f
             {
                 const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
                 const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-                const vec4  v = VoxFace(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)) + VoxSideRead(a, o));
+                const vec4  v = VoxFace(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)));
                 if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * cw; Den += cw; }     // (as the read: each corner its mean, trusted up to 32 samples)
             }
             if (Den > 1e-3) { Sum += Num / Den * wa; SumW += wa; }
