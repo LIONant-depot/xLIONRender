@@ -117,6 +117,33 @@ vec3 VoxEmitters(in const vec3 P, in const vec3 N)
     const vec3 Le = GV(e + 7u);
     return Le * (Q / (0.2126 * Le.x + 0.7152 * Le.y + 0.0722 * Le.z)) * (float(nE) / float(Few));
 }
+// The lights at a hit: the sun as Direct, of the lamps in reach one shadow ray, the lamp picked by what it would give (a shadow ray to every lamp was 2 of 5.75 ms at 16384 rays). As noisy as it needs; a face averages it
+vec3 VoxDirect(in const vec3 P, in const vec3 N)
+{
+    g_DirectNoLamps = true;
+    vec3 E = Direct(P, N);
+    const uint Lt = GD[2], nP = GD[3];
+    float Q = 0.0, Dist = 0.0; vec3 Pick = vec3(0.0), Dir = vec3(0.0); float PickQ = 0.0;
+    for (uint i = 0u; i < nP; ++i)
+    {
+        const uint b = Lt + 57u + 12u * i;
+        const vec3 D = GV(b) - P;
+        const float d = length(D), s = d / GF(b + 6u);
+        if (s >= 1.0 || d < 1e-6) continue;
+        const float c = dot(N, D) / d;
+        if (c <= 0.0) continue;
+        const float Co = GF(b + 10u);
+        const float Cone = Co > -1.5 ? smoothstep(Co, max(GF(b + 11u), Co + 1e-6), dot(-D, GV(b + 7u)) / d) : 1.0;
+        if (Cone <= 0.0) continue;
+        const vec3 Li = GV(b + 3u) * ((1.0 - s * s * s * s) / (1.0 + 2.0 * s * s) * c * Cone);
+        const float q = dot(Li, vec3(0.2126, 0.7152, 0.0722));
+        if (q <= 0.0) continue;
+        Q += q;
+        if (Rnd() * Q < q) { Pick = Li; PickQ = q; Dir = D * (1.0 / d); Dist = d; }
+    }
+    if (Q > 0.0 && !Occluded(P + N * 1e-3, Dir, Dist - 2e-3)) E += Pick * (Q / PickQ);
+    return E;
+}
 // A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
 vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out vec3 Nh, out bool bHit)
 {
@@ -136,7 +163,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
     Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
     bHit = true;
-    vec3 In = Direct(Ph, Nh) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
+    vec3 In = VoxDirect(Ph, Nh) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
     if (GD[15] > 0u) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
     return Own + (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }
