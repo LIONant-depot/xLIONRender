@@ -155,6 +155,9 @@ namespace xlionrender
         constexpr std::uint32_t s_FullscreenVert[] = {
             #include "xlionrender_fullscreen_vert.h"
         };
+        constexpr std::uint32_t s_GIDenoiseComp[] = {
+            #include "xlionrender_gi_denoise_comp.h"
+        };
         constexpr std::uint32_t s_ContactComp[] = {
             #include "xlionrender_contact_comp.h"
         };
@@ -801,6 +804,8 @@ namespace xlionrender
             if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ContactComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactCompute, { .m_pShader = &m_ContactShader, .m_nBuffers = 1, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 112 }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIDenoiseComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIDenoiseCompute, { .m_pShader = &m_GIDenoiseShader, .m_nBuffers = 4, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80 }); Err ) return Err;
@@ -1812,6 +1817,7 @@ namespace xlionrender
         if( auto Err = m_Device.Create(View.m_GIScreenZeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen zeros" }); Err ) return Err;
         Data[0] = { std::uint32_t(W), std::uint32_t(H), 0u, 0u };
         if( auto Err = m_Device.Create(View.m_GIScreenBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen buffer" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenFilter, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen filter" }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenPrev, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen buffer previous" }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenHeader, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * screen_header_v, .m_pName = "GI: screen header" }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenCounters, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v, .m_pName = "GI: screen counters" }); Err ) return Err;
@@ -1834,6 +1840,7 @@ namespace xlionrender
         if( View.m_GIScreenBuffer.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenBuffer));
         if( View.m_GIScreenZeros.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenZeros));
         if( View.m_GIScreenPrev.m_Private )   m_Device.Destroy(std::move(View.m_GIScreenPrev));
+        if( View.m_GIScreenFilter.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenFilter));
         if( View.m_GIScreenHeader.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenHeader));
         if( View.m_GIScreenCounters.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenCounters));
         View.m_bGIScreenPrev = false;

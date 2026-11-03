@@ -461,6 +461,8 @@ namespace xlionrender
         const tile_graph*           m_pBuildTile = nullptr;         // (buildMaterialPipeline: that pipeline)
         xgpu::shader                m_ContactShader;                // the sun's contact shadow (XLION_CONTACT; xlionrender_contact_comp.glsl)
         xgpu::compute               m_ContactCompute;
+        xgpu::shader                m_GIDenoiseShader;              // the voxels' GI read cleaned on the screen (XLION_GI_DENOISE)
+        xgpu::compute               m_GIDenoiseCompute;
         xgpu::texture               m_ContactTex;                   // R32_SFLOAT, sun_mask_w_v x sun_mask_h_v
         xgpu::timestamps            m_ContactTimes;
         bool                        m_bContactReady = false;

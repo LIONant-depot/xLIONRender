@@ -949,6 +949,8 @@ namespace xlionrender::gi
             if (s_bHits) Push.m_Epoch = -Push.m_Epoch;
             static const bool s_bKept = std::getenv("XLION_VOX_NO_KEPT") == nullptr;     // (a hit's direct light from what its surface was found to have: xlionrender_gi_ref_comp.glsl VoxDirectKept)
             if (s_bKept) Push.m_Bounces = -3;
+            static const bool s_bFirstOnly = std::getenv("XLION_VOX_FIRST_ONLY") != nullptr;
+            if (s_bFirstOnly) Push.m_First |= 2;
             Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
             return true;
         }

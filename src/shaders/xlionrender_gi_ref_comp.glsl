@@ -87,7 +87,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
     m.rgb += (Sample - m.rgb) * vox_short_v;
     m.w   += (Ds * Ds - m.w) * vox_short_v;
-    if (v.w >= 64.0 && Push.m_First != 0)       // (m_First: the lights changed lately)
+    if (v.w >= 64.0 && (Push.m_First & 1) != 0)       // (m_First: the lights changed lately)
     {
         const float Lk = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w, Lm = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
         const float Noise = sqrt(max(m.w, 0.0) * vox_short_v / (2.0 - vox_short_v));       // (the short mean's own standard deviation)
@@ -170,11 +170,11 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
     const vec4  d = GIRefAccum[e + 2u];
     const bool  bMine = d.x == Tag;
     vec4 c = bMine ? GIRefAccum[e] : vec4(0.0);
-    if (Push.m_First == 0 && c.w >= 1.0 && Rnd() >= 0.125) return c.rgb / c.w;
+    if ((Push.m_First & 1) == 0 && c.w >= 1.0 && Rnd() >= 0.125) return c.rgb / c.w;
     const vec3 E = VoxDirect(P, N);
     if (!bMine && d.x != 0.0 && abs(Now - d.y) < 120.0) return E;
     c += vec4(E, 1.0);
-    if (c.w >= (Push.m_First != 0 ? 4.0 : 32.0)) c *= 0.5;
+    if (c.w >= ((Push.m_First & 1) != 0 ? 4.0 : 32.0)) c *= 0.5;
     GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(0.0); GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
     return E;
 }
@@ -197,7 +197,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
     Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
     bHit = true;
-    vec3 In = VoxDirectKept(Ph, Nh, Hd) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
+    vec3 In = VoxDirectKept(Ph, Nh, Hd) + ((Push.m_First & 2) != 0 ? vec3(0.0) : VoxRead(Ph, Nh, Hd.xyz, Hd.w));     // (m_First's bit 1, XLION_VOX_FIRST_ONLY: measurement: no bounce past the first, so nothing a sample reads is still converging)
     if (GD[15] > 0u) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
     return Own + (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }

@@ -63,7 +63,7 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
         if (wa < 0.02) continue;
         const uint Face = uint(2 * a + (n[a] < 0.0 ? 1 : 0));
         vec3  Num = vec3(0.0);
-        float Den = 0.0;
+        float Den = 0.0, Raw = 0.0;
         vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;     // (X1c: finer along the face's own axis)
         const ivec3 iv = ivec3(floor(gv));
         const vec3  fc = g_ClipFloat ? gv - vec3(iv) : f;
@@ -75,19 +75,19 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
             {
                 const uint h = VoxHash(L, iv + o, Face), e = VoxEntryOf(h);
                 // (each corner its mean, trusted up to 32 samples: by raw count a corner with thousands of samples drowned one with dozens, the light outdoors over the floor indoors)
-                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * cw; Den += cw; } }
+                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * cw; Den += cw; Raw += min(v.w, 256.0) * t; } }
                 continue;
             }
             const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(q.x) + uint(q.y) * uint(clip_dim_v) + uint(q.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
             const uvec4 v = GIClip[e];
             Num += vec3(v.xyz) * t; Den += float(v.w) * t;
         }
-        if (Den > (g_ClipFloat ? 1e-3 : 1.0)) { Sum += Num / Den * wa; SumW += wa; Samples += Den * wa; }
+        if (Den > (g_ClipFloat ? 1e-3 : 1.0)) { Sum += Num / Den * wa; SumW += wa; Samples += Raw * wa; }
     }
     if (g_ClipFloat && SumW > 0.0)
     {
         const vec3 Inside = min(g, vec3(clip_dim_v - 1) - g);
-        g_ClipTrust = clamp(Samples / SumW / 32.0, 0.0, 1.0) * clamp(min(Inside.x, min(Inside.y, Inside.z)) / 4.0, 0.0, 1.0);
+        g_ClipTrust = clamp(Samples / SumW / 256.0, 0.0, 1.0) * clamp(min(Inside.x, min(Inside.y, Inside.z)) / 4.0, 0.0, 1.0);
     }
     return SumW > 0.0 ? vec4(Sum / SumW, SumW) : vec4(0.0);
 }

@@ -3242,6 +3242,19 @@ namespace xlionrender
                     }
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 3);
                 }
+                // The voxels' read cleaned on the screen (XLION_GI_DENOISE="<strides as cells> <largest stride>"; two passes, the second on the first)
+                static const std::array<float, 2> s_Denoise = [] { std::array<float, 2> A{ 0.0f, 32.0f }; if( const char* p = std::getenv("XLION_GI_DENOISE") ) (void)std::sscanf(p, "%f %f", &A[0], &A[1]); return A; }();
+                if( s_Denoise[0] > 0.0f && m_bVoxOn && !m_pGatherRefS && View.m_GIScreenFilter.m_Private )
+                {
+                    const float* pM = reinterpret_cast<const float*>(&W2C);
+                    const float  P11 = std::sqrt(pM[1] * pM[1] + pM[5] * pM[5] + pM[9] * pM[9]);
+                    struct { int m_W, m_H, m_TableBase, m_bAO; float m_CellPixels, m_MaxStride, m_Mult, m_Pad; } DPush{ View.m_GIScreenWidth, View.m_GIScreenHeight, int(m_GatherTableBase), bAO ? 1 : 0
+                        , gi::gpu_trace::VoxConfig()[0] * s_Denoise[0] * 0.5f * float(View.m_GIScreenHeight) * P11, s_Denoise[1], 0.5f, 0.0f };
+                    const int GX = (View.m_GIScreenWidth + 7) / 8, GY = (View.m_GIScreenHeight + 7) / 8;
+                    { auto Bf = std::array<xgpu::buffer*, 4>{ &View.m_GIScreenBuffer, &View.m_GIScreenFilter, &View.m_GIGatherTable, &View.m_AO }; Window.Dispatch(m_GIDenoiseCompute, Bf, std::span<const xgpu::texture* const>{}, std::span<const xgpu::texture* const>{}, &DPush, sizeof(DPush), GX, GY); }
+                    DPush.m_Mult = 1.0f;
+                    { auto Bf = std::array<xgpu::buffer*, 4>{ &View.m_GIScreenFilter, &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AO }; Window.Dispatch(m_GIDenoiseCompute, Bf, std::span<const xgpu::texture* const>{}, std::span<const xgpu::texture* const>{}, &DPush, sizeof(DPush), GX, GY); }
+                }
                 const xgpu::buffer::copy C{ 6, int(m_Device.getFrameIndex() % ring_frames_v), 1 };     // (its counters into this frame's slot, as the geometry read's)
                 Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });
             };
