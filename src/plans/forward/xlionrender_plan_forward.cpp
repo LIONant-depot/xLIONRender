@@ -3332,7 +3332,7 @@ namespace xlionrender
             if( s_bSplit && bMain )
             {
                 auto [It, bNew] = s_Split.try_emplace(this);
-                if( bNew && m_Device.Create(It->second, { .m_Count = 4 }) ) s_Split.erase(It);
+                if( bNew && m_Device.Create(It->second, { .m_Count = 6 }) ) s_Split.erase(It);
                 else pSplit = &It->second;
             }
             if( pSplit )
@@ -3343,6 +3343,12 @@ namespace xlionrender
                 {
                     s_Pre += double(s_Ns[1] - s_Ns[0]) * 1e-6; s_Shade += double(s_Ns[3] - s_Ns[1]) * 1e-6; s_Blend += double(s_Ns[2] - s_Ns[3]) * 1e-6;
                     if( ++s_n == 120 ) { std::printf("SCENESPLIT prepass %.3f, shading + sky %.3f, blended %.3f ms\n", s_Pre / s_n, s_Shade / s_n, s_Blend / s_n); std::fflush(stdout); s_n = 0; s_Pre = s_Shade = s_Blend = 0; }
+                    static double s_Depth = 0, s_Screen = 0, s_Tile = 0; static int s_m = 0;
+                    if( s_Ns.size() >= 6 && s_Ns[4] > s_Ns[0] && s_Ns[5] >= s_Ns[4] && s_Ns[1] >= s_Ns[5] )
+                    {
+                        s_Depth += double(s_Ns[4] - s_Ns[0]) * 1e-6; s_Screen += double(s_Ns[5] - s_Ns[4]) * 1e-6; s_Tile += double(s_Ns[1] - s_Ns[5]) * 1e-6;
+                        if( ++s_m == 120 ) { std::printf("PREPASSSPLIT depth and attributes %.3f, gather + mask + contact %.3f, tile pass %.3f ms\n", s_Depth / s_m, s_Screen / s_m, s_Tile / s_m); std::fflush(stdout); s_m = 0; s_Depth = s_Screen = s_Tile = 0; }
+                    }
                 }
                 Cmd.WriteTimestamp(*pSplit, 0);
             }
@@ -3527,7 +3533,7 @@ namespace xlionrender
                     CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
                     PrepassCulled(1);
                 }
-                if( Mode == 2 ) { CmdPass.reset(); if( bScreen ) GatherGI(); if( bSunMask ) SunMask(); if( bContact ) ContactPass(); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
+                if( Mode == 2 ) { CmdPass.reset(); if( pSplit ) Window.WriteTimestamp(*pSplit, 4); if( bScreen ) GatherGI(); if( bSunMask ) SunMask(); if( bContact ) ContactPass(); if( pSplit ) Window.WriteTimestamp(*pSplit, 5); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;

@@ -132,10 +132,10 @@ vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
         {
             if (Bw[b] < 0.02) continue;
             vec3 Num = vec3(0.0); float Den = 0.0;
-            for (int c = 0; c < 8; ++c)
+            for (int c = 0; c < 4; ++c)        // (the face's plane: along its axis the corner its samples rounded to)
             {
-                const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
-                const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
+                ivec3 o = ivec3(0); o[u] = c & 1; o[v] = c >> 1; o[a] = f[a] >= 0.5 ? 1 : 0;
+                const float t = (o[u] != 0 ? f[u] : 1.0 - f[u]) * (o[v] != 0 ? f[v] : 1.0 - f[v]);
                 const uint  h = VoxHash(L, iv + o, Base + Bk[b]), e = VoxEntryOf(h);
                 if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 w = uintBitsToFloat(GIClip[e]); if (w.w > 0.0) { const float cw = min(w.w, 128.0) * t; Num += w.rgb / w.w * cw; Den += cw; } }
             }
