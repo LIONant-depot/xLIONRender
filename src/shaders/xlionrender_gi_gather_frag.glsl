@@ -42,7 +42,7 @@ float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]);
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
 const float vox_layers_v = 8.0;            // (xlionrender_gi_ref_comp.glsl)
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 36u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 180u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
 uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
 bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
@@ -73,7 +73,8 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
             const float t = (o.x != 0 ? fc.x : 1.0 - fc.x) * (o.y != 0 ? fc.y : 1.0 - fc.y) * (o.z != 0 ? fc.z : 1.0 - fc.z);
             if (g_ClipFloat)      // (X1c: the sparse store: a face no surface fed, or lost to another, adds nothing)
             {
-                const uint h = VoxHash(L, iv + o, Face), e = VoxEntryOf(h);
+                const int ua = (a + 1) % 3, va = (a + 2) % 3;
+                const uint h = VoxHash(L, iv + o, Face + 36u * (1u + (o[ua] == 0 ? 1u : 0u) + (o[va] == 0 ? 2u : 0u))), e = VoxEntryOf(h);
                 // (each corner its mean, trusted up to 32 samples: by raw count a corner with thousands of samples drowned one with dozens, the light outdoors over the floor indoors)
                 if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * cw; Den += cw; } }
                 continue;
