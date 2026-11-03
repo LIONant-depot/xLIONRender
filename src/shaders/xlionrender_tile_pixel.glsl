@@ -9,6 +9,30 @@ layout(binding = 5) uniform usampler2D TileAttr1;
 layout(binding = 6) uniform sampler2D TileColor;
 vec2 g_TileDx, g_TileDy;
 vec3 TileOct(in const vec2 o) { vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y)); if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0); return normalize(n); }
+// A march toward a paged light through the prepass's depth: 4 steps, xlionrender_contact_comp.glsl's way
+float TileContact(in const vec3 P, in const vec3 ToLight)
+{
+    const float Len = length(ToLight), Dist = length(P);
+    const float Reach = min(UBOLight.ShadowLevels[0].w, Len * 0.9);
+    if (Reach <= 0.0 || Dist > 15.0) return 1.0;
+    const vec3  Dir = ToLight / Len;
+    const vec3  Start = P + Dir * (0.004 + 0.002 * Dist);
+    const vec2  Size = vec2(textureSize(TileDepth, 0));
+    const float Jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    for (int k = 0; k < 4; ++k)
+    {
+        const float t = (float(k) + Jit) / 4.0;
+        const vec4  C = UBOLight.TailW2C * vec4(Start + Dir * (t * t * Reach), 1.0);
+        if (C.w <= 1e-4) return 1.0;
+        const vec3  n = C.xyz / C.w;
+        if (any(greaterThan(abs(n.xy), vec2(1.0)))) return 1.0;
+        const float zs = texelFetch(TileDepth, ivec2((n.xy * 0.5 + 0.5) * Size), 0).r;
+        if (zs >= n.z || zs >= 1.0) continue;
+        const vec4  Ws = UBOLight.TailC2W * vec4(n.xy, zs, 1.0);
+        if (C.w - 1.0 / Ws.w < 0.15) return smoothstep(7.5, 15.0, Dist);       // (blocked, fading out with the distance)
+    }
+    return 1.0;
+}
 void TilePixelSetup()
 {
     const ivec2 Px = ivec2(gl_FragCoord.xy);

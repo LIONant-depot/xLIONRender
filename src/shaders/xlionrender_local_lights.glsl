@@ -239,10 +239,19 @@ vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in c
 }
 
 // Its shadow at the surface (1 lit .. 0 shadowed)
+#ifdef XLION_TILE_PIXEL
+float TileContact(in const vec3 P, in const vec3 ToLight);      // (xlionrender_tile_pixel.glsl)
+#endif
 float LocalLightShadow(in const int i, in const vec3 N)
 {
     const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];
+#ifdef XLION_TILE_PIXEL
+    // A paged light's contact shadow (XLION_CONTACT; ShadowLevels[0].w its length): the tile pass has the depth to trace. ponytail: the raster path (skinned, special materials) goes without
+    const float St = LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+    return St > 0.0 && Ld.Shadow.z > 0.0 && UBOLight.ShadowLevels[0].w > 0.0 ? St * TileContact(In.wSpacePosition.xyz, Ld.PosRadius.xyz - In.wSpacePosition.xyz) : St;
+#else
     return LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+#endif
 }
 
 // One light's contribution at the surface (0 outside its radius)

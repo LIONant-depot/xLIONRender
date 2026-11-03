@@ -3368,6 +3368,8 @@ namespace xlionrender
                 Window.Dispatch(m_ContactCompute, Buffers, Textures, Images, &Push, sizeof(Push), GX, GY);
                 if( s_bTimes ) Window.WriteTimestamp(m_ContactTimes, 1);
                 pLight->m_ShadowLevels[0].m_Z = s_Contact[4];
+                pLight->m_ShadowLevels[0].m_W = s_Contact[0];
+                pLight->m_TailW2C = W2C; pLight->m_TailC2W = W2C.Inverse();
                 m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;      // (the scene's block, with its flag)
             };
             const auto TilePass = [&]
