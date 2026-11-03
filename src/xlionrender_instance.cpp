@@ -399,7 +399,7 @@ namespace xlionrender
         {
             const std::uint32_t Zero = 0u;
             const auto          Mips = std::array{ xgpu::texture::setup::mip_size{ sizeof(Zero) } };
-            if( std::getenv("XLION_CONTACT") )      // (before anything binds LitBindings)
+            if( const char* pContact = std::getenv("XLION_CONTACT"); pContact && std::atof(pContact) > 0.0 )      // (before anything binds LitBindings)
                 if( auto Err = Device.Create(m_ContactTex, { .m_Format = xgpu::texture::format::R32_SFLOAT, .m_Width = sun_mask_w_v, .m_Height = sun_mask_h_v, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: contact shadow" }); Err ) return Err;
             if( auto Err = Device.Create(m_SunMaskDummy, { .m_Format = xgpu::texture::format::R32_UINT, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
                                                          , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Zero), sizeof(Zero) }, .m_isGamma = false, .m_pName = "Shadows: sun mask dummy" }); Err ) return Err;
@@ -641,7 +641,7 @@ namespace xlionrender
                 }
                 {   // the G-buffer prepass (gi_gbuffer_gather_plan.md): the prepass's vertex shaders, the normal and the submesh instance written
                     xgpu::shader GPreFrag;
-                    if( std::getenv("XLION_TILE") )      // (the tile pass's prototype: the attributes too; its own shaders)
+                    if( const char* pTile = std::getenv("XLION_TILE"); pTile && pTile[0] != '0' )      // (the tile pass: the attributes too)
                     {
                         if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPreTileFrag) }); Err ) return Err;
                         if( auto Err = Device.Create(m_TileVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
@@ -1754,7 +1754,7 @@ namespace xlionrender
         // (the HDR target first, cleared here: the scene pass then loads it as it loads the depth - loaded without a clear this frame it was
         // in no attachment layout: nothing drew)
         auto Attachments = std::vector{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId } };
-        if( std::getenv("XLION_TILE") )
+        if( const char* pTile = std::getenv("XLION_TILE"); pTile && pTile[0] != '0' )
         {
             for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1 } )
             {

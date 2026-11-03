@@ -101,6 +101,9 @@ void ProbeAdd(in const int Record, in const vec3 P, in const vec3 N, in const ve
 }
 
 #ifndef XLION_TAIL_SCREEN
+#ifndef XLION_FRAG_DIST
+#define XLION_FRAG_DIST (1.0 / gl_FragCoord.w)      // (the pixel's clip w; the tile pass's triangle has none: its depth's)
+#endif
 // The traced reflections (documentation/reflections_strategy.md sec. 5; xlionrender_refl_trace_comp.glsl): the records' second region,
 // a half-size texel each (U: the lobe-mean radiance, its confidence, the view depth, the octahedral normal). The 4 texels around the
 // pixel, bilinear, each weighed by how close its view depth is to this pixel's and how much its normal agrees (the tail's weights,
@@ -121,13 +124,13 @@ vec4 ReflScreen(in const vec3 N)
             const uvec4 Q = TailScreen[Rf];
             const uvec2 r = (k & 1u) != 0u ? Q.zw : Q.xy;
             const vec2  bd = unpackHalf2x16(r.y);
-            const float Dist = 1.0 / gl_FragCoord.w;
+            const float Dist = XLION_FRAG_DIST;
             if (bd.y > 0.0 && abs(bd.y - Dist) < 0.05 * Dist && !any(isnan(vec3(unpackHalf2x16(r.x), bd.x))) && !any(isinf(vec3(unpackHalf2x16(r.x), bd.x)))) return vec4(unpackHalf2x16(r.x), bd.x, 1.0);
         }
     }
     const vec2  hp = gl_FragCoord.xy * 0.5 - 0.5;
     const vec2  i0 = floor(hp), f = hp - i0;
-    const float Dist = 1.0 / gl_FragCoord.w;
+    const float Dist = XLION_FRAG_DIST;
     vec3  Su = vec3(0.0);
     float Sc = 0.0, Sw = 0.0;
     for (int k = 0; k < 4; ++k)

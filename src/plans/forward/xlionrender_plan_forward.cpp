@@ -2789,9 +2789,12 @@ namespace xlionrender
             // the gather has no vertices - the scene pass's own vertex read
             static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
             // (the GI off: the same pass, no GI in it - the ambient occlusion's way to the materials)
-            const bool bScreen = bGPre && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && Scene.m_GI.m_Debug == gi_debug::NONE
+            // (the voxels' light view: the surfels hold nothing to show, the gather's read does)
+            const bool bVoxLightView = Scene.m_GI.m_Debug == gi_debug::LIGHT && gi::gpu_trace::VoxConfig()[0] > 0.0f;
+            if( pLight ) pLight->m_ShadowLevels[1].m_X = bVoxLightView ? 2.0f : 0.0f;
+            const bool bScreen = bGPre && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && (Scene.m_GI.m_Debug == gi_debug::NONE || bVoxLightView)
                               && (Scene.m_GI.m_bPerPixel || !Scene.m_GI.m_bEnable) && createGIScreenTargets(View) == nullptr;
-            static const bool s_bTile = [] { const char* p = std::getenv("XLION_TILE"); return p && p[0] != '2'; }();        // (2: the attributes written, no tile pass: the prepass's cost)
+            static const bool s_bTile = [] { const char* p = std::getenv("XLION_TILE"); return p && p[0] != '2' && p[0] != '0'; }();        // (2: the attributes written, no tile pass: the prepass's cost)
             const bool bTile = s_bTile && bGPre && bScreen && View.m_TilePass.m_Private;
             const auto TileMat = [&]( const material_slot* pMat )       // (opaque or masked, one or two sided: the prepass has them all)
             {
@@ -4177,8 +4180,8 @@ namespace xlionrender
         // Camera-centered world (same as the editors): precision stays near the eye in large worlds
         const xmath::fvec3 Eye     = Camera.getPosition();
         const xmath::fmat4 W2CNoJitter = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
-        static const bool s_bEnvTAA = std::getenv("XLION_TAA") != nullptr;      // (measurement)
-        const bool bTAA = s_bEnvTAA || Scene.m_Post.m_bTAA;
+        static const int s_EnvTAA = [] { const char* p = std::getenv("XLION_TAA"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();      // (measurement: 0 off, else on)
+        const bool bTAA = s_EnvTAA >= 0 ? s_EnvTAA == 1 : Scene.m_Post.m_bTAA;
         const xmath::fmat4 W2C = [&]
         {
             if( !bTAA ) return W2CNoJitter;
@@ -4289,9 +4292,9 @@ namespace xlionrender
         {
             XPROFILE_SCOPE("Render: tone map"); XPROFILE_GPU_SCOPE(Window, "Render: tone map");
             static const float s_EnvBloom = [] { const char* p = std::getenv("XLION_BLOOM"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement)
-            static const bool  s_bEnvAuto = std::getenv("XLION_AUTO_EXPOSURE") != nullptr;
+            static const int   s_EnvAuto = [] { const char* p = std::getenv("XLION_AUTO_EXPOSURE"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();     // (measurement: 0 off, else on)
             const float Bloom = s_EnvBloom >= 0.0f ? s_EnvBloom : Scene.m_Post.m_Bloom;
-            const bool  bAuto = s_bEnvAuto || Scene.m_Post.m_bAutoExposure;
+            const bool  bAuto = s_EnvAuto >= 0 ? s_EnvAuto == 1 : Scene.m_Post.m_bAutoExposure;
             const xgpu::texture* pHDR = &View.m_HDR;
             xgpu::pipeline_instance* pToneMap = &View.m_ToneMapInstance;
             if( bTAA )

@@ -375,7 +375,7 @@ float g_CapRoughness = 1.0, g_CapF0 = 0.04;     // (the material's, for the capt
 void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in const vec3 inAlbedo, in const float inMetalic, in const vec3 inEmissiveColor)
 {
 #ifndef XLION_NO_GI_PIXEL
-	if (InGIRef.y == gi_screen_v) { SurfelGIScreen(normalize(In.Normal.xyz) * (XLION_FRONT ? 1.0 : -1.0), length(In.wSpacePosition.xyz)); return; }     // read at half resolution: upsampled
+	if (InGIRef.y == gi_screen_v) { SurfelGIScreen(normalize(In.Normal.xyz) * (XLION_FRONT ? 1.0 : -1.0), length(In.wSpacePosition.xyz)); if (UBOLight.ShadowLevels[1].x == 2.0) g_GIDebug = vec4(g_GI.w > 0.5 ? g_GI.rgb / PI : vec3(0.0), 1.0); return; }     // (ShadowLevels[1].x 2: the voxels' LIGHT view) read at half resolution: upsampled
 #endif
 	if (InGI.w > 1e-6) { g_GI = vec4(InGI.rgb / InGI.w, 1.0); g_GISource = 1u; }
 #ifndef XLION_NO_GI_PIXEL

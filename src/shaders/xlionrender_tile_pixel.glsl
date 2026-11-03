@@ -51,6 +51,7 @@ void TilePixelSetup()
     const vec2 uv = (vec2(Px) + 0.5) / vec2(textureSize(TileId, 0));
     const vec4 Pc = g_Tile.m_C2W * vec4(uv * 2.0 - 1.0, texelFetch(TileDepth, Px, 0).r, 1.0);
     In.wSpacePosition = vec4(Pc.xyz / Pc.w, 1.0);
+    g_TileDist = 1.0 / Pc.w;
     In.ShadowPosition = vec4(0.0);
     In.VertColor = texelFetch(TileColor, Px, 0);
     In.Normal = TileOct(texelFetch(TileNormal, Px, 0).xy);
