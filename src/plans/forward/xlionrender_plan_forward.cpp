@@ -2166,7 +2166,9 @@ namespace xlionrender
         if( bLights ) Light.m_LocalCount.m_Y = float(int(light_mode::SCREEN));
 
         // Reflections' sharp receivers: the G-buffer at full size too (createSharpTargets: made when first needed; its rays a pixel each)
-        const bool bSharp = m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && createSharpTargets(View) == nullptr;
+        static const float s_SharpEnv = [] { const char* p = std::getenv("XLION_REFL_SHARP"); return p ? float(std::atof(p)) : -1.0f; }();      // (measurement)
+        if( s_SharpEnv >= 0.0f ) m_ReflSharpMax = s_SharpEnv;
+        const bool bSharp = m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && m_bReflSharpSeen && createSharpTargets(View) == nullptr;
         Light.m_TailParams.m_X = bSharp ? float(View.m_SharpWidth) : 0.0f;      // (the materials: the full-size records' row, 0: none)
         Window.WriteTimestamp(m_TailTimes, 0);
         const auto DrawGBuffer = [&]( xgpu::renderpass& Pass )
@@ -2302,6 +2304,7 @@ namespace xlionrender
             }
             std::uint32_t Got[8] = {};
             (void)m_ReflStats.MemoryMap(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
+            if( Got[0] ) { m_bReflSharpSeen = (Got[7] >> 31) != 0u; Got[7] &= 0x7FFFFFFFu; }
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 5 && Ns[0] != ~0ull && Ns[4] > Ns[0] )
             {
                 m_ReflSum[0] += double(Ns[4] - Ns[0]) * 1e-6;
@@ -2360,10 +2363,10 @@ namespace xlionrender
             // (the voxels on: they are the hits' indirect light; the surfels hold nothing then)
             xgpu::buffer* pVox = m_bVoxOn && m_pGITrace ? m_pGITrace->VoxBuffer() : nullptr;
             const std::array<float, 3> VoxAt = pVox ? m_pGITrace->VoxAnchor() : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
-            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; } Push
+            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
                 , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, 0 }
-                , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) }, { VoxAt[0], VoxAt[1], VoxAt[2], pVox ? gi::gpu_trace::VoxConfig()[0] : 0.0f } };
+                , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) }, { VoxAt[0], VoxAt[1], VoxAt[2], pVox ? gi::gpu_trace::VoxConfig()[0] : 0.0f }, m_ReflSharpMax };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
             auto Buffers  = std::array<xgpu::buffer*, 12>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };

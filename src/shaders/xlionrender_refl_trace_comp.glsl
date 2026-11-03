@@ -43,7 +43,7 @@ layout(set = 1, binding = 5) uniform sampler2D GMotion;    // w: the motion's fl
 // records' first (x, y, z; x 0: the half-size dispatch)
 // m_Tex: x the receivers' roughness up to which their hits get their material's own shading (fading over its last quarter), y the visible
 // reflectance from which (scene::m_ReflectionTextureMaxRoughness, m_ReflectionTextureMinReflectance), w the list's capacity; x 0: none
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; } Push;
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen; } Push;
 
 #include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
@@ -182,6 +182,8 @@ void main()
         const float PlaneDist = dot(Push.m_Plane.xyz, P + Push.m_Eye) + Push.m_Plane.w;
         const bool  bPlanarHere = Push.m_Mode == 0u && Push.m_bPlanar > 0.5 && Rough < Push.m_MaxRough && abs(PlaneDist) < 0.01 + 0.002 * length(P) && dot(N, Push.m_Plane.xyz) > 0.95;
         const bool  bSharpHere  = Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpMax;      // (traced at full size)
+        // (a sharp receiver seen, whether or not the full size runs: Stats' top bit: an empty full size dispatch cost 2 ms on Bistro)
+        if (Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpSeen) atomicOr(Stats[Push.m_Slot * 8u + 7u], 0x80000000u);
         if (bFull && !bSharpHere) { }      // (the full-size dispatch: the sharp ones only; the rest: none - the half-size records serve them)
         else if (!bFull && bSharpHere) { }  // (the half-size dispatch leaves the sharp ones to the full-size one)
         else if (bPlanarHere)

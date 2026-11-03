@@ -251,6 +251,7 @@ namespace xlionrender
         int                                        m_SSRSteps        = 48;                  // reflections' screen trace (scene::m_bReflectionScreen): its steps a ray (half size), its length and thickness (world units)
         float                                      m_SSRMaxDist      = 30.0f;
         float                                      m_SSRThickness    = 0.15f;
+        bool                                       m_bReflSharpSeen  = true;                // (last frames' half size trace saw a receiver that sharp: the full size runs)
         float                                      m_ReflSharpMax    = 0.1f;                // reflections: the receivers sharper than this trace at the view's full size (their own G-buffer); 0: all at half size
         int                                        m_ReflTraceBench  = 0;                   // (measurement) SCREEN, the GI on: a reflection ray a thin G-buffer texel through the GI's BVH (shaders/xlionrender_refl_trace_comp.glsl): 1 mirror, 2 roughness 0.5, 3 the materials'; checks shown as the records (with ReflectionDebug): 4 the camera's ray through the BVH against the G-buffer's depth (green agrees, red / blue 10 x the error; hits: within 1%), 5 the G-buffer's normal, 6 its N.V, 7 its F0 luminance (the motion target's w: the hits' texturing selects by it); 0 off. Init: XLION_REFL_BENCH
         // Emissive surfaces as lights (documentation/lighting_gi_interface_notice.md): the GI's emitter view (gi::world::ForEachEmitter) as
