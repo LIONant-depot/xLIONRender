@@ -925,8 +925,9 @@ namespace xlionrender::gi
         bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, std::uint32_t LightsKey) noexcept
         {
             // The lights still for a while: no face can have changed, the noise can't start one over: the light settles and the flicker dies out, with fewer rays too (ponytail: moving objects aren't in the key)
-            if (LightsKey != m_VoxLightsKey) { m_VoxLightsKey = LightsKey; m_VoxStill = 0; }
-            const bool bStill = ++m_VoxStill > 60;
+            const auto VoxNow = std::chrono::steady_clock::now();
+            if (LightsKey != m_VoxLightsKey) { m_VoxLightsKey = LightsKey; m_VoxLightsMoved = VoxNow; }
+            const bool bStill = std::chrono::duration<float>(VoxNow - m_VoxLightsMoved).count() > 0.5f;      // (seconds: a game can't promise its frame rate)
             // VoxQuiet: fewer rays only when nothing asks for them: the eye still too (a moving eye's new cells fill from them: a quarter of them drew a bubble around it, Tomas). A nudge asks for nothing (Tomas: it dropped the frame):
             // the eye has to leave a place by a quarter of a cell, a slow drift counts too. How far it went since the rays last slept says how long they stay: a nudge a second, past a metre or so the old ten (a long way: much is new; a second alone left 2.5 % off at 5 s against .8). A turn asks for nothing yet: rays stay one frame in 8 (ponytail: what a turn brings in fills slowly; wake on a large turn if it shows)
             const v3 dv{ Eye.m_X - m_VoxEyeAt[0], Eye.m_Y - m_VoxEyeAt[1], Eye.m_Z - m_VoxEyeAt[2] };
@@ -956,7 +957,7 @@ namespace xlionrender::gi
             Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
             return true;
         }
-        bool                 VoxQuiet(void) const noexcept { return m_VoxStill > 600 && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
+        bool                 VoxQuiet(void) const noexcept { return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
         // XLION_GI_VOX=<level 0's cell> [<ms a frame> [<samples a face keeps>]]
         static const std::array<float, 3>& VoxConfig(void) noexcept { static const std::array<float, 3> s_A = [] { std::array<float, 3> A{ 0.0f, 1.0f, 16384.0f }; if (const char* p = std::getenv("XLION_GI_VOX")) (void)std::sscanf(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }(); return s_A; }
         std::array<float, 3> VoxAnchor(void) const noexcept { return m_VoxAnchor; }
@@ -1340,7 +1341,7 @@ namespace xlionrender::gi
         static constexpr std::uint32_t      vox_slots_v = 1u << 21;     // (xlionrender_gi_ref_comp.glsl, _gather_frag.glsl)
         std::size_t                         m_VoxCleared = 0;
         std::uint32_t                       m_VoxLightsKey = 0;
-        int                                 m_VoxStill = 0;
+        std::chrono::steady_clock::time_point m_VoxLightsMoved{};
         bool                                m_bRef = false;
         std::size_t                         m_RefNext = 0;
         std::uint32_t                       m_RefLightsKey = 0;
