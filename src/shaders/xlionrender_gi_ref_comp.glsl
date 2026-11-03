@@ -29,8 +29,31 @@ vec3 CosineDir(in const vec3 N)
 // The header after the pixels (2 entries): the eye and level 0's cell
 #include "xlionrender_vox_read.glsl"
 // A sample into a level: a cell around the point and a face its normal looks toward, by the read's weights: it lands where the reads look for it
+// The same rays, by where they went (the reflection's read, xlionrender_gi_gather_frag.glsl VoxReflect): a cell's face (no layers) keeps a plain mean per direction: around its normal,
+// or along one of the other two axes, each way. No more rays: a place on a floor knows what its rays saw toward the street and toward the wall
+vec3 g_VoxRayD = vec3(0.0);
+void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
+{
+    const vec3 An = abs(N);
+    const int  a = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2, u = (a + 1) % 3, v = (a + 2) % 3;
+    const vec3 D = g_VoxRayD, Ad = abs(D);
+    const uint b = Ad[a] >= Ad[u] && Ad[a] >= Ad[v] ? 4u : Ad[u] >= Ad[v] ? (D[u] > 0.0 ? 0u : 1u) : (D[v] > 0.0 ? 2u : 3u);
+    const uint h = VoxHash(L, Org + ivec3(floor(g + 0.5)), 6u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 5u + b), e = VoxEntryOf(h);
+    const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
+    const vec4 d = GIRefAccum[e + 2u];
+    vec4 c = GIRefAccum[e];
+    if (d.x != Tag)
+    {
+        if (d.x != 0.0 && abs(Now - d.y) < 120.0) return;
+        c = vec4(0.0);
+    }
+    c += vec4(Sample, 1.0);
+    if (c.w >= 256.0) c *= 0.5;
+    GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(0.0); GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
+}
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
+    VoxStoreDir(L, Org, g, N, Sample);
     const vec3  w = N * N;
     const float r = Rnd() * (w.x + w.y + w.z);
     const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
@@ -101,6 +124,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     // the emitters by light sampling (G5, as the surfels' pass: the table, a shadow ray), this point's own unless lighting shades it; an emission a ray hits is not counted again
     const vec3 Own = GD[15] > 0u && !EmitterDirectExternal() ? VoxEmitters(P, N) : vec3(0.0);
     const vec3 D = CosineDir(N);
+    g_VoxRayD = D;
     const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
     if (H.m_Inst < 0) return Own + SkyAt(D) * gi_pi_v;
     const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);

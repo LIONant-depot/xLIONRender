@@ -42,7 +42,7 @@ float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]);
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
 const float vox_layers_v = 8.0;            // (xlionrender_gi_ref_comp.glsl)
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 6u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 36u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
 uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
 bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
@@ -104,6 +104,47 @@ vec4 VoxReadLevels(in const vec3 Pcam, in const vec3 n)
         Last = R.xyz; bAny = true;
     }
     return bAny ? vec4(Sum + Last * Left, 1.0) : vec4(0.0);      // (what no level vouches for: the coarsest that has anything)
+}
+// The light around the mirror direction, from the rays this place's own face sent that way (xlionrender_gi_ref_comp.glsl VoxStoreDir): the three axes R leans on, by their squares, as a face read.
+// Finest level that knows, the rest from its parent; what none vouches for: the place's irradiance (Fallback; EnvLighting then gives about its older ratio), so a new cell fades in
+vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
+{
+    const vec3 EyeL = vec3(TF(22u), TF(23u), TF(24u)), Pw = Pcam + vec3(TF(25u), TF(26u), TF(27u));
+    const vec3 Rd = reflect(normalize(Pcam), n), An = abs(n);
+    const int  a = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2, u = (a + 1) % 3, v = (a + 2) % 3;
+    const uint Base = 6u + uint(2 * a + (n[a] < 0.0 ? 1 : 0)) * 5u;
+    const uint  Bk[3] = uint[3](4u, Rd[u] > 0.0 ? 0u : 1u, Rd[v] > 0.0 ? 2u : 3u);
+    const float Bw[3] = float[3](Rd[a] * Rd[a], Rd[u] * Rd[u], Rd[v] * Rd[v]);
+    const float Cell0 = TF(21u);
+    vec3 Sum = vec3(0.0); float Left = 1.0;
+    for (int L = 0; L < clip_levels_v && Left > 1e-3; ++L)
+    {
+        const float Cell = Cell0 * float(1 << L);
+        const ivec3 Org  = ivec3(floor(EyeL / Cell)) - ivec3(clip_dim_v / 2);
+        const vec3  g    = Pw / Cell - vec3(Org) - 0.5;
+        if (any(lessThan(g, vec3(0.0))) || any(greaterThanEqual(g, vec3(clip_dim_v - 1)))) continue;
+        const vec3  gv = vec3(Org) + g;
+        const ivec3 iv = ivec3(floor(gv));
+        const vec3  f  = gv - vec3(iv);
+        vec3 Lit = vec3(0.0); float WSum = 0.0, Trust = 0.0;
+        for (int b = 0; b < 3; ++b)
+        {
+            if (Bw[b] < 0.02) continue;
+            vec3 Num = vec3(0.0); float Den = 0.0;
+            for (int c = 0; c < 8; ++c)
+            {
+                const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
+                const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
+                const uint  h = VoxHash(L, iv + o, Base + Bk[b]), e = VoxEntryOf(h);
+                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 w = uintBitsToFloat(GIClip[e]); if (w.w > 0.0) { const float cw = min(w.w, 128.0) * t; Num += w.rgb / w.w * cw; Den += cw; } }
+            }
+            if (Den > 1e-3) { Lit += Num / Den * Bw[b]; WSum += Bw[b]; Trust += Den * Bw[b]; }
+        }
+        if (WSum < 0.5) continue;
+        const float Tr = clamp(Trust / WSum / 64.0, 0.0, 1.0);
+        Sum += Lit / WSum * (Left * Tr); Left *= 1.0 - Tr;
+    }
+    return vec4(Sum + Fallback * Left, 1.0);
 }
 vec4 ClipRead(in const vec3 Pcam, in const vec3 n)
 {
@@ -233,6 +274,7 @@ void main()
             E = VoxReadLevels(S.P, N);
             bWeak = E.w < 0.5;
             E.w = 1.0;
+            g_GIRefl = VoxReflect(S.P, N, E.rgb);
         }
         else if (GITable[push.TableBase + 20u] != 0u)                   // experiment X1: the clipmap, both reads
         {
