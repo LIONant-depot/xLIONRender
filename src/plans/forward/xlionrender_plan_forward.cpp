@@ -2357,12 +2357,15 @@ namespace xlionrender
             // the hits to texture: the trace appends them to m_HitList (their keys: the half size's texels, then the full size's sharp ones)
             const std::uint32_t HalfKeys = std::uint32_t(W * H);
             const bool bHits = m_ReflTraceBench == 0 && Scene.m_ReflectionTextureMaxRoughness > 0 && createHitTargets() == nullptr;
-            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; } Push
+            // (the voxels on: they are the hits' indirect light; the surfels hold nothing then)
+            xgpu::buffer* pVox = m_bVoxOn && m_pGITrace ? m_pGITrace->VoxBuffer() : nullptr;
+            const std::array<float, 3> VoxAt = pVox ? m_pGITrace->VoxAnchor() : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
+            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
                 , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, 0 }
-                , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) } };
+                , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) }, { VoxAt[0], VoxAt[1], VoxAt[2], pVox ? gi::gpu_trace::VoxConfig()[0] : 0.0f } };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
-            auto Buffers  = std::array<xgpu::buffer*, 11>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats };
+            auto Buffers  = std::array<xgpu::buffer*, 12>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
             // list's places before the glossy ones

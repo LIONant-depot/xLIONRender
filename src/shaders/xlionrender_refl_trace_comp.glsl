@@ -31,6 +31,7 @@ layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; 
 // receivers whose reflection shows (Push.m_Tex: their visible reflectance - F0 through the split sum's DFG, Karis' fit - times their
 // sharpness): a white dielectric shows 4% of what it reflects, its hits keep the capture's
 layout(std430, set = 0, binding = 10) buffer hits_b { uvec4 Hits[]; };
+layout(std430, set = 0, binding = 11) readonly buffer vox_b { vec4 GIRefAccum[]; };      // the voxels of light, the indirect light at the hits (Push.m_Vox.w > 0)
 layout(set = 1, binding = 0) uniform sampler2D GColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 1) uniform sampler2D GDepth;
 layout(set = 1, binding = 2) uniform sampler2D EnvAtlas;   // the sky's prefiltered atlas (xlionrender_environment.glsl EnvSample)
@@ -42,8 +43,9 @@ layout(set = 1, binding = 5) uniform sampler2D GMotion;    // w: the motion's fl
 // records' first (x, y, z; x 0: the half-size dispatch)
 // m_Tex: x the receivers' roughness up to which their hits get their material's own shading (fading over its last quarter), y the visible
 // reflectance from which (scene::m_ReflectionTextureMaxRoughness, m_ReflectionTextureMinReflectance), w the list's capacity; x 0: none
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex; } Push;
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; } Push;
 
+#include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
 shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured;
@@ -244,7 +246,8 @@ void main()
                         SurfaceAt(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Albedo, Emission);
                         vec3 Ei;
                         g_HitGridRead = true;
-                        if (!Indirect(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Ei)) Ei = Unsupported(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V);
+                        if (Push.m_Vox.w > 0.0) Ei = VoxRead(Py, Ny, Push.m_Vox.xyz, Push.m_Vox.w);
+                        else if (!Indirect(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Ei)) Ei = Unsupported(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V);
                         const bool bSpec = (GD[R + 47u] & 128u) != 0u;      // (its triangles' specular: world::SetTriangleSpecular)
                         const uint Sb = bSpec ? GD[R + 48u] + 4u * uint(Hit.m_Tri) : 0u;
                         vec3 Ed, Sy;
