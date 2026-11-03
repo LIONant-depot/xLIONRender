@@ -2898,7 +2898,7 @@ namespace xlionrender
                         if( s_Vox[0] > 0.0f ) { m_VoxPixels = std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight; m_VoxKey = LightsKey; }
                         // Experiment X1c: the voxels' rays (here, not in updateGI: at the frame's start they measured 3.4 ms whatever their number), as many as fit their ms a frame by what they measured
                         // (64 rays cost about as much as 32768 and long rays are what cost - why is not known yet (gi_next_level_analysis.md) -, so with nothing changing, none on most frames, not fewer on each)
-            if( const auto& Vox = s_Vox; Vox[0] > 0.0f && m_pGITrace && m_VoxPixels > 0 && !(m_pGITrace->VoxQuiet() && m_Device.getFrameIndex() % 8 != 0) )
+            if( const auto& Vox = s_Vox; Vox[0] > 0.0f && !m_pGatherRefS && m_pGITrace && m_VoxPixels > 0 && !(m_pGITrace->VoxQuiet() && m_Device.getFrameIndex() % 8 != 0) )
                         {
                             if( !m_bVoxTSTried ) { m_bVoxTSTried = true; m_bVoxTS = m_Device.Create(m_VoxTS, { .m_Count = 2 }) == nullptr; }
                             if( std::vector<std::uint64_t> Ns; m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
@@ -2914,7 +2914,7 @@ namespace xlionrender
                             m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, m_Device.getFrameIndex(), int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey);
                             if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
                         }
-                        if( s_Vox[0] > 0.0f && m_bVoxOn && m_pGITrace && m_pGITrace->RefSamples() && m_pGITrace->VoxBuffer() )
+                        if( s_Vox[0] > 0.0f && !m_pGatherRefS && m_bVoxOn && m_pGITrace && m_pGITrace->RefSamples() && m_pGITrace->VoxBuffer() )     // (the ground truth above stays: the voxels overwrote it, a black or voxel image in its place)
                         {
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum(); m_pGatherClip = m_pGITrace->VoxBuffer();
                             const auto A = m_pGITrace->VoxAnchor();

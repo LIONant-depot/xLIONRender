@@ -947,6 +947,8 @@ namespace xlionrender::gi
             }
             static const bool s_bHits = std::getenv("XLION_GI_VOX_HITS") != nullptr;     // (the rays' hits feed the voxels too)
             if (s_bHits) Push.m_Epoch = -Push.m_Epoch;
+            static const bool s_bKept = std::getenv("XLION_VOX_NO_KEPT") == nullptr;     // (a hit's direct light from what its surface was found to have: xlionrender_gi_ref_comp.glsl VoxDirectKept)
+            if (s_bKept) Push.m_Bounces = -3;
             Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
             return true;
         }

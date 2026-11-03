@@ -16,7 +16,7 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in co
     return false;
 }
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 36u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 72u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
 uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
 vec4 VoxFace(in const int L, in const ivec3 q, in const uint Face) { const uint h = VoxHash(L, q, Face), e = VoxEntryOf(h); return GIRefAccum[e + 2u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0); }

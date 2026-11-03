@@ -42,7 +42,7 @@ float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]);
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
 const float vox_layers_v = 8.0;            // (xlionrender_gi_ref_comp.glsl)
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 36u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 72u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
 uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
 bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
@@ -274,7 +274,7 @@ void main()
             E = VoxReadLevels(S.P, N);
             bWeak = E.w < 0.5;
             E.w = 1.0;
-            g_GIRefl = VoxReflect(S.P, N, E.rgb);
+            if (GITable[push.TableBase + 29u] == 0u) g_GIRefl = VoxReflect(S.P, N, E.rgb);
         }
         else if (GITable[push.TableBase + 20u] != 0u)                   // experiment X1: the clipmap, both reads
         {

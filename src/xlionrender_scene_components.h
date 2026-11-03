@@ -786,7 +786,7 @@ namespace xlionrender
         int             m_GIFilterPasses  = 4;              // the GI light's spatial filter passes (smoother with more)
         bool            m_bGIMoments      = true;           // the reads' depth-moment visibility test
         float           m_ReflectionMaxRoughness = 0.0f;    // traced reflections (they need the GI): the receivers up to this roughness; 0: off (the probes)
-        bool            m_bReflectionScreen  = true;        // the screen trace (SSR) over the probes: what is on screen reflected where it is
+        bool            m_bReflectionScreen  = false;       // the screen trace (SSR) over the probes: what is on screen reflected where it is
         bool            m_bReflectionFloor   = false;       // a floor is a planar receiver: the scene mirrored in it (exact reflections)
         bool            m_bReflectionFloorAuto = true;      // that floor: the one under the camera (else at m_ReflectionFloorY)
         float           m_ReflectionFloorY   = 0.0f;

@@ -462,7 +462,7 @@ namespace xlionrender
 
         void SetEnvironment(const environment& E) noexcept
         {
-            m_Scene.m_Post.m_Bloom = 0.04f; m_Scene.m_Post.m_bAutoExposure = true; m_Scene.m_Post.m_bTAA = true;     // (Tomas, 2026-11-03: on; a menu later)
+            m_Scene.m_Post.m_Bloom = 0.0f; m_Scene.m_Post.m_bAutoExposure = false; m_Scene.m_Post.m_bTAA = false;     // (Tomas, 2026-11-03: off while the base image is reviewed; XLION_BLOOM, XLION_AUTO_EXPOSURE, XLION_TAA)
             m_Scene.m_Sky     = { .m_Zenith = E.m_SkyZenith, .m_Horizon = E.m_SkyHorizon, .m_Ground = E.m_SkyGround, .m_Intensity = E.m_SkyIntensity };
             m_Scene.m_Ambient = E.m_Ambient;
             m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget, .m_bPerPixel = E.m_bGIPerPixel, .m_Debug = E.m_GIDebug, .m_RaysPerSurfel = E.m_GIRaysPerSurfel, .m_FilterPasses = E.m_GIFilterPasses, .m_bMoments = E.m_bGIMoments, .m_bHalfRes = E.m_bGIHalfRes, .m_EmissiveScale = E.m_GIEmissiveScale, .m_bShowBlend = true, .m_bEmitterLights = E.m_bGIEmitterLights };     // (m_bShowBlend: a game's and an editor's view - never a jump)

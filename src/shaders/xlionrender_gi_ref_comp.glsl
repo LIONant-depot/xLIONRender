@@ -71,7 +71,19 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
         v = vec4(0.0); m = vec4(0.0);
     }
     const float Ls = dot(Sample, vec3(0.2126, 0.7152, 0.0722));
-    if (v.w <= 0.0) m = vec4(Sample, 0.0);
+    if (v.w <= 0.0)
+    {
+        m = vec4(Sample, 0.0);
+        // A new face starts from its parent's light, as 8 samples (Godot's new probes): its first rays don't decide alone, the read trusts it a little at once
+        const vec4 Hd = GIRefSample[2u * uint(Push.m_nPixels)];
+        int Lp; ivec3 Op; vec3 gp;
+        if (VoxCell((vec3(Org) + g + 0.5) * (Hd.w * float(1 << L)), Hd.xyz, Hd.w, L + 1, Lp, Op, gp))
+        {
+            vec3 gq = vec3(Op) + gp; gq[a] *= vox_layers_v;
+            const vec4 Par = VoxFace(Lp, ivec3(floor(gq + 0.5)), uint(2 * a + (N[a] < 0.0 ? 1 : 0)));
+            if (Par.w >= 8.0) v = vec4(Par.rgb / Par.w * 8.0, 8.0);
+        }
+    }
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
     m.rgb += (Sample - m.rgb) * vox_short_v;
     m.w   += (Ds * Ds - m.w) * vox_short_v;
@@ -144,6 +156,28 @@ vec3 VoxDirect(in const vec3 P, in const vec3 N)
     if (Q > 0.0 && !Occluded(P + N * 1e-3, Dir, Dist - 2e-3)) E += Pick * (Q / PickQ);
     return E;
 }
+// The first bounce kept apart (Godot's direct light pass, Lumen's surface cache, Capsaicin's direct radiance; m_Bounces -3): a hit reads the direct light its surface was found to have, a face's mean (36 + the face),
+// and one read in 8 casts its shadow rays again. The lights changed lately: every read casts them, the mean short. The sun's and the lamps' shadow rays were most of a ray's cost: light the voxels already knew
+vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
+{
+    int L; ivec3 Org; vec3 g;
+    if (Push.m_Bounces != -3 || !VoxCell(P, Hd.xyz, Hd.w, 0, L, Org, g)) return VoxDirect(P, N);
+    const vec3 An = abs(N);
+    const int  a = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2;
+    vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;
+    const uint  h = VoxHash(L, ivec3(floor(gv + 0.5)), 36u + uint(2 * a + (N[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+    const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
+    const vec4  d = GIRefAccum[e + 2u];
+    const bool  bMine = d.x == Tag;
+    vec4 c = bMine ? GIRefAccum[e] : vec4(0.0);
+    if (Push.m_First == 0 && c.w >= 1.0 && Rnd() >= 0.125) return c.rgb / c.w;
+    const vec3 E = VoxDirect(P, N);
+    if (!bMine && d.x != 0.0 && abs(Now - d.y) < 120.0) return E;
+    c += vec4(E, 1.0);
+    if (c.w >= (Push.m_First != 0 ? 4.0 : 32.0)) c *= 0.5;
+    GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(0.0); GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
+    return E;
+}
 // A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
 vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out vec3 Nh, out bool bHit)
 {
@@ -163,7 +197,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
     Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
     bHit = true;
-    vec3 In = VoxDirect(Ph, Nh) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
+    vec3 In = VoxDirectKept(Ph, Nh, Hd) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);
     if (GD[15] > 0u) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
     return Own + (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }
