@@ -19,7 +19,7 @@ layout(location = 0) out vec4 outColor;
 void main()
 {
     const vec4 HDR = texture(SamplerHDR, in_UV);
-    vec3 C   = (push.Params.y > 0.0 ? mix(HDR.rgb, texture(SamplerBloom, in_UV).rgb, push.Params.y) : HDR.rgb) * push.Params.x;
+    vec3 C   = (push.Params.y > 0.0 ? HDR.rgb + texture(SamplerBloom, in_UV).rgb * push.Params.y : HDR.rgb) * push.Params.x;       // (added: what is under the threshold isn't in the bloom, a mix would dim it)
     if (push.Params.z > 0.0) C *= texelFetch(SamplerExposure, ivec2(0), 0).r;
     C        = clamp(ToneMapper_lion(max(C, vec3(1e-10))), 0.0, 1.0);
     const float Coverage = clamp(HDR.a, 0.0, 1.0);                  // 0 where nothing was drawn (cleared), 1 on geometry

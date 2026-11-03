@@ -801,7 +801,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TailDenoiseComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_PostShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_PostComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ContactComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactCompute, { .m_pShader = &m_ContactShader, .m_nBuffers = 1, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 112 }); Err ) return Err;
             if( auto Err = Device.Create(m_GIDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIDenoiseComp) }); Err ) return Err;

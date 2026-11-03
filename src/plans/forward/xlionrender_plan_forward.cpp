@@ -4335,7 +4335,7 @@ namespace xlionrender
                         bOk = !m_Device.Create(View.m_ToneMapTAA[i], { .m_PipeLine = m_ToneMapPipeline, .m_SamplersBindings = Bindings });
                         if( !bOk ) break;
                         struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Fill{ View.m_Width, View.m_Height, 3, 0.0f };
-                        const xgpu::texture* T[] = { &View.m_HDR }; const xgpu::texture* I[] = { &View.m_TAA[i] };
+                        const xgpu::texture* T[] = { &View.m_HDR, &View.m_ExposureTex }; const xgpu::texture* I[] = { &View.m_TAA[i] };
                         Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Fill, sizeof(Fill), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
                     }
                     View.m_bTAAHistory = false;
@@ -4352,7 +4352,8 @@ namespace xlionrender
                 struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{};
                 const auto Run = [&](const xgpu::texture& Src, const xgpu::texture& Dst, int W, int H)
                 {
-                    const xgpu::texture* T[] = { &Src }; const xgpu::texture* I[] = { &Dst };
+                    const xgpu::texture* T[] = { &Src, &View.m_HDR }; const xgpu::texture* I[] = { &Dst };
+                    if( &Dst != &View.m_ExposureTex ) T[1] = &View.m_ExposureTex;      // (read: the threshold; the exposure's own pass writes it)
                     Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
                 };
                 const auto Size = [&](int i) { return std::array<int, 2>{ std::max(View.m_Width >> (i + 1), 1), std::max(View.m_Height >> (i + 1), 1) }; };
@@ -4363,12 +4364,14 @@ namespace xlionrender
                     Push.m_W = Push.m_H = 1; Run(View.m_HDR, View.m_ExposureTex, 1, 1);
                     View.m_bPostReady = true;
                 }
-                // (the exposure reads the 5th level, the bloom needs them all)
-                const int nLevels = Bloom > 0.0f ? int(View.m_Bloom.size()) : bAuto ? 5 : 0;
+                // The levels by the view's height: the bloom's width a share of the screen at any resolution (the smallest level about 48 pixels high at the view's full size)
+                const int nBloom = std::clamp(int(std::round(std::log2(float(View.m_Height) / 48.0f))), 3, int(View.m_Bloom.size()));
+                const int nLevels = Bloom > 0.0f ? nBloom : 0;
                 for( int i = 0; i < nLevels; ++i )
                 {
                     const auto S = Size(i);
                     Push = {}; Push.m_W = S[0]; Push.m_H = S[1]; Push.m_Mode = 0; Push.m_A = i == 0 ? 1.0f : 0.0f;
+                    Push.m_B = Scene.m_Post.m_BloomThreshold; Push.m_C = Scene.m_Post.m_BloomKnee; Push.m_D = View.m_Exposure; Push.m_E = bAuto ? 1.0f : 0.0f;
                     Run(i == 0 ? *pHDR : View.m_Bloom[i - 1], View.m_Bloom[i], S[0], S[1]);
                 }
                 if( bAuto )
@@ -4377,12 +4380,12 @@ namespace xlionrender
                     const float Dt = View.m_PostLast == clock::time_point{} ? 0.0f : std::min(std::chrono::duration<float>(Now - View.m_PostLast).count(), 0.25f);
                     View.m_PostLast = Now;
                     Push = { 1, 1, 2, Dt, Scene.m_Post.m_ExposureRate, Scene.m_Post.m_ExposureKey, Scene.m_Post.m_ExposureMin, Scene.m_Post.m_ExposureMax };
-                    Run(View.m_Bloom[4], View.m_ExposureTex, 1, 1);
+                    Run(*pHDR, View.m_ExposureTex, 1, 1);
                 }
-                if( Bloom > 0.0f ) for( int i = int(View.m_Bloom.size()) - 2; i >= 0; --i )
+                if( Bloom > 0.0f ) for( int i = nBloom - 2; i >= 0; --i )
                 {
                     const auto S = Size(i);
-                    Push = {}; Push.m_W = S[0]; Push.m_H = S[1]; Push.m_Mode = 1;
+                    Push = {}; Push.m_W = S[0]; Push.m_H = S[1]; Push.m_Mode = 1; Push.m_A = Scene.m_Post.m_BloomSpread;
                     Run(View.m_Bloom[i + 1], View.m_Bloom[i], S[0], S[1]);
                 }
             }
