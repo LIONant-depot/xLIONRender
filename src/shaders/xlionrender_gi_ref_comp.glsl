@@ -71,19 +71,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
         v = vec4(0.0); m = vec4(0.0);
     }
     const float Ls = dot(Sample, vec3(0.2126, 0.7152, 0.0722));
-    if (v.w <= 0.0)
-    {
-        m = vec4(Sample, 0.0);
-        // A new face starts from its parent's light, as 8 samples (Godot's new probes): its first rays don't decide alone, the read trusts it a little at once
-        const vec4 Hd = GIRefSample[2u * uint(Push.m_nPixels)];
-        int Lp; ivec3 Op; vec3 gp;
-        if (VoxCell((vec3(Org) + g + 0.5) * (Hd.w * float(1 << L)), Hd.xyz, Hd.w, L + 1, Lp, Op, gp))
-        {
-            vec3 gq = vec3(Op) + gp; gq[a] *= vox_layers_v;
-            const vec4 Par = VoxFace(Lp, ivec3(floor(gq + 0.5)), uint(2 * a + (N[a] < 0.0 ? 1 : 0)));
-            if (Par.w >= 8.0) v = vec4(Par.rgb / Par.w * 8.0, 8.0);
-        }
-    }
+    if (v.w <= 0.0) m = vec4(Sample, 0.0);
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
     m.rgb += (Sample - m.rgb) * vox_short_v;
     m.w   += (Ds * Ds - m.w) * vox_short_v;
