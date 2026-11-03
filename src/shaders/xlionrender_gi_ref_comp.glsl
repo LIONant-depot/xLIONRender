@@ -202,7 +202,8 @@ void VoxMain()
         if (VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) VoxStore(Lp, Op, gp, N, Sample);
     }
     // the surface it hit too, seen yet or not: one more ray from there is a sample of that surface's own indirect light. Off screen surfaces are lit before the eye turns to them
-    if (Push.m_Epoch < 0 && bHit && VoxCell(Ph, Hd.xyz, Hd.w, 0, L, Org, g))
+    // (a group in four, all its lanes: this ray was 60 % of the pass, and one lane firing it makes its whole group wait)
+    if (Push.m_Epoch < 0 && bHit && (RHash(gl_WorkGroupID.x * 2654435761u + uint(Push.m_Frame) * 97u) & 255u) < 64u && VoxCell(Ph, Hd.xyz, Hd.w, 0, L, Org, g))
     {
         vec3 Ph2, Nh2; bool bHit2;
         const vec3 S2 = VoxRay(Ph, Nh, Hd, Ph2, Nh2, bHit2);
