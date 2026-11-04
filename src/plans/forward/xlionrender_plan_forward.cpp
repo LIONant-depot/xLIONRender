@@ -61,6 +61,9 @@ namespace xlionrender
         constexpr std::uint32_t s_GIRefComp[] = {           // the GI's ground truth (XLION_GI_REF)
             #include "xlionrender_gi_ref_comp.h"
         };
+        constexpr std::uint32_t s_GIVoxComp[] = {           // the voxel rays
+            #include "xlionrender_gi_vox_comp.h"
+        };
         constexpr std::uint32_t s_GIClipComp[] = {          // experiment X1: the clipmap (XLION_GI_CLIP)
             #include "xlionrender_gi_clip_comp.h"
         };
@@ -209,7 +212,7 @@ namespace xlionrender
         if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
         {
             m_pGITrace = std::make_unique<gi::gpu_trace>();
-            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp, s_GIProbesComp, s_GIClipComp, s_GIRefComp }) )
+            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp, s_GIProbesComp, s_GIClipComp, s_GIRefComp, s_GIVoxComp }) )
                 { m_pGITrace.reset(); m_bGITraceFailed = true; }
         }
         // The light lives on the GPU (m_bGPUOwned). Turned off, the GPU's light comes back into the world first (a read back: one frame

@@ -24,7 +24,7 @@ namespace xlionrender::gi
     public:
 
         // The SPIR-V of the shaders (shaders/xlionrender_gi_*_comp.glsl)
-        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links, m_Solve, m_Ghosts, m_Probes, m_Clip, m_Ref; };     // (m_Links, m_Solve: optional, experiment D)
+        struct shaders { std::span<const std::uint32_t> m_Pass, m_Scatter, m_Commit, m_Ops, m_Filter, m_Expand, m_Means, m_Cube, m_Migrate, m_ReadBack, m_Links, m_Solve, m_Ghosts, m_Probes, m_Clip, m_Ref, m_Vox; };     // (m_Links, m_Solve: optional, experiment D)
 
         bool Init(xgpu::device& Device, const shaders& S) noexcept
         {
@@ -48,7 +48,8 @@ namespace xlionrender::gi
                 && (S.m_Ghosts.empty() || (m_bGhosts = Make(m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true)
                 && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true)
                 && (S.m_Clip.empty() || (m_bClip = Make(m_Shader[14], m_ClipC, S.m_Clip, 8, 48)) || true)
-                && (S.m_Ref.empty() || (m_bRef = Make(m_Shader[15], m_RefC, S.m_Ref, 7, 32)) || true);
+                && (S.m_Ref.empty() || (m_bRef = Make(m_Shader[15], m_RefC, S.m_Ref, 7, 32)) || true)
+                && (S.m_Vox.empty() || (m_bVox = Make(m_Shader[16], m_VoxC, S.m_Vox, 7, 32)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
@@ -934,7 +935,7 @@ namespace xlionrender::gi
             if (VoxQuiet()) m_VoxTravel = 0.0f;
             if (dv.Dot(dv) > Cell * Cell * 0.0625f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxTravel += std::sqrt(dv.Dot(dv)); m_VoxEyeAt = { Eye.m_X, Eye.m_Y, Eye.m_Z }; }
             const int Keep = KeepMax;
-            if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
+            if (!m_bVox || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
             const std::size_t nEntries = std::size_t(vox_slots_v) * 3;
             if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0] };
@@ -944,7 +945,7 @@ namespace xlionrender::gi
             {
                 const std::size_t n = std::min<std::size_t>(nEntries - m_VoxCleared, std::size_t(1) << 22);
                 Push.m_Bounces = -2; Push.m_First = int(m_VoxCleared); Push.m_Count = int(n);
-                Window.Dispatch(m_RefC, B, &Push, sizeof(Push), int((n + 63) / 64));
+                Window.Dispatch(m_VoxC, B, &Push, sizeof(Push), int((n + 63) / 64));
                 m_VoxCleared += n;
                 return true;
             }
@@ -954,7 +955,7 @@ namespace xlionrender::gi
             if (s_bKept) Push.m_Bounces = -3;
             static const bool s_bFirstOnly = std::getenv("XLION_VOX_FIRST_ONLY") != nullptr;
             if (s_bFirstOnly) Push.m_First |= 2;
-            Window.Dispatch(m_RefC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
+            Window.Dispatch(m_VoxC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
             return true;
         }
         bool                 VoxQuiet(void) const noexcept { return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
@@ -1331,8 +1332,9 @@ namespace xlionrender::gi
         }
 
         xgpu::device*                       m_pDevice = nullptr;
-        xgpu::shader                        m_Shader[16];
+        xgpu::shader                        m_Shader[17];
         xgpu::compute                       m_RefC;             // the ground truth: RefStep
+        xgpu::compute                       m_VoxC;             // the voxel rays
         xgpu::buffer                        m_RefSampleB, m_RefAccumB;
         std::array<float, 3>                m_VoxAnchor{};
         std::array<float, 3>                m_VoxEyeAt{};
@@ -1343,6 +1345,7 @@ namespace xlionrender::gi
         std::uint32_t                       m_VoxLightsKey = 0;
         std::chrono::steady_clock::time_point m_VoxLightsMoved{};
         bool                                m_bRef = false;
+        bool                                m_bVox = false;
         std::size_t                         m_RefNext = 0;
         std::uint32_t                       m_RefLightsKey = 0;
         int                                 m_RefEpoch = 1;
