@@ -142,21 +142,21 @@ int main()
         {
             xgpu::shader PostS; xgpu::compute PostC;
             CHECK(!App.m_Device.Create(PostS, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_PostComp, std::size(s_PostComp) } } }), "the post shader");
-            CHECK(!App.m_Device.Create(PostC, { .m_pShader = &PostS, .m_nBuffers = 0, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 32 }), "the post compute");
+            CHECK(!App.m_Device.Create(PostC, { .m_pShader = &PostS, .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32 }), "the post compute");
             const auto Target = [&](xgpu::texture& T, int Sz) { CHECK(!App.m_Device.Create(T, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = Sz, .m_Height = Sz, .m_isGamma = false, .m_bStorage = true }), "a post target"); };
             xgpu::texture Big, Level0, Level1, Exposure;
             Target(Big, 32); Target(Level0, 16); Target(Level1, 8); Target(Exposure, 1);
             struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{};
             const auto Run = [&](const xgpu::texture& Src, const xgpu::texture& Dst, int Sz)
             {
-                const xgpu::texture* T[] = { &Src }; const xgpu::texture* I[] = { &Dst };
+                const xgpu::texture* T[] = { &Src, &Dst == &Exposure ? &Big : &Exposure }; const xgpu::texture* I[] = { &Dst };
                 App.m_Window.Dispatch(PostC, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (Sz + 7) / 8, (Sz + 7) / 8);
             };
             while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
             for (auto* pT : { &Level0, &Level1, &Exposure, &Big }) { const int Sz = pT == &Big ? 32 : pT == &Level0 ? 16 : pT == &Level1 ? 8 : 1; Push = { Sz, Sz, 3, pT == &Big ? 2.0f : 0.0f }; Run(Tex, *pT, Sz); }
-            Push = { 16, 16, 0, 1.0f }; Run(Big, Level0, 16);
-            Push = { 8, 8, 0, 0.0f };   Run(Level0, Level1, 8);
-            Push = { 16, 16, 1 };       Run(Level1, Level0, 16);
+            Push = { 16, 16, 0, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f }; Run(Big, Level0, 16);      // (threshold 0, no knee, exposure 1: all of it passes)
+            Push = { 8, 8, 0, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };   Run(Level0, Level1, 8);
+            Push = { 16, 16, 1, 0.5f };  Run(Level1, Level0, 16);
             Push = { 1, 1, 2, 100.0f, 1.5f, 0.18f, 0.03f, 30.0f }; Run(Level1, Exposure, 1);      // (a long time: settled)
             const xgpu::texture* ReadBloom[] = { &Level0 }, *ReadExp[] = { &Exposure };
             xgpu::buffer OutE;
@@ -171,7 +171,7 @@ int main()
             CHECK(OutB.MemoryMap(0, int(V.size()), [&](void* q) { std::memcpy(V.data(), q, V.size() * sizeof(float)); }) == nullptr, "read the bloom back");
             CHECK(OutE.MemoryMap(0, int(E.size()), [&](void* q) { std::memcpy(E.data(), q, E.size() * sizeof(float)); }) == nullptr, "read the exposure back");
             for (int i = 0; i < 16 * 16; ++i) CHECK(std::abs(V[4 * i] - 2.0f) < 1e-2f, "bloom: a flat image stays itself");
-            CHECK(std::abs(E[0] - 0.18f / 2.0f) < 2e-3f, "exposure: the key over the average");
+            CHECK(std::abs(E[0] - 0.18f / 2.0f) < 1e-2f, "exposure: the key over the average, to the histogram bin");
             std::printf("Bloom and exposure: a flat 2 stays 2 down and up, its exposure %.3f\n", E[0]);
 
             // TAA (xlionrender_taa_comp.glsl): a flat frame over a black history stays the frame (the clamp), with no history it is the frame
