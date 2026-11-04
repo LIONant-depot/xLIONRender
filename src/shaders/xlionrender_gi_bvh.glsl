@@ -17,7 +17,7 @@ bool g_GIBvhSeeThrough = false;     // the casts leave the see-through triangles
 bool GISeeThrough(int Inst, int Tri) { return false; }
 #endif
 
-const int gi_bvh_stack_v = 64;
+const int gi_bvh_stack_v = 128;       // (measured on Bistro, hit or miss, 1M rays: 32 entries 38 ms, 64 28.6, 128 21.4, and no stored distances 19.6: the deepest is 27. Why bigger is faster is not known: a driver storage choice?)
 int g_GIBvhVisits = 0;              // (diagnostics) the nodes and leaves the walks popped
 
 // Which of a node's 4 children the ray enters before TMax (a bit each), and where (TNear): bvh::Box4
@@ -75,14 +75,13 @@ void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
 {
     const vec3  Inv  = GISafeInverse(D);
     const ivec3 Near = ivec3(Inv.x < 0.0 ? 1 : 0, Inv.y < 0.0 ? 3 : 2, Inv.z < 0.0 ? 5 : 4);
-    int   Code[gi_bvh_stack_v]; float TS[gi_bvh_stack_v];
+    int   Code[gi_bvh_stack_v];
     int n = 0;
-    Code[n] = Root; TS[n] = 0.0; ++n;
+    Code[n] = Root; ++n;
     while (n > 0)
     {
         --n;
         const int c = Code[n];
-        if (TS[n] > H.m_T) continue;
         ++g_GIBvhVisits;
         if (c < 0)
         {
@@ -102,7 +101,7 @@ void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
                 for (; j > 0 && KT[j - 1] < TNear[k]; --j) { Kids[j] = Kids[j - 1]; KT[j] = KT[j - 1]; }
                 Kids[j] = int(GIBvhNodes[c].m_W[10 + k]); KT[j] = TNear[k];
             }
-        for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; TS[n] = KT[k]; ++n; }
+        for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; ++n; }
     }
 }
 
@@ -111,14 +110,13 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
     gi_hit H; H.m_T = TMax; H.m_U = 0.0; H.m_V = 0.0; H.m_Inst = -1; H.m_Tri = -1;
     const vec3  Inv  = GISafeInverse(D);
     const ivec3 Near = ivec3(Inv.x < 0.0 ? 1 : 0, Inv.y < 0.0 ? 3 : 2, Inv.z < 0.0 ? 5 : 4);
-    int   Code[gi_bvh_stack_v]; float TS[gi_bvh_stack_v];
+    int   Code[gi_bvh_stack_v];
     int n = 0;
-    Code[n] = g_GIBvhTlasRoot; TS[n] = 0.0; ++n;
+    Code[n] = g_GIBvhTlasRoot; ++n;
     while (n > 0)
     {
         --n;
         const int c = Code[n];
-        if (TS[n] > H.m_T) continue;
         ++g_GIBvhVisits;
         if (c < 0)
         {
@@ -144,7 +142,7 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
                 for (; j > 0 && KT[j - 1] < TNear[k]; --j) { Kids[j] = Kids[j - 1]; KT[j] = KT[j - 1]; }
                 Kids[j] = int(GIBvhNodes[c].m_W[10 + k]); KT[j] = TNear[k];
             }
-        for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; TS[n] = KT[k]; ++n; }
+        for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; ++n; }
     }
     return H;
 }
