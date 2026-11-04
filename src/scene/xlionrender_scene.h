@@ -230,14 +230,14 @@ namespace xlionrender
     // The frame's bloom and auto exposure (xlionrender_post_comp.glsl), off by default
     struct post_settings
     {
-        float   m_Bloom         = 0.2f;     // how much of what is too bright is added, blurred (0: off)
+        float   m_Bloom         = 0.0f;     // how much of what is too bright is added, blurred (0: off)
         float   m_BloomThreshold = 0.99f;   // exposed light where it starts (1: white, 0.18: middle grey)
         float   m_BloomKnee     = 0.5f;     // how softly it starts
         float   m_BloomSpread   = 0.7f;     // 0 tight around the light .. 1 wide (the weight of each wider level)
         bool    m_bAutoExposure = false;
         bool    m_bTAA          = false;    // temporal antialiasing (the view jitters a sub-pixel a frame)
         float   m_TAABlend      = 0.1f;     // this frame's share over the history
-        float   m_ExposureKey   = 0.18f;    // the middle grey the average is brought to
+        float   m_ExposureKey   = 0.115f;   // what the metered light is brought to (Wicked: 0.115)
         float   m_ExposureRate  = 1.5f;     // how fast the eye adapts (1 / seconds)
         float   m_ExposureMin   = 0.03f;
         float   m_ExposureMax   = 30.0f;
