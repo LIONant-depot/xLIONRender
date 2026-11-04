@@ -188,6 +188,8 @@ void main()
     const bool  bIn  = p.x < Size.x && p.y < Size.y;
     const uint  i    = uint(Size.x * Size.y) + uint(p.y * Size.x + p.x);
     const float z    = bIn ? texelFetch(GDepth, p, 0).r : 1.0;
+    const bool  bScreenFirst = !bFull && Push.m_Full.z == 3;       // (m_Full.z 3: xlionrender_refl_ssr_comp.glsl ran first)
+    const uint  refl_screen_v = 4u;
     uvec4 Rec = uvec4(0u);
     const uint Key = bFull ? uint(F[Push.m_Slot].Params.x * F[Push.m_Slot].Params.y) + uint(p.y * ((Size.x + 1) & ~1) + p.x) : uint(p.y * Size.x + p.x);
     if (z < 1.0)
@@ -234,6 +236,7 @@ void main()
             atomicAdd(s_Planar, 1u);
             atomicAdd(s_PlanarRough, uint(Rough * 100.0 + 0.5));
         }
+        else if (bScreenFirst && ((Records[i].w >> 24) & 15u) == refl_screen_v && unpackHalf2x16(Records[i].y).y >= 0.95) { }     // (the screen's certain answer stays)
         else if (Push.m_Mode != 0u || Rough < Push.m_MaxRough)
         {
             const vec3  V   = normalize(-P);
@@ -422,7 +425,7 @@ void main()
             }
         }
     }
-    if (!bFull && bIn && (Push.m_Mode == 0u || Push.m_Mode >= 4u)) Records[i] = Rec;
+    if (!bFull && bIn && (Push.m_Mode == 0u || Push.m_Mode >= 4u) && !(bScreenFirst && z < 1.0 && ((Rec.w >> 24) & 15u) == 0u)) Records[i] = Rec;     // (no ray here: the screen trace's stays)
     if (bFull)          // two pixels a record: rgb and, its sign the confidence, the view depth (the materials match it)
     {
         const float Depth = unpackHalf2x16(Rec.w & 0xFFFFu).x;

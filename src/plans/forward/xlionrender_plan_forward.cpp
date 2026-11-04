@@ -2293,6 +2293,43 @@ namespace xlionrender
         const bool bTraced = (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
         const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
+        const bool bReconstruct = Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && !Scene.m_bDebugReflectionMirror;      // (its kernel follows the real roughness)
+        if( bTraced || bScreen )
+        {
+            if( bScreen || bReconstruct )
+            {
+                const xmath::fmat4 ToPrev = View.m_bTailPrev ? View.m_TailPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) : xmath::fmat4::fromIdentity();
+                const xmath::fvec4 RP{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
+                (void)m_ReflFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
+                {
+                    auto* pB = static_cast<std::byte*>(p);
+                    std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &ToPrev, 64); std::memcpy(pB + 128, &RP, 16);
+                });
+            }
+            // the screen trace (SSR: xlionrender_refl_ssr_comp.glsl) before the BVH trace, which leaves its certain answers: last frame's lit image
+            // (View.m_HDR: the scene pass has not drawn yet) at the ray's hit in this frame's thin G-buffer. Every roughness: the probes stay
+            // the base where it misses (off screen, hidden)
+            if( bScreen )
+            {
+                if( std::vector<std::uint64_t> Ns; m_ReflSSRTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
+                {
+                    m_ReflSSRSum += double(Ns[1] - Ns[0]) * 1e-6;
+                    static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                    if( ++m_ReflSSRSumN == 120 )
+                    {
+                        if( s_bTimes ) std::printf("SSRGPU %d x %d: %.3f ms (the screen trace and the reconstruction)\n", W, H, m_ReflSSRSum / m_ReflSSRSumN), std::fflush(stdout);
+                        m_ReflSSRSum = 0; m_ReflSSRSumN = 0;
+                    }
+                }
+                const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
+                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, 1.0f, 0.0f };
+                auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
+                auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_HDR };
+                Window.WriteTimestamp(m_ReflSSRTimes, 0);
+                Window.Dispatch(m_ReflSSR, SBuffers, STextures, &SPush, sizeof(SPush), (W + 7) / 8, (H + 7) / 8);
+                Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, 1e-3f);      // (the materials read the records)
+            }
+        }
         if( bTraced )
         {
             if( !bLights )      // (the denoiser writes this slot's frame when it runs)
@@ -2368,7 +2405,7 @@ namespace xlionrender
             const std::array<float, 3> VoxAt = pVox ? m_pGITrace->VoxAnchor() : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
             struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
-                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, Scene.m_bDebugReflectionMirror ? 1 : Scene.m_bReflectionFixedRays ? 2 : 0 }
+                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, bScreen ? 3 : 0, Scene.m_bDebugReflectionMirror ? 1 : Scene.m_bReflectionFixedRays ? 2 : 0 }
                 , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) }, { VoxAt[0], VoxAt[1], VoxAt[2], pVox ? gi::gpu_trace::VoxConfig()[0] : 0.0f }, m_ReflSharpMax
                 , m_bEnvOn ? 0.0f : Scene.m_Ambient.m_X / gi::pi_v, m_bEnvOn ? 0.0f : Scene.m_Ambient.m_Y / gi::pi_v, m_bEnvOn ? 0.0f : Scene.m_Ambient.m_Z / gi::pi_v };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
@@ -2409,44 +2446,10 @@ namespace xlionrender
             Window.WriteTimestamp(m_ReflTimes, 2);
             if( bHits ) shadeReflectionHits(Window, Scene, View, BvhR, Slot, HalfKeys, std::uint32_t(2 * W * H));
             Window.WriteTimestamp(m_ReflTimes, 3);
-            Light.m_EnvParams.m_W = MaxRough;
+            Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, MaxRough);
         }
         if( bTraced || bScreen )
         {
-            const bool bReconstruct = Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && !Scene.m_bDebugReflectionMirror;      // (its kernel follows the real roughness)
-            if( bScreen || bReconstruct )
-            {
-                const xmath::fmat4 ToPrev = View.m_bTailPrev ? View.m_TailPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) : xmath::fmat4::fromIdentity();
-                const xmath::fvec4 RP{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
-                (void)m_ReflFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
-                {
-                    auto* pB = static_cast<std::byte*>(p);
-                    std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &ToPrev, 64); std::memcpy(pB + 128, &RP, 16);
-                });
-            }
-            // the screen trace (SSR: xlionrender_refl_ssr_comp.glsl) where the BVH trace wrote nothing this frame: last frame's lit image
-            // (View.m_HDR: the scene pass has not drawn yet) at the ray's hit in this frame's thin G-buffer. Every roughness: the probes stay
-            // the base where it misses (off screen, hidden)
-            if( bScreen )
-            {
-                if( std::vector<std::uint64_t> Ns; m_ReflSSRTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
-                {
-                    m_ReflSSRSum += double(Ns[1] - Ns[0]) * 1e-6;
-                    static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
-                    if( ++m_ReflSSRSumN == 120 )
-                    {
-                        if( s_bTimes ) std::printf("SSRGPU %d x %d: %.3f ms (the screen trace and the reconstruction)\n", W, H, m_ReflSSRSum / m_ReflSSRSumN), std::fflush(stdout);
-                        m_ReflSSRSum = 0; m_ReflSSRSumN = 0;
-                    }
-                }
-                const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
-                    { std::uint32_t(Slot), bTraced ? 1u : 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, 1.0f, 0.0f };
-                auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
-                auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_HDR };
-                Window.WriteTimestamp(m_ReflSSRTimes, 0);
-                Window.Dispatch(m_ReflSSR, SBuffers, STextures, &SPush, sizeof(SPush), (W + 7) / 8, (H + 7) / 8);
-                Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, 1e-3f);      // (the materials read the records)
-            }
             // the reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then spatial;
             // the half-size records it leaves are what the materials read (REFLSPLIT's reconstruction includes the screen trace when both run)
             if( bReconstruct )
