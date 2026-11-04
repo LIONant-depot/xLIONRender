@@ -2306,6 +2306,7 @@ namespace xlionrender
                     std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &ToPrev, 64); std::memcpy(pB + 128, &RP, 16);
                 });
             }
+            // (up to roughness 0.5, the voxels past it: at every roughness it cost 0.3 to 0.8 ms more on Bistro for no better image)
             // the screen trace (SSR: xlionrender_refl_ssr_comp.glsl) before the BVH trace, which leaves its certain answers: last frame's lit image
             // (View.m_HDR: the scene pass has not drawn yet) at the ray's hit in this frame's thin G-buffer. Every roughness: the probes stay
             // the base where it misses (off screen, hidden)
@@ -2322,7 +2323,7 @@ namespace xlionrender
                     }
                 }
                 const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
-                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, 1.0f, 0.0f };
+                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, 0.5f, 0.0f };
                 auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
                 auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_HDR };
                 Window.WriteTimestamp(m_ReflSSRTimes, 0);
