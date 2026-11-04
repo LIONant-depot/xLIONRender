@@ -25,7 +25,8 @@ vec3 Down(in const vec2 uv)
         // (Push: B the threshold, C the knee, D the exposure, E 1: times the adapted one; in exposed light: 1 is white, 0.18 middle grey)
         const float Ex = Push.m_D * (Push.m_E > 0.5 ? texelFetch(ExposureTex, ivec2(0), 0).r : 1.0);
         const float l  = Luma(c) * Ex, q = clamp(l - Push.m_B + Push.m_C, 0.0, 2.0 * Push.m_C);
-        return c * (max(q * q / (4.0 * Push.m_C + 1e-5), l - Push.m_B) / max(l, 1e-4));
+        const vec3  b  = c * (max(q * q / (4.0 * Push.m_C + 1e-5), l - Push.m_B) / max(l, 1e-4));
+        return b / (1.0 + max(b.r, max(b.g, b.b)) * Ex * 0.001);      // (Filament's highlight limit: a very bright value doesn't take over the glow)
     }
     return e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125;
 }
@@ -42,18 +43,30 @@ void main()
     if (Push.m_Mode == 3) { imageStore(Dst, p, vec4(Push.m_A)); return; }
     if (Push.m_Mode == 2)
     {
-        // (the image itself, a sparse grid of it: the bloom's chain holds only what is past its threshold)
+        // A histogram of a sparse grid of the image, as Unreal and Bevy: its darkest and brightest tenth don't count (deep shadow would brighten the whole frame, a patch of sky darken it). Log2 of the light, -10 to 6
         const ivec2 Sz = textureSize(Src, 0);
-        float Sum = 0.0, SumW = 0.0;
+        float Hist[64]; for (int i = 0; i < 64; ++i) Hist[i] = 0.0;
+        float Total = 0.0;
         for (int y = 0; y < 36; ++y) for (int x = 0; x < 64; ++x)
         {
             const vec2  u = (vec2(x, y) + 0.5) / vec2(64.0, 36.0), o = u * 2.0 - 1.0;
             const float w = 1.0 - 0.75 * dot(o, o) * 0.5;
-            Sum += log(max(Luma(texelFetch(Src, ivec2(u * vec2(Sz)), 0).rgb), 1e-4)) * w; SumW += w;
+            const int   b = clamp(int((log2(max(Luma(texelFetch(Src, ivec2(u * vec2(Sz)), 0).rgb), 1e-4)) + 10.0) * 4.0), 0, 63);
+            Hist[b] += w; Total += w;
         }
-        const float Target = clamp(Push.m_C / exp(Sum / SumW), Push.m_D, Push.m_E);
+        const float Low = Total * 0.5, High = Total * 0.95;
+        float Run = 0.0, Sum = 0.0, SumW = 0.0;
+        for (int i = 0; i < 64; ++i)
+        {
+            const float Take = min(Run + Hist[i], High) - max(Run, Low);
+            if (Take > 0.0) { Sum += ((float(i) + 0.5) / 4.0 - 10.0) * Take; SumW += Take; }
+            Run += Hist[i];
+        }
+        const float Target = clamp(Push.m_C / pow(2.0, Sum / max(SumW, 1e-4)), Push.m_D, Push.m_E);
         const float Prev   = imageLoad(Dst, p).r;
-        imageStore(Dst, p, vec4(Prev <= 0.0 ? Target : mix(Target, Prev, exp(-Push.m_A * Push.m_B))));
+        // (brighter 3, darker 1, by the light: Unreal's and Bevy's defaults: out of the dark slowly isn't the eye's way; m_B scales them)
+        const float Rate = (Target < Prev ? 2.0 : 0.667) * Push.m_B;
+        imageStore(Dst, p, vec4(Prev <= 0.0 ? Target : mix(Target, Prev, exp(-Push.m_A * Rate))));
         return;
     }
     const vec2 uv = (vec2(p) + 0.5) / vec2(Push.m_W, Push.m_H);

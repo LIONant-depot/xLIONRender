@@ -15,10 +15,11 @@ vec3 ToneMapper_lion(vec3 v)
     v = (((2.3756 * v - 3.5265) * v + 0.4727) * v - 0.218) * v + 0.5815;
     v = (((1.7907 * v + 0.6957) * v - 1.0095) * v - 1.23219) * v + 0.716327;
 
-    float l = dot(v, vec3(0.2126, 0.2152, 0.0722));
+    // The saturation in the curve's own space, before the power (as Filament's AgX looks): done after it, the luma added a grey veil to the darks
+    float l = dot(v, vec3(0.2126, 0.7152, 0.0722));
 
-    v = m_inv * max(l + 0.93 * (pow(v, vec3(2.5)) - l), 0.0);
-    v *= 1.3;
+    v = m_inv * pow(max(l + 1.2 * (v - l), 0.0), vec3(2.5));
+    v *= 1.3 / (1.0 + 0.34 * max(v.r, max(v.g, v.b)));    // (lifts the darks and mids, its top as AgX; on the brightest channel: the color keeps its ratios)
     return v;
 }
 
