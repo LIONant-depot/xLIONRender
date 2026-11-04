@@ -820,7 +820,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 14, .m_nTextures = 6, .m_PushConstantsSize = 128 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 15, .m_nTextures = 6, .m_PushConstantsSize = 128 }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdfShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_WorldSdfComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdf, { .m_pShader = &m_WorldSdfShader, .m_nBuffers = 7, .m_PushConstantsSize = 40 }); Err ) return Err;
             if( std::getenv("XLION_SDF") )
@@ -1133,6 +1133,20 @@ namespace xlionrender
         (void)M.m_OutlineIB.MemoryMap(0, int(Indices.size()), [&](void* p) { std::memcpy(p, Indices.data(), Indices.size() * sizeof(std::uint32_t)); });
         M.m_OutlineCenter = Center; M.m_OutlineHalf = Half;
         M.m_nOutlineIndices = int(Indices.size());
+        return nullptr;
+    }
+
+    xgpu::device::error* instance::SetBakedSdf( const gi::sdf_bake::level& L ) noexcept
+    {
+        std::vector<std::uint32_t> Data(8 + L.m_Table.size() + (L.m_Bytes.size() + 3) / 4);
+        Data[0] = std::bit_cast<std::uint32_t>(L.m_Cell);
+        for( int a = 0; a < 3; ++a ) { Data[1 + a] = std::uint32_t(L.m_Org[a]); Data[4 + a] = std::uint32_t(L.m_Dim[a]); }
+        Data[7] = std::uint32_t(8 + L.m_Table.size());
+        std::copy(L.m_Table.begin(), L.m_Table.end(), Data.begin() + 8);
+        std::memcpy(Data.data() + Data[7], L.m_Bytes.data(), L.m_Bytes.size());
+        m_bBakedSdf = false;
+        if( auto Err = m_Device.Create(m_BakedSdfB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Data.size()), .m_pData = Data.data() }); Err ) return Err;
+        m_bBakedSdf = true;
         return nullptr;
     }
 

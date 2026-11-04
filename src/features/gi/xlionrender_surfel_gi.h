@@ -25,6 +25,7 @@
 
 #include "dependencies/xmath/source/xmath.h"
 #include "dependencies/xscheduler/source/xscheduler.h"
+#include "xlionrender_world_sdf_bake.h"
 #include <algorithm>
 #include <array>
 #include <atomic>

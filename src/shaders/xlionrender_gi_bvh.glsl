@@ -17,7 +17,7 @@ bool g_GIBvhSeeThrough = false;     // the casts leave the see-through triangles
 bool GISeeThrough(int Inst, int Tri) { return false; }
 #endif
 
-const int gi_bvh_stack_v = 128;       // (measured on Bistro, hit or miss, 1M rays: 32 entries 38 ms, 64 28.6, 128 21.4, and no stored distances 19.6: the deepest is 27. Why bigger is faster is not known: a driver storage choice?)
+const int gi_bvh_stack_v = 128;       // (measured on Bistro, hit or miss, 1M rays: 32 entries 38 ms, 64 28.6, 128 21.4, and no stored distances 19.6: the deepest is 27. Under 128 the driver reports 168 registers against 128, and bigger code: XGPU_PIPELINE_STATS)
 int g_GIBvhVisits = 0;              // (diagnostics) the nodes and leaves the walks popped
 
 // Which of a node's 4 children the ray enters before TMax (a bit each), and where (TNear): bvh::Box4
@@ -71,6 +71,61 @@ int GIIntersectTri4(int Row, int Inst, vec3 O, vec3 D, float TMax, out float Dis
 // TMax: its instance (Inst), its triangle (Tri: the mesh's), U, V. A mesh is walked with the ray in its space (t is the same parameter)
 struct gi_hit { float m_T, m_U, m_V; int m_Inst, m_Tri; };
 
+#ifdef GI_BVH_ONE_LOOP
+// GI_BVH_ONE_LOOP (the includer's choice): the TLAS's and the meshes' walks in one loop. Measured on Bistro (2026-11-04, the same nodes): rough reflections
+// 21 to 12.5 ms, mirrors the same, but the GI's rays in 2 ms 10,700 to 3,300 (247 registers), so the GI keeps the nested walks
+gi_hit GICast(vec3 O, vec3 D, float TMax)
+{
+    gi_hit H; H.m_T = TMax; H.m_U = 0.0; H.m_V = 0.0; H.m_Inst = -1; H.m_Tri = -1;
+    const vec3  WInv  = GISafeInverse(D);
+    const ivec3 WNear = ivec3(WInv.x < 0.0 ? 1 : 0, WInv.y < 0.0 ? 3 : 2, WInv.z < 0.0 ? 5 : 4);
+    vec3  Ro = O, Rd = D, Inv = WInv;
+    ivec3 Near = WNear;
+    int   Code[gi_bvh_stack_v];
+    int   n = 0, Base = -1, Inst = -1, Next = 0, End = 0;     // (Base: the stack's height under the mesh being walked, -1 in the TLAS; Next, End: a TLAS leaf's instances left)
+    Code[n] = g_GIBvhTlasRoot; ++n;
+    while (true)
+    {
+        if (Base >= 0 && n == Base) { Base = -1; Ro = O; Rd = D; Inv = WInv; Near = WNear; }
+        if (Base < 0 && Next < End)
+        {
+            const int p = GIBvhTlasLeaves[g_GIBvhPrimOffset + Next]; ++Next;
+            const vec4 R0 = GIBvhInstances[p].m_W2L[0], R1 = GIBvhInstances[p].m_W2L[1], R2 = GIBvhInstances[p].m_W2L[2];
+            Ro = vec3(dot(R0.xyz, O) + R0.w, dot(R1.xyz, O) + R1.w, dot(R2.xyz, O) + R2.w);
+            Rd = vec3(dot(R0.xyz, D), dot(R1.xyz, D), dot(R2.xyz, D));
+            Inv = GISafeInverse(Rd);
+            Near = ivec3(Inv.x < 0.0 ? 1 : 0, Inv.y < 0.0 ? 3 : 2, Inv.z < 0.0 ? 5 : 4);
+            Inst = GIBvhInstances[p].m_Info.y;
+            Base = n;
+            Code[n] = GIBvhInstances[p].m_Info.x; ++n;
+        }
+        if (n == 0) break;
+        --n;
+        const int c = Code[n];
+        ++g_GIBvhVisits;
+        if (c < 0)
+        {
+            if (Base < 0) { Next = GIBvhTlasLeaves[2 * (~c)]; End = Next + GIBvhTlasLeaves[2 * (~c) + 1]; continue; }
+            float d, u, v;
+            const int k = GIIntersectTri4(~c, Inst, Ro, Rd, H.m_T, d, u, v);
+            if (k >= 0) { H.m_T = d; H.m_U = u; H.m_V = v; H.m_Inst = Inst; H.m_Tri = GIBvhTri4[~c].m_Tri[k]; if (g_GIBvhAnyHit) return H; }
+            continue;
+        }
+        vec4 TNear;
+        int Mask = GIBox4(c, Ro, Inv, Near, H.m_T, TNear);
+        int Kids[4]; float KT[4]; int h = 0;
+        for (int k = 0; k < 4; ++k)
+            if ((Mask & (1 << k)) != 0)
+            {
+                int j = h++;
+                for (; j > 0 && KT[j - 1] < TNear[k]; --j) { Kids[j] = Kids[j - 1]; KT[j] = KT[j - 1]; }
+                Kids[j] = int(GIBvhNodes[c].m_W[10 + k]); KT[j] = TNear[k];
+            }
+        for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; ++n; }
+    }
+    return H;
+}
+#else
 void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
 {
     const vec3  Inv  = GISafeInverse(D);
@@ -146,3 +201,4 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
     }
     return H;
 }
+#endif

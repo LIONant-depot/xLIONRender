@@ -12,6 +12,7 @@
 // 0.5, the materials'; nothing written). Its counters per ring slot: rays, hits, the BVH's visits
 layout(local_size_x = 8, local_size_y = 8) in;
 
+#define GI_BVH_ONE_LOOP
 #include "xlionrender_gi_pass_common.glsl"           // (bindings 0-4: the BVH and the GI's data)
 #include "xlionrender_octahedral.glsl"
 #include "xlionrender_environment_atlas.glsl"
@@ -25,6 +26,8 @@ struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; uvec4 nBoxes; vec4 Box[12
 layout(std430, set = 0, binding = 12) readonly buffer sdf_b    { float WorldSDF[]; };     // (XLION_SDF: xlionrender_world_sdf.glsl)
 layout(std430, set = 0, binding = 13) readonly buffer sdf_surf_b { uvec2 WorldSDFSurf[]; };
 #include "xlionrender_world_sdf.glsl"
+layout(std430, set = 0, binding = 14) readonly buffer baked_sdf_b { uint BakedSDF[]; };     // (XLION_SDF 11, 12: xlionrender_baked_sdf.glsl)
+#include "xlionrender_baked_sdf.glsl"
 layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; };        // (a ring slot each)
 // The hits to texture (xlionrender_refl_hits_comp.glsl), a list: Hits[0] its counts (x, y: by the frame's parity - the hits pass clears
 // the next frame's), then three a hit - x: the instance, y: the triangle, z, w: the barycentrics u, v; then E = (E_direct + E_indirect) / pi (rgb), the
@@ -251,7 +254,8 @@ void main()
                 g_GIBvhSeeThrough = true;                   // (the GI's rays: see-through triangles let them pass)
                 // (m_Full.y, measurement, XLION_SDF: hit or miss alone: 1 by the world's distance field, 2 by the BVH)
                 gi_hit Hit;
-                if (Push.m_Full.y == 1 || Push.m_Full.y >= 3) { float St; const bool bS = SDFCast(O, L, St); Hit.m_T = St; Hit.m_U = 0.0; Hit.m_V = 0.0; Hit.m_Tri = -1; Hit.m_Inst = bS ? -2 : -1; }
+                if (Push.m_Full.y >= 11) Hit = BakedCast(O, L);
+                else if (Push.m_Full.y == 1 || Push.m_Full.y >= 3) { float St; const bool bS = SDFCast(O, L, St); Hit.m_T = St; Hit.m_U = 0.0; Hit.m_V = 0.0; Hit.m_Tri = -1; Hit.m_Inst = bS ? -2 : -1; }
                 else Hit = GICast(O, L, 1e30);
                 // (XLION_SDF 9: the field says about where, a short BVH ray there says what: the real triangle, for the real shading below)
                 bool bExact = false;
@@ -323,7 +327,7 @@ void main()
                         if (Push.m_Full.y == 7) Lr = Ed;
                         Class = refl_hit_v; Dist = Hit.m_T;
                     }
-                    else if (Push.m_Full.y != 0 && Push.m_Full.y < 3 && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
+                    else if ((Push.m_Full.y == 11 || (Push.m_Full.y != 0 && Push.m_Full.y < 3)) && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
                     else if (Push.m_Full.y == 9 && Hit.m_Inst == -2) { Lr = vec3(1.0, 0.0, 1.0); Class = refl_hit_v; Dist = Hit.m_T; }     // (the short ray met nothing: shown)
                     else if (Hit.m_Inst >= 0)
                     {

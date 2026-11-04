@@ -96,6 +96,7 @@ namespace xlionrender
                       void                 DestroyMesh  ( mesh_id Id )                                          noexcept;
         // Surfel GI for a cluster mesh (CreateClusterGeom, rigid): its baked surfels (gi::surfel_mesh::Bake) in the mesh's vertex
         // order - the resource pipeline's product (the xgeom GI options); kept by the renderer. scene::m_GI turns GI on.
+        [[nodiscard]] xgpu::device::error* SetBakedSdf  ( const gi::sdf_bake::level& Level ) noexcept;      // ponytail: one level, the world's (XLION_SDF 11, 12): rays aren't moved into an instance's space
         [[nodiscard]] xgpu::device::error* SetMeshGI    ( mesh_id Id, gi::surfel_mesh&& Surfels, std::vector<std::uint32_t>&& Packed = {} ) noexcept;     // Packed: PackMeshGI's data made on a worker (empty: packed here)
         // A geometry over one GI mesh's cap (xgeom_static version 7): its GI in sections, each its own surfels (gi::LoadSection) and display
         // buffer; per cluster its section and the delta from its vertices to its section's (gi::LoadSection's VMap)
@@ -488,6 +489,8 @@ namespace xlionrender
         xgpu::shader                m_WorldSdfShader;               // (XLION_SDF, prototype) the world's distance field: xlionrender_world_sdf_comp.glsl
         xgpu::compute               m_WorldSdf;
         xgpu::buffer                m_WorldSdfB, m_WorldSdfSurfB;
+        xgpu::buffer                m_BakedSdfB;                    // SetBakedSdf (XLION_SDF 11, 12)
+        bool                        m_bBakedSdf = false;
         int                         m_WorldSdfCascade = 0, m_WorldSdfSlice = 0, m_WorldSdfAge = 0;
         xmath::fvec3                m_WorldSdfCenter{};
         xgpu::shader                m_ReflTraceShader;              // the reflection trace's benchmark (m_ReflTraceBench): its pass, counters (4 per ring slot), timestamps
