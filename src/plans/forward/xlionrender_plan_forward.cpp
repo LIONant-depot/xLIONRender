@@ -2716,7 +2716,7 @@ namespace xlionrender
 
                 writeLocalLights(Window, Scene, Eye, Light);
                 if( m_LightModeUsed == light_mode::SCREEN && !bMain ) Light.m_LocalCount.m_Y = float(int(light_mode::CELLS));     // (the screen tail is the main view's: the others' every light of the list)
-                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? 1.0f : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
+                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? (Scene.m_bDebugReflectionMirror ? 2.0f : 1.0f) : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
 
             }
 

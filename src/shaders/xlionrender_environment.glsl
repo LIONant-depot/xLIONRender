@@ -221,6 +221,6 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     if (UBOLight.EnvParams.w > 0.0) { const vec4 U = ReflScreen(N); Spec = mix(Spec, U.rgb, U.a); }      // the traced reflections replace the probes where they cover
 #endif
     const vec2 DFG = textureLod(SamplerEnvDFG, vec2(NdotV, PerceptualRoughness), 0.0).rg;
-    g_EnvSpecular = Spec * (F0 * DFG.x + DFG.y) * AO;
+    g_EnvSpecular = UBOLight.EnvParams.z > 1.5 ? Spec : Spec * (F0 * DFG.x + DFG.y) * AO;
     return (Diff * Albedo * (1.0 - Metallic) + Spec * (F0 * DFG.x + DFG.y)) * AO;     // (the lit sum as before, bitwise)
 }

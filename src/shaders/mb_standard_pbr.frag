@@ -133,7 +133,7 @@ layout(set = 2, binding = 1) uniform lighting_uniforms
 	vec4 LocalCount;                     // x: local lights, y: mode (0 exact, 1 cells, 2 cells + sampled tail), z: seed, w: the tail's resampling candidates (> 1: RIS; < -1: RIS, the visibility in the weights)
 	vec4 LocalBase;                      // x: first light in LocalLightList, y: first uint in LightCells, z: level 0 cell size, w: tail samples
 	vec4 CellOrigin[5];                  // per cell level: the window's first cell index (xyz) - features/lights/xlionrender_light_cells.h
-	vec4 EnvParams;                      // x: 1 the environment probe replaces the flat ambient, y: its intensity, z: 1 the reflection debug view (g_EnvSpecular)
+	vec4 EnvParams;                      // x: 1 the environment probe replaces the flat ambient, y: its intensity, z: 1 the reflection debug view (g_EnvSpecular), 2 the same with every material a mirror
 	vec4 ProbeCount;                     // x: reflection probes (innermost first), y: the first's record in LocalLightList, z: their cell headers in LightCells (-1: none)
 	// the sun's virtual shadow pages (xlionrender_shadow_vsm.glsl; appended: materials compiled before them read the fields above only)
 	vec4 VSMParams;                      // x: 1 the virtual pages (0: the clipmap), y: level 0 texel, z: levels, w: the page table's first uint in LightCells
@@ -468,9 +468,10 @@ vec3 PBRLighting
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 #ifndef XLION_LDR_OUTPUT
 	g_CapRoughness = inRoughness; g_CapF0 = inF0;
+	if (UBOLight.EnvParams.z > 1.5) N = TransformNotmalToWorld(vec3(0.0, 0.0, 1.0));      // (the mirror view: no normal map, as Unreal's Reflections view)
 	GIPixelGI(inNormal, N, V, inAlbedo, inMetalic, inEmissiveColor);
 	ambient *= g_ScreenAO;
-	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO * g_ScreenAO);   // the sky probe
+	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, UBOLight.EnvParams.z > 1.5 ? 0.0 : max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO * g_ScreenAO);   // the sky probe
 #endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).
