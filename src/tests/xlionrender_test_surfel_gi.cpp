@@ -4,6 +4,7 @@
 //  - a rotated instance equals the same geometry pre-transformed (transforms reach surfels, normals and reads)
 //  - a city (400 buildings, sun + sky): cost per update, coverage, LOD levels, and a moved building dirtying only its block
 //  - surfels saved by the GeomStatic compiler load back as baked, and a receive-only mesh is not in the rays' way
+#include "../features/gi/xlionrender_world_sdf_bake.h"
 #include "features/gi/xlionrender_surfel_gi.h"
 #include "tests/xlionrender_test_no_dialogs.h"
 #include "features/gi/xlionrender_surfel_gi_chunks.h"
@@ -133,6 +134,21 @@ namespace
 
 int main()
 {
+    // The baked distance field: never above the true distance, a thin triangle isn't stepped through, far from everything it says the range
+    {
+        namespace sb = xlionrender::gi::sdf_bake;
+        const std::vector<sb::v3f> P{ { -3, 0, -3 }, { 3, 0, -3 }, { 3, 0, 3 }, { -3, 0, 3 }, { 0, 0, 0 }, { 0.01f, 0, 0 }, { 0, 3, 0 } };
+        const std::vector<std::array<std::uint32_t, 3>> T{ { 0, 1, 2 }, { 0, 2, 3 }, { 4, 5, 6 } };
+        const auto L = sb::BakeLevel(std::span{ P }, std::span{ T }, 0.1f, [](std::size_t n, auto&& f) { for (std::size_t i = 0; i < n; ++i) f(i); });
+        std::vector<sb::v3f> Q;
+        std::uint32_t r = 1;
+        const auto Next = [&] { r = r * 1664525u + 1013904223u; return float(r >> 8) / float(1u << 24); };
+        for (int i = 0; i < 5000; ++i) Q.push_back({ Next() * 6.0f - 3.0f, Next() * 3.0f, Next() * 6.0f - 3.0f });
+        if (!sb::Check(L, std::span{ P }, std::span{ T }, std::span{ Q })) { std::printf("FAIL: sdf bake: a lower bound above the true distance\n"); return 1; }
+        if (L.LowerBound({ 0.003f, 1.0f, 0 }) != 0.0f) { std::printf("FAIL: sdf bake: a thin triangle would be stepped through\n"); return 1; }
+        if (L.LowerBound({ 2.5f, 2.5f, 2.5f }) < 0.3f) { std::printf("FAIL: sdf bake: far from everything it should step\n"); return 1; }
+        std::printf("SDF bake: safe, %zu bricks\n", L.m_Bytes.size() / 512);
+    }
     // 1. The BVHs against brute force
     {
         cornell C;
