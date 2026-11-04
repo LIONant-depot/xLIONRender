@@ -2288,7 +2288,7 @@ namespace xlionrender
         const auto BvhR = m_pGITrace ? m_pGITrace->getBvh() : gi::gpu_trace::bvh_view{ nullptr, nullptr, nullptr, nullptr, 0, 0, true };
         Light.m_EnvParams.m_W = 0.0f;
         const bool bTraced = (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
-        const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0;
+        const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
         if( bTraced )
         {
