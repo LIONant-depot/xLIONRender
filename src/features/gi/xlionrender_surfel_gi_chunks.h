@@ -605,10 +605,13 @@ namespace xlionrender::gi
         Out.assign(F.m_Sections.size(), {});
         ClusterSection = F.m_ClusterSection;
         ClusterVertexDelta.assign(Geom.getClusters().size(), 0);
-        for (std::size_t k = 0; k < F.m_Sections.size(); ++k)
+        // A section a task (Bistro's 16 took 1.75 s on the main thread at every open): each writes its own Out[k] and its own clusters' deltas
+        std::atomic<bool> bFailed{ false };
+        ParallelFor(int(F.m_Sections.size()), [&](int iSection)
         {
+            const std::size_t k = std::size_t(iSection);
             std::vector<int> VMap;
-            if (!LoadSection(Whole, TriCluster, V, k, Out[k].m_Surfels, &VMap)) return false;
+            if (!LoadSection(Whole, TriCluster, V, k, Out[k].m_Surfels, &VMap)) { bFailed = true; return; }
             Out[k].m_Surfels.m_bBounce = Geom.m_GIMode != decltype(Geom.m_GIMode)::RECEIVE;
             Out[k].m_nOwned = F.m_Sections[k].m_nOwned;
             Out[k].m_Ghosts.assign(F.m_Ghosts.begin() + F.m_Sections[k].m_iGhost, F.m_Ghosts.begin() + F.m_Sections[k].m_iGhost + F.m_Sections[k].m_nGhosts);
@@ -636,7 +639,7 @@ namespace xlionrender::gi
                 if (First >= VMap.size() || VMap[First] < 0) continue;      // (a cluster with no triangles)
                 ClusterVertexDelta[c] = VMap[First] - int(First);
             }
-        }
-        return true;
+        });
+        return !bFailed;
     }
 }
