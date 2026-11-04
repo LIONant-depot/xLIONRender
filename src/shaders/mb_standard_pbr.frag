@@ -450,6 +450,9 @@ vec3 PBRLighting
 
 	// Ambient baseline: Compute always�cheap; 2025 grazing approx for subtle IBL hack (neural-inspired, no cubemap).
 	vec3    N                   = TransformNotmalToWorld(inNormal);
+#ifndef XLION_LDR_OUTPUT
+	if (UBOLight.EnvParams.z > 1.5) N = TransformNotmalToWorld(vec3(0.0, 0.0, 1.0));      // (the mirror view: no normal map, as Unreal's Reflections view)
+#endif
 #ifdef XLION_GBUFFER_OUTPUT
 	// The material's G-buffer variant (the half-size thin G-buffer: lighting_p3_design.md "The decision"): its octahedral normal (x 0.5
 	// + 0.5) and roughness, as the material's color into the 10-10-10-2 target - no lighting compiled in
@@ -468,7 +471,6 @@ vec3 PBRLighting
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 #ifndef XLION_LDR_OUTPUT
 	g_CapRoughness = inRoughness; g_CapF0 = inF0;
-	if (UBOLight.EnvParams.z > 1.5) N = TransformNotmalToWorld(vec3(0.0, 0.0, 1.0));      // (the mirror view: no normal map, as Unreal's Reflections view)
 	GIPixelGI(inNormal, N, V, inAlbedo, inMetalic, inEmissiveColor);
 	ambient *= g_ScreenAO;
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, UBOLight.EnvParams.z > 1.5 ? 0.0 : max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO * g_ScreenAO);   // the sky probe

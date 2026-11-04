@@ -43,7 +43,7 @@ layout(set = 1, binding = 5) uniform sampler2D GMotion;    // w: the motion's fl
 // records' first (x, y, z; x 0: the half-size dispatch)
 // m_Tex: x the receivers' roughness up to which their hits get their material's own shading (fading over its last quarter), y the visible
 // reflectance from which (scene::m_ReflectionTextureMaxRoughness, m_ReflectionTextureMinReflectance), w the list's capacity; x 0: none
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen; } Push;
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; } Push;     // (Flat: the sky's radiance with no environment; m_Full.w: the mirror view: every receiver roughness 0)
 
 #include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
@@ -176,7 +176,7 @@ void main()
         const vec3  P   = Pc.xyz / Pc.w;                                    // camera-centred
         const vec4  G   = texelFetch(GColor, p, 0);
         const vec3  N   = OctDecode(G.xy * 2.0 - 1.0);
-        const float Rough = Push.m_Mode == 1u ? 0.0 : Push.m_Mode == 2u ? 0.5 : G.z;
+        const float Rough = Push.m_Mode == 1u || Push.m_Full.w != 0 ? 0.0 : Push.m_Mode == 2u ? 0.5 : G.z;
         const vec2  OctN = OctEncode(N) * 0.5 + 0.5;
         Rec.w = packHalf2x16(vec2(Pc.w > 0.0 ? 1.0 / Pc.w : 0.0, 0.0)) | (uint(OctN.x * 15.0 + 0.5) << 16) | (uint(OctN.y * 15.0 + 0.5) << 20);    // (the view depth: clip w, as the tail's)
         const float PlaneDist = dot(Push.m_Plane.xyz, P + Push.m_Eye) + Push.m_Plane.w;
@@ -290,7 +290,7 @@ void main()
                     }
                     else
                     {
-                        Lr = AtlasSample(EnvAtlas, vec2(0.0), kEnvAtlas, L, 0.0) * Push.m_EnvIntensity;      // (the sky along the sampled direction: the lobe is the sampling's, not the atlas')
+                        Lr = AtlasSample(EnvAtlas, vec2(0.0), kEnvAtlas, L, 0.0) * Push.m_EnvIntensity + vec3(Push.m_FlatR, Push.m_FlatG, Push.m_FlatB);      // (the sky along the sampled direction: the lobe is the sampling's, not the atlas')
                         Class = refl_miss_v;
                     }
                     const float Conf = 1.0 - smoothstep(0.5 * Push.m_MaxRough, Push.m_MaxRough, Rough);     // (B: sharp receivers; glossy ones fade to the probes until the reconstruction)
