@@ -820,13 +820,15 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 13, .m_nTextures = 6, .m_PushConstantsSize = 128 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 14, .m_nTextures = 6, .m_PushConstantsSize = 128 }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdfShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_WorldSdfComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_WorldSdf, { .m_pShader = &m_WorldSdfShader, .m_nBuffers = 6, .m_PushConstantsSize = 40 }); Err ) return Err;
+            if( auto Err = Device.Create(m_WorldSdf, { .m_pShader = &m_WorldSdfShader, .m_nBuffers = 7, .m_PushConstantsSize = 40 }); Err ) return Err;
             if( std::getenv("XLION_SDF") )
             {
                 const std::vector<float> Zero(4 + 4 * 128 * 128 * 128, 0.0f);
                 if( auto Err = Device.Create(m_WorldSdfB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = int(Zero.size()), .m_pData = const_cast<float*>(Zero.data()), .m_pName = "World SDF" }); Err ) return Err;
+                const std::vector<std::uint32_t> ZeroS(2 * 4 * 128 * 128 * 128, 0u);
+                if( auto Err = Device.Create(m_WorldSdfSurfB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = int(ZeroS.size() / 2), .m_pData = const_cast<std::uint32_t*>(ZeroS.data()), .m_pName = "World SDF: surfaces" }); Err ) return Err;
             }
             if( auto Err = Device.Create(m_ReflDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflDenoiseComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflDenoise, { .m_pShader = &m_ReflDenoiseShader, .m_nBuffers = 4, .m_nTextures = 3, .m_PushConstantsSize = 16 }); Err ) return Err;

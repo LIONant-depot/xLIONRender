@@ -5,6 +5,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #include "xlionrender_gi_pass_common.glsl"           // (bindings 0-4: the BVH and the GI's data)
 layout(std430, set = 0, binding = 5) buffer sdf_b { float WorldSDF[]; };
+layout(std430, set = 0, binding = 6) buffer sdf_surf_b { uvec2 WorldSDFSurf[]; };      // per cell, the nearest surface: x: albedo, sqrt, RGB8, 255 in A where there is one; y: the normal, octahedral 16 16
 
 layout(push_constant) uniform push_t { vec3 m_Center; float m_Cell0; int m_Cascade, m_Slice, m_Mode, m_TlasRoot, m_PrimOffset; float m_MaxCells; } Push;
 
@@ -12,6 +13,8 @@ const int  dim_v = 128;
 const vec3 dirs_v[14] = vec3[14](vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1),
     vec3(0.57735, 0.57735, 0.57735), vec3(-0.57735, 0.57735, 0.57735), vec3(0.57735, -0.57735, 0.57735), vec3(-0.57735, -0.57735, 0.57735),
     vec3(0.57735, 0.57735, -0.57735), vec3(-0.57735, 0.57735, -0.57735), vec3(0.57735, -0.57735, -0.57735), vec3(-0.57735, -0.57735, -0.57735));
+
+vec2 Oct(vec3 n) { n /= abs(n.x) + abs(n.y) + abs(n.z); return n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0); }
 
 int At(ivec3 i) { return 4 + Push.m_Cascade * dim_v * dim_v * dim_v + i.z * dim_v * dim_v + i.y * dim_v + i.x; }
 
@@ -29,8 +32,23 @@ void main()
         g_GIBvhSeeThrough = true;
         const vec3 O = Push.m_Center + (vec3(i) + 0.5 - float(dim_v) * 0.5) * Cell;
         float d = MaxD;
-        for (int k = 0; k < 14; ++k) { const gi_hit H = GICast(O, dirs_v[k], d); if (H.m_Inst >= 0) d = min(d, H.m_T); }
+        gi_hit Best; Best.m_Inst = -1; Best.m_Tri = -1; Best.m_U = 0.0; Best.m_V = 0.0; Best.m_T = MaxD;
+        for (int k = 0; k < 14; ++k) { const gi_hit H = GICast(O, dirs_v[k], d); if (H.m_Inst >= 0 && H.m_T < d) { d = H.m_T; Best = H; } }
         WorldSDF[At(i)] = d;
+        uvec2 Surf = uvec2(0u);
+        if (Best.m_Inst >= 0)
+        {
+            const uint  R = InstRec(Best.m_Inst), M = MeshOf(R);
+            const uvec3 Tr = MTri(M, Best.m_Tri);
+            const float b0 = 1.0 - Best.m_U - Best.m_V;
+            const vec3  N = normalize(NormalToWorld(R, MNrm(M, Tr.x) * b0 + MNrm(M, Tr.y) * Best.m_U + MNrm(M, Tr.z) * Best.m_V));
+            vec3 Albedo, Emission;
+            SurfaceAt(Best.m_Inst, Best.m_Tri, Best.m_U, Best.m_V, Albedo, Emission);
+            const uvec3 c = uvec3(sqrt(clamp(Albedo, vec3(0.0), vec3(1.0))) * 255.0 + 0.5);
+            const uvec2 o = uvec2((Oct(N) * 0.5 + 0.5) * 65535.0 + 0.5);
+            Surf = uvec2(c.x | (c.y << 8) | (c.z << 16) | (255u << 24), o.x | (o.y << 16));
+        }
+        WorldSDFSurf[At(i) - 4] = Surf;
     }
     else
     {

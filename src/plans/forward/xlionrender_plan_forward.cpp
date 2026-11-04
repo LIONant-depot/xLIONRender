@@ -2371,12 +2371,14 @@ namespace xlionrender
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
             // (XLION_SDF, prototype, reflections_sdf_plan_2026-11.md's gate: 1 hit or miss by the world's distance field, built here over some frames; 2 by the BVH)
             static const int s_Sdf = [] { const char* p = std::getenv("XLION_SDF"); return p ? std::atoi(p) : 0; }();
-            if( s_Sdf == 1 && (E - m_WorldSdfCenter).Length() > 3.0f ) { m_WorldSdfCascade = 0; m_WorldSdfSlice = 0; }      // ponytail: the whole field again when the eye leaves; scrolling cascades when it moves in a game
-            if( s_Sdf == 1 && m_WorldSdfCascade < 4 )
+            const bool bSdf = s_Sdf == 1 || s_Sdf >= 3;
+            if( bSdf && (E - m_WorldSdfCenter).Length() > 3.0f ) { m_WorldSdfCascade = 0; m_WorldSdfSlice = 0; m_WorldSdfAge = 0; }      // ponytail: the whole field again when the eye leaves; scrolling cascades when it moves in a game
+            if( bSdf && ++m_WorldSdfAge == 300 ) { m_WorldSdfCascade = 0; m_WorldSdfSlice = 0; }      // ponytail: and once more when the materials' capture is in: its albedo was 0 before
+            if( bSdf && m_WorldSdfCascade < 4 )
             {
                 if( m_WorldSdfCascade == 0 && m_WorldSdfSlice == 0 ) m_WorldSdfCenter = E;
                 struct { float m_Center[3], m_Cell0; int m_Cascade, m_Slice, m_Mode, m_TlasRoot, m_PrimOffset; float m_MaxCells; } SPush{ { m_WorldSdfCenter.m_X, m_WorldSdfCenter.m_Y, m_WorldSdfCenter.m_Z }, 0.1f, m_WorldSdfCascade, m_WorldSdfSlice, 0, BvhR.m_TlasRoot, BvhR.m_PrimOffset, 8.0f };
-                auto SB = std::array<xgpu::buffer*, 6>{ const_cast<xgpu::buffer*>(BvhR.m_pNodes), const_cast<xgpu::buffer*>(BvhR.m_pTri4), const_cast<xgpu::buffer*>(BvhR.m_pInstances), const_cast<xgpu::buffer*>(BvhR.m_pTlas), const_cast<xgpu::buffer*>(BvhR.m_pData), &m_WorldSdfB };
+                auto SB = std::array<xgpu::buffer*, 7>{ const_cast<xgpu::buffer*>(BvhR.m_pNodes), const_cast<xgpu::buffer*>(BvhR.m_pTri4), const_cast<xgpu::buffer*>(BvhR.m_pInstances), const_cast<xgpu::buffer*>(BvhR.m_pTlas), const_cast<xgpu::buffer*>(BvhR.m_pData), &m_WorldSdfB, &m_WorldSdfSurfB };
                 Window.Dispatch(m_WorldSdf, SB, &SPush, sizeof(SPush), 16, 16, 16);
                 if( (m_WorldSdfSlice += 16) >= 128 )
                 {
@@ -2386,7 +2388,7 @@ namespace xlionrender
                 }
             }
             Push.m_Full[1] = s_Sdf;
-            auto Buffers  = std::array<xgpu::buffer*, 13>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, s_Sdf == 1 ? &m_WorldSdfB : &m_ReflStats };
+            auto Buffers  = std::array<xgpu::buffer*, 14>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
             // list's places before the glossy ones

@@ -487,8 +487,8 @@ namespace xlionrender
         double                      m_SunMaskSum = 0; int m_SunMaskSumN = 0;
         xgpu::shader                m_WorldSdfShader;               // (XLION_SDF, prototype) the world's distance field: xlionrender_world_sdf_comp.glsl
         xgpu::compute               m_WorldSdf;
-        xgpu::buffer                m_WorldSdfB;
-        int                         m_WorldSdfCascade = 0, m_WorldSdfSlice = 0;
+        xgpu::buffer                m_WorldSdfB, m_WorldSdfSurfB;
+        int                         m_WorldSdfCascade = 0, m_WorldSdfSlice = 0, m_WorldSdfAge = 0;
         xmath::fvec3                m_WorldSdfCenter{};
         xgpu::shader                m_ReflTraceShader;              // the reflection trace's benchmark (m_ReflTraceBench): its pass, counters (4 per ring slot), timestamps
         xgpu::compute               m_ReflTrace;

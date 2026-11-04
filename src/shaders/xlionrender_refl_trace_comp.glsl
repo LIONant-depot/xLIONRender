@@ -23,6 +23,7 @@ layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records
 layout(std430, set = 0, binding = 8) readonly buffer mips_b    { uvec2   PlanarMips[]; }; // the planar view's pyramid (xlionrender_refl_planar_mips_comp.glsl)
 struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; uvec4 nBoxes; vec4 Box[128]; };      // (Box: the unrepresented drawn things' world boxes, lo / hi: instance::refl_boxes_v)                                  // the planar view's clip -> its eye's centred world; x: the half view's pixels a unit at distance 1, y: the pyramid's levels; per level: its base, w, h
 layout(std430, set = 0, binding = 12) readonly buffer sdf_b    { float WorldSDF[]; };     // (XLION_SDF: xlionrender_world_sdf.glsl)
+layout(std430, set = 0, binding = 13) readonly buffer sdf_surf_b { uvec2 WorldSDFSurf[]; };
 #include "xlionrender_world_sdf.glsl"
 layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; };        // (a ring slot each)
 // The hits to texture (xlionrender_refl_hits_comp.glsl), a list: Hits[0] its counts (x, y: by the frame's parity - the hits pass clears
@@ -85,6 +86,8 @@ bool PrefixIncomplete(vec3 O, vec3 D, float TMax)
 
 // The GI's Direct (xlionrender_gi_pass_common.glsl: the sun and its lights, a shadow ray each) with each light's GGX highlight toward V
 // (mb_standard_pbr.frag's: D, correlated Smith, Schlick) for a surface of F0 and roughness Rough: E the irradiance, S the radiance
+bool g_ShadowBySDF = false;     // (XLION_SDF 3: its shadow rays march the field too)
+bool ShadowRay(vec3 O, vec3 L, float TMax) { if (!g_ShadowBySDF) return Occluded(O, L, TMax); float t; return SDFCast(O, L, t) && t < TMax; }
 void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec, out vec3 E, out vec3 S)
 {
     const uint Lt = GD[2];
@@ -115,7 +118,7 @@ void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec,
             C = GV(b + 3u) * ((1.0 - s * s * s * s) / (1.0 + 2.0 * s * s) * Cone);
         }
         const float c = dot(N, L);
-        if (c <= 0.0 || Occluded(O, L, k < 0 ? 1e30 : d - 2e-3)) continue;
+        if (c <= 0.0 || ShadowRay(O, L, k < 0 ? 1e30 : d - 2e-3)) continue;
         E += C * c;
         if (!bSpec) continue;
         const vec3  H  = normalize(L + V);
@@ -233,14 +236,33 @@ void main()
                 g_GIBvhSeeThrough = true;                   // (the GI's rays: see-through triangles let them pass)
                 // (m_Full.y, measurement, XLION_SDF: hit or miss alone: 1 by the world's distance field, 2 by the BVH)
                 gi_hit Hit;
-                if (Push.m_Full.y == 1) { float St; const bool bS = SDFCast(O, L, St); Hit.m_T = St; Hit.m_U = 0.0; Hit.m_V = 0.0; Hit.m_Tri = -1; Hit.m_Inst = bS ? -2 : -1; }
+                if (Push.m_Full.y == 1 || Push.m_Full.y >= 3) { float St; const bool bS = SDFCast(O, L, St); Hit.m_T = St; Hit.m_U = 0.0; Hit.m_V = 0.0; Hit.m_Tri = -1; Hit.m_Inst = bS ? -2 : -1; }
                 else Hit = GICast(O, L, 1e30);
                 atomicAdd(s_Rays, 1u);
                 atomicAdd(s_Visits, uint(g_GIBvhVisits));
                 if (Push.m_Mode == 0u)
                 {
                     vec3 Lr; uint Class; float Dist = 0.0;
-                    if (Push.m_Full.y != 0 && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
+                    if (Push.m_Full.y >= 3 && Hit.m_Inst != -1)
+                    {
+                        // the hit by the field: the surface it stored, the voxels' light, the sun and lamps with shadow rays through the field (no emission yet)
+                        atomicAdd(s_Hits, 1u);
+                        const vec3 Py = O + L * Hit.m_T;
+                        vec3 Albedo, Ny;
+                        SDFSurface(Py, L, Albedo, Ny);
+                        vec3 Ei = vec3(0.0), Ed, Sy;
+                        if (Push.m_Vox.w > 0.0) { g_HitGridRead = true; Ei = VoxRead(Py, Ny, Push.m_Vox.xyz, Push.m_Vox.w); }
+                        g_ShadowBySDF = true;
+                        DirectAndSpecular(Py + Ny * 2.0 * WorldSDF[3], Ny, -L, vec3(0.04), 1.0, false, Ed, Sy);
+                        g_ShadowBySDF = false;
+                        Lr = Albedo * (1.0 / gi_pi_v) * (Ed + Ei) + 0.04 * 0.45 * (1.0 / gi_pi_v) * (Ed + Ei);
+                        if (Push.m_Full.y == 4) Lr = Albedo;            // (XLION_SDF 4, 5, 6, 7: its pieces alone)
+                        if (Push.m_Full.y == 5) Lr = Ny * 0.5 + 0.5;
+                        if (Push.m_Full.y == 6) Lr = Ei;
+                        if (Push.m_Full.y == 7) Lr = Ed;
+                        Class = refl_hit_v; Dist = Hit.m_T;
+                    }
+                    else if (Push.m_Full.y != 0 && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
                     else if (Hit.m_Inst >= 0)
                     {
                         atomicAdd(s_Hits, 1u);
