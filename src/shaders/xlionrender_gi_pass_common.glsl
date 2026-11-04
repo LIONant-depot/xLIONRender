@@ -10,7 +10,7 @@ uint  g_CapTier = 0u;       // the link build: the tier to report (GI_EMIT) on a
 float g_CapScale = 0.0, g_CapB = 0.0;
 int   g_CapInst = -1;
 
-struct GINode     { vec4 m_B[6]; ivec4 m_Child; };
+struct GINode     { uint m_W[14]; };
 struct GITri4     { vec4 m_V0[3]; vec4 m_E1[3]; vec4 m_E2[3]; ivec4 m_Tri; };
 struct GIInstance { vec4 m_W2L[3]; ivec4 m_Info; };
 

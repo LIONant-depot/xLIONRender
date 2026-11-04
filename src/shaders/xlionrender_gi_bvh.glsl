@@ -2,7 +2,7 @@
 // gi::world::PackGPU writes. Every mesh's BVH4 nodes and the TLAS's are in one array (a child code >= 0 a node, < 0 ~ a leaf: for a
 // mesh its 4-triangle row, for the TLAS its entry in the TLAS leaves); per TLAS primitive the instance's world-to-mesh rows, its mesh's
 // root code and its world id. The includer declares the buffers with these names (std430):
-//   GINode     { vec4 m_B[6]; ivec4 m_Child; }          GIBvhNodes[]
+//   GINode     { uint m_W[14]; }                        GIBvhNodes[]        (56 bytes: 0-2 the origin, floats; 3 an exponent per axis; 4-9 the children's bytes, x lo, x hi, y lo ..; 10-13 the child codes)
 //   GITri4     { vec4 m_V0[3], m_E1[3], m_E2[3]; ivec4 m_Tri; }   GIBvhTri4[]
 //   GIInstance { vec4 m_W2L[3]; ivec4 m_Info; }         GIBvhInstances[]       (m_Info.x: root code, .y: world instance)
 //   int                                                 GIBvhTlasLeaves[]      (per leaf first, count; the primitives from g_GIBvhPrimOffset)
@@ -21,11 +21,16 @@ const int gi_bvh_stack_v = 64;
 int g_GIBvhVisits = 0;              // (diagnostics) the nodes and leaves the walks popped
 
 // Which of a node's 4 children the ray enters before TMax (a bit each), and where (TNear): bvh::Box4
+vec4 GIBytes(uint w) { return vec4(uvec4(w, w >> 8, w >> 16, w >> 24) & uvec4(255u)); }
 int GIBox4(int Node, vec3 O, vec3 Inv, ivec3 Near, float TMax, out vec4 TNear)
 {
-    const vec4 nx = (GIBvhNodes[Node].m_B[Near.x] - O.x) * Inv.x, fx = (GIBvhNodes[Node].m_B[Near.x ^ 1] - O.x) * Inv.x;
-    const vec4 ny = (GIBvhNodes[Node].m_B[Near.y] - O.y) * Inv.y, fy = (GIBvhNodes[Node].m_B[Near.y ^ 1] - O.y) * Inv.y;
-    const vec4 nz = (GIBvhNodes[Node].m_B[Near.z] - O.z) * Inv.z, fz = (GIBvhNodes[Node].m_B[Near.z ^ 1] - O.z) * Inv.z;
+    // (quantized outward, in the node's own frame; an unused child's lo is above its hi: never entered)
+    const uint E = GIBvhNodes[Node].m_W[3];
+    const vec3 Or = vec3(uintBitsToFloat(GIBvhNodes[Node].m_W[0]), uintBitsToFloat(GIBvhNodes[Node].m_W[1]), uintBitsToFloat(GIBvhNodes[Node].m_W[2])) - O;
+    const vec3 Sc = vec3(uintBitsToFloat((E & 255u) << 23), uintBitsToFloat(((E >> 8) & 255u) << 23), uintBitsToFloat(((E >> 16) & 255u) << 23));
+    const vec4 nx = (Or.x + GIBytes(GIBvhNodes[Node].m_W[4 + Near.x]) * Sc.x) * Inv.x, fx = (Or.x + GIBytes(GIBvhNodes[Node].m_W[4 + (Near.x ^ 1)]) * Sc.x) * Inv.x;
+    const vec4 ny = (Or.y + GIBytes(GIBvhNodes[Node].m_W[4 + Near.y]) * Sc.y) * Inv.y, fy = (Or.y + GIBytes(GIBvhNodes[Node].m_W[4 + (Near.y ^ 1)]) * Sc.y) * Inv.y;
+    const vec4 nz = (Or.z + GIBytes(GIBvhNodes[Node].m_W[4 + Near.z]) * Sc.z) * Inv.z, fz = (Or.z + GIBytes(GIBvhNodes[Node].m_W[4 + (Near.z ^ 1)]) * Sc.z) * Inv.z;
     TNear = max(max(nx, ny), max(nz, vec4(0.0)));
     const vec4 tf = min(min(fx, fy), min(fz, vec4(TMax)));
     const bvec4 In = lessThanEqual(TNear, tf);
@@ -95,7 +100,7 @@ void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
             {
                 int j = h++;
                 for (; j > 0 && KT[j - 1] < TNear[k]; --j) { Kids[j] = Kids[j - 1]; KT[j] = KT[j - 1]; }
-                Kids[j] = GIBvhNodes[c].m_Child[k]; KT[j] = TNear[k];
+                Kids[j] = int(GIBvhNodes[c].m_W[10 + k]); KT[j] = TNear[k];
             }
         for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; TS[n] = KT[k]; ++n; }
     }
@@ -137,7 +142,7 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
             {
                 int j = h++;
                 for (; j > 0 && KT[j - 1] < TNear[k]; --j) { Kids[j] = Kids[j - 1]; KT[j] = KT[j - 1]; }
-                Kids[j] = GIBvhNodes[c].m_Child[k]; KT[j] = TNear[k];
+                Kids[j] = int(GIBvhNodes[c].m_W[10 + k]); KT[j] = TNear[k];
             }
         for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; TS[n] = KT[k]; ++n; }
     }

@@ -1187,9 +1187,9 @@ namespace xlionrender::gi
             m_bPlaced = true;
             ++m_nRetlas;
             if (!Local(m_Inst, m_Scene.m_Instances) || !Local(m_Tlas, m_Scene.m_TlasLeaves)) return false;
-            const std::size_t n0 = std::size_t(m_Scene.m_nMeshNodes), nW = (m_Scene.m_Nodes.size() - n0) * sizeof(bvh::node) / 4;
+            const std::size_t n0 = std::size_t(m_Scene.m_nMeshNodes), nW = (m_Scene.m_Nodes.size() - n0) * sizeof(world::gpu_scene::gpu_node) / 4;
             if (nW == 0) return true;
-            constexpr std::size_t node_words_v = sizeof(bvh::node) / 4;
+            constexpr std::size_t node_words_v = sizeof(world::gpu_scene::gpu_node) / 4;
             const std::array<int, 4> Job{ 0, 0, int(n0 * node_words_v), int(nW) };
             if (!Fit(m_TlasStageB, int(sizeof(std::uint32_t)), nW) || m_TlasStageB.MemoryMap(0, int(nW), [&](void* q) { std::memcpy(q, m_Scene.m_Nodes.data() + n0, nW * 4); })) return false;
             if (!Fit(m_TlasJobB, int(sizeof(Job)), 1) || m_TlasJobB.MemoryMap(0, 1, [&](void* q) { std::memcpy(q, &Job, sizeof(Job)); })) return false;

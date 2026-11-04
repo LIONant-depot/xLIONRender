@@ -16,7 +16,7 @@ layout(binding = 1) uniform sampler2D GBufferColor;     // xy: the octahedral no
 layout(binding = 2) uniform sampler2D GBufferDepth;
 
 // P4: the GI's BVH (gi::gpu_trace::getBvh; shaders/xlionrender_gi_bvh.glsl's layouts), absolute world space; the GI dummy where it has none
-struct GINode     { vec4 m_B[6]; ivec4 m_Child; };
+struct GINode     { uint m_W[14]; };
 struct GITri4     { vec4 m_V0[3]; vec4 m_E1[3]; vec4 m_E2[3]; ivec4 m_Tri; };
 struct GIInstance { vec4 m_W2L[3]; ivec4 m_Info; };
 layout(std430, set = 1, binding = 15) readonly buffer nodes_b     { GINode     GIBvhNodes[]; };

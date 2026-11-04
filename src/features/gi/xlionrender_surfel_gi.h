@@ -2962,8 +2962,16 @@ namespace xlionrender::gi
         // ponytail: see-through triangles are not left out yet (G2)
         struct gpu_scene
         {
+            // A node as the GPU has it, 56 bytes (shaders/xlionrender_gi_bvh.glsl): the children's boxes in bytes of the node's own frame, rounded outward
+            struct gpu_node
+            {
+                float         m_Origin[3];
+                std::uint32_t m_Exponents;
+                std::uint32_t m_B[6];       // per axis lo, hi: a byte a child
+                int           m_Child[4];
+            };
             struct instance { float m_W2L[3][4]; int m_Root = 0, m_Inst = -1, m_Pad0 = 0, m_Pad1 = 0; };
-            std::vector<bvh::node>  m_Nodes;
+            std::vector<gpu_node>   m_Nodes;
             std::vector<tri4>       m_Tri4;
             std::vector<instance>   m_Instances;
             std::vector<int>        m_TlasLeaves;       // per TLAS leaf its first and count in the primitives after them (m_PrimOffset on)
@@ -3017,10 +3025,32 @@ namespace xlionrender::gi
         }
         static int CopyBvh(gpu_scene& Out, const bvh& B, int NodeBase, int LeafBase) noexcept       // its nodes, the child codes made global
         {
-            for (auto N : B.m_Nodes)
+            for (const auto& N : B.m_Nodes)
             {
-                for (int k = 0; k < 4; ++k) N.m_Child[k] = N.m_Child[k] >= 0 ? N.m_Child[k] + NodeBase : ~(~N.m_Child[k] + LeafBase);
-                Out.m_Nodes.push_back(N);
+                gpu_scene::gpu_node G{};
+                for (int k = 0; k < 4; ++k) G.m_Child[k] = N.m_Child[k] >= 0 ? N.m_Child[k] + NodeBase : ~(~N.m_Child[k] + LeafBase);
+                for (int a = 0; a < 3; ++a)
+                {
+                    float Lo = 1e30f, Hi = -1e30f;
+                    for (int k = 0; k < 4; ++k) if (N.m_B[2 * a][k] <= N.m_B[2 * a + 1][k]) { Lo = std::min(Lo, N.m_B[2 * a][k]); Hi = std::max(Hi, N.m_B[2 * a + 1][k]); }
+                    if (Lo > Hi) Lo = Hi = 0;
+                    const float Slack = 1e-5f * std::max(std::abs(Lo), std::abs(Hi)) + 1e-6f;
+                    const float O = Lo - Slack, Extent = Hi + Slack - O;
+                    int e = 0; (void)std::frexp(Extent / 250.0f, &e);          // (Extent / 2^e under 250: room for the rounding)
+                    e = std::clamp(e, -120, 120);
+                    const float S = std::ldexp(1.0f, e);
+                    G.m_Origin[a] = O;
+                    G.m_Exponents |= std::uint32_t(e + 127) << (8 * a);
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        const bool bUsed = N.m_B[2 * a][k] <= N.m_B[2 * a + 1][k];
+                        const int  l = bUsed ? std::clamp(int(std::floor((N.m_B[2 * a][k] - O) / S)), 0, 255) : 255;
+                        const int  h = bUsed ? std::clamp(int(std::ceil((N.m_B[2 * a + 1][k] - O) / S)), 0, 255) : 0;
+                        G.m_B[2 * a]     |= std::uint32_t(l) << (8 * k);
+                        G.m_B[2 * a + 1] |= std::uint32_t(h) << (8 * k);
+                    }
+                }
+                Out.m_Nodes.push_back(G);
             }
             return B.m_Root >= 0 ? B.m_Root + NodeBase : ~(~B.m_Root + LeafBase);
         }
