@@ -55,11 +55,11 @@ bool SDFSurface(vec3 P, vec3 D, out vec3 Albedo, out vec3 N)
 }
 
 // The march: a cascade at a time, never back to a finer one. The thickness of a hit grows with the distance up to half a cell (Flax: RayTraceGlobalSDF)
-bool SDFCast(vec3 O, vec3 D, out float T)
+bool SDFCastFrom(vec3 O, vec3 D, float From, out float T)
 {
     const vec3  Center = vec3(WorldSDF[0], WorldSDF[1], WorldSDF[2]);
     const float Cell0  = WorldSDF[3];
-    float t = 2.0 * Cell0;
+    float t = max(From, 2.0 * Cell0);
     for (int c = 0; c < sdf_cascades_v; ++c)
     {
         const float Cell = Cell0 * float(1 << c);
@@ -76,3 +76,4 @@ bool SDFCast(vec3 O, vec3 D, out float T)
     T = 1e30;
     return false;
 }
+bool SDFCast(vec3 O, vec3 D, out float T) { return SDFCastFrom(O, D, 0.0, T); }

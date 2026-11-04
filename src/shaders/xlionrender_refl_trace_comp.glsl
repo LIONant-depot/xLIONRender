@@ -129,6 +129,21 @@ void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec,
     }
 }
 
+// Visible on screen (O3DE): the scene's colour at the hit (Pcam camera-centred), when its depth there is the hit's. Planar holds the view's HDR under XLION_SDF
+bool ScreenAt(in const vec3 Pcam, in const float T, in const ivec2 Sz, out vec3 C)
+{
+    C = vec3(0.0);
+    const vec4 Hc = inverse(F[Push.m_Slot].C2W) * vec4(Pcam, 1.0);
+    if (Hc.w <= 0.0) return false;
+    const vec2 Ndh = Hc.xy / Hc.w;
+    if (any(greaterThanEqual(abs(Ndh), vec2(1.0)))) return false;
+    const ivec2 q  = clamp(ivec2((Ndh * 0.5 + 0.5) * vec2(Sz)), ivec2(0), Sz - 1);
+    const vec4  Qc = F[Push.m_Slot].C2W * vec4(Ndh, texelFetch(GDepth, q, 0).r, 1.0);
+    if (abs(length(Qc.xyz / Qc.w) - length(Pcam)) >= 0.15 + 0.03 * T) return false;
+    C = textureLod(Planar, Ndh * 0.5 + 0.5, 0.0).rgb;
+    return true;
+}
+
 // A radiance as the records' half floats hold it: past 65504 a half is infinite (a near-mirror hit's point light highlight: 1 / (pi a2)
 // at roughness 0.045 is ~78000) and the denoiser's weights made it NaN - black, flickering blocks on Police's lit walls (Tomas)
 vec3 HalfSafe(in const vec3 c) { return any(isnan(c)) ? vec3(0.0) : min(c, vec3(60000.0)); }
@@ -246,13 +261,33 @@ void main()
                     const gi_hit E = GICast(O + L * (Hit.m_T - Back), L, Back + Win);
                     if (E.m_Inst >= 0) { const float Tf = Hit.m_T - Back + E.m_T; Hit = E; Hit.m_T = Tf; bExact = true; }
                 }
+                // (XLION_SDF 10, the reflections' colour: on screen, the scene's. Else sharp receivers: the real triangle, the march resumed when the short ray finds
+                // the field's hit was only a grazed surface. Rough ones the low frequency path of 3: that detail doesn't show on them)
+                vec3 ScreenC = vec3(0.0);
+                if (Push.m_Full.y == 10 && Hit.m_Inst == -2)
+                {
+                    float Tc = Hit.m_T;
+                    if (Push.m_Full.w == 0 && ScreenAt(O + L * Tc - Push.m_Eye, Tc, Size, ScreenC)) Hit.m_Inst = -3;
+                    else if (Rough < 0.15)
+                    {
+                        for (int r = 0; r < 4 && Hit.m_Inst == -2; ++r)
+                        {
+                            const float Win = 0.3 + 0.05 * Tc, Back = min(Win, Tc);
+                            const gi_hit E = GICast(O + L * (Tc - Back), L, Back + Win);
+                            if (E.m_Inst >= 0) { const float Tf = Tc - Back + E.m_T; Hit = E; Hit.m_T = Tf; bExact = true; }
+                            else if (!SDFCastFrom(O, L, Tc + Win, Tc)) Hit.m_Inst = -1;
+                            else Hit.m_T = Tc;
+                        }
+                    }
+                }
                 if (bExact) g_ShadowBySDF = true;
                 atomicAdd(s_Rays, 1u);
                 atomicAdd(s_Visits, uint(g_GIBvhVisits));
                 if (Push.m_Mode == 0u)
                 {
                     vec3 Lr; uint Class; float Dist = 0.0;
-                    if (Push.m_Full.y >= 3 && Push.m_Full.y != 9 && Hit.m_Inst != -1)
+                    if (Hit.m_Inst == -3) { atomicAdd(s_Hits, 1u); Lr = ScreenC; Class = refl_hit_v; Dist = Hit.m_T; }
+                    else if (Push.m_Full.y >= 3 && Push.m_Full.y != 9 && Hit.m_Inst == -2)
                     {
                         // the hit by the field: the surface it stored, the voxels' light, the sun and lamps with shadow rays through the field (no emission yet)
                         atomicAdd(s_Hits, 1u);
@@ -288,7 +323,7 @@ void main()
                         if (Push.m_Full.y == 7) Lr = Ed;
                         Class = refl_hit_v; Dist = Hit.m_T;
                     }
-                    else if (Push.m_Full.y != 0 && Push.m_Full.y != 9 && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
+                    else if (Push.m_Full.y != 0 && Push.m_Full.y < 3 && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
                     else if (Push.m_Full.y == 9 && Hit.m_Inst == -2) { Lr = vec3(1.0, 0.0, 1.0); Class = refl_hit_v; Dist = Hit.m_T; }     // (the short ray met nothing: shown)
                     else if (Hit.m_Inst >= 0)
                     {
