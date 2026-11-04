@@ -238,12 +238,21 @@ void main()
                 gi_hit Hit;
                 if (Push.m_Full.y == 1 || Push.m_Full.y >= 3) { float St; const bool bS = SDFCast(O, L, St); Hit.m_T = St; Hit.m_U = 0.0; Hit.m_V = 0.0; Hit.m_Tri = -1; Hit.m_Inst = bS ? -2 : -1; }
                 else Hit = GICast(O, L, 1e30);
+                // (XLION_SDF 9: the field says about where, a short BVH ray there says what: the real triangle, for the real shading below)
+                bool bExact = false;
+                if (Push.m_Full.y == 9 && Hit.m_Inst == -2)
+                {
+                    const float Win = 0.3 + 0.03 * Hit.m_T, Back = min(Win, Hit.m_T);
+                    const gi_hit E = GICast(O + L * (Hit.m_T - Back), L, Back + Win);
+                    if (E.m_Inst >= 0) { const float Tf = Hit.m_T - Back + E.m_T; Hit = E; Hit.m_T = Tf; bExact = true; }
+                }
+                if (bExact) g_ShadowBySDF = true;
                 atomicAdd(s_Rays, 1u);
                 atomicAdd(s_Visits, uint(g_GIBvhVisits));
                 if (Push.m_Mode == 0u)
                 {
                     vec3 Lr; uint Class; float Dist = 0.0;
-                    if (Push.m_Full.y >= 3 && Hit.m_Inst != -1)
+                    if (Push.m_Full.y >= 3 && Push.m_Full.y != 9 && Hit.m_Inst != -1)
                     {
                         // the hit by the field: the surface it stored, the voxels' light, the sun and lamps with shadow rays through the field (no emission yet)
                         atomicAdd(s_Hits, 1u);
@@ -256,13 +265,31 @@ void main()
                         DirectAndSpecular(Py + Ny * 2.0 * WorldSDF[3], Ny, -L, vec3(0.04), 1.0, false, Ed, Sy);
                         g_ShadowBySDF = false;
                         Lr = Albedo * (1.0 / gi_pi_v) * (Ed + Ei) + 0.04 * 0.45 * (1.0 / gi_pi_v) * (Ed + Ei);
+                        // Visible on screen (O3DE): the scene's own colour there, all its detail and light: the field only said where. Else what is above, for now
+                        if ((Push.m_Full.y == 3 || Push.m_Full.y == 8) && Push.m_bPlanar < 0.5)
+                        {
+                            const vec3 Pcam = Py - Push.m_Eye;
+                            const vec4 Hc   = inverse(F[Push.m_Slot].C2W) * vec4(Pcam, 1.0);
+                            if (Hc.w > 0.0)
+                            {
+                                const vec2 Ndh = Hc.xy / Hc.w;
+                                if (all(lessThan(abs(Ndh), vec2(1.0))))
+                                {
+                                    const ivec2 q = clamp(ivec2((Ndh * 0.5 + 0.5) * vec2(Size)), ivec2(0), Size - 1);
+                                    const vec4  Qc = F[Push.m_Slot].C2W * vec4(Ndh, texelFetch(GDepth, q, 0).r, 1.0);
+                                    const float Dd = length(Qc.xyz / Qc.w);
+                                    if (abs(Dd - length(Pcam)) < 0.15 + 0.03 * Hit.m_T) Lr = Push.m_Full.y == 8 ? vec3(1.0, 0.0, 0.0) : textureLod(Planar, Ndh * 0.5 + 0.5, 0.0).rgb;      // (XLION_SDF 8: which hits the screen answers)
+                                }
+                            }
+                        }
                         if (Push.m_Full.y == 4) Lr = Albedo;            // (XLION_SDF 4, 5, 6, 7: its pieces alone)
                         if (Push.m_Full.y == 5) Lr = Ny * 0.5 + 0.5;
                         if (Push.m_Full.y == 6) Lr = Ei;
                         if (Push.m_Full.y == 7) Lr = Ed;
                         Class = refl_hit_v; Dist = Hit.m_T;
                     }
-                    else if (Push.m_Full.y != 0 && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
+                    else if (Push.m_Full.y != 0 && Push.m_Full.y != 9 && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
+                    else if (Push.m_Full.y == 9 && Hit.m_Inst == -2) { Lr = vec3(1.0, 0.0, 1.0); Class = refl_hit_v; Dist = Hit.m_T; }     // (the short ray met nothing: shown)
                     else if (Hit.m_Inst >= 0)
                     {
                         atomicAdd(s_Hits, 1u);
@@ -321,6 +348,7 @@ void main()
                         Lr = AtlasSample(EnvAtlas, vec2(0.0), kEnvAtlas, L, 0.0) * Push.m_EnvIntensity + vec3(Push.m_FlatR, Push.m_FlatG, Push.m_FlatB);      // (the sky along the sampled direction: the lobe is the sampling's, not the atlas')
                         Class = refl_miss_v;
                     }
+                    g_ShadowBySDF = false;
                     const float Conf = 1.0 - smoothstep(0.5 * Push.m_MaxRough, Push.m_MaxRough, Rough);     // (B: sharp receivers; glossy ones fade to the probes until the reconstruction)
                     Rec.x = packHalf2x16(HalfSafe(Lr).rg);
                     Rec.y = packHalf2x16(vec2(HalfSafe(Lr).b, Conf));

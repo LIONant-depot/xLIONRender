@@ -2389,7 +2389,7 @@ namespace xlionrender
             }
             Push.m_Full[1] = s_Sdf;
             auto Buffers  = std::array<xgpu::buffer*, 14>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats };
-            auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
+            auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : bSdf ? &View.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
             // list's places before the glossy ones
             Window.WriteTimestamp(m_ReflTimes, 0);
