@@ -485,6 +485,11 @@ namespace xlionrender
         xgpu::buffer                m_VSMBounds, m_VSMBoundsList;   // per slot: least | greatest << 16; this frame's pages (their atlas origin, a ring)
         void                        vsmBounds( xgpu::window& Window ) noexcept;
         double                      m_SunMaskSum = 0; int m_SunMaskSumN = 0;
+        xgpu::shader                m_WorldSdfShader;               // (XLION_SDF, prototype) the world's distance field: xlionrender_world_sdf_comp.glsl
+        xgpu::compute               m_WorldSdf;
+        xgpu::buffer                m_WorldSdfB;
+        int                         m_WorldSdfCascade = 0, m_WorldSdfSlice = 0;
+        xmath::fvec3                m_WorldSdfCenter{};
         xgpu::shader                m_ReflTraceShader;              // the reflection trace's benchmark (m_ReflTraceBench): its pass, counters (4 per ring slot), timestamps
         xgpu::compute               m_ReflTrace;
         xgpu::shader                m_ReflDenoiseShader;            // the reflections' reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl), its frames (a ring slot each)

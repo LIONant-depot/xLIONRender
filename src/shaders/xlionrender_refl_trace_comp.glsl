@@ -22,6 +22,8 @@ layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]
 layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records[]; };    // the view's records: the tail's W x H, then these
 layout(std430, set = 0, binding = 8) readonly buffer mips_b    { uvec2   PlanarMips[]; }; // the planar view's pyramid (xlionrender_refl_planar_mips_comp.glsl)
 struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; uvec4 nBoxes; vec4 Box[128]; };      // (Box: the unrepresented drawn things' world boxes, lo / hi: instance::refl_boxes_v)                                  // the planar view's clip -> its eye's centred world; x: the half view's pixels a unit at distance 1, y: the pyramid's levels; per level: its base, w, h
+layout(std430, set = 0, binding = 12) readonly buffer sdf_b    { float WorldSDF[]; };     // (XLION_SDF: xlionrender_world_sdf.glsl)
+#include "xlionrender_world_sdf.glsl"
 layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; };        // (a ring slot each)
 // The hits to texture (xlionrender_refl_hits_comp.glsl), a list: Hits[0] its counts (x, y: by the frame's parity - the hits pass clears
 // the next frame's), then three a hit - x: the instance, y: the triangle, z, w: the barycentrics u, v; then E = (E_direct + E_indirect) / pi (rgb), the
@@ -229,13 +231,17 @@ void main()
                 const float w = (1.0 + Lambda(Ve.z, a)) / (1.0 + Lambda(Ve.z, a) + Lambda(Lt.z, a));     // G2 / G1
                 const vec3  O = Push.m_Mode >= 4u ? Push.m_Eye : P + Push.m_Eye + N * (0.002 * length(P) + 0.001);
                 g_GIBvhSeeThrough = true;                   // (the GI's rays: see-through triangles let them pass)
-                const gi_hit Hit = GICast(O, L, 1e30);
+                // (m_Full.y, measurement, XLION_SDF: hit or miss alone: 1 by the world's distance field, 2 by the BVH)
+                gi_hit Hit;
+                if (Push.m_Full.y == 1) { float St; const bool bS = SDFCast(O, L, St); Hit.m_T = St; Hit.m_U = 0.0; Hit.m_V = 0.0; Hit.m_Tri = -1; Hit.m_Inst = bS ? -2 : -1; }
+                else Hit = GICast(O, L, 1e30);
                 atomicAdd(s_Rays, 1u);
                 atomicAdd(s_Visits, uint(g_GIBvhVisits));
                 if (Push.m_Mode == 0u)
                 {
                     vec3 Lr; uint Class; float Dist = 0.0;
-                    if (Hit.m_Inst >= 0)
+                    if (Push.m_Full.y != 0 && Hit.m_Inst != -1) { atomicAdd(s_Hits, 1u); Lr = vec3(0.0); Class = refl_hit_v; Dist = Hit.m_T; }
+                    else if (Hit.m_Inst >= 0)
                     {
                         atomicAdd(s_Hits, 1u);
                         const uint  R = InstRec(Hit.m_Inst), M = MeshOf(R);
