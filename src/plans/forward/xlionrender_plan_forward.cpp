@@ -2368,7 +2368,7 @@ namespace xlionrender
             const std::array<float, 3> VoxAt = pVox ? m_pGITrace->VoxAnchor() : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
             struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
-                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, Scene.m_bDebugReflectionMirror ? 1 : 0 }
+                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, 0, Scene.m_bDebugReflectionMirror ? 1 : Scene.m_bReflectionFixedRays ? 2 : 0 }
                 , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) }, { VoxAt[0], VoxAt[1], VoxAt[2], pVox ? gi::gpu_trace::VoxConfig()[0] : 0.0f }, m_ReflSharpMax
                 , m_bEnvOn ? 0.0f : Scene.m_Ambient.m_X / gi::pi_v, m_bEnvOn ? 0.0f : Scene.m_Ambient.m_Y / gi::pi_v, m_bEnvOn ? 0.0f : Scene.m_Ambient.m_Z / gi::pi_v };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };

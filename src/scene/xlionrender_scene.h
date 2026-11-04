@@ -271,6 +271,10 @@ namespace xlionrender
         bool                        m_bReflectionReconstruct = true;
         // The screen trace (SSR: shaders/xlionrender_refl_ssr_comp.glsl) over the probes, every roughness: what is on screen reflected where
         // it is (a character in a mirror the probes' boxes flatten onto their walls); where the BVH trace above runs, its records stay
+        // OPEN CHOICE, kept visible on purpose (Tomas, 2026-11-04, decided later): the rays along the mirror direction, not over the rough lobe.
+        // For: Bistro, rays to roughness 0.3, about 1.2 ms off the frame (tomas 10.48 to 9.25), steady, no noise. Against: no blur yet, so
+        // surfaces near 0.3 reflect too sharply, and it shows straight bright stripes on floors and walls (not understood yet, reflections_ssr_plan_2026-11.md)
+        bool                        m_bReflectionFixedRays = false;
         bool                        m_bReflectionScreen = false;
         // The receivers up to this roughness see the hits' own material - each hit shaded by its material's capture variant (textures,
         // per-entity parameters); rougher ones its per-triangle capture, blended over the last quarter. 0: none
