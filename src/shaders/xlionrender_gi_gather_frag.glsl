@@ -307,7 +307,8 @@ void main()
         if (GITable[push.TableBase + 29u] != 0u) g_GIRefl = vec4(0.0);
         const bool bE = E.w > 0.5, bR = g_GIRefl.w > 0.5;
         bKeep = !bE && !bR;           // (no GI here: the AO's own entry stays)
-        const vec3 Rr = bR ? g_GIRefl.rgb : vec3(0.0);
+        // (never a non-finite or negative reflection, as E above: reprojection carries it on, black and blocky on the moto, Tomas 2026-11-04)
+        const vec3 Rr = bR && !any(isnan(g_GIRefl.rgb)) && !any(isinf(g_GIRefl.rgb)) ? max(g_GIRefl.rgb, vec3(0.0)) : vec3(0.0);
         Out = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, Dist)), packHalf2x16(Rr.rg),
                     (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFFu) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u) | (bE && bWeak ? 3u << 28 : 0u));     // (age 3, never a fresh one's: weak - a hole in the surfels' coverage, the Cornell cube's dashes)
     }
