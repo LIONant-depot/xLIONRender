@@ -31,6 +31,7 @@ vec3 CosineDir(in const vec3 N)
 // The same rays, by where they went (the reflection's read, xlionrender_gi_gather_frag.glsl VoxReflect): a cell's face (no layers) keeps a plain mean per direction: around its normal,
 // or along one of the other two axes, each way. No more rays: a place on a floor knows what its rays saw toward the street and toward the wall
 vec3 g_VoxRayD = vec3(0.0);
+bool g_VoxMissed = false;       // (this ray saw the sky. A bin keeps its sky apart, second entry: rgb sum, count: a direction near the surface takes less of it - VoxReflect)
 void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
     const vec3 An = abs(N);
@@ -40,15 +41,16 @@ void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const v
     const uint h = VoxHash(L, Org + ivec3(floor(g + 0.5)), 6u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 5u + b), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     const vec4 d = GIRefAccum[e + 2u];
-    vec4 c = GIRefAccum[e];
+    vec4 c = GIRefAccum[e], m = GIRefAccum[e + 1u];
     if (d.x != Tag)
     {
         if (d.x != 0.0 && abs(Now - d.y) < 120.0) return;
-        c = vec4(0.0);
+        c = vec4(0.0); m = vec4(0.0);
     }
     c += vec4(Sample, 1.0);
-    if (c.w >= 256.0) c *= 0.5;
-    GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(0.0); GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
+    if (g_VoxMissed) m += vec4(Sample, 1.0);
+    if (c.w >= 256.0) { c *= 0.5; m *= 0.5; }
+    GIRefAccum[e] = c; GIRefAccum[e + 1u] = m; GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
 }
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
@@ -174,6 +176,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     const vec3 D = CosineDir(N);
     g_VoxRayD = D;
     const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
+    g_VoxMissed = H.m_Inst < 0;
     if (H.m_Inst < 0) return Own + SkyAt(D) * gi_pi_v;
     const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
     const uvec3 HT = MTri(HM, H.m_Tri);

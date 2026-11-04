@@ -202,7 +202,7 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         const float EnvLum = dot(Diff, vec3(0.2126, 0.7152, 0.0722));
         const float GILum  = dot(GIRefl, vec3(0.2126, 0.7152, 0.0722));
         Spec *= EnvLum > 1e-4 ? clamp(GILum / EnvLum, 0.0, 1.0) : 1.0;
-        Spec  = mix(Spec, GIRefl, smoothstep(0.3, 0.7, PerceptualRoughness));
+        Spec  = mix(Spec, GIRefl, smoothstep(0.1, 0.3, PerceptualRoughness));
         Diff  = g_GI.rgb / 3.14159265359;
     }
     else if (g_GI.w > 0.5)

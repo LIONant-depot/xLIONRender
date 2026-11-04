@@ -116,6 +116,8 @@ vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
     const uint  Bk[3] = uint[3](4u, Rd[u] > 0.0 ? 0u : 1u, Rd[v] > 0.0 ? 2u : 3u);
     const float Bw[3] = float[3](Rd[a] * Rd[a], Rd[u] * Rd[u], Rd[v] * Rd[v]);
     const float Cell0 = TF(21u);
+    // A bin is wide: the rays of a floor's bin toward the street go up to about 55 degrees, into the sky; a reflection near the surface stays low, among the walls
+    const float SkyTake = smoothstep(0.0, 0.5, abs(Rd[a]));
     vec3 Sum = vec3(0.0); float Left = 1.0;
     for (int L = 0; L < clip_levels_v && Left > 1e-3; ++L)
     {
@@ -136,7 +138,7 @@ vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
                 ivec3 o = ivec3(0); o[u] = c & 1; o[v] = c >> 1; o[a] = f[a] >= 0.5 ? 1 : 0;
                 const float t = (o[u] != 0 ? f[u] : 1.0 - f[u]) * (o[v] != 0 ? f[v] : 1.0 - f[v]);
                 const uint  h = VoxHash(L, iv + o, Base + Bk[b]), e = VoxEntryOf(h);
-                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 w = uintBitsToFloat(GIClip[e]); if (w.w > 0.0) { const float cw = min(w.w, 128.0) * t; Num += w.rgb / w.w * cw; Den += cw; } }
+                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 w = uintBitsToFloat(GIClip[e]); if (w.w > 0.0) { const vec4 m = uintBitsToFloat(GIClip[e + 1u]) * (1.0 - SkyTake); const float cw = min(w.w, 128.0) * t, nl = w.w - m.w; Num += (nl > 0.5 ? (w.rgb - m.rgb) / nl : w.rgb / w.w) * cw; Den += cw; } }
             }
             if (Den > 1e-3) { Lit += Num / Den * Bw[b]; WSum += Bw[b]; Trust += Den * Bw[b]; }
         }
