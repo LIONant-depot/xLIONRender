@@ -2168,7 +2168,7 @@ namespace xlionrender
         // Reflections' sharp receivers: the G-buffer at full size too (createSharpTargets: made when first needed; its rays a pixel each)
         static const float s_SharpEnv = [] { const char* p = std::getenv("XLION_REFL_SHARP"); return p ? float(std::atof(p)) : -1.0f; }();      // (measurement)
         if( s_SharpEnv >= 0.0f ) m_ReflSharpMax = s_SharpEnv;
-        const bool bSharp = m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && m_bReflSharpSeen && !Scene.m_bDebugReflectionMirror && createSharpTargets(View) == nullptr;
+        const bool bSharp = m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && m_bReflSharpSeen && !Scene.m_bDebugReflectionMirror && std::getenv("XLION_SDF") == nullptr && createSharpTargets(View) == nullptr;
         Light.m_TailParams.m_X = bSharp ? float(View.m_SharpWidth) : 0.0f;      // (the materials: the full-size records' row, 0: none)
         Window.WriteTimestamp(m_TailTimes, 0);
         const auto DrawGBuffer = [&]( xgpu::renderpass& Pass )

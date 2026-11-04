@@ -96,7 +96,7 @@ void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec,
     const float a  = max(Rough, 0.045) * max(Rough, 0.045), a2 = a * a;
     const float NdotV = max(dot(N, V), 1e-4);
     const vec3 SunD = GV(Lt), SunC = GV(Lt + 3u);
-    for (int k = -1; k < int(GD[3]); ++k)
+    for (int k = -1; k < (g_ShadowBySDF ? 0 : int(GD[3])); ++k)      // (through the field: the sun alone; the lamps as the voxels hold them)
     {
         vec3 L, C; float d = 1e30;
         if (k < 0)
