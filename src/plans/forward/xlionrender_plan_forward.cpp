@@ -2436,6 +2436,7 @@ namespace xlionrender
             float MaxRoughOut = 0.0f;
             static const float s_Sparse = [] { const char* p = std::getenv("XLION_REFL_SPARSE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: one ray in four at or above this roughness)
             Push.m_Sparse = bReconstruct ? s_Sparse : 0.0f;
+            static const bool s_bBands = std::getenv("XLION_REFL_BANDS") != nullptr; Push.m_Pad[1] = s_bBands ? 1.0f : 0.0f;
             static const float s_ReflProbe = [] { int X = 0, Y = 0; if( const char* p = std::getenv("XLION_REFL_PROBE") ) std::sscanf(p, "%d,%d", &X, &Y); return float(X * 10000 + Y); }(); Push.m_Pad[2] = s_ReflProbe;
             static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = std::getenv("XLION_VOX_DIRS_TRACE"); const char* d = std::getenv("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; std::sscanf(d, "%f,%f", &D[1], &K); std::sscanf(t, "%f,%f", &D[2], &D[3]); D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
             if( pVox && s_DirsTrace[0] > 0.0f ) { std::memcpy(Push.m_Dirs, s_DirsTrace.data(), sizeof(Push.m_Dirs)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }

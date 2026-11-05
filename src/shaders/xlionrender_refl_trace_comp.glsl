@@ -239,6 +239,11 @@ void main()
             atomicAdd(s_PlanarRough, uint(Rough * 100.0 + 0.5));
         }
         else if (bScreenFirst && ((Records[i].w >> 24) & 15u) == refl_screen_v && unpackHalf2x16(Records[i].y).y >= 0.95) { }     // (the screen's certain answer stays)
+        else if (Push.m_Pad1 > 0.5 && !bFull)      // (XLION_REFL_BANDS: a texel's real roughness by colour: red below .15, green .25, blue .4, yellow .65, white above: which pixels each graded roughness speaks for)
+        {
+            const vec3 C = G.z < 0.15 ? vec3(1.0, 0.0, 0.0) : G.z < 0.25 ? vec3(0.0, 1.0, 0.0) : G.z < 0.4 ? vec3(0.0, 0.0, 1.0) : G.z < 0.65 ? vec3(1.0, 1.0, 0.0) : vec3(1.0);
+            Rec.x = packHalf2x16(C.rg); Rec.y = packHalf2x16(vec2(C.b, 1.0)); Rec.z = packHalf2x16(vec2(0.0, 1.0)); Rec.w |= refl_miss_v << 24;
+        }
         // (XLION_VOX_DIRS_TRACE=<rays below>,<store up to>, a prototype: the record is a read of the coarse directional store (xlionrender_gi_ref.glsl VoxDirsAdd), a few random samples of the real lobe: the reconstruction filters them as it does rays)
         else if (!bFull && Push.m_Mode == 0u && Push.m_Dirs.x > 0.5 && Push.m_Vox.w > 0.0 && Rough >= Push.m_Dirs.z && Rough < Push.m_Dirs.w)
         {
