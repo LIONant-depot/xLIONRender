@@ -219,7 +219,7 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         Diff  = GIDiff;
     }
 #ifndef XLION_TAIL_SCREEN
-    if (UBOLight.EnvParams.w > 0.0) { const vec4 U = ReflScreen(N); Spec = mix(Spec, U.rgb, U.a); }      // the traced reflections replace the probes where they cover
+    if (UBOLight.EnvParams.w > 0.0) { const vec4 U = ReflScreen(N); Spec = mix(Spec, U.rgb, U.a * (1.0 - smoothstep(UBOLight.EnvParams.w * 0.7, UBOLight.EnvParams.w, PerceptualRoughness))); }      // the traced reflections replace the probes where they cover
 #endif
     if (UBOLight.EnvParams.z > 3.5) Spec = g_GI.rgb / 3.14159265359;      // (XLION_REFL_GRADE with XLION_GI_REF: the ground truth's mean: xlionrender_gi_ref.glsl SpecDir)
     const vec2 DFG = textureLod(SamplerEnvDFG, vec2(NdotV, PerceptualRoughness), 0.0).rg;

@@ -201,7 +201,7 @@ void main()
         const vec3  P   = Pc.xyz / Pc.w;                                    // camera-centred
         const vec4  G   = texelFetch(GColor, p, 0);
         const vec3  N   = OctDecode(G.xy * 2.0 - 1.0);
-        const float Rough = Push.m_Mode == 1u || Push.m_Full.w == 1 ? 0.0 : Push.m_Mode == 2u ? 0.5 : G.z;
+        const float Rough = Push.m_Mode == 1u || Push.m_Full.w == 1 ? 0.0 : Push.m_Mode == 2u ? 0.5 : Push.m_Full.w >= 1000 ? float(Push.m_Full.w % 1000) * 0.001 : G.z;      // (m_Full.w 1000 +: XLION_REFL_GRADE_RAYS, every receiver that roughness in thousandths; 3000 +: and fixed rays)
         const vec2  OctN = OctEncode(N) * 0.5 + 0.5;
         Rec.w = packHalf2x16(vec2(Pc.w > 0.0 ? 1.0 / Pc.w : 0.0, 0.0)) | (uint(OctN.x * 15.0 + 0.5) << 16) | (uint(OctN.y * 15.0 + 0.5) << 20);    // (the view depth: clip w, as the tail's)
         const float PlaneDist = dot(Push.m_Plane.xyz, P + Push.m_Eye) + Push.m_Plane.w;
@@ -246,7 +246,7 @@ void main()
             const uint  h   = Hash32(uint(p.x) * 73856093u ^ uint(p.y) * 19349663u ^ Push.m_Frame * 83492791u);
             const vec2  u   = vec2(float(h & 0xFFFFu), float(h >> 16)) / 65536.0;
             const float a   = max(Rough, 0.045) * max(Rough, 0.045);
-            const vec3  H   = Push.m_Mode == 1u || Push.m_Full.w == 2 ? vec3(0.0, 0.0, 1.0) : SampleVNDF(Ve, a, u);      // (m_Full.w 2: scene::m_bReflectionFixedRays)
+            const vec3  H   = Push.m_Mode == 1u || Push.m_Full.w == 2 || Push.m_Full.w >= 3000 ? vec3(0.0, 0.0, 1.0) : SampleVNDF(Ve, a, u);      // (m_Full.w 2: scene::m_bReflectionFixedRays)
             const vec3  Lt  = Push.m_Mode >= 4u ? vec3(0.0, 0.0, 1.0) : reflect(-Ve, H);
             if (Lt.z > 0.0)
             {

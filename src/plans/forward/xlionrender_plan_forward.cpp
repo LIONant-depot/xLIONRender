@@ -2290,7 +2290,9 @@ namespace xlionrender
         // ago, done) into the report, cleared. m_ReflTraceBench > 0: the benchmark's rays only (mirror, roughness 0.5, the materials')
         const auto BvhR = m_pGITrace ? m_pGITrace->getBvh() : gi::gpu_trace::bvh_view{ nullptr, nullptr, nullptr, nullptr, 0, 0, true };
         Light.m_EnvParams.m_W = 0.0f;
-        static const bool s_bGrading = std::getenv("XLION_REFL_GRADE") != nullptr;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
+        static const bool s_bGradeRays = std::getenv("XLION_REFL_GRADE_RAYS") != nullptr;      // (rays graded too, at XLION_REFL_GRADE's roughness: half size, one frame, no reconstruction: its noise counts against them)
+        static const int  s_GradeRough = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? int(std::atof(p) * 1000.0 + 0.5) : 0; }();
+        static const bool s_bGrading = std::getenv("XLION_REFL_GRADE") != nullptr && !s_bGradeRays;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
         const bool bTraced = !s_bGrading && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
         const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
@@ -2407,7 +2409,7 @@ namespace xlionrender
             const std::array<float, 3> VoxAt = pVox ? m_pGITrace->VoxAnchor() : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
             struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
-                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, bScreen ? 3 : 0, Scene.m_bDebugReflectionMirror ? 1 : Scene.m_bReflectionFixedRays ? 2 : 0 }
+                , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, bScreen ? 3 : 0, s_bGradeRays ? (Scene.m_bReflectionFixedRays ? 3000 : 1000) + s_GradeRough : Scene.m_bDebugReflectionMirror ? 1 : Scene.m_bReflectionFixedRays ? 2 : 0 }
                 , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) }, { VoxAt[0], VoxAt[1], VoxAt[2], pVox ? gi::gpu_trace::VoxConfig()[0] : 0.0f }, m_ReflSharpMax
                 , m_bEnvOn ? 0.0f : Scene.m_Ambient.m_X / gi::pi_v, m_bEnvOn ? 0.0f : Scene.m_Ambient.m_Y / gi::pi_v, m_bEnvOn ? 0.0f : Scene.m_Ambient.m_Z / gi::pi_v };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
@@ -2449,6 +2451,8 @@ namespace xlionrender
             if( bHits ) shadeReflectionHits(Window, Scene, View, BvhR, Slot, HalfKeys, std::uint32_t(2 * W * H));
             Window.WriteTimestamp(m_ReflTimes, 3);
             Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, MaxRough);
+            static const float s_GradeCut = [] { const char* p = std::getenv("XLION_REFL_GRADE_CUT"); return p ? float(std::atof(p)) : 0.0f; }();      /* (grading: the mirror view asks rays of everything; the cutoff their fade follows) */
+            if( s_GradeCut > 0.0f ) Light.m_EnvParams.m_W = s_GradeCut;
         }
         if( bTraced || bScreen )
         {
