@@ -184,7 +184,7 @@ void main()
     if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; }
     barrier();
     const bool  bFull = Push.m_Full.x > 0;
-    const ivec2 Size = bFull ? Push.m_Full.xy : ivec2(F[Push.m_Slot].Params.xy);
+    const ivec2 Size = bFull ? ivec2(Push.m_Full.x & 0xFFFF, Push.m_Full.x >> 16) : ivec2(F[Push.m_Slot].Params.xy);     // (the full size: width | height << 16; m_Full.y is XLION_SDF's mode in both: the height there made the sharp pass a baked-field cast, mostly misses)
     const ivec2 p    = ivec2(gl_GlobalInvocationID.xy);
     const bool  bIn  = p.x < Size.x && p.y < Size.y;
     const uint  i    = uint(Size.x * Size.y) + uint(p.y * Size.x + p.x);
