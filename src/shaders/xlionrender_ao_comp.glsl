@@ -18,7 +18,8 @@ layout(std430, set = 0, binding = 3) buffer out_b             { vec2 AOOut[]; };
 layout(std430, set = 0, binding = 4) buffer raw_b             { vec2 AORaw[]; };
 layout(set = 1, binding = 0) uniform sampler2D GPreDepth;
 layout(set = 1, binding = 1) uniform sampler2D GPreNormal;
-layout(set = 1, binding = 2) uniform sampler2D GPreId;      // (its y < 0: a back face - the normal turned to its visible side)
+layout(set = 1, binding = 2) uniform sampler2D GPreId;
+layout(set = 1, binding = 3) uniform sampler2D LastHDR;   // (XLION_SSGI, Mode bit 4: last frame's lit image - the screen GI's light. ponytail: read at this frame's texel, not reprojected: a moving camera lags a frame)      // (its y < 0: a back face - the normal turned to its visible side)
 
 layout(push_constant) uniform push_t
 {
@@ -62,15 +63,19 @@ vec3 NormalAt(in const ivec2 Q)
 }
 
 // The raw AO at half-size pixel p (Mode 0)
-float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 P, in const float Dist)
+// (XLION_SSGI: Gi, the near field's irradiance - each sample's light times the cosine-weighted share of the sectors it newly occludes, SSRT3's)
+float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 P, in const float Dist, out vec3 Gi)
 {
+    Gi = vec3(0.0);
+    const bool bGi = (Push.Mode & 4u) != 0u;
+    vec3 GiSum = vec3(0.0);
     const vec3 V = -P / Dist, N0 = NormalAt(Q), N = texelFetch(GPreId, Q, 0).y >= 0.0 ? N0 : -N0;      // (a double-sided back face: its visible side)
     // the 4 x 4 pattern: 16 rotations a tile (a stratified order), the steps' offsets from the same index
     const uint  k16 = uint((p.x & 3) | ((p.y & 3) << 2));
     const uint  Order[16] = uint[16](0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
     const float n0 = (float(Order[k16]) + 0.5) / 16.0, n1 = fract(float(Order[(k16 + 5u) & 15u]) / 16.0 + 0.03125);
     const float RadiusPx = min(Push.Radius * Push.PixelsPerUnit / Dist, 64.0);
-    if (RadiusPx < 1.0) return 1.0;
+    if (RadiusPx < 1.0) return 1.0;     // (Gi stays 0)
     float Sum = 0.0, Wsum = 0.0;
     for (int s = 0; s < slices_v; ++s)
     {
@@ -87,6 +92,7 @@ float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 
         // put the hemisphere behind the surface - every sample an occluder, a black wedge along Sponza's arch, Tomas)
         const float n = sign(dot(Ortho, Np)) * acos(clamp(dot(Np, V) / NpLen, 0.0, 1.0));
         uint Mask = 0u;
+        vec3 GiS = vec3(0.0);
         for (int k = 0; k < steps_v; ++k)
         {
             const float t   = pow((float(k) + n1) / float(steps_v), 2.0);
@@ -114,12 +120,15 @@ float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 
                 const uvec2 b = uvec2(floor(vec2(min(h.x, h.y), max(h.x, h.y)) * 32.0));
                 const uint lo = b.x < 32u ? 0xFFFFFFFFu << b.x : 0u;
                 const uint hi = b.y != 0u ? 0xFFFFFFFFu >> (32u - b.y) : 0u;
+                if (bGi) { const uint New = (lo & hi) & ~Mask; if (New != 0u) GiS += texelFetch(LastHDR, Qs, 0).rgb * (float(bitCount(New)) / 32.0); }
                 Mask |= lo & hi;
             }
         }
         Sum  += (1.0 - float(bitCount(Mask)) / 32.0) * NpLen;
+        GiSum += GiS * NpLen;
         Wsum += NpLen;
     }
+    if (Wsum > 0.0 && bGi) { Gi = PI * GiSum / Wsum; if (any(isnan(Gi)) || any(isinf(Gi))) Gi = vec3(0.0); }
     return Wsum > 0.0 ? clamp(Sum / Wsum, 0.0, 1.0) : 1.0;
 }
 
@@ -136,28 +145,36 @@ void main()
                  uintBitsToFloat(uvec4(GITable[T + 12u], GITable[T + 13u], GITable[T + 14u], GITable[T + 15u])));
     const ivec2 Q = FullTexel(p);
     const float z = texelFetch(GPreDepth, Q, 0).r;
-    if (Push.Mode == 0u)
+    const uint NP = Push.W * Push.H;      // (the buffers: AO, distance at i; the screen GI's rg at N + i, b at 2N + i)
+    if ((Push.Mode & 3u) == 0u)
     {
-        if (z >= 1.0) { AORaw[i] = vec2(1.0, 0.0); return; }
+        if (z >= 1.0) { AORaw[i] = vec2(1.0, 0.0); AORaw[NP + i] = vec2(0.0); AORaw[2u * NP + i] = vec2(0.0); return; }
         const vec3 P = WorldAt(Q, z);
         const float Dist = length(P);
-        AORaw[i] = vec2(RawAO(p, Q, z, P, Dist), Dist);
+        vec3 Gi;
+        AORaw[i] = vec2(RawAO(p, Q, z, P, Dist, Gi), Dist);
+        AORaw[NP + i] = Gi.rg; AORaw[2u * NP + i] = vec2(Gi.b, 0.0);
         return;
     }
 
     // Mode 1: the 4 x 4 tile's rotations summed (edge aware: the distance's match), then the history
     const vec2 C = AORaw[i];
-    if (C.y <= 0.0) { AOOut[i] = vec2(1.0, 0.0); return; }
+    if (C.y <= 0.0) { AOOut[i] = vec2(1.0, 0.0); AOOut[NP + i] = vec2(0.0); AOOut[2u * NP + i] = vec2(0.0); return; }
     const float Dist = C.y;
     float S = 0.0, Wt = 0.0;
+    vec3  G = vec3(0.0);
     for (int y = -1; y <= 2; ++y) for (int x = -1; x <= 2; ++x)
     {
         const ivec2 q = clamp(p + ivec2(x, y), ivec2(0), ivec2(int(Push.W) - 1, int(Push.H) - 1));
-        const vec2  A = AORaw[uint(q.y) * Push.W + uint(q.x)];
+        const uint  j = uint(q.y) * Push.W + uint(q.x);
+        const vec2  A = AORaw[j];
         if (A.y <= 0.0) continue;
         const float w = max(0.0, 1.0 - abs(A.y - Dist) / (0.03 * Dist + 0.01));
         S += A.x * w; Wt += w;
+        G += vec3(AORaw[NP + j], AORaw[2u * NP + j].x) * w;
     }
+    G = Wt > 1e-4 ? G / Wt : vec3(AORaw[NP + i], AORaw[2u * NP + i].x);
+    AOOut[NP + i] = G.rg; AOOut[2u * NP + i] = vec2(G.b, 0.0);
     float AO = Wt > 1e-4 ? S / Wt : C.x;
 
     // Temporal: last frame's where this point was, the same surface (its distance, 1 %)

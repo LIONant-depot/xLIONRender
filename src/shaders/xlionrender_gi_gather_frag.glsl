@@ -30,6 +30,12 @@ float GatherAO(in const ivec2 P, in const uint W, in const uint H, in const floa
     }
     return Wt > 1e-4 ? S / Wt : 1.0;
 }
+// (XLION_SSGI, push.AO 2: the AO pass's screen GI at this pixel, the near field's irradiance - after the AO's 4 x 4 filter)
+vec3 GatherSSGI(in const ivec2 P, in const uint W, in const uint H)
+{
+    const uint N = W * H, i = uint(P.y) * W + uint(P.x);
+    return max(vec3(AOData[N + i], AOData[2u * N + i].x), vec3(0.0));
+}
 
 // Experiment X1 (XLION_GI_CLIP, xlionrender_gi_clip_comp.glsl): the light at a world point for a normal, from the clipmap: the finest level
 // holding it, 8 cells x the 3 faces the normal looks toward (squared cosines), the weighted light over the weights - cells no surfel
@@ -345,6 +351,7 @@ void main()
         }
         if (E.w < 0.5 && (Ref & 0x8000u) == 0u) E = vec4(SurfelGILocalMean(Pm, GFace, Offset, Ref & 0xFFu), 1.0);
         if (push.AO != 0u) E.rgb *= GatherAO(P, W, H, Dist);
+        if (push.AO == 2u && E.w > 0.5) E.rgb += GatherSSGI(P, W, H);      // (the store's light kept for the free sectors, the screen's for the occluded ones)
         if (any(isnan(E.rgb)) || any(isinf(E.rgb))) E = vec4(0.0);     // (never a non-finite entry: the reprojection would carry it on)      // (a fresh read only: a reprojected one carries last frame's)
         if (GITable[push.TableBase + 29u] != 0u) g_GIRefl = vec4(0.0);
         const bool bE = E.w > 0.5, bR = g_GIRefl.w > 0.5;

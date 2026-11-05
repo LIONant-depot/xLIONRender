@@ -29,6 +29,8 @@ namespace xlionrender
         xmath::fvec4            m_Background{ 0, 0, 0, 0 };     // display-encoded color of m_Output where nothing was drawn (alpha 0: transparent)
 
         xgpu::texture           m_HDR;                  // R16G16B16A16_SFLOAT, scene-linear
+        xgpu::texture           m_HDRPrev;              // last frame's m_HDR (the G-buffer prepass clears m_HDR before anything reads it): the screen trace's and XLION_SSGI's light; made when first needed
+        bool                    m_bHDRPrev = false;     // m_HDRPrev holds a frame
         xgpu::texture           m_Depth;                // DEPTH_F32
         xgpu::texture           m_Output;               // R8G8B8A8_UNORM, display-encoded
         xgpu::renderpass        m_ScenePass;

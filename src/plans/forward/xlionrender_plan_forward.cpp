@@ -2329,7 +2329,7 @@ namespace xlionrender
                 constexpr float ssr_max_rough_v = 0.5f;
                     { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, ssr_max_rough_v, 0.0f };
                 auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
-                auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_HDR };
+                auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };      // (m_HDRPrev: m_HDR itself is cleared by the prepass)
                 Window.WriteTimestamp(m_ReflSSRTimes, 0);
                 Window.Dispatch(m_ReflSSR, SBuffers, STextures, &SPush, sizeof(SPush), (W + 7) / 8, (H + 7) / 8);
                 Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, ssr_max_rough_v);      // (the materials read the records up to the screen trace's roughness: 1e-3 here read none - EnvLighting fades them out by .7 w)
@@ -3263,6 +3263,8 @@ namespace xlionrender
                 // takes the AO entries' (mb_standard_pbr.frag SurfelGIScreen): the GI on or off, no extra read. Last frame's: the history
                 if( pGS ) Window.WriteTimestamp(*pGS, 0);
                 if( bAO )
+                static const bool s_bSSGI = std::getenv("XLION_SSGI") != nullptr;
+                static const float s_AORadius = [] { const char* p = std::getenv("XLION_AO_RADIUS"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: the AO's and the screen GI's range)      // (prototype, A32: screen GI on the AO's bitmask - xLION_Docs ssgi_bitmask_plan_2026-11-06.md)
                 {
                     std::swap(View.m_AO, View.m_AOPrev);
                     const float* pM = reinterpret_cast<const float*>(&W2C);      // (column major: the clip y row's scale, P11 - the view's rotation keeps it)
@@ -3270,19 +3272,20 @@ namespace xlionrender
                     // (two dispatches: the raw AO, then its 4 x 4 filter - the pattern's rotations summed: each frame good on its own - and a third
                     // of the way from the history)
                     details::push_ao Push{ std::uint32_t(View.m_GIScreenWidth), std::uint32_t(View.m_GIScreenHeight), std::uint32_t(GIScreenDivisor()), 0u
-                                         , Scene.m_GI.m_AORadius, Scene.m_GI.m_AOThickness, 0.5f * float(View.m_GIScreenHeight) * P11, m_GatherTableBase, 0u, 0.33f };     // (no history: each frame good on its own - HypeHype's; moving looks as still)
+                                         , s_AORadius > 0.0f ? s_AORadius : Scene.m_GI.m_AORadius, Scene.m_GI.m_AOThickness, 0.5f * float(View.m_GIScreenHeight) * P11, m_GatherTableBase, 0u, 0.33f };     // (no history: each frame good on its own - HypeHype's; moving looks as still)
                     auto Buffers  = std::array<xgpu::buffer*, 5>{ &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AOPrev, &View.m_AO, &View.m_AORaw };
-                    auto Textures = std::array<const xgpu::texture*, 3>{ &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId };
+                    auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };     // (last frame's lit image, XLION_SSGI's light)
                     const int GX = (View.m_GIScreenWidth + 7) / 8, GY = (View.m_GIScreenHeight + 7) / 8;
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
-                    Push.m_Mode = 1u;
+                    if( s_bSSGI ) Push.m_Mode = 4u;
+                    Push.m_Mode = s_bSSGI ? 5u : 1u;
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                 }
                 View.m_bAOPrev = bAO;
                 {
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
-                    const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()), bAO ? 1u : 0u };
+                    const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()), bAO ? (s_bSSGI ? 2u : 1u) : 0u };
                     std::array<xgpu::buffer*, 11> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO, m_pGatherClip ? m_pGatherClip : &m_GIDummy
                                                          , m_pGatherRefS ? m_pGatherRefS : &m_GIDummy, m_pGatherRefA ? m_pGatherRefA : &m_GIDummy };
                     GCmd.setPipelineInstance(View.m_GIClassifyInstance, std::span{ Buffers });
@@ -4381,6 +4384,13 @@ namespace xlionrender
             const float Bloom = s_EnvBloom >= 0.0f ? s_EnvBloom : Scene.m_Post.m_Bloom;
             const bool  bAuto = s_EnvAuto >= 0 ? s_EnvAuto == 1 : Scene.m_Post.m_bAutoExposure;
             const xgpu::texture* pHDR = &View.m_HDR;
+            // (last frame's lit image for the next frame's screen reads: the prepass clears m_HDR - they had read black)
+            static const bool s_bSSGIPrev = std::getenv("XLION_SSGI") != nullptr;
+            if( s_bSSGIPrev || Scene.m_bReflectionScreen )
+            {
+                if( !View.m_HDRPrev.m_Private ) (void)m_Device.Create(View.m_HDRPrev, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: last frame's HDR" });
+                if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true; }
+            }
             xgpu::pipeline_instance* pToneMap = &View.m_ToneMapInstance;
             if( bTAA )
             {
