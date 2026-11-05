@@ -2293,7 +2293,7 @@ namespace xlionrender
         static const bool s_bGradeRays = std::getenv("XLION_REFL_GRADE_RAYS") != nullptr;      // (rays graded too, at XLION_REFL_GRADE's roughness: half size, one frame, no reconstruction: its noise counts against them)
         static const int  s_GradeRough = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? int(std::atof(p) * 1000.0 + 0.5) : 0; }();
         static const bool s_bGrading = std::getenv("XLION_REFL_GRADE") != nullptr && !s_bGradeRays;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
-        const bool bTraced = !s_bGrading && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
+        const bool bTraced = !s_bGrading && !Scene.m_bDebugReflectionPathTraced && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
         const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
         const bool bReconstruct = Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || std::getenv("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
@@ -2756,7 +2756,7 @@ namespace xlionrender
                 // XLION_REFL_GRADE=<roughness below 1>: the mirror view at that roughness on every surface, for grading against the ground truth (with XLION_GI_REF: it is what shows: 4 +)
                 static const float s_Grade = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) : -1.0f; }();
                 static const float s_GradeBase = s_Grade >= 0.0f ? (std::getenv("XLION_GI_REF") ? 4.0f : std::getenv("XLION_REFL_GRADE_RAW_PROBE") ? 6.0f : 2.0f) + s_Grade : 2.0f;
-                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? (Scene.m_bDebugReflectionMirror ? s_GradeBase : 1.0f) : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
+                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? (Scene.m_bDebugReflectionMirror ? (Scene.m_bDebugReflectionPathTraced ? 4.01f : s_GradeBase) : 1.0f) : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
 
             }
 
@@ -2936,13 +2936,14 @@ namespace xlionrender
                         const auto KeyOf = [&](const void* p, std::size_t n) { const auto* b = static_cast<const std::uint8_t*>(p); for( std::size_t k = 0; k < n; ++k ) LightsKey = (LightsKey ^ b[k]) * 16777619u; };
                         { const float Sn[7] = { Scene.m_Sun.m_Direction[0], Scene.m_Sun.m_Direction[1], Scene.m_Sun.m_Direction[2], Scene.m_Sun.m_Color[0], Scene.m_Sun.m_Color[1], Scene.m_Sun.m_Color[2], Scene.m_Sun.m_Intensity }; KeyOf(Sn, sizeof(Sn)); }
                         for( const auto& LL : Scene.m_LocalLights ) { const float Ls[5] = { LL.m_Position[0], LL.m_Position[1], LL.m_Position[2], LL.m_Intensity, LL.m_Radius }; KeyOf(Ls, sizeof(Ls)); }
-                        if( (s_Ref[0] > 0 || Scene.m_GI.m_bPathTraced) && m_pGITrace && m_pGITrace->RefStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), s_Ref[0] > 0 ? s_Ref[0] : 1 << 18, s_Ref[1], LightsKey) )
+                        if( (s_Ref[0] > 0 || Scene.m_GI.m_bPathTraced || Scene.m_bDebugReflectionPathTraced) && m_pGITrace && m_pGITrace->RefStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), s_Ref[0] > 0 ? s_Ref[0] : 1 << 18, s_Ref[1], LightsKey) )
                         {
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum();
                             const float Ey[3] = { Eye[0], Eye[1], Eye[2] };
                             m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
                             static const float s_GradeRef = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) + (std::getenv("XLION_REFL_REF_NO_WEIGHT") ? 2.0f : 0.0f) : -1.0f; }();      // (the reflections' ground truth at this roughness; none: the irradiance)
-                            std::memcpy(m_GatherTable.data() + 30, &s_GradeRef, sizeof(s_GradeRef));
+                            const float GradeRef = Scene.m_bDebugReflectionPathTraced ? 0.01f : s_GradeRef;      // (the mirror view's path traced option: a mirror's ground truth)
+                            std::memcpy(m_GatherTable.data() + 30, &GradeRef, sizeof(GradeRef));
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
                         }
                         if( s_Vox[0] > 0.0f ) { m_VoxPixels = std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight; m_VoxKey = LightsKey; }
