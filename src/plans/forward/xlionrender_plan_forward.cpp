@@ -2750,7 +2750,7 @@ namespace xlionrender
                 if( m_LightModeUsed == light_mode::SCREEN && !bMain ) Light.m_LocalCount.m_Y = float(int(light_mode::CELLS));     // (the screen tail is the main view's: the others' every light of the list)
                 // XLION_REFL_GRADE=<roughness below 1>: the mirror view at that roughness on every surface, for grading against the ground truth (with XLION_GI_REF: it is what shows: 4 +)
                 static const float s_Grade = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) : -1.0f; }();
-                static const float s_GradeBase = s_Grade >= 0.0f ? (std::getenv("XLION_GI_REF") ? 4.0f : 2.0f) + s_Grade : 2.0f;
+                static const float s_GradeBase = s_Grade >= 0.0f ? (std::getenv("XLION_GI_REF") ? 4.0f : std::getenv("XLION_REFL_GRADE_RAW_PROBE") ? 6.0f : 2.0f) + s_Grade : 2.0f;
                 Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? (Scene.m_bDebugReflectionMirror ? s_GradeBase : 1.0f) : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
 
             }

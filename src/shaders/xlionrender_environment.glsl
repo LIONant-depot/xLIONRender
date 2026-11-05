@@ -215,13 +215,13 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         const vec3  GIDiff = g_GI.rgb / 3.14159265359;            // irradiance -> the diffuse term's radiance
         const float SkyLum = dot(Diff, vec3(0.2126, 0.7152, 0.0722));
         const float GILum  = dot(GIDiff, vec3(0.2126, 0.7152, 0.0722));
-        Spec *= SkyLum > 1e-4 ? clamp(GILum / SkyLum, 0.0, 1.0) : 1.0;
+        Spec *= SkyLum > 1e-4 && UBOLight.EnvParams.z < 5.5 ? clamp(GILum / SkyLum, 0.0, 1.0) : 1.0;     // (z 6 +: XLION_REFL_GRADE_RAW_PROBE, the probes as captured)
         Diff  = GIDiff;
     }
 #ifndef XLION_TAIL_SCREEN
     if (UBOLight.EnvParams.w > 0.0) { const vec4 U = ReflScreen(N); Spec = mix(Spec, U.rgb, U.a * (1.0 - smoothstep(UBOLight.EnvParams.w * 0.7, UBOLight.EnvParams.w, PerceptualRoughness))); }      // the traced reflections replace the probes where they cover
 #endif
-    if (UBOLight.EnvParams.z > 3.5) Spec = g_GI.rgb / 3.14159265359;      // (XLION_REFL_GRADE with XLION_GI_REF: the ground truth's mean: xlionrender_gi_ref.glsl SpecDir)
+    if (UBOLight.EnvParams.z > 3.5 && UBOLight.EnvParams.z < 5.5) Spec = g_GI.rgb / 3.14159265359;      // (XLION_REFL_GRADE with XLION_GI_REF: the ground truth's mean: xlionrender_gi_ref.glsl SpecDir)
     const vec2 DFG = textureLod(SamplerEnvDFG, vec2(NdotV, PerceptualRoughness), 0.0).rg;
     g_EnvSpecular = UBOLight.EnvParams.z > 1.5 ? Spec : Spec * (F0 * DFG.x + DFG.y) * AO;
     return (Diff * Albedo * (1.0 - Metallic) + Spec * (F0 * DFG.x + DFG.y)) * AO;     // (the lit sum as before, bitwise)
