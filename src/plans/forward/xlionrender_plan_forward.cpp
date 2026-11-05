@@ -2446,7 +2446,7 @@ namespace xlionrender
             {
                 auto P2 = Push;
                 P2.m_Full[0] = int(View.m_SharpWidth | (View.m_SharpHeight << 16)); P2.m_Full[2] = 2 * W * H; P2.m_SharpMax = m_ReflSharpMax;
-                P2.m_Frame = Scene.m_bReflectionJitter ? View.m_TailFrame : 0u;     // (the sharp ones are not reconstructed: their one ray each stays unless asked)
+                P2.m_Frame = View.m_TailFrame;     // (the sharp ones are not reconstructed: a new ray each frame, TAA averages them; one fixed ray a pixel was static sparkle on Bistro's glass. Same cost, noise over 8 .020 to .028 %)
                 auto T2 = std::array<const xgpu::texture*, 6>{ &View.m_SharpGColor, &View.m_SharpGDepth, &m_EnvAtlas, Textures[3], Textures[4], &View.m_SharpGMotion };
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
             }
