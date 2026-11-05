@@ -962,6 +962,8 @@ namespace xlionrender::gi
             if (s_bFirstOnly) Push.m_First |= 2;
             static const bool s_bBinPdf = std::getenv("XLION_VOX_NO_BIN_PDF") == nullptr;      // (a bin's mean over its directions: xlionrender_gi_ref.glsl VoxStoreDir)
             if (s_bBinPdf) Push.m_First |= 4;
+            static const int s_DirsBits = [] { float L = -1.0f, K = 8.0f; if( const char* p = std::getenv("XLION_VOX_DIRS") ) std::sscanf(p, "%f,%f", &L, &K); return L < 0.0f ? 0 : 2048 | (int(L) & 3) << 12 | (K > 8.5f ? 16384 : 0); }();      // (a prototype: xlionrender_gi_ref.glsl VoxDirsAdd)
+            Push.m_First |= s_DirsBits;
             static const bool s_bCoherent = std::getenv("XLION_VOX_COHERENT") != nullptr;
             if (s_bCoherent) Push.m_First |= 8;
             static const double s_HitCachedAfter = [] { const char* p = std::getenv("XLION_VOX_HIT_CACHED"); return p ? std::atof(p) : 0.0; }();      // (seconds after the first rays: a warm cache first)

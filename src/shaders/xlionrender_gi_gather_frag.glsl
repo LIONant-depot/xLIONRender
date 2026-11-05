@@ -149,6 +149,46 @@ vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
     }
     return vec4(Sum + Fallback * Left, 1.0);
 }
+// XLION_VOX_DIRS (word 32: bit 3 on; bits 0, 1 level; bit 2 k 16; bits 8 to 15 roughness x 255; word 33 the frame; xlionrender_gi_ref.glsl VoxDirsAdd): the read, samples of the lobe, a position in the surface's plane by chance (bilinear over time)
+uint DirsHash(inout uint s) { s ^= s >> 16; s *= 0x7FEB352Du; s ^= s >> 15; s *= 0x846CA68Bu; s ^= s >> 16; return s; }
+vec4 VoxDirsRead(in const vec3 Pcam, in const vec3 n, in const vec4 Fallback, in const ivec2 Px)
+{
+    const uint  Cfg = GITable[push.TableBase + 32u];
+    const int   L = int(Cfg & 3u); const uint k = (Cfg & 4u) != 0u ? 16u : 8u;
+    const float Rg = float((Cfg >> 8) & 255u) / 255.0, al = max(Rg * Rg, 0.002), Cell = TF(21u) * float(1 << L);
+    const vec3  Pw = Pcam + vec3(TF(25u), TF(26u), TF(27u)), Ve0 = -normalize(Pcam), An = abs(n);
+    const int   a = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2, u = (a + 1) % 3, v = (a + 2) % 3;
+    const float sg = n[a] < 0.0 ? -1.0 : 1.0; const uint Face = uint(2 * a + (n[a] < 0.0 ? 1 : 0));
+    const vec3  T = normalize(cross(abs(n.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), n)), B = cross(n, T), Ve = vec3(dot(Ve0, T), dot(Ve0, B), max(dot(Ve0, n), 1e-3));
+    const vec3  Vh = normalize(vec3(al * Ve.x, al * Ve.y, Ve.z));
+    const float Lq = Vh.x * Vh.x + Vh.y * Vh.y;
+    const vec3  T1 = Lq > 1e-9 ? vec3(-Vh.y, Vh.x, 0.0) / sqrt(Lq) : vec3(1.0, 0.0, 0.0), T2 = cross(Vh, T1);
+    uint Seed = uint(Px.x) * 73856093u ^ uint(Px.y) * 19349663u ^ GITable[push.TableBase + 33u] * 83492791u;
+    vec3 Sum = vec3(0.0);
+    const bool bFixed = (Cfg & 16u) != 0u;      // (the affordable read: 4 fixed directions of the lobe, each over the 4 records around, 16 fetches, no noise)
+    const int nS = bFixed ? 16 : 8;
+    const vec2 Fx = fract(Pw[u] / Cell - 0.5) * vec2(1.0, 0.0) + fract(Pw[v] / Cell - 0.5) * vec2(0.0, 1.0);
+    float SumW = 0.0;
+    for (int i = 0; i < nS; ++i)
+    {
+        const float r1 = bFixed ? (float(i >> 2 & 1) + 0.5) * 0.5 : float(DirsHash(Seed)) / 4294967296.0, r2 = bFixed ? (float(i >> 3 & 1) * 0.5 + float(i >> 2 & 1) * 0.25 + 0.125) : float(DirsHash(Seed)) / 4294967296.0;
+        const float j1 = bFixed ? float(i & 1) : float(DirsHash(Seed)) / 4294967296.0, j2 = bFixed ? float(i >> 1 & 1) : float(DirsHash(Seed)) / 4294967296.0;
+        const float Wt = bFixed ? ((i & 1) != 0 ? Fx.x : 1.0 - Fx.x) * ((i & 2) != 0 ? Fx.y : 1.0 - Fx.y) : 1.0;
+        const float r = sqrt(r1), Phi = 6.2831853 * r2, t1 = r * cos(Phi), s = 0.5 * (1.0 + Vh.z), t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * r * sin(Phi);
+        const vec3  Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh, Ne = normalize(vec3(al * Nh.x, al * Nh.y, max(0.0, Nh.z)));
+        vec3 Le = reflect(-Ve, Ne); if (Le.z <= 1e-4) Le.z = abs(Le.z) + 1e-4;
+        const vec3  D = normalize(T * Le.x + B * Le.y + n * Le.z);
+        vec3 q = Pw / Cell; if (bFixed) { q[u] = floor(q[u] - 0.5) + j1 + 0.5; q[v] = floor(q[v] - 0.5) + j2 + 0.5; } else { q[u] += j1 - 0.5; q[v] += j2 - 0.5; }
+        const float sd = abs(D[u]) + abs(D[v]) + max(D[a] * sg, 0.0) + 1e-6, x = D[u] / sd, y = D[v] / sd;
+        const uint  di = min(uint((x + y + 1.0) * 0.5 * float(k)), k - 1u), dj = min(uint((x - y + 1.0) * 0.5 * float(k)), k - 1u);
+        const uint  h = VoxHash(L, ivec3(floor(q)), 1000u + Face * 256u + di * k + dj), e = VoxEntryOf(h);
+        const bool  bOurs = uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h);
+        const vec4  w = bOurs ? VoxBin(GIClip[e]) : vec4(0.0);
+        const float Tr = clamp(w.w / 64.0, 0.0, 1.0);        // (under a few rays: what the bins say, explicitly)
+        Sum += Wt * mix(Fallback.rgb, w.w > 0.0 ? w.rgb / w.w : vec3(0.0), Tr); SumW += Wt;
+    }
+    return vec4(Sum / max(SumW, 1e-4), 1.0);
+}
 vec4 ClipRead(in const vec3 Pcam, in const vec3 n)
 {
     const vec3 EyeL = vec3(TF(22u), TF(23u), TF(24u)), Eye = vec3(TF(25u), TF(26u), TF(27u));
@@ -278,7 +318,7 @@ void main()
             E = VoxReadLevels(S.P, N);
             bWeak = E.w < 0.5;
             E.w = 1.0;
-            if (GITable[push.TableBase + 29u] == 0u) g_GIRefl = VoxReflect(S.P, N, E.rgb);
+            if (GITable[push.TableBase + 29u] == 0u) { g_GIRefl = VoxReflect(S.P, N, E.rgb); if ((GITable[push.TableBase + 32u] & 8u) != 0u) g_GIRefl = VoxDirsRead(S.P, N, g_GIRefl, P); }
         }
         else if (GITable[push.TableBase + 20u] != 0u)                   // experiment X1: the clipmap, both reads
         {

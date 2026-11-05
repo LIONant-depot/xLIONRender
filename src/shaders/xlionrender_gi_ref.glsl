@@ -93,6 +93,31 @@ void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const v
     if (g_VoxMissed) { atomicAdd(GIRefAccumU[e + 1u].x, q.x); atomicAdd(GIRefAccumU[e + 1u].y, q.y); atomicAdd(GIRefAccumU[e + 1u].z, q.z); atomicAdd(GIRefAccumU[e + 1u].w, w16); }
     GIRefAccumU[e + 2u].y = floatBitsToUint(Now);
 }
+// XLION_VOX_DIRS=<level>,<k> (m_First's bit 11; bits 12, 13: the level; bit 14: k 16, else 8): a prototype. Reflections' light in a coarse level, k x k directions a face (reflection_store_design_2026-11-06.md), the same rays
+void VoxDirsAdd(in const vec3 Pw, in const vec3 N, in const float Cell0, in const vec3 Sample)
+{
+    const int   L = (Push.m_First >> 12) & 3; const uint k = (Push.m_First & 16384) != 0 ? 16u : 8u;
+    const ivec3 q = ivec3(floor(Pw / (Cell0 * float(1 << L))));
+    const vec3  An = abs(N);
+    const int   a = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2, u = (a + 1) % 3, v = (a + 2) % 3;
+    const float sg = N[a] < 0.0 ? -1.0 : 1.0;
+    const vec3  D = g_VoxRayD;
+    const float s = abs(D[u]) + abs(D[v]) + max(D[a] * sg, 0.0) + 1e-6, x = D[u] / s, y = D[v] / s;
+    const uint  i = min(uint((x + y + 1.0) * 0.5 * float(k)), k - 1u), j = min(uint((x - y + 1.0) * 0.5 * float(k)), k - 1u);
+    const uint  h = VoxHash(L, q, 1000u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 256u + i * k + j), e = VoxEntryOf(h);
+    const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
+    const uint  TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 2u].x;
+    if (Cur != TagU)
+    {
+        if (Cur != 0u && abs(Now - GIRefAccum[e + 2u].y) < 120.0) return;
+        if (atomicCompSwap(GIRefAccumU[e + 2u].x, Cur, TagU) != Cur) return;
+        GIRefAccumU[e] = uvec4(0u); GIRefAccumU[e + 1u] = uvec4(0u); GIRefAccumU[e + 2u].z = floatBitsToUint(1.0);
+    }
+    const uint  w16 = uint(16.0 / max(dot(N, g_VoxRayD), 0.1) + 0.5);
+    const uvec3 c = uvec3(clamp(Sample, vec3(0.0), vec3(4000.0)) * 16.0 * float(w16));
+    atomicAdd(GIRefAccumU[e].x, c.x); atomicAdd(GIRefAccumU[e].y, c.y); atomicAdd(GIRefAccumU[e].z, c.z); atomicAdd(GIRefAccumU[e].w, w16);
+    GIRefAccumU[e + 2u].y = floatBitsToUint(Now);
+}
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
     VoxStoreDir(L, Org, g, N, Sample);
@@ -378,6 +403,7 @@ void VoxMain()
         if (!any(isnan(Sample)) && all(lessThan(Sample, vec3(1e6))))
         {
             VoxStore(L, Org, g, N, Sample);
+            if ((Push.m_First & 2048) != 0) VoxDirsAdd(P, N, Hd.w, g_HasSeen ? g_SeenSample : Sample);
             int Lp; ivec3 Op; vec3 gp;
             if (r == 0 && VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) VoxStore(Lp, Op, gp, N, Sample);
         }

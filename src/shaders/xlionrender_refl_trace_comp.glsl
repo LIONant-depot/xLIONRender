@@ -49,7 +49,7 @@ layout(set = 1, binding = 5) uniform sampler2D GMotion;    // w: the motion's fl
 // records' first (x, y, z; x 0: the half-size dispatch)
 // m_Tex: x the receivers' roughness up to which their hits get their material's own shading (fading over its last quarter), y the visible
 // reflectance from which (scene::m_ReflectionTextureMaxRoughness, m_ReflectionTextureMinReflectance), w the list's capacity; x 0: none
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; } Push;     // (Flat: the sky's radiance with no environment; m_Full.w: the mirror view: every receiver roughness 0)
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; float m_Sparse; } Push;     // (Flat: the sky's radiance with no environment; m_Full.w: the mirror view: every receiver roughness 0)
 
 #include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
@@ -237,6 +237,9 @@ void main()
             atomicAdd(s_PlanarRough, uint(Rough * 100.0 + 0.5));
         }
         else if (bScreenFirst && ((Records[i].w >> 24) & 15u) == refl_screen_v && unpackHalf2x16(Records[i].y).y >= 0.95) { }     // (the screen's certain answer stays)
+        // (XLION_REFL_SPARSE, measurement: at or above this roughness one half-size texel in four a frame traces; the rest class 5: the reconstruction fills them)
+        else if (!bFull && Push.m_Mode == 0u && Push.m_Sparse > 0.0 && Rough >= Push.m_Sparse && Rough < Push.m_MaxRough
+                 && ((p.x & 1) != int(Push.m_Frame & 1u) || (p.y & 1) != int((Push.m_Frame >> 1) & 1u))) Rec.w |= 5u << 24;
         else if (Push.m_Mode != 0u || Rough < Push.m_MaxRough)
         {
             const vec3  V   = normalize(-P);
