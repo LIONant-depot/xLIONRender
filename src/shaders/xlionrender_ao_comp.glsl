@@ -104,7 +104,7 @@ float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 
                 const ivec2 Qs = FullTexel(q);
                 const float zs = texelFetch(GPreDepth, Qs, 0).r;
                 if (zs >= 1.0) continue;
-                const vec3  d  = WorldAt(Qs, zs) - P;
+                const vec3  d  = RayAt(Qs, zs) - P;      // (the depth's point, not GPreId's exact distance: 4 bytes a sample, not 20)
                 const float L  = length(d);
                 if (L < 1e-5 || L > Push.Radius) continue;          // (short range: beyond it the GI's own visibility holds)
                 const vec3  db = d - V * Push.Thickness;
@@ -152,7 +152,7 @@ void main()
         const vec3 P = WorldAt(Q, z);
         const float Dist = length(P);
         vec3 Gi;
-        AORaw[i] = vec2(RawAO(p, Q, z, P, Dist, Gi), Dist);
+        AORaw[i] = vec2(RawAO(p, Q, z, RayAt(Q, z), Dist, Gi), Dist);
         AORaw[NP + i] = Gi.rg; AORaw[2u * NP + i] = vec2(Gi.b, 0.0);
         return;
     }
