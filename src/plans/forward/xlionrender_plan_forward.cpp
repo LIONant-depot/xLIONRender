@@ -2326,12 +2326,13 @@ namespace xlionrender
                     }
                 }
                 const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
-                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, 0.5f, 0.0f };
+                constexpr float ssr_max_rough_v = 0.5f;
+                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, ssr_max_rough_v, 0.0f };
                 auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
                 auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_HDR };
                 Window.WriteTimestamp(m_ReflSSRTimes, 0);
                 Window.Dispatch(m_ReflSSR, SBuffers, STextures, &SPush, sizeof(SPush), (W + 7) / 8, (H + 7) / 8);
-                Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, 1e-3f);      // (the materials read the records)
+                Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, ssr_max_rough_v);      // (the materials read the records up to the screen trace's roughness: 1e-3 here read none - EnvLighting fades them out by .7 w)
             }
         }
         if( bTraced )

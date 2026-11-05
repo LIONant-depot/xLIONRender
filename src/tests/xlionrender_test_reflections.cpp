@@ -822,6 +822,7 @@ int main()
                 Scene.m_ReflectionMaxRoughness = 0;
                 Scene.m_bReflectionJitter = true;
                 Scene.m_bReflectionReconstruct = true;
+                Scene.m_bDebugReflection = false;      // (the screen trace is off in the debug view: its colours are last frame's image, reflections of reflections there)
                 std::vector<std::uint8_t> MSphere(MFloor.size(), 0), MSky(MFloor.size(), 0);
                 for (int y = 0; y < size_v; ++y) for (int x = 0; x < size_v; ++x)
                 {
@@ -864,6 +865,7 @@ int main()
                 CHECK(FS < 0.02, "the screen trace's floor flickers (%.5f a frame)", FS);
                 Scene.m_bReflectionScreen = false;
                 Scene.m_bReflectionReconstruct = false;
+                Scene.m_bDebugReflection = true;
             }
             Objects[floor_v].m_Mat.m_Roughness = 0.10f;
             Scene.m_Draws[floor_v].m_Material.m_Roughness = 0.10f;
