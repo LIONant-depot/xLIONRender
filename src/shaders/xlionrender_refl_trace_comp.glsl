@@ -206,6 +206,7 @@ void main()
         const vec2  OctN = OctEncode(N) * 0.5 + 0.5;
         Rec.w = packHalf2x16(vec2(Pc.w > 0.0 ? 1.0 / Pc.w : 0.0, 0.0)) | (uint(OctN.x * 15.0 + 0.5) << 16) | (uint(OctN.y * 15.0 + 0.5) << 20);    // (the view depth: clip w, as the tail's)
         const float PlaneDist = dot(Push.m_Plane.xyz, P + Push.m_Eye) + Push.m_Plane.w;
+        if (Push.m_Pad2 > 0.0 && !bFull && p == ivec2(int(Push.m_Pad2) / 10000, int(Push.m_Pad2) % 10000)) { const float Mw_ = texelFetch(GMotion, p, 0).w; atomicAdd(Stats[Push.m_Slot * 8u + 3u], 10000000u + uint((Mw_ > 0.5 ? Mw_ - 1.0 : -Mw_) * 1000.0)); atomicAdd(Stats[Push.m_Slot * 8u + 4u], 10000000u + uint(Rough * 1000.0)); }      // (XLION_REFL_PROBE=<x>,<y>: this texel's F0 and roughness into the log)
         const bool  bPlanarHere = Push.m_Mode == 0u && Push.m_bPlanar > 0.5 && Rough < Push.m_MaxRough && abs(PlaneDist) < 0.01 + 0.002 * length(P) && dot(N, Push.m_Plane.xyz) > 0.95;
         const bool  bSharpHere  = Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpMax;      // (traced at full size)
         // (a sharp receiver seen, whether or not the full size runs: Stats' top bit: an empty full size dispatch cost 2 ms on Bistro)
@@ -239,7 +240,7 @@ void main()
         }
         else if (bScreenFirst && ((Records[i].w >> 24) & 15u) == refl_screen_v && unpackHalf2x16(Records[i].y).y >= 0.95) { }     // (the screen's certain answer stays)
         // (XLION_VOX_DIRS_TRACE=<rays below>,<store up to>, a prototype: the record is a read of the coarse directional store (xlionrender_gi_ref.glsl VoxDirsAdd), a few random samples of the real lobe: the reconstruction filters them as it does rays)
-        else if (!bFull && Push.m_Mode == 0u && Push.m_Dirs.x > 0.5 && Push.m_Vox.w > 0.0 && Rough >= Push.m_Dirs.z && Rough < Push.m_Dirs.w && !(Push.m_Pad0 > 0.0 && Rough < Push.m_MaxRough && (texelFetch(GMotion, p, 0).w > 0.5 ? texelFetch(GMotion, p, 0).w - 1.0 : -texelFetch(GMotion, p, 0).w) >= Push.m_Pad0))
+        else if (!bFull && Push.m_Mode == 0u && Push.m_Dirs.x > 0.5 && Push.m_Vox.w > 0.0 && Rough >= Push.m_Dirs.z && Rough < Push.m_Dirs.w)
         {
             const vec3  Pw = P + Push.m_Eye, V = normalize(-P), An = abs(N);
             const int   L_ = int(Push.m_Dirs.y); const uint k = uint(Push.m_Dirs.x);

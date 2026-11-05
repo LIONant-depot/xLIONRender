@@ -2348,6 +2348,7 @@ namespace xlionrender
             }
             std::uint32_t Got[8] = {};
             (void)m_ReflStats.MemoryMap(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
+            if( Got[3] >= 10000000u && std::getenv("XLION_REFL_PROBE") && m_Device.getFrameIndex() % 120 == 0 ) { std::printf("REFLPROBE F0 %.3f roughness %.3f\n", (Got[3] - 10000000u) / 1000.0, (Got[4] - 10000000u) / 1000.0); std::fflush(stdout); }
             if( Got[0] ) { m_bReflSharpSeen = (Got[7] >> 31) != 0u; Got[7] &= 0x7FFFFFFFu; }
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 5 && Ns[0] != ~0ull && Ns[4] > Ns[0] )
             {
@@ -2435,8 +2436,9 @@ namespace xlionrender
             float MaxRoughOut = 0.0f;
             static const float s_Sparse = [] { const char* p = std::getenv("XLION_REFL_SPARSE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: one ray in four at or above this roughness)
             Push.m_Sparse = bReconstruct ? s_Sparse : 0.0f;
+            static const float s_ReflProbe = [] { int X = 0, Y = 0; if( const char* p = std::getenv("XLION_REFL_PROBE") ) std::sscanf(p, "%d,%d", &X, &Y); return float(X * 10000 + Y); }(); Push.m_Pad[2] = s_ReflProbe;
             static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = std::getenv("XLION_VOX_DIRS_TRACE"); const char* d = std::getenv("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; std::sscanf(d, "%f,%f", &D[1], &K); std::sscanf(t, "%f,%f", &D[2], &D[3]); D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
-            if( pVox && s_DirsTrace[0] > 0.0f ) { std::memcpy(Push.m_Dirs, s_DirsTrace.data(), sizeof(Push.m_Dirs)); static const float s_DirsF0 = [] { const char* p = std::getenv("XLION_VOX_DIRS_F0"); return p ? float(std::atof(p)) : 0.0f; }(); Push.m_Pad[0] = s_DirsF0;      /* (surfaces of at least this F0 keep their rays up to ReflectionRoughness: CryEngine's MinRefl) */ MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
+            if( pVox && s_DirsTrace[0] > 0.0f ) { std::memcpy(Push.m_Dirs, s_DirsTrace.data(), sizeof(Push.m_Dirs)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
             auto Buffers  = std::array<xgpu::buffer*, 15>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : bSdf ? &View.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
