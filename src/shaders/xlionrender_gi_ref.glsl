@@ -295,8 +295,9 @@ void main()
     if (!bSpec && GD[15] > 0u && !EmitterDirectExternal()) Sum += EmitterIrradianceAt(P, N, g_Seed) * (1.0 / gi_pi_v);      // (the point's own: lighting doesn't shade them, the GI shows them)
     for (int b = 0; b <= Push.m_Bounces; ++b)
     {
-        const vec3 D = bSpec && b == 0 ? SpecDir(N, normalize(Grade.xyz - P), max(Grade.w * Grade.w, 1e-3), SpecW) : CosineDir(N);
+        const vec3 D = bSpec && b == 0 ? SpecDir(N, normalize(Grade.xyz - P), max(fract(Grade.w) * fract(Grade.w), 1e-3), SpecW) : CosineDir(N);
         if (SpecW <= 0.0) return;
+        if (Grade.w >= 2.0) SpecW = 1.0;      // (XLION_REFL_REF_NO_WEIGHT, measurement: the lobe's samples unweighted, as the reflection rays' records are)
         const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
         if (H.m_Inst < 0) { Sum += Th * SkyAt(D); break; }
         const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);

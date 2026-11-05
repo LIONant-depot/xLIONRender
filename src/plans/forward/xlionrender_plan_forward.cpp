@@ -2296,7 +2296,7 @@ namespace xlionrender
         const bool bTraced = !s_bGrading && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
         const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
-        const bool bReconstruct = Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && !Scene.m_bDebugReflectionMirror;      // (its kernel follows the real roughness)
+        const bool bReconstruct = Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || std::getenv("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
         if( bTraced || bScreen )
         {
             if( bScreen || bReconstruct )
@@ -2930,7 +2930,7 @@ namespace xlionrender
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum();
                             const float Ey[3] = { Eye[0], Eye[1], Eye[2] };
                             m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
-                            static const float s_GradeRef = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) : -1.0f; }();      // (the reflections' ground truth at this roughness; none: the irradiance)
+                            static const float s_GradeRef = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) + (std::getenv("XLION_REFL_REF_NO_WEIGHT") ? 2.0f : 0.0f) : -1.0f; }();      // (the reflections' ground truth at this roughness; none: the irradiance)
                             std::memcpy(m_GatherTable.data() + 30, &s_GradeRef, sizeof(s_GradeRef));
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
                         }
