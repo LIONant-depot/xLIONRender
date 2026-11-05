@@ -955,6 +955,13 @@ namespace xlionrender::gi
             if (s_bKept) Push.m_Bounces = -3;
             static const bool s_bFirstOnly = std::getenv("XLION_VOX_FIRST_ONLY") != nullptr;
             if (s_bFirstOnly) Push.m_First |= 2;
+            {   // The direction bins' halving (VoxMain, -4): an eighth of the slots a frame, before the rays
+                auto Sw = Push; const int Slice = int(vox_slots_v / 8);
+                // The samples a bin keeps: many, with the lights still (with atomic bins, 256 to 8192: whole surfaces stopped shifting on a still moto, pixels off from the final image 30000 to 5000); few while they change: it catches up (XLION_VOX_BIN_CAP)
+                static const int s_BinCap = [] { const char* p = std::getenv("XLION_VOX_BIN_CAP"); return p ? std::atoi(p) : 8192; }();
+                Sw.m_Bounces = -4; Sw.m_First = int(m_VoxSweep) * Slice; Sw.m_Count = Slice; Sw.m_Epoch = bStill ? s_BinCap : std::min(s_BinCap, 128); m_VoxSweep = (m_VoxSweep + 1) % 8;
+                Window.Dispatch(m_VoxC, B, &Sw, sizeof(Sw), (Slice + 63) / 64);
+            }
             Window.Dispatch(m_VoxC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
             return true;
         }
@@ -1340,6 +1347,7 @@ namespace xlionrender::gi
         std::array<float, 3>                m_VoxEyeAt{};
         float                               m_VoxTravel = 0.0f;
         std::chrono::steady_clock::time_point m_VoxEyeMoved{};
+        int                                   m_VoxSweep = 0;
         static constexpr std::uint32_t      vox_slots_v = 1u << 21;     // (xlionrender_gi_ref_comp.glsl, _gather_frag.glsl)
         std::size_t                         m_VoxCleared = 0;
         std::uint32_t                       m_VoxLightsKey = 0;

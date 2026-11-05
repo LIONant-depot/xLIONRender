@@ -6,6 +6,7 @@ layout(local_size_x = 4) in;      // (a few lanes: lanes in a group pay for each
 
 layout(std430, set = 0, binding = 5) readonly buffer samples_b { vec4 GIRefSample[]; };     // per pixel: its world point, w 1 (0: none); then its normal
 layout(std430, set = 0, binding = 6)          buffer accum_b   { vec4 GIRefAccum[]; };      // per pixel 2: the sum (rgb) and count, its point
+layout(std430, set = 0, binding = 6)          buffer accum_u_b { uvec4 GIRefAccumU[]; };    // (the same memory: a direction bin's fixed point sums, added atomically)
 layout(push_constant) uniform push_t { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push;
 #include "xlionrender_gi_pass_common.glsl"
 
@@ -53,6 +54,7 @@ vec3 SpecDir(in const vec3 N, in const vec3 V, in const float a, out float W)
 // The same rays, by where they went (the reflection's read, xlionrender_gi_gather_frag.glsl VoxReflect): a cell's face (no layers) keeps a plain mean per direction: around its normal,
 // or along one of the other two axes, each way. No more rays: a place on a floor knows what its rays saw toward the street and toward the wall
 vec3 g_VoxRayD = vec3(0.0);
+const float bin_scale_v = 256.0;      // (xlionrender_gi_gather_frag.glsl VoxBin: 4000 a sample, thousands of samples between two halvings, in 32 bits)
 bool g_VoxMissed = false;       // (this ray saw the sky. A bin keeps its sky apart, second entry: rgb sum, count: a direction near the surface takes less of it - VoxReflect)
 void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
@@ -62,17 +64,19 @@ void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const v
     const uint b = Ad[a] >= Ad[u] && Ad[a] >= Ad[v] ? 4u : Ad[u] >= Ad[v] ? (D[u] > 0.0 ? 0u : 1u) : (D[v] > 0.0 ? 2u : 3u);
     const uint h = VoxHash(L, Org + ivec3(floor(g + 0.5)), 6u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 5u + b), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
-    const vec4 d = GIRefAccum[e + 2u];
-    vec4 c = GIRefAccum[e], m = GIRefAccum[e + 1u];
-    if (d.x != Tag)
+    // Atomic: lanes sharing a bin read, added and wrote over each other: samples lost, a bin's sum and its sky from different lanes. Its halving in a pass of its own (VoxMain, -4), one owner.
+    // Entry e and e + 1: rgb by bin_scale_v, count; z of e + 2: 1, a bin
+    const uint TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 2u].x;
+    if (Cur != TagU)
     {
-        if (d.x != 0.0 && abs(Now - d.y) < 120.0) return;
-        c = vec4(0.0); m = vec4(0.0);
+        if (Cur != 0u && abs(Now - GIRefAccum[e + 2u].y) < 120.0) return;
+        if (atomicCompSwap(GIRefAccumU[e + 2u].x, Cur, TagU) != Cur) return;
+        GIRefAccumU[e] = uvec4(0u); GIRefAccumU[e + 1u] = uvec4(0u); GIRefAccumU[e + 2u].z = floatBitsToUint(1.0);
     }
-    c += vec4(Sample, 1.0);
-    if (g_VoxMissed) m += vec4(Sample, 1.0);
-    if (c.w >= 256.0) { c *= 0.5; m *= 0.5; }
-    GIRefAccum[e] = c; GIRefAccum[e + 1u] = m; GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
+    const uvec3 q = uvec3(clamp(Sample, vec3(0.0), vec3(4000.0)) * bin_scale_v);
+    atomicAdd(GIRefAccumU[e].x, q.x); atomicAdd(GIRefAccumU[e].y, q.y); atomicAdd(GIRefAccumU[e].z, q.z); atomicAdd(GIRefAccumU[e].w, 1u);
+    if (g_VoxMissed) { atomicAdd(GIRefAccumU[e + 1u].x, q.x); atomicAdd(GIRefAccumU[e + 1u].y, q.y); atomicAdd(GIRefAccumU[e + 1u].z, q.z); atomicAdd(GIRefAccumU[e + 1u].w, 1u); }
+    GIRefAccumU[e + 2u].y = floatBitsToUint(Now);
 }
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
@@ -216,6 +220,21 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
 void VoxMain()
 {
     if (Push.m_Bounces == -2) { for (uint k = 0u; k < 16u; ++k) { const uint i = gl_GlobalInvocationID.x * 16u + k; if (int(i) < Push.m_Count) GIRefAccum[uint(Push.m_First) + i] = vec4(0.0); } return; }     // (a lane clears 16: not a million groups)
+    if (Push.m_Bounces == -4)         // (the bins' halving, a slice of the slots a frame: nothing else writes them now)
+    {
+        for (uint k = 0u; k < 16u; ++k)
+        {
+            const uint i = gl_GlobalInvocationID.x * 16u + k;
+            if (int(i) >= Push.m_Count) return;
+            const uint e = (uint(Push.m_First) + i) * 3u;
+            if (GIRefAccum[e + 2u].z != 1.0) continue;
+            const uvec4 c = GIRefAccumU[e];
+            if (c.w < uint(Push.m_Epoch)) continue;
+            const float s = 0.5 * float(Push.m_Epoch) / float(c.w);
+            GIRefAccumU[e] = uvec4(vec4(c) * s); GIRefAccumU[e + 1u] = uvec4(vec4(GIRefAccumU[e + 1u]) * s);
+        }
+        return;
+    }
     if (int(gl_GlobalInvocationID.x) >= Push.m_Count) return;
     g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
     const vec4 Hd = GIRefSample[2u * uint(Push.m_nPixels)];

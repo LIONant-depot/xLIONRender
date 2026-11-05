@@ -107,6 +107,7 @@ vec4 VoxReadLevels(in const vec3 Pcam, in const vec3 n)
 }
 // The light around the mirror direction, from the rays this place's own face sent that way (xlionrender_gi_ref_comp.glsl VoxStoreDir): the three axes R leans on, by their squares, as a face read.
 // Finest level that knows, the rest from its parent; what none vouches for: the place's irradiance (Fallback; EnvLighting then gives about its older ratio), so a new cell fades in
+vec4 VoxBin(in const uvec4 q) { return vec4(vec3(q.xyz) / 256.0, float(q.w)); }     // (a direction bin's fixed point sum: xlionrender_gi_ref.glsl VoxStoreDir)
 vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
 {
     const vec3 EyeL = vec3(TF(22u), TF(23u), TF(24u)), Pw = Pcam + vec3(TF(25u), TF(26u), TF(27u));
@@ -138,7 +139,7 @@ vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
                 ivec3 o = ivec3(0); o[u] = c & 1; o[v] = c >> 1; o[a] = f[a] >= 0.5 ? 1 : 0;
                 const float t = (o[u] != 0 ? f[u] : 1.0 - f[u]) * (o[v] != 0 ? f[v] : 1.0 - f[v]);
                 const uint  h = VoxHash(L, iv + o, Base + Bk[b]), e = VoxEntryOf(h);
-                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 w = uintBitsToFloat(GIClip[e]); if (w.w > 0.0) { const vec4 m0 = uintBitsToFloat(GIClip[e + 1u]); const vec4 m = m0 * ((1.0 - SkyTake) * smoothstep(8.0, 48.0, w.w - m0.w));      /* (the sky left out only where enough rays hit something: a few hits' mean flips between tiles: black squares, Tomas) */ const float cw = min(w.w, 128.0) * t, nl = w.w - m.w; Num += (nl > 0.5 ? (w.rgb - m.rgb) / nl : w.rgb / w.w) * cw; Den += cw; } }
+                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 w = VoxBin(GIClip[e]); if (w.w > 0.0) { const vec4 m0 = VoxBin(GIClip[e + 1u]); const vec4 m = m0 * ((1.0 - SkyTake) * smoothstep(8.0, 48.0, w.w - m0.w));      /* (the sky left out only where enough rays hit something: a few hits' mean flips between tiles: black squares, Tomas) */ const float cw = min(w.w, 128.0) * t, nl = w.w - m.w; Num += (nl > 0.5 ? (w.rgb - m.rgb) / nl : w.rgb / w.w) * cw; Den += cw; } }
             }
             if (Den > 1e-3) { Lit += Num / Den * Bw[b]; WSum += Bw[b]; Trust += Den * Bw[b]; }
         }
