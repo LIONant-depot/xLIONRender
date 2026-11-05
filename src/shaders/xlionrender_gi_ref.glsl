@@ -2,10 +2,20 @@
 // the points the gather wrote last frame (no surfels read: the sun, lamps, sky and emission at each hit, Bounces diffuse bounces with the
 // hits' albedo). Each pixel's irradiance averaged over the frames while its point stays where it is. Slow on purpose; never for a game.
 // A pixel a lane; m_First: the next pixel (wraps); m_Epoch: the lights' version (another: the pixel starts over)
-layout(local_size_x = 4) in;      // (a few lanes: lanes in a group pay for each other: 64 rays cost 0.9 ms in groups of 4, 2.9 in one of 64; 32768 cost 9 and 4: launching groups isn't free)
+#ifdef GI_VOX_LANES
+layout(local_size_x = GI_VOX_LANES) in;
+#else
+layout(local_size_x = 4) in;
+#endif
+//      // (a few lanes: lanes in a group pay for each other: 64 rays cost 0.9 ms in groups of 4, 2.9 in one of 64; 32768 cost 9 and 4: launching groups isn't free)
 
 layout(std430, set = 0, binding = 5) readonly buffer samples_b { vec4 GIRefSample[]; };     // per pixel: its world point, w 1 (0: none); then its normal
 layout(std430, set = 0, binding = 6)          buffer accum_b   { vec4 GIRefAccum[]; };      // per pixel 2: the sum (rgb) and count, its point
+#ifdef GI_VOX_ONLY
+// (XLION_VOX_RELIGHT, a prototype: rays' connections kept, 7 entries each: the point (w 1) and its normal; the ray; the hit (w: 1 a surface, 0 the sky, -1 a back face), its normal, albedo and emission. Relighting reads the light at a known hit, no traversal)
+layout(std430, set = 0, binding = 7)          buffer conn_b    { uvec4 ConnHeader; vec4 Conn[]; };
+layout(set = 1, binding = 0) uniform sampler2D SceneHDR;      // (XLION_VOX_SEEN: last frame's lit image, what the surfaces were seen as: every light, shadow and texture on screen)
+#endif
 layout(std430, set = 0, binding = 6)          buffer accum_u_b { uvec4 GIRefAccumU[]; };    // (the same memory: a direction bin's fixed point sums, added atomically)
 layout(push_constant) uniform push_t { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push;
 #include "xlionrender_gi_pass_common.glsl"
@@ -57,8 +67,10 @@ vec3 SpecDir(in const vec3 N, in const vec3 V, in const float a, out float W)
 // or along one of the other two axes, each way. No more rays: a place on a floor knows what its rays saw toward the street and toward the wall
 vec3 g_VoxRayD = vec3(0.0);
 bool g_VoxMissed = false;       // (this ray saw the sky. A bin keeps its sky apart, second entry: rgb sum, count: a direction near the surface takes less of it - VoxReflect)
-void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
+bool g_HasSeen = false; vec3 g_SeenSample = vec3(0.0);      // (the bins take what a hit was seen as, the faces, the diffuse light, stay as the GI's lights give them)
+void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample0)
 {
+    const vec3 Sample = g_HasSeen ? g_SeenSample : Sample0;
     const vec3 An = abs(N);
     const int  a = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2, u = (a + 1) % 3, v = (a + 2) % 3;
     const vec3 D = g_VoxRayD, Ad = abs(D);
@@ -188,7 +200,7 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
     const vec4  d = GIRefAccum[e + 2u];
     const bool  bMine = d.x == Tag;
     vec4 c = bMine ? GIRefAccum[e] : vec4(0.0);
-    if ((Push.m_First & 1) == 0 && c.w >= 1.0 && Rnd() >= 0.125) return c.rgb / c.w;
+    if ((Push.m_First & 1) == 0 && c.w >= 1.0 && ((Push.m_First & 16) != 0 || Rnd() >= 0.125)) return c.rgb / c.w;      // (m_First's bit 4, XLION_VOX_HIT_CACHED, measurement: a hit with a kept direct never casts its shadow rays again: the best case of hits reading a cache)
     const vec3 E = VoxDirect(P, N);
     if (!bMine && d.x != 0.0 && abs(Now - d.y) < 120.0) return E;
     c += vec4(E, 1.0);
@@ -197,16 +209,20 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
     return E;
 }
 // A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
+int g_Ablate = 0;
+float g_ConnKind = -1.0; vec3 g_ConnAlbedo = vec3(0.0), g_ConnEmission = vec3(0.0);
 vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out vec3 Nh, out bool bHit)
 {
-    bHit = false; Ph = vec3(0.0); Nh = vec3(0.0, 1.0, 0.0);
+    bHit = false; Ph = vec3(0.0); Nh = vec3(0.0, 1.0, 0.0); g_HasSeen = false;
     // the emitters by light sampling (G5, as the surfels' pass: the table, a shadow ray), this point's own unless lighting shades it; an emission a ray hits is not counted again
     const vec3 Own = GD[15] > 0u && !EmitterDirectExternal() ? VoxEmitters(P, N) : vec3(0.0);
     const vec3 D = CosineDir(N);
     g_VoxRayD = D;
     const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
+    if (g_Ablate == 1) return vec3(0.0);
     g_VoxMissed = H.m_Inst < 0;
-    if (H.m_Inst < 0) return Own + SkyAt(D) * gi_pi_v;
+    g_ConnKind = -1.0;
+    if (H.m_Inst < 0) { g_ConnKind = 0.0; return Own + SkyAt(D) * gi_pi_v; }
     const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
     const uvec3 HT = MTri(HM, H.m_Tri);
     const float B0 = 1.0 - H.m_U - H.m_V;
@@ -216,13 +232,61 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
     Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
     bHit = true;
-    vec3 In = VoxDirectKept(Ph, Nh, Hd) + ((Push.m_First & 2) != 0 ? vec3(0.0) : VoxRead(Ph, Nh, Hd.xyz, Hd.w));     // (m_First's bit 1, XLION_VOX_FIRST_ONLY: measurement: no bounce past the first, so nothing a sample reads is still converging)
+#ifdef GI_VOX_ONLY
+    if ((Push.m_First & 128) != 0)
+    {
+        int Ls; ivec3 Os; vec3 gs;
+        if (VoxCell(Ph, Hd.xyz, Hd.w, 0, Ls, Os, gs))
+        {
+            const vec3 An = abs(Nh);
+            const int  a  = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2;
+            const uint h  = VoxHash(Ls, Os + ivec3(floor(gs + 0.5)), 42u + uint(2 * a + (Nh[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+            const vec4 c  = GIRefAccum[e];
+            if (GIRefAccum[e + 2u].x == VoxTagOf(h) && c.w >= 1.0) { g_HasSeen = true; g_SeenSample = c.rgb / c.w * gi_pi_v; }
+        }
+    }
+#endif
+    if (g_Ablate == 2) return Albedo + Emission;
+    g_ConnKind = 1.0; g_ConnAlbedo = Albedo; g_ConnEmission = Emission;
+    vec3 In = VoxDirectKept(Ph, Nh, Hd);
+    if (g_Ablate == 3) return In * Albedo;
+    In += (Push.m_First & 2) != 0 ? vec3(0.0) : VoxRead(Ph, Nh, Hd.xyz, Hd.w);
+    if (g_Ablate == 4) return In * Albedo;     // (m_First's bit 1, XLION_VOX_FIRST_ONLY: measurement: no bounce past the first, so nothing a sample reads is still converging)
     if (GD[15] > 0u) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
     return Own + (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }
 void VoxMain()
 {
     if (Push.m_Bounces == -2) { for (uint k = 0u; k < 16u; ++k) { const uint i = gl_GlobalInvocationID.x * 16u + k; if (int(i) < Push.m_Count) GIRefAccum[uint(Push.m_First) + i] = vec4(0.0); } return; }     // (a lane clears 16: not a million groups)
+#ifdef GI_VOX_ONLY
+    if (Push.m_Bounces == -7)         // (XLION_VOX_SEEN: the lit image into its surfaces' records, a mean of what they were seen as. m_Epoch: the half size width. ponytail: last frame's pixel without reprojection: a still camera's)
+    {
+        if (int(gl_GlobalInvocationID.x) >= Push.m_Count) return;
+        const vec4 HdS = GIRefSample[2u * uint(Push.m_nPixels)];
+        if (HdS.w <= 0.0) return;
+        g_Seed = RHash(gl_GlobalInvocationID.x * 2654435761u + uint(Push.m_Frame) * 97u);
+        const uint px = uint(Rnd() * float(Push.m_nPixels)) % uint(Push.m_nPixels), W1 = uint(Push.m_Epoch);
+        const vec4 Ps = GIRefSample[2u * px];
+        if (Ps.w < 0.5) return;
+        const vec3 Nk = GIRefSample[2u * px + 1u].xyz;
+        int Ls; ivec3 Os; vec3 gs;
+        if (!VoxCell(Ps.xyz, HdS.xyz, HdS.w, 0, Ls, Os, gs)) return;
+        const vec3 Lit = texelFetch(SceneHDR, ivec2(int(px % W1) * 2 + 1, int(px / W1) * 2 + 1), 0).rgb;
+        if (any(isnan(Lit)) || any(isinf(Lit))) return;
+        const vec3 An = abs(Nk);
+        const int  a  = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2;
+        const uint h  = VoxHash(Ls, Os + ivec3(floor(gs + 0.5)), 42u + uint(2 * a + (Nk[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+        const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
+        const vec4 d = GIRefAccum[e + 2u];
+        vec4 c = d.x == Tag ? GIRefAccum[e] : vec4(0.0);
+        if (d.x != Tag && d.x != 0.0 && abs(Now - d.y) < 120.0) return;
+        c += vec4(min(Lit, vec3(4000.0)), 1.0);
+        if (c.w >= 64.0) c *= 0.5;
+        GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(0.0); GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
+        return;
+    }
+    if (Push.m_Bounces == -6) { if (gl_GlobalInvocationID.x == 0u) ConnHeader = uvec4(0u); for (uint k = 0u; k < 16u; ++k) { const uint i = gl_GlobalInvocationID.x * 16u + k; if (i < uint(Conn.length())) Conn[i] = vec4(0.0); } return; }
+#endif
     if (Push.m_Bounces == -4)         // (the bins' halving, a slice of the slots a frame: nothing else writes them now)
     {
         for (uint k = 0u; k < 16u; ++k)
@@ -242,7 +306,35 @@ void VoxMain()
     g_GIBvhTlasRoot = Push.m_TlasRoot; g_GIBvhPrimOffset = Push.m_PrimOffset; g_GIBvhSeeThrough = true;
     const vec4 Hd = GIRefSample[2u * uint(Push.m_nPixels)];
     if (Hd.w <= 0.0) return;
+    g_Ablate = (Push.m_First >> 8) & 7;
     g_Seed = RHash(gl_GlobalInvocationID.x * 2654435761u + uint(Push.m_Frame) * 97u);
+#ifdef GI_VOX_ONLY
+    if ((Push.m_First & 64) != 0)      // (relight: a known connection with the light of now)
+    {
+        const uint nConn = uint(Conn.length()) / 7u, k = (uint(Push.m_Frame) * uint(Push.m_Count) + gl_GlobalInvocationID.x) % nConn;
+        const vec4 C0 = Conn[7u * k];
+        if (C0.w < 0.5) return;
+        const vec3 N1 = Conn[7u * k + 1u].xyz, D1 = Conn[7u * k + 2u].xyz;
+        const vec4 H3 = Conn[7u * k + 3u];
+        g_VoxRayD = D1; g_VoxMissed = H3.w == 0.0;
+        vec3 Sample = vec3(0.0);
+        if (H3.w == 0.0) Sample = SkyAt(D1) * gi_pi_v;
+        else if (H3.w > 0.5)
+        {
+            const vec3 Nh1 = Conn[7u * k + 4u].xyz, Al = Conn[7u * k + 5u].xyz, Em = Conn[7u * k + 6u].xyz;
+            vec3 In = VoxDirectKept(H3.xyz, Nh1, Hd) + VoxRead(H3.xyz, Nh1, Hd.xyz, Hd.w);
+            Sample = (Al * In * (1.0 / gi_pi_v) + Em) * gi_pi_v;
+        }
+        int L1; ivec3 O1; vec3 g1;
+        if (!any(isnan(Sample)) && all(lessThan(Sample, vec3(1e6))) && VoxCell(C0.xyz, Hd.xyz, Hd.w, 0, L1, O1, g1))
+        {
+            VoxStore(L1, O1, g1, N1, Sample);
+            int Lp1; ivec3 Op1; vec3 gp1;
+            if (VoxCell(C0.xyz, Hd.xyz, Hd.w, L1 + 1, Lp1, Op1, gp1)) VoxStore(Lp1, Op1, gp1, N1, Sample);
+        }
+        return;
+    }
+#endif
     // Of a few pixels, the one whose cell knows least: the rays go where they are needed - the cells a moving eye just brought in - and not, as the screen's area would have it, to the near floor
     vec3 P = vec3(0.0), N = vec3(0.0, 1.0, 0.0);
     int L = 0; ivec3 Org = ivec3(0); vec3 g = vec3(0.0);
@@ -251,7 +343,7 @@ void VoxMain()
     if (bCoh)
     {
         g_CohOn = true;
-        const uint Run = RHash((gl_WorkGroupID.x >> 6u) * 2654435761u + uint(Push.m_Frame) * 97u);
+        const uint Run = RHash(gl_WorkGroupID.x * 2654435761u + uint(Push.m_Frame) * 97u);      // (a group of 64 shares a direction: more shared lost directions: 21.7 against 17.9 at roughness 0.3)
         g_CohU = float(Run & 0xFFFFu) / 65536.0; g_CohV = float(Run >> 16u) / 65536.0;
     }
     for (int k = 0; k < (bCoh ? 1 : 4); ++k)
@@ -274,13 +366,22 @@ void VoxMain()
     for (int r = 0; r < 2; ++r)
     {
         const vec3 Sample = VoxRay(P, N, Hd, Ph, Nh, bHit);
+        if (g_Ablate >= 1 && g_Ablate <= 4) { if (any(isnan(Sample))) GIRefAccumU[0].w += 0u; return; }
+#ifdef GI_VOX_ONLY
+        if (r == 0 && (Push.m_First & 32) != 0)      // (kept for relighting: the ring's oldest goes)
+        {
+            const uint k = atomicAdd(ConnHeader.x, 1u) % (uint(Conn.length()) / 7u);
+            Conn[7u * k] = vec4(P, 1.0); Conn[7u * k + 1u] = vec4(N, 0.0); Conn[7u * k + 2u] = vec4(g_VoxRayD, 0.0); Conn[7u * k + 3u] = vec4(Ph, g_ConnKind);
+            Conn[7u * k + 4u] = vec4(Nh, 0.0); Conn[7u * k + 5u] = vec4(g_ConnAlbedo, 0.0); Conn[7u * k + 6u] = vec4(g_ConnEmission, 0.0);
+        }
+#endif
         if (!any(isnan(Sample)) && all(lessThan(Sample, vec3(1e6))))
         {
             VoxStore(L, Org, g, N, Sample);
             int Lp; ivec3 Op; vec3 gp;
             if (r == 0 && VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) VoxStore(Lp, Op, gp, N, Sample);
         }
-        if (r == 1 || Push.m_Epoch >= 0 || !bHit || (RHash(gl_WorkGroupID.x * 2654435761u + uint(Push.m_Frame) * 97u) & 255u) >= 64u || !VoxCell(Ph, Hd.xyz, Hd.w, 0, L, Org, g)) break;
+        if (g_Ablate == 5 || r == 1 || Push.m_Epoch >= 0 || !bHit || (RHash(gl_WorkGroupID.x * 2654435761u + uint(Push.m_Frame) * 97u) & 255u) >= 64u || !VoxCell(Ph, Hd.xyz, Hd.w, 0, L, Org, g)) break;
         P = Ph; N = Nh;
     }
 }

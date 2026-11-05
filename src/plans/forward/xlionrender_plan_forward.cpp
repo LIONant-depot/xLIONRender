@@ -2959,7 +2959,7 @@ namespace xlionrender
                                 if( s_bVoxLog && m_Device.getFrameIndex() % 120 == 0 ) { std::printf("VOXRAYS %.2f ms, %.0f rays, budget %.2f\n", Ms, m_VoxRays, Budget); std::fflush(stdout); }
                             }
                             if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
-                            m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, m_Device.getFrameIndex(), int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey);
+                            m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, m_Device.getFrameIndex(), int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey, View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
                             if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
                         }
                         if( s_Vox[0] > 0.0f && !m_pGatherRefS && m_bVoxOn && m_pGITrace && m_pGITrace->RefSamples() && m_pGITrace->VoxBuffer() )     // (the ground truth above stays: the voxels overwrote it, a black or voxel image in its place)

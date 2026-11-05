@@ -49,7 +49,7 @@ namespace xlionrender::gi
                 && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true)
                 && (S.m_Clip.empty() || (m_bClip = Make(m_Shader[14], m_ClipC, S.m_Clip, 8, 48)) || true)
                 && (S.m_Ref.empty() || (m_bRef = Make(m_Shader[15], m_RefC, S.m_Ref, 7, 32)) || true)
-                && (S.m_Vox.empty() || (m_bVox = Make(m_Shader[16], m_VoxC, S.m_Vox, 7, 32)) || true);
+                && (S.m_Vox.empty() || (m_bVox = Make(m_Shader[16], m_VoxC, S.m_Vox, 8, 32, 1)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
@@ -923,8 +923,9 @@ namespace xlionrender::gi
         // Experiment X1c (XLION_GI_VOX; xlionrender_gi_ref_comp.glsl VoxMain): rays from the screen's points into voxels of light on the surfaces.
         // A sparse store: vox_slots_v faces of 3 entries, 50 MB whatever the scene
         // KeepMax: the most samples a face keeps; a face notices a change of its own light and starts over (VoxStore), the rest stay as they are
-        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, std::uint32_t LightsKey) noexcept
+        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, std::uint32_t LightsKey, const xgpu::texture& SceneHDR, int HalfW, bool bLit) noexcept
         {
+            const std::array<const xgpu::texture*, 1> VoxTex{ &SceneHDR };
             // The lights still for a while: no face can have changed, the noise can't start one over: the light settles and the flicker dies out, with fewer rays too (ponytail: moving objects aren't in the key)
             const auto VoxNow = std::chrono::steady_clock::now();
             if (LightsKey != m_VoxLightsKey) { m_VoxLightsKey = LightsKey; m_VoxLightsMoved = VoxNow; }
@@ -938,15 +939,19 @@ namespace xlionrender::gi
             if (!m_bVox || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
             const std::size_t nEntries = std::size_t(vox_slots_v) * 3;
             if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
-            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0] };
+            // (XLION_VOX_RELIGHT=<connections a frame>, a prototype: rays keep what they found, 200000 of them; that many are relit each frame, no traversal; its buffer a token otherwise)
+            static const int s_Relight = [] { const char* p = std::getenv("XLION_VOX_RELIGHT"); return p ? std::atoi(p) : 0; }();
+            if (!m_ConnB.m_Private && !FitLocal(m_ConnB, 16, s_Relight > 0 ? 1 + 200000 * 7 : 8)) return false;
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0], &m_ConnB };
             m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z };
             struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), bStill ? 0 : 1, PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, -1, Keep };
             if (m_VoxCleared < nEntries)
             {
                 const std::size_t n = std::min<std::size_t>(nEntries - m_VoxCleared, std::size_t(1) << 22);
                 Push.m_Bounces = -2; Push.m_First = int(m_VoxCleared); Push.m_Count = int(n);
-                Window.Dispatch(m_VoxC, B, &Push, sizeof(Push), int((n + 63) / 64));
+                Window.Dispatch(m_VoxC, B, VoxTex, &Push, sizeof(Push), int((n + 63) / 64));
                 m_VoxCleared += n;
+                if (m_VoxCleared >= nEntries && s_Relight > 0) { auto Cl = Push; Cl.m_Bounces = -6; Cl.m_First = 0; Cl.m_Count = 0; Window.Dispatch(m_VoxC, B, VoxTex, &Cl, sizeof(Cl), (1 + 200000 * 7 + 63) / 64); }
                 return true;
             }
             static const bool s_bHits = std::getenv("XLION_GI_VOX_HITS") != nullptr;     // (the rays' hits feed the voxels too)
@@ -959,14 +964,30 @@ namespace xlionrender::gi
             if (s_bBinPdf) Push.m_First |= 4;
             static const bool s_bCoherent = std::getenv("XLION_VOX_COHERENT") != nullptr;
             if (s_bCoherent) Push.m_First |= 8;
+            static const double s_HitCachedAfter = [] { const char* p = std::getenv("XLION_VOX_HIT_CACHED"); return p ? std::atof(p) : 0.0; }();      // (seconds after the first rays: a warm cache first)
+            static const auto s_HitT0 = std::chrono::steady_clock::now();
+            if (s_HitCachedAfter > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - s_HitT0).count() > s_HitCachedAfter) Push.m_First |= 16;
+            static const bool s_bNoSweep = std::getenv("XLION_VOX_NO_SWEEP") != nullptr;      // (measurement: its cost)
+            if (!s_bNoSweep)
             {   // The direction bins' halving (VoxMain, -4): an eighth of the slots a frame, before the rays
                 auto Sw = Push; const int Slice = int(vox_slots_v / 8);
                 // The samples a bin keeps: many, with the lights still (with atomic bins, 256 to 8192: whole surfaces stopped shifting on a still moto, pixels off from the final image 30000 to 5000); few while they change: it catches up (XLION_VOX_BIN_CAP)
                 static const int s_BinCap = [] { const char* p = std::getenv("XLION_VOX_BIN_CAP"); return p ? std::atoi(p) : 8192; }();
                 Sw.m_Bounces = -4; Sw.m_First = int(m_VoxSweep) * Slice; Sw.m_Count = Slice; Sw.m_Epoch = bStill ? s_BinCap : std::min(s_BinCap, 128); m_VoxSweep = (m_VoxSweep + 1) % 8;
-                Window.Dispatch(m_VoxC, B, &Sw, sizeof(Sw), (Slice + 63) / 64);
+                Window.Dispatch(m_VoxC, B, VoxTex, &Sw, sizeof(Sw), (Slice + 63) / 64);
             }
-            Window.Dispatch(m_VoxC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
+            if (s_Relight > 0) Push.m_First |= 32;
+            static const int s_Ablate = [] { const char* p = std::getenv("XLION_VOX_ABLATE"); return p ? std::atoi(p) : 0; }();      // (measurement: where a voxel ray's time goes: xlionrender_gi_ref.glsl g_Ablate)
+            if (s_Ablate > 0) Push.m_First |= s_Ablate << 8;
+            // (XLION_VOX_SEEN=<pixels a frame>: the lit image feeds the records hits read for the bins; only when the image is the lit one, not a debug view)
+            static const int s_Seen = [] { const char* p = std::getenv("XLION_VOX_SEEN"); return p ? std::atoi(p) : 0; }();
+            if (s_Seen > 0)
+            {
+                Push.m_First |= 128;
+                if (bLit) { auto Fd = Push; Fd.m_Bounces = -7; Fd.m_Count = s_Seen; Fd.m_Epoch = HalfW; Window.Dispatch(m_VoxC, B, VoxTex, &Fd, sizeof(Fd), (s_Seen + 3) / 4); }
+            }
+            Window.Dispatch(m_VoxC, B, VoxTex, &Push, sizeof(Push), (PerFrame + 3) / 4);
+            if (s_Relight > 0) { auto Rl = Push; Rl.m_First = (Push.m_First & ~32) | 64; Rl.m_Count = s_Relight; Window.Dispatch(m_VoxC, B, VoxTex, &Rl, sizeof(Rl), (s_Relight + 3) / 4); }
             return true;
         }
         bool                 VoxQuiet(void) const noexcept { static const bool s_bNoQuiet = std::getenv("XLION_VOX_NO_QUIET") != nullptr; if (s_bNoQuiet) return false; return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
@@ -1354,6 +1375,7 @@ namespace xlionrender::gi
         int                                   m_VoxSweep = 0;
         static constexpr std::uint32_t      vox_slots_v = 1u << 21;     // (xlionrender_gi_ref_comp.glsl, _gather_frag.glsl)
         std::size_t                         m_VoxCleared = 0;
+        xgpu::buffer                        m_ConnB;
         std::uint32_t                       m_VoxLightsKey = 0;
         std::chrono::steady_clock::time_point m_VoxLightsMoved{};
         bool                                m_bRef = false;
