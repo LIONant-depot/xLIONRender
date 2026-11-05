@@ -13,9 +13,11 @@ layout(push_constant) uniform push_t { int m_nPixels, m_First, m_Count, m_Frame,
 uint RHash(uint x) { x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16; return x; }
 uint g_Seed;
 float Rnd() { g_Seed = RHash(g_Seed + 0x9E3779B9u); return float(g_Seed) / 4294967296.0; }
+// (XLION_VOX_COHERENT, m_First's bit 3, measurement: the rays of nearby groups start from neighbouring pixels and share a direction in their surface's frame, another each frame: what does coherence buy?)
+bool g_CohOn = false; float g_CohU = 0.0, g_CohV = 0.0;
 vec3 CosineDir(in const vec3 N)
 {
-    const float u = Rnd(), v = Rnd(), r = sqrt(u), Phi = 6.2831853 * v;
+    const float u = g_CohOn ? fract(g_CohU + 0.02 * Rnd()) : Rnd(), v = g_CohOn ? fract(g_CohV + 0.02 * Rnd()) : Rnd(), r = sqrt(u), Phi = 6.2831853 * v;
     const vec3  T = normalize(cross(abs(N.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), N)), B = cross(N, T);
     return normalize(T * (r * cos(Phi)) + B * (r * sin(Phi)) + N * sqrt(max(0.0, 1.0 - u)));
 }
@@ -245,9 +247,16 @@ void VoxMain()
     vec3 P = vec3(0.0), N = vec3(0.0, 1.0, 0.0);
     int L = 0; ivec3 Org = ivec3(0); vec3 g = vec3(0.0);
     float Least = 1e30;
-    for (int k = 0; k < 4; ++k)
+    const bool bCoh = (Push.m_First & 8) != 0;
+    if (bCoh)
     {
-        const uint  px = uint(Rnd() * float(Push.m_nPixels)) % uint(Push.m_nPixels);
+        g_CohOn = true;
+        const uint Run = RHash((gl_WorkGroupID.x >> 6u) * 2654435761u + uint(Push.m_Frame) * 97u);
+        g_CohU = float(Run & 0xFFFFu) / 65536.0; g_CohV = float(Run >> 16u) / 65536.0;
+    }
+    for (int k = 0; k < (bCoh ? 1 : 4); ++k)
+    {
+        const uint  px = bCoh ? (RHash(uint(Push.m_Frame)) + gl_GlobalInvocationID.x * 7u) % uint(Push.m_nPixels) : uint(Rnd() * float(Push.m_nPixels)) % uint(Push.m_nPixels);
         const vec4  Ps = GIRefSample[2u * px];
         if (Ps.w < 0.5) continue;
         const vec3  Nk = GIRefSample[2u * px + 1u].xyz;
