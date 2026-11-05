@@ -955,6 +955,8 @@ namespace xlionrender::gi
             if (s_bKept) Push.m_Bounces = -3;
             static const bool s_bFirstOnly = std::getenv("XLION_VOX_FIRST_ONLY") != nullptr;
             if (s_bFirstOnly) Push.m_First |= 2;
+            static const bool s_bBinPdf = std::getenv("XLION_VOX_NO_BIN_PDF") == nullptr;      // (a bin's mean over its directions: xlionrender_gi_ref.glsl VoxStoreDir)
+            if (s_bBinPdf) Push.m_First |= 4;
             {   // The direction bins' halving (VoxMain, -4): an eighth of the slots a frame, before the rays
                 auto Sw = Push; const int Slice = int(vox_slots_v / 8);
                 // The samples a bin keeps: many, with the lights still (with atomic bins, 256 to 8192: whole surfaces stopped shifting on a still moto, pixels off from the final image 30000 to 5000); few while they change: it catches up (XLION_VOX_BIN_CAP)

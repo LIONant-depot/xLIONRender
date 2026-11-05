@@ -54,7 +54,6 @@ vec3 SpecDir(in const vec3 N, in const vec3 V, in const float a, out float W)
 // The same rays, by where they went (the reflection's read, xlionrender_gi_gather_frag.glsl VoxReflect): a cell's face (no layers) keeps a plain mean per direction: around its normal,
 // or along one of the other two axes, each way. No more rays: a place on a floor knows what its rays saw toward the street and toward the wall
 vec3 g_VoxRayD = vec3(0.0);
-const float bin_scale_v = 256.0;      // (xlionrender_gi_gather_frag.glsl VoxBin: 4000 a sample, thousands of samples between two halvings, in 32 bits)
 bool g_VoxMissed = false;       // (this ray saw the sky. A bin keeps its sky apart, second entry: rgb sum, count: a direction near the surface takes less of it - VoxReflect)
 void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
@@ -73,9 +72,11 @@ void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const v
         if (atomicCompSwap(GIRefAccumU[e + 2u].x, Cur, TagU) != Cur) return;
         GIRefAccumU[e] = uvec4(0u); GIRefAccumU[e + 1u] = uvec4(0u); GIRefAccumU[e + 2u].z = floatBitsToUint(1.0);
     }
-    const uvec3 q = uvec3(clamp(Sample, vec3(0.0), vec3(4000.0)) * bin_scale_v);
-    atomicAdd(GIRefAccumU[e].x, q.x); atomicAdd(GIRefAccumU[e].y, q.y); atomicAdd(GIRefAccumU[e].z, q.z); atomicAdd(GIRefAccumU[e].w, 1u);
-    if (g_VoxMissed) { atomicAdd(GIRefAccumU[e + 1u].x, q.x); atomicAdd(GIRefAccumU[e + 1u].y, q.y); atomicAdd(GIRefAccumU[e + 1u].z, q.z); atomicAdd(GIRefAccumU[e + 1u].w, 1u); }
+    // (XLION_VOX_NO_BIN_PDF to turn it off, m_First's bit 2: a bin's mean over its directions, not by the cosine the rays came with: self normalized by 1 / pdf, clamped at a cosine of 0.1. The count in sixteenths; off, 16 a ray)
+    const uint  w16 = (Push.m_First & 4) != 0 ? uint(16.0 / max(dot(N, g_VoxRayD), 0.1) + 0.5) : 16u;
+    const uvec3 q = uvec3(clamp(Sample, vec3(0.0), vec3(4000.0)) * 16.0 * float(w16));
+    atomicAdd(GIRefAccumU[e].x, q.x); atomicAdd(GIRefAccumU[e].y, q.y); atomicAdd(GIRefAccumU[e].z, q.z); atomicAdd(GIRefAccumU[e].w, w16);
+    if (g_VoxMissed) { atomicAdd(GIRefAccumU[e + 1u].x, q.x); atomicAdd(GIRefAccumU[e + 1u].y, q.y); atomicAdd(GIRefAccumU[e + 1u].z, q.z); atomicAdd(GIRefAccumU[e + 1u].w, w16); }
     GIRefAccumU[e + 2u].y = floatBitsToUint(Now);
 }
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
@@ -229,8 +230,8 @@ void VoxMain()
             const uint e = (uint(Push.m_First) + i) * 3u;
             if (GIRefAccum[e + 2u].z != 1.0) continue;
             const uvec4 c = GIRefAccumU[e];
-            if (c.w < uint(Push.m_Epoch)) continue;
-            const float s = 0.5 * float(Push.m_Epoch) / float(c.w);
+            if (c.w < uint(Push.m_Epoch) * 16u) continue;
+            const float s = 8.0 * float(Push.m_Epoch) / float(c.w);
             GIRefAccumU[e] = uvec4(vec4(c) * s); GIRefAccumU[e + 1u] = uvec4(vec4(GIRefAccumU[e + 1u]) * s);
         }
         return;

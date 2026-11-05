@@ -204,7 +204,7 @@ vec3 EnvLighting(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         Spec *= EnvLum > 1e-4 ? clamp(GILum / EnvLum, 0.0, 1.0) : 1.0;
         Spec  = mix(Spec, GIRefl, smoothstep(0.1, 0.3, PerceptualRoughness));
         Diff  = g_GI.rgb / 3.14159265359;
-        Spec  = mix(Spec, Diff, smoothstep(0.35, 0.9, PerceptualRoughness));      // (a wide lobe sees about what the surface's own irradiance saw; the read along R is one narrow direction: 28 of 255 too dark at roughness 0.8 against the path traced reference, refl_grade.py)
+        Spec  = mix(Spec, Diff, smoothstep(0.3, 0.8, PerceptualRoughness));      // (a wide lobe sees about what the surface's own irradiance saw; the read along R is one narrow direction: 28 of 255 too dark at roughness 0.8 against the path traced reference, refl_grade.py)
     }
     else if (g_GI.w > 0.5)
     {

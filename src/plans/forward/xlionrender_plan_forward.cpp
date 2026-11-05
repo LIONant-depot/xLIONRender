@@ -2900,6 +2900,8 @@ namespace xlionrender
                     m_GatherTable.assign(40, 0u);
                     static const bool s_bNoGatherRefl = std::getenv("XLION_GI_NO_REFL") != nullptr;      // (measurement: the gather's reflection term off - the path traced view has none: read against it fairly)
                     m_GatherTable[29] = s_bNoGatherRefl ? 1u : 0u;
+                    static const bool s_bBinPdf = std::getenv("XLION_VOX_NO_BIN_PDF") == nullptr;
+                    m_GatherTable[31] = s_bBinPdf ? 1u : 0u;
                     {   // X1: the clipmap the gather reads instead (words 20 on, xlionrender_gi_gather_frag.glsl); 20: 0 none
                         static const std::array<float, 2> s_ClipCell = [] { std::array<float, 2> A{ 0.0f, 0.5f }; if( const char* p = std::getenv("XLION_GI_CLIP") ) (void)std::sscanf(p, "%f,%f", &A[0], &A[1]); return A; }();
                         m_pGatherClip = s_ClipCell[0] > 0.0f && m_pGITrace ? m_pGITrace->ClipBuffer() : nullptr;

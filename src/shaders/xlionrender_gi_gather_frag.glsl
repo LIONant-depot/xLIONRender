@@ -107,7 +107,7 @@ vec4 VoxReadLevels(in const vec3 Pcam, in const vec3 n)
 }
 // The light around the mirror direction, from the rays this place's own face sent that way (xlionrender_gi_ref_comp.glsl VoxStoreDir): the three axes R leans on, by their squares, as a face read.
 // Finest level that knows, the rest from its parent; what none vouches for: the place's irradiance (Fallback; EnvLighting then gives about its older ratio), so a new cell fades in
-vec4 VoxBin(in const uvec4 q) { return vec4(vec3(q.xyz) / 256.0, float(q.w)); }     // (a direction bin's fixed point sum: xlionrender_gi_ref.glsl VoxStoreDir)
+vec4 VoxBin(in const uvec4 q) { return vec4(vec3(q.xyz) / 256.0, float(q.w) / 16.0); }     // (a direction bin's fixed point sum: xlionrender_gi_ref.glsl VoxStoreDir)
 vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
 {
     const vec3 EyeL = vec3(TF(22u), TF(23u), TF(24u)), Pw = Pcam + vec3(TF(25u), TF(26u), TF(27u));
@@ -118,7 +118,7 @@ vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
     const float Bw[3] = float[3](Rd[a] * Rd[a], Rd[u] * Rd[u], Rd[v] * Rd[v]);
     const float Cell0 = TF(21u);
     // A bin is wide: the rays of a floor's bin toward the street go up to about 55 degrees, into the sky; a reflection near the surface stays low, among the walls
-    const float SkyTake = smoothstep(0.0, 0.5, abs(Rd[a]));
+    const float SkyTake = GITable[push.TableBase + 31u] != 0u ? 1.0 : smoothstep(0.0, 0.5, abs(Rd[a]));     // (no sky left out unless XLION_VOX_NO_BIN_PDF: the bin's own mean is meant to be right near the surface)
     vec3 Sum = vec3(0.0); float Left = 1.0;
     for (int L = 0; L < clip_levels_v && Left > 1e-3; ++L)
     {
