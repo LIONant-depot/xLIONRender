@@ -2437,7 +2437,7 @@ namespace xlionrender
             static const bool s_bBands = std::getenv("XLION_REFL_BANDS") != nullptr; if( s_bBands && !bPlanar ) Push.m_Plane[0] = -1.0f;
             static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = std::getenv("XLION_VOX_DIRS_TRACE"); const char* d = std::getenv("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; std::sscanf(d, "%f,%f", &D[1], &K); std::sscanf(t, "%f,%f", &D[2], &D[3]); if( D[1] < 0.0f ) return std::array<float, 4>{}; D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
             if( pVox && s_DirsTrace[0] > 0.0f ) { if( !bPlanar ) std::memcpy(Push.m_Plane, s_DirsTrace.data(), sizeof(Push.m_Plane)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
-            auto Buffers  = std::array<xgpu::buffer*, 15>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats };
+            auto Buffers  = std::array<xgpu::buffer*, 16>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats, &m_ReflSharpList };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : bSdf ? &View.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
             // list's places before the glossy ones
@@ -2449,7 +2449,10 @@ namespace xlionrender
                 P2.m_Frame = View.m_TailFrame;     // (the sharp ones are not reconstructed: a new ray each frame, TAA averages them; one fixed ray a pixel was static sparkle on Bistro's glass. Same cost, noise over 8 .020 to .028 %)
                 auto T2 = std::array<const xgpu::texture*, 6>{ &View.m_SharpGColor, &View.m_SharpGDepth, &m_EnvAtlas, Textures[3], Textures[4], &View.m_SharpGMotion };
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
+                P2.m_Frame = (P2.m_Frame & ~1u) | (m_ReflSharpRuns++ & 1u);      // (the list's parity: alternates each run, gaps or not)
             }
+                P2.m_Full[0] = -P2.m_Full[0];      // (the list: 64 a group, every lane busy)
+                Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), 262144 / 64, 1);
             Window.WriteTimestamp(m_ReflTimes, 1);
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
             Window.WriteTimestamp(m_ReflTimes, 2);

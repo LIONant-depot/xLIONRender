@@ -26,7 +26,13 @@ struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; uvec4 nBoxes; vec4 Box[12
 layout(std430, set = 0, binding = 12) readonly buffer sdf_b    { float WorldSDF[]; };     // (XLION_SDF: xlionrender_world_sdf.glsl)
 layout(std430, set = 0, binding = 13) readonly buffer sdf_surf_b { uvec2 WorldSDFSurf[]; };
 #include "xlionrender_world_sdf.glsl"
-layout(std430, set = 0, binding = 14) readonly buffer baked_sdf_b { uint BakedSDF[]; };     // (XLION_SDF 11, 12: xlionrender_baked_sdf.glsl)
+layout(std430, set = 0, binding = 14) readonly buffer baked_sdf_b { uint BakedSDF[]; };
+// The sharp receivers' list (the full size in two dispatches): the first (m_Full.x > 0) traces nothing for the sharp texels it lists
+// - their count at [parity], the texels from 2 - and writes every pair's record as zeros; the second (m_Full.x < 0, 64 texels a group
+// in a row) traces the list, every lane busy, and writes its half of the pair. Past refl_sharp_cap_v the first traces them itself.
+// (The sparse sharp texels had cost a group each: 35000 rays 1.9 ms on Bistro against 74000 half size ones 2.2)
+layout(std430, set = 0, binding = 15) buffer sharp_list_b { uint SharpList[]; };
+const uint refl_sharp_cap_v = 262144u;     // (XLION_SDF 11, 12: xlionrender_baked_sdf.glsl)
 #include "xlionrender_baked_sdf.glsl"
 layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; };        // (a ring slot each)
 // The hits to texture (xlionrender_refl_hits_comp.glsl), a list: Hits[0] its counts (x, y: by the frame's parity - the hits pass clears
@@ -183,12 +189,21 @@ void main()
 {
     if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; }
     barrier();
-    const bool  bFull = Push.m_Full.x > 0;
-    const ivec2 Size = bFull ? ivec2(Push.m_Full.x & 0xFFFF, Push.m_Full.x >> 16) : ivec2(F[Push.m_Slot].Params.xy);     // (the full size: width | height << 16; m_Full.y is XLION_SDF's mode in both: the height there made the sharp pass a baked-field cast, mostly misses)
-    const ivec2 p    = ivec2(gl_GlobalInvocationID.xy);
-    const bool  bIn  = p.x < Size.x && p.y < Size.y;
+    const bool  bList = Push.m_Full.x < 0;
+    const bool  bFull = Push.m_Full.x != 0;
+    const int   FullXY = bList ? -Push.m_Full.x : Push.m_Full.x;
+    const ivec2 Size = bFull ? ivec2(FullXY & 0xFFFF, FullXY >> 16) : ivec2(F[Push.m_Slot].Params.xy);
+    const uint  Par  = Push.m_Frame & 1u;      // (the plan alternates it each run of the sharp pass)
+    if (bFull && !bList && gl_GlobalInvocationID.xy == uvec2(0u)) SharpList[1u - Par] = 0u;      // (the next run's count: nothing reads it in this one)
+    const uint  ListI = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+    const uint  ListN = bList ? min(SharpList[Par], refl_sharp_cap_v) : 0u;
+    const uint  ListP = bList && ListI < ListN ? SharpList[2u + ListI] : 0u;     // (the full size: width | height << 16; m_Full.y is XLION_SDF's mode in both: the height there made the sharp pass a baked-field cast, mostly misses)
+    const ivec2 p    = bList ? ivec2(int(ListP & 0xFFFFu), int(ListP >> 16)) : ivec2(gl_GlobalInvocationID.xy);
+    const bool  bIn  = (!bList || ListI < ListN) && p.x < Size.x && p.y < Size.y;
     const uint  i    = uint(Size.x * Size.y) + uint(p.y * Size.x + p.x);
-    const float z    = bIn ? texelFetch(GDepth, p, 0).r : 1.0;
+    // (the full size's first dispatch: a texel not sharp is only its pair's zeros - the roughness first, nothing else read: 0.83 ms of 6 M texels' setup)
+    const bool  bSkip = bFull && !bList && bIn && Push.m_Mode == 0u && Push.m_Full.w == 0 && texelFetch(GColor, p, 0).z >= Push.m_SharpMax;
+    const float z    = bIn && !bSkip ? texelFetch(GDepth, p, 0).r : 1.0;
     const bool  bScreenFirst = !bFull && Push.m_Full.z == 3;       // (m_Full.z 3: xlionrender_refl_ssr_comp.glsl ran first)
     const uint  refl_screen_v = 4u;
     uvec4 Rec = uvec4(0u);
@@ -210,7 +225,9 @@ void main()
         const bool  bSharpHere  = Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpMax;      // (traced at full size)
         // (a sharp receiver seen, whether or not the full size runs: Stats' top bit: an empty full size dispatch cost 2 ms on Bistro)
         if (Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpSeen) atomicOr(Stats[Push.m_Slot * 8u + 7u], 0x80000000u);
-        if (bFull && !bSharpHere) { }      // (the full-size dispatch: the sharp ones only; the rest: none - the half-size records serve them)
+        bool bListed = false;
+        if (bFull && !bList && bSharpHere) { const uint a = atomicAdd(SharpList[Par], 1u); if (a < refl_sharp_cap_v) { SharpList[2u + a] = uint(p.x) | (uint(p.y) << 16); bListed = true; } }
+        if (bFull && (!bSharpHere || bListed)) { }      // (the full-size dispatch: the sharp ones only; the rest: none - the half-size records serve them)
         else if (!bFull && bSharpHere) { }  // (the half-size dispatch leaves the sharp ones to the full-size one)
         else if (bPlanarHere)
         {
@@ -468,14 +485,23 @@ void main()
         }
     }
     if (!bFull && bIn && (Push.m_Mode == 0u || Push.m_Mode >= 4u) && !(bScreenFirst && z < 1.0 && ((Rec.w >> 24) & 15u) == 0u)) Records[i] = Rec;     // (no ray here: the screen trace's stays)
-    if (bFull)          // two pixels a record: rgb and, its sign the confidence, the view depth (the materials match it)
+    if (bFull && bList) { }
+    else if (bFull)          // two pixels a record: rgb and, its sign the confidence, the view depth (the materials match it)
     {
         const float Depth = unpackHalf2x16(Rec.w & 0xFFFFu).x;
         const float Conf  = unpackHalf2x16(Rec.y).y;
         s_Pair[gl_LocalInvocationIndex] = Conf > 0.0 ? uvec2(Rec.x, packHalf2x16(vec2(unpackHalf2x16(Rec.y).x, Depth))) : uvec2(0u);
     }
     barrier();
-    if (bFull && bIn && Push.m_Mode == 0u && (p.x & 1) == 0)
+    if (bFull && bList && bIn && Push.m_Mode == 0u)      // (a listed texel: its half of the pair)
+    {
+        const float Depth = unpackHalf2x16(Rec.w & 0xFFFFu).x;
+        const float Conf  = unpackHalf2x16(Rec.y).y;
+        const uvec2 v = Conf > 0.0 ? uvec2(Rec.x, packHalf2x16(vec2(unpackHalf2x16(Rec.y).x, Depth))) : uvec2(0u);
+        const uint  k = uint(p.y * ((Size.x + 1) & ~1) + p.x);
+        if ((k & 1u) == 0u) Records[uint(Push.m_Full.z) + k / 2u].xy = v; else Records[uint(Push.m_Full.z) + k / 2u].zw = v;
+    }
+    if (bFull && !bList && bIn && Push.m_Mode == 0u && (p.x & 1) == 0)
     {
         const uint  k = uint(p.y * ((Size.x + 1) & ~1) + p.x);     // (rows padded to even: a record never spans two)
         const uvec2 b = p.x + 1 < Size.x ? s_Pair[gl_LocalInvocationIndex + 1u] : uvec2(0u);
@@ -483,12 +509,12 @@ void main()
     }
     if (gl_LocalInvocationIndex == 0u)
     {
-        atomicAdd(Stats[Push.m_Slot * 8u + 0u], s_Rays);
-        atomicAdd(Stats[Push.m_Slot * 8u + 1u], s_Hits);
-        atomicAdd(Stats[Push.m_Slot * 8u + 2u], s_Visits);
-        atomicAdd(Stats[Push.m_Slot * 8u + 3u], s_Planar);
-        atomicAdd(Stats[Push.m_Slot * 8u + 4u], s_PlanarRough);
-        atomicAdd(Stats[Push.m_Slot * 8u + 5u], s_Incomplete);
-        atomicAdd(Stats[Push.m_Slot * 8u + (bFull ? 7u : 6u)], s_Textured);     // (the textured hits: the half size's, the full size's)
+        if (s_Rays != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 0u], s_Rays);
+        if (s_Hits != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 1u], s_Hits);
+        if (s_Visits != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 2u], s_Visits);
+        if (s_Planar != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 3u], s_Planar);
+        if (s_PlanarRough != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 4u], s_PlanarRough);
+        if (s_Incomplete != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 5u], s_Incomplete);
+        if (s_Textured != 0u) atomicAdd(Stats[Push.m_Slot * 8u + (bFull ? 7u : 6u)], s_Textured);     // (an empty group none: 94000 groups' adds on 7 addresses)     // (the textured hits: the half size's, the full size's)
     }
 }

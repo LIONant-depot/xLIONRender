@@ -820,7 +820,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 15, .m_nTextures = 6, .m_PushConstantsSize = 128 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 16, .m_nTextures = 6, .m_PushConstantsSize = 128 }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdfShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_WorldSdfComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdf, { .m_pShader = &m_WorldSdfShader, .m_nBuffers = 7, .m_PushConstantsSize = 40 }); Err ) return Err;
             if( std::getenv("XLION_SDF") )
@@ -843,6 +843,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_PlanarParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 16 + 8 * 16 + 16 + 2 * 16 * refl_boxes_v, .m_EntryCount = ring_frames_v, .m_pName = "Frame: planar reflection parameters" }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMipsBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = 1, .m_pData = Zeros.data(), .m_pName = "Render target: planar reflection mips" }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 8 * ring_frames_v, .m_pData = Zeros.data(), .m_pName = "Debug: reflection stats" }); Err ) return Err;
+            { const std::vector<std::uint32_t> ListZeros(2 + 262144, 0u); if( auto Err = Device.Create(m_ReflSharpList, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(ListZeros.size()), .m_pData = const_cast<std::uint32_t*>(ListZeros.data()), .m_pName = "Reflections: the sharp receivers' list" }); Err ) return Err; }
             if( auto Err = Device.Create(m_ReflTimes, { .m_Count = 7 }); Err ) return Err;     // (the start, after the trace, the sharp trace, the hits' shading, the reconstruction)
             if( const char* p = std::getenv("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } if( m_ReflTraceBench > 0 ) m_LightMode = light_mode::SCREEN; }     // (its rays start from the thin G-buffer: the screen tail's)
             if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v, .m_pName = "Shadows: local light frames" }); Err ) return Err;

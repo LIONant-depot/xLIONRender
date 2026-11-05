@@ -517,6 +517,8 @@ namespace xlionrender
         xgpu::device::error*        createHitTargets( void ) noexcept;
         void                        shadeReflectionHits( xgpu::window& Window, const scene& Scene, render_view& View, const gi::gpu_trace::bvh_view& BvhR, int Slot, std::uint32_t HalfKeys, std::uint32_t FullBase ) noexcept;
         xgpu::buffer                m_ReflStats;
+        xgpu::buffer                m_ReflSharpList;        // the sharp receivers' list (refl_trace_comp.glsl): 2 counts, then 262144 texels
+        std::uint32_t               m_ReflSharpRuns = 0;
         xgpu::timestamps            m_ReflTimes;
         double                      m_ReflSplit[4] = {}, m_ReflTextured = 0, m_ReflTexturedFull = 0, m_ReflHitSplit[3] = {};     // (the hits' shading: bins, draws, relight)            // (measurement) the sharp trace, the trace, the hits' shading, the reconstruction: ms summed over the report's frames
         refl_report                 m_ReflReport;
