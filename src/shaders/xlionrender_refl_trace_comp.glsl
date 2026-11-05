@@ -239,7 +239,7 @@ void main()
         }
         else if (bScreenFirst && ((Records[i].w >> 24) & 15u) == refl_screen_v && unpackHalf2x16(Records[i].y).y >= 0.95) { }     // (the screen's certain answer stays)
         // (XLION_VOX_DIRS_TRACE=<rays below>,<store up to>, a prototype: the record is a read of the coarse directional store (xlionrender_gi_ref.glsl VoxDirsAdd), a few random samples of the real lobe: the reconstruction filters them as it does rays)
-        else if (!bFull && Push.m_Mode == 0u && Push.m_Dirs.x > 0.5 && Push.m_Vox.w > 0.0 && Rough >= Push.m_Dirs.z && Rough < Push.m_Dirs.w)
+        else if (!bFull && Push.m_Mode == 0u && Push.m_Dirs.x > 0.5 && Push.m_Vox.w > 0.0 && Rough >= Push.m_Dirs.z && Rough < Push.m_Dirs.w && !(Push.m_Pad0 > 0.0 && Rough < Push.m_MaxRough && (texelFetch(GMotion, p, 0).w > 0.5 ? texelFetch(GMotion, p, 0).w - 1.0 : -texelFetch(GMotion, p, 0).w) >= Push.m_Pad0))
         {
             const vec3  Pw = P + Push.m_Eye, V = normalize(-P), An = abs(N);
             const int   L_ = int(Push.m_Dirs.y); const uint k = uint(Push.m_Dirs.x);
