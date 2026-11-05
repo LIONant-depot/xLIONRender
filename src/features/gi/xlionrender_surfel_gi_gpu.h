@@ -912,7 +912,7 @@ namespace xlionrender::gi
         bool RefStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int Bounces, std::uint32_t LightsKey) noexcept
         {
             if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
-            if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels))) return false;
+            if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels))) return false;
             if (LightsKey != m_RefLightsKey) { m_RefLightsKey = LightsKey; ++m_RefEpoch; }      // (the lights changed: every pixel starts over)
             const struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), int(m_RefNext % nPixels), PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, Bounces, m_RefEpoch };
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_RefAccumB };
@@ -958,7 +958,7 @@ namespace xlionrender::gi
             Window.Dispatch(m_VoxC, B, &Push, sizeof(Push), (PerFrame + 3) / 4);
             return true;
         }
-        bool                 VoxQuiet(void) const noexcept { return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
+        bool                 VoxQuiet(void) const noexcept { static const bool s_bNoQuiet = std::getenv("XLION_VOX_NO_QUIET") != nullptr; if (s_bNoQuiet) return false; return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
         // XLION_GI_VOX=<level 0's cell> [<ms a frame> [<samples a face keeps>]]
         static const std::array<float, 3>& VoxConfig(void) noexcept { static const std::array<float, 3> s_A = [] { std::array<float, 3> A{ 0.0f, 1.0f, 16384.0f }; if (const char* p = std::getenv("XLION_GI_VOX")) (void)std::sscanf(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }(); return s_A; }
         std::array<float, 3> VoxAnchor(void) const noexcept { return m_VoxAnchor; }

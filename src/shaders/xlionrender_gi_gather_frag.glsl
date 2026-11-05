@@ -261,6 +261,7 @@ void main()
             const vec3 Pwr = S.P + vec3(TF(25u), TF(26u), TF(27u));
             GIRefSample[2u * Ri] = vec4(Pwr, 1.0);
             GIRefSample[2u * Ri + 1u] = vec4(N, 0.0);
+            GIRefSample[2u * W * H] = vec4(TF(25u), TF(26u), TF(27u), TF(30u));      // (the eye, the roughness the reflections' ground truth grades: xlionrender_gi_ref.glsl)
             const vec4 Ac = GIRefAccum[2u * Ri], Pa = GIRefAccum[2u * Ri + 1u];
             if (Ac.w > 0.5 && Pa.w > 0.5 && dot(Pa.xyz - Pwr, Pa.xyz - Pwr) < 1e-4) { E = vec4(Ac.rgb / Ac.w, 1.0); bWeak = false; }
             else E = vec4(0.0, 0.0, 0.0, 1.0);
@@ -308,7 +309,25 @@ void main()
         const bool bE = E.w > 0.5, bR = g_GIRefl.w > 0.5;
         bKeep = !bE && !bR;           // (no GI here: the AO's own entry stays)
         // (never a non-finite or negative reflection, as E above: reprojection carries it on, black and blocky on the moto, Tomas 2026-11-04)
-        const vec3 Rr = bR && !any(isnan(g_GIRefl.rgb)) && !any(isinf(g_GIRefl.rgb)) ? max(g_GIRefl.rgb, vec3(0.0)) : vec3(0.0);
+        vec3 Rr = bR && !any(isnan(g_GIRefl.rgb)) && !any(isinf(g_GIRefl.rgb)) ? max(g_GIRefl.rgb, vec3(0.0)) : vec3(0.0);
+        // (the read along R over time, every pixel every frame: no tiles, no squares. Its bins' means move a little with each ray: on a still moto, 7 in 8 of the flicker went with the read)
+        if ((Hd.w & 1u) != 0u && bR)
+        {
+            const mat4 PrevW2C = mat4(uintBitsToFloat(GIScreen[1]), uintBitsToFloat(GIScreen[2]), uintBitsToFloat(GIScreen[3]), uintBitsToFloat(GIScreen[4]));
+            const vec3 Prev    = S.P + uintBitsToFloat(GIScreen[5].xyz);
+            const vec4 C       = PrevW2C * vec4(Prev, 1.0);
+            if (C.w > 1e-6)
+            {
+                const ivec2 Q = ivec2(floor((C.xy / C.w * 0.5 + 0.5) * vec2(float(W), float(H))));
+                if (Q.x >= 0 && Q.y >= 0 && uint(Q.x) < W && uint(Q.y) < H)
+                {
+                    const uvec4 Rp = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
+                    const float Sd = unpackHalf2x16(Rp.y).y, Ld = length(Prev);
+                    if ((Rp.w & (1u << 31)) != 0u && abs(Sd - Ld) < 0.02 * Ld + 0.01 && dot(ScreenNormal(Rp.w), N) > 0.9)
+                        Rr = mix(vec3(unpackHalf2x16(Rp.z), unpackHalf2x16(Rp.w & 0xFFFFu).x), Rr, 0.1);
+                }
+            }
+        }
         Out = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, Dist)), packHalf2x16(Rr.rg),
                     (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFFu) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u) | (bE && bWeak ? 3u << 28 : 0u));     // (age 3, never a fresh one's: weak - a hole in the surfels' coverage, the Cornell cube's dashes)
     }

@@ -19,6 +19,28 @@ vec3 CosineDir(in const vec3 N)
     return normalize(T * (r * cos(Phi)) + B * (r * sin(Phi)) + N * sqrt(max(0.0, 1.0 - u)));
 }
 
+// The reflections' ground truth (XLION_REFL_GRADE=<roughness> with XLION_GI_REF, in the REFLECTIONS_MIRROR view): the first direction from the GGX lobe, the visible normals' (Heitz 2018), every
+// surface that roughness over its flat normal. W: what this sample's Fresnel-free BRDF weight is (G2 / G1): the mean of the radiance by W is what the split sum's prefiltered Spec stands for, with the real lobe
+vec3 SpecDir(in const vec3 N, in const vec3 V, in const float a, out float W)
+{
+    W = 0.0;
+    const vec3 T = normalize(cross(abs(N.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), N)), B = cross(N, T);
+    const vec3 Ve = vec3(dot(V, T), dot(V, B), dot(V, N));
+    if (Ve.z <= 1e-4) return N;
+    const vec3  Vh = normalize(vec3(a * Ve.x, a * Ve.y, Ve.z));
+    const float Lq = Vh.x * Vh.x + Vh.y * Vh.y;
+    const vec3  T1 = Lq > 0.0 ? vec3(-Vh.y, Vh.x, 0.0) / sqrt(Lq) : vec3(1.0, 0.0, 0.0), T2 = cross(Vh, T1);
+    const float u = Rnd(), v = Rnd(), r = sqrt(u), Phi = 6.2831853 * v, t1 = r * cos(Phi), s = 0.5 * (1.0 + Vh.z);
+    const float t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * r * sin(Phi);
+    const vec3  Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+    const vec3  Ne = normalize(vec3(a * Nh.x, a * Nh.y, max(0.0, Nh.z)));
+    const vec3  Le = reflect(-Ve, Ne);
+    if (Le.z <= 1e-4) return N;
+    const float LamV = 0.5 * (sqrt(1.0 + a * a * (1.0 - Ve.z * Ve.z) / (Ve.z * Ve.z)) - 1.0), LamL = 0.5 * (sqrt(1.0 + a * a * (1.0 - Le.z * Le.z) / (Le.z * Le.z)) - 1.0);
+    W = (1.0 + LamV) / (1.0 + LamV + LamL);
+    return T * Le.x + B * Le.y + N * Le.z;
+}
+
 // Experiment X1c (XLION_GI_VOX, Tomas's offset voxels lit by rays): light kept only where a surface is. Levels of 64^3 cells, 6 faces a cell, a face
 // the sum of the samples (rgb) and their count, as floats (GIRefAccum). A ray goes from a real point of the screen (never inside a wall) into a cell
 // around it, a face its normal looks toward, both picked by their read weights. m_Bounces: -1 this, -2 clear; m_Epoch: the samples a face keeps (negative: the hits feed too).
@@ -247,10 +269,14 @@ void main()
     const vec3 N0 = GIRefSample[2u * i + 1u].xyz;
     g_Seed = RHash(i * 2654435761u + uint(Push.m_Frame) * 97u);
     vec3 P = Ps.xyz, N = N0, Th = vec3(1.0), Sum = vec3(0.0);
-    if (GD[15] > 0u && !EmitterDirectExternal()) Sum += EmitterIrradianceAt(P, N, g_Seed) * (1.0 / gi_pi_v);      // (the point's own: lighting doesn't shade them, the GI shows them)
+    const vec4  Grade = GIRefSample[2u * uint(Push.m_nPixels)];      // (after the pixels: the eye, w the roughness graded; negative: the irradiance)
+    const bool  bSpec = Grade.w >= 0.0;
+    float SpecW = 1.0;
+    if (!bSpec && GD[15] > 0u && !EmitterDirectExternal()) Sum += EmitterIrradianceAt(P, N, g_Seed) * (1.0 / gi_pi_v);      // (the point's own: lighting doesn't shade them, the GI shows them)
     for (int b = 0; b <= Push.m_Bounces; ++b)
     {
-        const vec3 D = CosineDir(N);
+        const vec3 D = bSpec && b == 0 ? SpecDir(N, normalize(Grade.xyz - P), max(Grade.w * Grade.w, 1e-3), SpecW) : CosineDir(N);
+        if (SpecW <= 0.0) return;
         const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
         if (H.m_Inst < 0) { Sum += Th * SkyAt(D); break; }
         const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
@@ -271,7 +297,7 @@ void main()
     vec4 A = GIRefAccum[2u * i];
     const vec4 Pa = GIRefAccum[2u * i + 1u];
     if (Pa.w != float(Push.m_Epoch) || dot(Pa.xyz - Ps.xyz, Pa.xyz - Ps.xyz) > 1e-4) { A = vec4(0.0); GIRefAccum[2u * i + 1u] = vec4(Ps.xyz, float(Push.m_Epoch)); }
-    if (all(lessThan(Sum, vec3(1e6))) && !any(isnan(Sum))) A += vec4(Sum * gi_pi_v, 1.0);
+    if (all(lessThan(Sum, vec3(1e6))) && !any(isnan(Sum))) A += vec4(Sum * gi_pi_v * SpecW, SpecW);
     GIRefAccum[2u * i] = A;
 #endif
 }

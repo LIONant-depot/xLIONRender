@@ -2290,7 +2290,8 @@ namespace xlionrender
         // ago, done) into the report, cleared. m_ReflTraceBench > 0: the benchmark's rays only (mirror, roughness 0.5, the materials')
         const auto BvhR = m_pGITrace ? m_pGITrace->getBvh() : gi::gpu_trace::bvh_view{ nullptr, nullptr, nullptr, nullptr, 0, 0, true };
         Light.m_EnvParams.m_W = 0.0f;
-        const bool bTraced = (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
+        static const bool s_bGrading = std::getenv("XLION_REFL_GRADE") != nullptr;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
+        const bool bTraced = !s_bGrading && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
         const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
         const bool bReconstruct = Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && !Scene.m_bDebugReflectionMirror;      // (its kernel follows the real roughness)
@@ -2743,7 +2744,10 @@ namespace xlionrender
 
                 writeLocalLights(Window, Scene, Eye, Light);
                 if( m_LightModeUsed == light_mode::SCREEN && !bMain ) Light.m_LocalCount.m_Y = float(int(light_mode::CELLS));     // (the screen tail is the main view's: the others' every light of the list)
-                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? (Scene.m_bDebugReflectionMirror ? 2.0f : 1.0f) : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
+                // XLION_REFL_GRADE=<roughness below 1>: the mirror view at that roughness on every surface, for grading against the ground truth (with XLION_GI_REF: it is what shows: 4 +)
+                static const float s_Grade = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) : -1.0f; }();
+                static const float s_GradeBase = s_Grade >= 0.0f ? (std::getenv("XLION_GI_REF") ? 4.0f : 2.0f) + s_Grade : 2.0f;
+                Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? (Scene.m_bDebugReflectionMirror ? s_GradeBase : 1.0f) : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
 
             }
 
@@ -2920,12 +2924,23 @@ namespace xlionrender
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum();
                             const float Ey[3] = { Eye[0], Eye[1], Eye[2] };
                             m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
+                            static const float s_GradeRef = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) : -1.0f; }();      // (the reflections' ground truth at this roughness; none: the irradiance)
+                            std::memcpy(m_GatherTable.data() + 30, &s_GradeRef, sizeof(s_GradeRef));
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
                         }
                         if( s_Vox[0] > 0.0f ) { m_VoxPixels = std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight; m_VoxKey = LightsKey; }
                         // Experiment X1c: the voxels' rays (here, not in updateGI: at the frame's start they measured 3.4 ms whatever their number), as many as fit their ms a frame by what they measured
                         // (64 rays cost about as much as 32768 and long rays are what cost - why is not known yet (gi_next_level_analysis.md) -, so with nothing changing, none on most frames, not fewer on each)
-            if( const auto& Vox = s_Vox; Vox[0] > 0.0f && !m_pGatherRefS && m_pGITrace && m_VoxPixels > 0 && !(m_pGITrace->VoxQuiet() && m_Device.getFrameIndex() % 8 != 0) )
+            static const double s_VoxStop = [] { const char* p = std::getenv("XLION_VOX_STOP"); return p ? std::atof(p) : 0.0; }();      /* (measurement: the voxels' rays stop this many seconds after the first: what still moves is not the store) */
+            static const auto s_VoxT0 = std::chrono::steady_clock::now();
+            // Settled (XLION_VOX_SETTLE seconds, 0: never): lights, eye and view all still that long: no more rays until one of them moves. With the rays stopped a still moto's whole surfaces stop shifting
+            // (mean change 0.6 to 0.2 of 255, Tomas: rough reflections should settle). ponytail: moving objects don't wake it, they aren't in the lights' key; wake on a changed caster when they matter
+            static const double s_VoxSettle = [] { const char* p = std::getenv("XLION_VOX_SETTLE"); return p ? std::atof(p) : 0.0; }();
+            const float* pFw = reinterpret_cast<const float*>(&W2C);
+            const xmath::fvec3 VoxFw = xmath::fvec3{ pFw[3], pFw[7], pFw[11] } / std::max(xmath::fvec3{ pFw[3], pFw[7], pFw[11] }.Length(), 1e-12f);
+            if( VoxFw.Dot(m_VoxFwd) < 0.999999f ) { m_VoxFwd = VoxFw; m_VoxTurned = std::chrono::steady_clock::now(); }
+            const bool bVoxSettled = s_VoxSettle > 0.0 && m_pGITrace && m_pGITrace->VoxQuiet() && std::chrono::duration<double>(std::chrono::steady_clock::now() - m_VoxTurned).count() > s_VoxSettle;
+            if( const auto& Vox = s_Vox; Vox[0] > 0.0f && !m_pGatherRefS && m_pGITrace && m_VoxPixels > 0 && !bVoxSettled && !(s_VoxStop > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - s_VoxT0).count() > s_VoxStop) && !(m_pGITrace->VoxQuiet() && m_Device.getFrameIndex() % 8 != 0) )
                         {
                             if( !m_bVoxTSTried ) { m_bVoxTSTried = true; m_bVoxTS = m_Device.Create(m_VoxTS, { .m_Count = 2 }) == nullptr; }
                             if( std::vector<std::uint64_t> Ns; m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )

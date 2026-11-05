@@ -473,7 +473,7 @@ vec3 PBRLighting
 	g_CapRoughness = inRoughness; g_CapF0 = inF0;
 	GIPixelGI(inNormal, N, V, inAlbedo, inMetalic, inEmissiveColor);
 	ambient *= g_ScreenAO;
-	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, UBOLight.EnvParams.z > 1.5 ? 0.0 : max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO * g_ScreenAO);   // the sky probe
+	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, UBOLight.EnvParams.z > 1.5 ? fract(UBOLight.EnvParams.z) : max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO * g_ScreenAO);   // the sky probe
 #endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).

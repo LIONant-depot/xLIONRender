@@ -652,6 +652,8 @@ namespace xlionrender
         xgpu::timestamps            m_VoxTS;                        // experiment X1c: the voxels' rays, by their ms
         bool                        m_bVoxTS = false, m_bVoxTSTried = false, m_bVoxOn = false;
         double                      m_VoxRays = 16384.0;
+        xmath::fvec3                m_VoxFwd{ 0.0f, 0.0f, 0.0f };
+        std::chrono::steady_clock::time_point m_VoxTurned{};
         std::size_t                 m_VoxPixels = 0;
         std::uint32_t               m_VoxKey = 0;
         xgpu::timestamps            m_GISliceTS;                    // 0 before Submit, 1 after the probes, 2 before Show, 3 after it, 4 before the probes
