@@ -87,7 +87,8 @@ namespace xlionrender
                 return S;
             }
         };
-        [[nodiscard]] xgpu::device::error* Init         ( xgpu::device& Device, const setup& Setup = {} ) noexcept;
+        [[nodiscard]] xgpu::device::error* Init         ( xgpu::device& Device, const setup& Setup ) noexcept;
+        [[nodiscard]] xgpu::device::error* Init         ( xgpu::device& Device ) noexcept { return Init( Device, setup{} ); }     // (clang: no default argument of a nested class with member initializers)
 
         [[nodiscard]] xgpu::device::error* CreateMesh   ( mesh_id& Id, std::span<const vertex> Vertices, std::span<const std::uint32_t> Indices ) noexcept;
         // An xgeom_static/xgeom_skin mesh (MakeClusterGeom / MakeSkinGeom). References Geom's GPU buffers (not owned, not
