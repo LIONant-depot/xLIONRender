@@ -2971,7 +2971,7 @@ namespace xlionrender
                                 if( s_bVoxLog && m_Device.getFrameIndex() % 120 == 0 ) { std::printf("VOXRAYS %.2f ms, %.0f rays, budget %.2f\n", Ms, m_VoxRays, Budget); std::fflush(stdout); }
                             }
                             if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
-                            m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, m_Device.getFrameIndex(), int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey, View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
+                            m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, m_Device.getFrameIndex(), int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
                             if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
                         }
                         if( s_Vox[0] > 0.0f && !m_pGatherRefS && m_bVoxOn && m_pGITrace && m_pGITrace->RefSamples() && m_pGITrace->VoxBuffer() )     // (the ground truth above stays: the voxels overwrote it, a black or voxel image in its place)
@@ -4385,7 +4385,7 @@ namespace xlionrender
             const bool  bAuto = s_EnvAuto >= 0 ? s_EnvAuto == 1 : Scene.m_Post.m_bAutoExposure;
             const xgpu::texture* pHDR = &View.m_HDR;
             // (last frame's lit image for the next frame's screen reads: the prepass clears m_HDR - they had read black)
-            static const bool s_bSSGIPrev = std::getenv("XLION_SSGI") != nullptr;
+            static const bool s_bSSGIPrev = std::getenv("XLION_SSGI") != nullptr || std::getenv("XLION_VOX_SEEN") != nullptr;      // (and the voxels' lit feed)
             if( s_bSSGIPrev || Scene.m_bReflectionScreen )
             {
                 if( !View.m_HDRPrev.m_Private ) (void)m_Device.Create(View.m_HDRPrev, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: last frame's HDR" });
