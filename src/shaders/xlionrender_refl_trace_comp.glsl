@@ -50,7 +50,7 @@ layout(set = 1, binding = 5) uniform sampler2D GMotion;    // w: the motion's fl
 // records' first (x, y, z; x 0: the half-size dispatch)
 // m_Tex: x the receivers' roughness up to which their hits get their material's own shading (fading over its last quarter), y the visible
 // reflectance from which (scene::m_ReflectionTextureMaxRoughness, m_ReflectionTextureMinReflectance), w the list's capacity; x 0: none
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; float m_Sparse; float m_Pad0, m_Pad1, m_Pad2; vec4 m_Dirs; } Push;     // (Flat: the sky's radiance with no environment; m_Full.w: the mirror view: every receiver roughness 0)
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; } Push;     // (Flat: the sky's radiance with no environment; m_Full.w: the mirror view: every receiver roughness 0)
 
 #include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
@@ -206,7 +206,6 @@ void main()
         const vec2  OctN = OctEncode(N) * 0.5 + 0.5;
         Rec.w = packHalf2x16(vec2(Pc.w > 0.0 ? 1.0 / Pc.w : 0.0, 0.0)) | (uint(OctN.x * 15.0 + 0.5) << 16) | (uint(OctN.y * 15.0 + 0.5) << 20);    // (the view depth: clip w, as the tail's)
         const float PlaneDist = dot(Push.m_Plane.xyz, P + Push.m_Eye) + Push.m_Plane.w;
-        if (Push.m_Pad2 > 0.0 && !bFull && p == ivec2(int(Push.m_Pad2) / 10000, int(Push.m_Pad2) % 10000)) { const float Mw_ = texelFetch(GMotion, p, 0).w; atomicAdd(Stats[Push.m_Slot * 8u + 3u], 10000000u + uint((Mw_ > 0.5 ? Mw_ - 1.0 : -Mw_) * 1000.0)); atomicAdd(Stats[Push.m_Slot * 8u + 4u], 10000000u + uint(Rough * 1000.0)); }      // (XLION_REFL_PROBE=<x>,<y>: this texel's F0 and roughness into the log)
         const bool  bPlanarHere = Push.m_Mode == 0u && Push.m_bPlanar > 0.5 && Rough < Push.m_MaxRough && abs(PlaneDist) < 0.01 + 0.002 * length(P) && dot(N, Push.m_Plane.xyz) > 0.95;
         const bool  bSharpHere  = Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpMax;      // (traced at full size)
         // (a sharp receiver seen, whether or not the full size runs: Stats' top bit: an empty full size dispatch cost 2 ms on Bistro)
@@ -239,16 +238,16 @@ void main()
             atomicAdd(s_PlanarRough, uint(Rough * 100.0 + 0.5));
         }
         else if (bScreenFirst && ((Records[i].w >> 24) & 15u) == refl_screen_v && unpackHalf2x16(Records[i].y).y >= 0.95) { }     // (the screen's certain answer stays)
-        else if (Push.m_Pad1 > 0.5 && !bFull)      // (XLION_REFL_BANDS: a texel's real roughness by colour: red below .15, green .25, blue .4, yellow .65, white above: which pixels each graded roughness speaks for)
+        else if (Push.m_bPlanar < 0.5 && Push.m_Plane.x < -0.5 && !bFull)      // (XLION_REFL_BANDS: a texel's real roughness by colour: red below .15, green .25, blue .4, yellow .65, white above: which pixels each graded roughness speaks for)
         {
             const vec3 C = G.z < 0.15 ? vec3(1.0, 0.0, 0.0) : G.z < 0.25 ? vec3(0.0, 1.0, 0.0) : G.z < 0.4 ? vec3(0.0, 0.0, 1.0) : G.z < 0.65 ? vec3(1.0, 1.0, 0.0) : vec3(1.0);
             Rec.x = packHalf2x16(C.rg); Rec.y = packHalf2x16(vec2(C.b, 1.0)); Rec.z = packHalf2x16(vec2(0.0, 1.0)); Rec.w |= refl_miss_v << 24;
         }
         // (XLION_VOX_DIRS_TRACE=<rays below>,<store up to>, a prototype: the record is a read of the coarse directional store (xlionrender_gi_ref.glsl VoxDirsAdd), a few random samples of the real lobe: the reconstruction filters them as it does rays)
-        else if (!bFull && Push.m_Mode == 0u && Push.m_Dirs.x > 0.5 && Push.m_Vox.w > 0.0 && Rough >= Push.m_Dirs.z && Rough < Push.m_Dirs.w)
+        else if (!bFull && Push.m_Mode == 0u && Push.m_bPlanar < 0.5 && Push.m_Plane.x > 0.5 && Push.m_Vox.w > 0.0 && Rough >= Push.m_Plane.z && Rough < Push.m_Plane.w)
         {
             const vec3  Pw = P + Push.m_Eye, V = normalize(-P), An = abs(N);
-            const int   L_ = int(Push.m_Dirs.y); const uint k = uint(Push.m_Dirs.x);
+            const int   L_ = int(Push.m_Plane.y); const uint k = uint(Push.m_Plane.x);      // (m_Plane, with no planar view: k, level, rays below, store up to; x -1: XLION_REFL_BANDS)
             const float Cell = Push.m_Vox.w * float(1 << L_);
             const int   a_ = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2, u_ = (a_ + 1) % 3, v_ = (a_ + 2) % 3;
             const float sg = N[a_] < 0.0 ? -1.0 : 1.0; const uint Face = uint(2 * a_ + (N[a_] < 0.0 ? 1 : 0));
@@ -280,9 +279,6 @@ void main()
             Rec.z = packHalf2x16(vec2(0.0, 1.0));
             Rec.w |= refl_miss_v << 24;
         }
-        // (XLION_REFL_SPARSE, measurement: at or above this roughness one half-size texel in four a frame traces; the rest class 5: the reconstruction fills them)
-        else if (!bFull && Push.m_Mode == 0u && Push.m_Sparse > 0.0 && Rough >= Push.m_Sparse && Rough < Push.m_MaxRough
-                 && ((p.x & 1) != int(Push.m_Frame & 1u) || (p.y & 1) != int((Push.m_Frame >> 1) & 1u))) Rec.w |= 5u << 24;
         else if (Push.m_Mode != 0u || Rough < Push.m_MaxRough)
         {
             const vec3  V   = normalize(-P);

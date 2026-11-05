@@ -2348,7 +2348,6 @@ namespace xlionrender
             }
             std::uint32_t Got[8] = {};
             (void)m_ReflStats.MemoryMap(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
-            if( Got[3] >= 10000000u && std::getenv("XLION_REFL_PROBE") && m_Device.getFrameIndex() % 120 == 0 ) { std::printf("REFLPROBE F0 %.3f roughness %.3f\n", (Got[3] - 10000000u) / 1000.0, (Got[4] - 10000000u) / 1000.0); std::fflush(stdout); }
             if( Got[0] ) { m_bReflSharpSeen = (Got[7] >> 31) != 0u; Got[7] &= 0x7FFFFFFFu; }
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 5 && Ns[0] != ~0ull && Ns[4] > Ns[0] )
             {
@@ -2408,7 +2407,7 @@ namespace xlionrender
             // (the voxels on: they are the hits' indirect light; the surfels hold nothing then)
             xgpu::buffer* pVox = m_bVoxOn && m_pGITrace ? m_pGITrace->VoxBuffer() : nullptr;
             const std::array<float, 3> VoxAt = pVox ? m_pGITrace->VoxAnchor() : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
-            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; float m_Sparse = 0.0f; float m_Pad[3] = {}; float m_Dirs[4] = {}; } Push
+            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
                 , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, bScreen ? 3 : 0, s_bGradeRays ? (Scene.m_bReflectionFixedRays ? 3000 : 1000) + s_GradeRough : Scene.m_bDebugReflectionMirror ? 1 : Scene.m_bReflectionFixedRays ? 2 : 0 }
                 , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) }, { VoxAt[0], VoxAt[1], VoxAt[2], pVox ? gi::gpu_trace::VoxConfig()[0] : 0.0f }, m_ReflSharpMax
@@ -2434,12 +2433,9 @@ namespace xlionrender
             }
             Push.m_Full[1] = s_Sdf;
             float MaxRoughOut = 0.0f;
-            static const float s_Sparse = [] { const char* p = std::getenv("XLION_REFL_SPARSE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: one ray in four at or above this roughness)
-            Push.m_Sparse = bReconstruct ? s_Sparse : 0.0f;
-            static const bool s_bBands = std::getenv("XLION_REFL_BANDS") != nullptr; Push.m_Pad[1] = s_bBands ? 1.0f : 0.0f;
-            static const float s_ReflProbe = [] { int X = 0, Y = 0; if( const char* p = std::getenv("XLION_REFL_PROBE") ) std::sscanf(p, "%d,%d", &X, &Y); return float(X * 10000 + Y); }(); Push.m_Pad[2] = s_ReflProbe;
+            static const bool s_bBands = std::getenv("XLION_REFL_BANDS") != nullptr; if( s_bBands && !bPlanar ) Push.m_Plane[0] = -1.0f;
             static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = std::getenv("XLION_VOX_DIRS_TRACE"); const char* d = std::getenv("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; std::sscanf(d, "%f,%f", &D[1], &K); std::sscanf(t, "%f,%f", &D[2], &D[3]); D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
-            if( pVox && s_DirsTrace[0] > 0.0f ) { std::memcpy(Push.m_Dirs, s_DirsTrace.data(), sizeof(Push.m_Dirs)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
+            if( pVox && s_DirsTrace[0] > 0.0f ) { if( !bPlanar ) std::memcpy(Push.m_Plane, s_DirsTrace.data(), sizeof(Push.m_Plane)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
             auto Buffers  = std::array<xgpu::buffer*, 15>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : bSdf ? &View.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits

@@ -62,7 +62,7 @@ void LoadTile()
     {
         const ivec2 q = clamp(Org + ivec2(int(t) % kTile, int(t) / kTile), ivec2(0), Size() - 1);
         const uvec4 R = Records[Base() + uint(q.y * Size().x + q.x)];
-        s_U[t] = vec4(RecU(R) * RecConf(R), RecClass(R) == 0u || RecClass(R) == 5u ? -1.0 : MetaDist(R.w));
+        s_U[t] = vec4(RecU(R) * RecConf(R), RecClass(R) == 0u ? -1.0 : MetaDist(R.w));
         s_C[t] = RecConf(R);
     }
     barrier();
@@ -71,7 +71,7 @@ void LoadTile()
 void TemporalPass(ivec2 p)
 {
     const uint  i = uint(p.y * Size().x + p.x);
-    uvec4 R = Records[Base() + i];
+    const uvec4 R = Records[Base() + i];
     const float z = texelFetch(GDepth, p, 0).r;
     if (z >= 1.0 || RecClass(R) == 0u) { Temporal[i] = R; return; }      // (no surface, or nothing traced: the probes - left alone)
     const vec4  G     = texelFetch(GColor, p, 0);
@@ -98,19 +98,7 @@ void TemporalPass(ivec2 p)
     const vec4 sd = sqrt(max(m2 / max(k, 1.0) - m1 * m1, 0.0));
     // a firefly (a highlight one ray in many finds: the sun's at a hit) taken at most 4 times the neighbourhood's mean luminance - it
     // would reset the history around it and sparkle; the energy it carries is the bias this clamp trades for stability (labelled)
-    const bool  bSkipped = RecClass(R) == 5u;       // (XLION_REFL_SPARSE: no ray here this frame: the neighbourhood's mean is its sample, its 2 x 2 block's traced texel its hit)
-    if (bSkipped)
-    {
-        if (k < 0.5) { Temporal[i] = uvec4(0u, 0u, 0u, R.w & ~(15u << 24)); return; }      // (no traced neighbour on this surface: the read)
-        R.w = (R.w & ~(15u << 24)) | (1u << 24);
-        for (int t = 0; t < 4; ++t)
-        {
-            const ivec2 q = min((p & ~1) + ivec2(t & 1, t >> 1), Size() - 1);
-            const uvec4 Rq = Records[Base() + uint(q.y * Size().x + q.x)];
-            if (RecClass(Rq) != 0u && RecClass(Rq) != 5u) { R.z = Rq.z; break; }
-        }
-    }
-    const vec4  Q0 = bSkipped ? m1 : RecQ(R);
+    const vec4  Q0 = RecQ(R);
     const float lm = dot(m1.rgb, vec3(0.2126, 0.7152, 0.0722)) / max(m1.a, 1e-3), lu = dot(Q0.rgb, vec3(0.2126, 0.7152, 0.0722)) / max(Q0.a, 1e-3);     // (per coverage: sparse hits are not fireflies)
     const vec4  U  = lu > 4.0 * lm + 1e-4 ? vec4(Q0.rgb * ((4.0 * lm + 1e-4) / lu), Q0.a) : Q0;
 
