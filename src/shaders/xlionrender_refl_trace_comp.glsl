@@ -37,6 +37,7 @@ layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; 
 // receivers whose reflection shows (Push.m_Tex: their visible reflectance - F0 through the split sum's DFG, Karis' fit - times their
 // sharpness): a white dielectric shows 4% of what it reflects, its hits keep the capture's
 layout(std430, set = 0, binding = 10) buffer hits_b { uvec4 Hits[]; };
+layout(std430, set = 0, binding = 11) readonly buffer vox_bu { uvec4 VoxBins[]; };     // (the same memory: a direction bin's fixed point sums, VoxDirs)
 layout(std430, set = 0, binding = 11) readonly buffer vox_b { vec4 GIRefAccum[]; };      // the voxels of light, the indirect light at the hits (Push.m_Vox.w > 0)
 layout(set = 1, binding = 0) uniform sampler2D GColor;     // xy: the octahedral normal (x 0.5 + 0.5), z: roughness
 layout(set = 1, binding = 1) uniform sampler2D GDepth;
@@ -49,7 +50,7 @@ layout(set = 1, binding = 5) uniform sampler2D GMotion;    // w: the motion's fl
 // records' first (x, y, z; x 0: the half-size dispatch)
 // m_Tex: x the receivers' roughness up to which their hits get their material's own shading (fading over its last quarter), y the visible
 // reflectance from which (scene::m_ReflectionTextureMaxRoughness, m_ReflectionTextureMinReflectance), w the list's capacity; x 0: none
-layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; float m_Sparse; } Push;     // (Flat: the sky's radiance with no environment; m_Full.w: the mirror view: every receiver roughness 0)
+layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; vec3 m_Eye; uint m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; vec4 m_Plane; ivec4 m_Full; vec4 m_Tex;  vec4 m_Vox; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; float m_Sparse; float m_Pad0, m_Pad1, m_Pad2; vec4 m_Dirs; } Push;     // (Flat: the sky's radiance with no environment; m_Full.w: the mirror view: every receiver roughness 0)
 
 #include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
@@ -237,6 +238,42 @@ void main()
             atomicAdd(s_PlanarRough, uint(Rough * 100.0 + 0.5));
         }
         else if (bScreenFirst && ((Records[i].w >> 24) & 15u) == refl_screen_v && unpackHalf2x16(Records[i].y).y >= 0.95) { }     // (the screen's certain answer stays)
+        // (XLION_VOX_DIRS_TRACE=<rays below>,<store up to>, a prototype: the record is a read of the coarse directional store (xlionrender_gi_ref.glsl VoxDirsAdd), a few random samples of the real lobe: the reconstruction filters them as it does rays)
+        else if (!bFull && Push.m_Mode == 0u && Push.m_Dirs.x > 0.5 && Push.m_Vox.w > 0.0 && Rough >= Push.m_Dirs.z && Rough < Push.m_Dirs.w)
+        {
+            const vec3  Pw = P + Push.m_Eye, V = normalize(-P), An = abs(N);
+            const int   L_ = int(Push.m_Dirs.y); const uint k = uint(Push.m_Dirs.x);
+            const float Cell = Push.m_Vox.w * float(1 << L_);
+            const int   a_ = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2, u_ = (a_ + 1) % 3, v_ = (a_ + 2) % 3;
+            const float sg = N[a_] < 0.0 ? -1.0 : 1.0; const uint Face = uint(2 * a_ + (N[a_] < 0.0 ? 1 : 0));
+            const vec3  T = normalize(abs(N.z) < 0.999 ? cross(vec3(0.0, 0.0, 1.0), N) : cross(vec3(1.0, 0.0, 0.0), N)), B = cross(N, T), Ve = vec3(dot(V, T), dot(V, B), max(dot(V, N), 1e-4));
+            const float al = max(Rough, 0.045) * max(Rough, 0.045);
+            uint hs = Hash32(uint(p.x) * 73856093u ^ uint(p.y) * 19349663u ^ Push.m_Frame * 83492791u);
+            vec3 Sum = vec3(0.0); float Miss = 0.0;
+            const int nS = 4;
+            for (int s = 0; s < nS; ++s)
+            {
+                hs = Hash32(hs + 1u); const vec2 u0 = vec2(float(hs & 0xFFFFu), float(hs >> 16)) / 65536.0;
+                hs = Hash32(hs + 1u); const vec2 j0 = vec2(float(hs & 0xFFFFu), float(hs >> 16)) / 65536.0;
+                vec3 Le = reflect(-Ve, SampleVNDF(Ve, al, u0)); if (Le.z <= 1e-4) Le.z = abs(Le.z) + 1e-4;
+                const vec3  D = normalize(T * Le.x + B * Le.y + N * Le.z);
+                vec3 q = Pw / Cell; q[u_] += j0.x - 0.5; q[v_] += j0.y - 0.5;
+                const float sd = abs(D[u_]) + abs(D[v_]) + max(D[a_] * sg, 0.0) + 1e-6, x = D[u_] / sd, y = D[v_] / sd;
+                const uint  di = min(uint((x + y + 1.0) * 0.5 * float(k)), k - 1u), dj = min(uint((x - y + 1.0) * 0.5 * float(k)), k - 1u);
+                const uint  hh = VoxHash(L_, ivec3(floor(q)), 1000u + Face * 256u + di * k + dj), e = VoxEntryOf(hh);
+                const bool  bOurs = GIRefAccum[e + 2u].x == VoxTagOf(hh);
+                const uvec4 c = bOurs ? VoxBins[e] : uvec4(0u);
+                const float wq = float(c.w) / 16.0, Tr = clamp(wq / 64.0, 0.0, 1.0);
+                if (wq > 0.0) Sum += Tr * (vec3(c.xyz) / 256.0) / wq;
+                Miss += 1.0 - Tr;
+            }
+            if (Miss > 0.0) Sum += Miss * VoxRead(Pw, N, Push.m_Vox.xyz, Push.m_Vox.w);
+            const vec3 Lr = Sum / float(nS) / 3.14159265;
+            Rec.x = packHalf2x16(HalfSafe(Lr).rg);
+            Rec.y = packHalf2x16(vec2(HalfSafe(Lr).b, 1.0));
+            Rec.z = packHalf2x16(vec2(0.0, 1.0));
+            Rec.w |= refl_miss_v << 24;
+        }
         // (XLION_REFL_SPARSE, measurement: at or above this roughness one half-size texel in four a frame traces; the rest class 5: the reconstruction fills them)
         else if (!bFull && Push.m_Mode == 0u && Push.m_Sparse > 0.0 && Rough >= Push.m_Sparse && Rough < Push.m_MaxRough
                  && ((p.x & 1) != int(Push.m_Frame & 1u) || (p.y & 1) != int((Push.m_Frame >> 1) & 1u))) Rec.w |= 5u << 24;

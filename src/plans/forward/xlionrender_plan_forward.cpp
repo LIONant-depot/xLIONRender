@@ -2407,7 +2407,7 @@ namespace xlionrender
             // (the voxels on: they are the hits' indirect light; the surfels hold nothing then)
             xgpu::buffer* pVox = m_bVoxOn && m_pGITrace ? m_pGITrace->VoxBuffer() : nullptr;
             const std::array<float, 3> VoxAt = pVox ? m_pGITrace->VoxAnchor() : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
-            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; float m_Sparse = 0.0f; } Push
+            struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; float m_Sparse = 0.0f; float m_Pad[3] = {}; float m_Dirs[4] = {}; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
                 , { bPlanar ? Pl.m_X : 0.0f, bPlanar ? Pl.m_Y : 0.0f, bPlanar ? Pl.m_Z : 0.0f, bPlanar ? Pl.m_W : 0.0f }, { 0, 0, bScreen ? 3 : 0, s_bGradeRays ? (Scene.m_bReflectionFixedRays ? 3000 : 1000) + s_GradeRough : Scene.m_bDebugReflectionMirror ? 1 : Scene.m_bReflectionFixedRays ? 2 : 0 }
                 , { bHits ? Scene.m_ReflectionTextureMaxRoughness : 0.0f, Scene.m_ReflectionTextureMinReflectance, float((View.m_TailFrame & 1023u) & 1u), float(hit_cap_v) }, { VoxAt[0], VoxAt[1], VoxAt[2], pVox ? gi::gpu_trace::VoxConfig()[0] : 0.0f }, m_ReflSharpMax
@@ -2432,8 +2432,11 @@ namespace xlionrender
                 }
             }
             Push.m_Full[1] = s_Sdf;
+            float MaxRoughOut = 0.0f;
             static const float s_Sparse = [] { const char* p = std::getenv("XLION_REFL_SPARSE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: one ray in four at or above this roughness)
             Push.m_Sparse = bReconstruct ? s_Sparse : 0.0f;
+            static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = std::getenv("XLION_VOX_DIRS_TRACE"); const char* d = std::getenv("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; std::sscanf(d, "%f,%f", &D[1], &K); std::sscanf(t, "%f,%f", &D[2], &D[3]); D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
+            if( pVox && s_DirsTrace[0] > 0.0f ) { std::memcpy(Push.m_Dirs, s_DirsTrace.data(), sizeof(Push.m_Dirs)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
             auto Buffers  = std::array<xgpu::buffer*, 15>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : bSdf ? &View.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
@@ -2452,7 +2455,7 @@ namespace xlionrender
             Window.WriteTimestamp(m_ReflTimes, 2);
             if( bHits ) shadeReflectionHits(Window, Scene, View, BvhR, Slot, HalfKeys, std::uint32_t(2 * W * H));
             Window.WriteTimestamp(m_ReflTimes, 3);
-            Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, MaxRough);
+            Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, std::max(MaxRough, MaxRoughOut));
             static const float s_GradeCut = [] { const char* p = std::getenv("XLION_REFL_GRADE_CUT"); return p ? float(std::atof(p)) : 0.0f; }();      /* (grading: the mirror view asks rays of everything; the cutoff their fade follows) */
             if( s_GradeCut > 0.0f ) Light.m_EnvParams.m_W = s_GradeCut;
         }
@@ -2911,7 +2914,8 @@ namespace xlionrender
                     {   // (XLION_VOX_DIRS=<level>,<k>[,<roughness>]: a prototype, the reflections' light in a coarse level by k x k directions: words 32, 33, xlionrender_gi_gather_frag.glsl VoxDirsRead. The read knows one roughness, XLION_REFL_GRADE's)
                         static const std::array<float, 3> s_Dirs = [] { std::array<float, 3> D{ -1.0f, 8.0f, 0.3f }; if( const char* p = std::getenv("XLION_VOX_DIRS") ) std::sscanf(p, "%f,%f,%f", &D[0], &D[1], &D[2]); if( const char* g = std::getenv("XLION_REFL_GRADE"); g && !std::getenv("XLION_VOX_DIRS_BAND") ) D[2] = float(std::atof(g)); return D; }();      /* (XLION_VOX_DIRS_BAND: the read's roughness stays the third number, whatever is graded) */
                         static const bool s_bDirsFixed = std::getenv("XLION_VOX_DIRS_FIXED") != nullptr;
-                        if( s_Dirs[0] >= 0.0f ) { m_GatherTable[32] = 8u | (s_bDirsFixed ? 16u : 0u) | (std::uint32_t(s_Dirs[0]) & 3u) | (s_Dirs[1] > 8.5f ? 4u : 0u) | (std::uint32_t(std::clamp(s_Dirs[2], 0.0f, 1.0f) * 255.0f + 0.5f) << 8); static const bool s_bDirsStill = std::getenv("XLION_VOX_DIRS_STILL") != nullptr; m_GatherTable[33] = s_bDirsStill ? 0u : std::uint32_t(m_Device.getFrameIndex()); }      /* (STILL: the same samples each frame: the store's own flicker, not the read's) */
+                        static const bool s_bDirsInTrace = std::getenv("XLION_VOX_DIRS_TRACE") != nullptr;      /* (the read in the reflections' pass instead: refl_trace_comp) */
+                        if( s_Dirs[0] >= 0.0f && !s_bDirsInTrace ) { m_GatherTable[32] = 8u | (s_bDirsFixed ? 16u : 0u) | (std::uint32_t(s_Dirs[0]) & 3u) | (s_Dirs[1] > 8.5f ? 4u : 0u) | (std::uint32_t(std::clamp(s_Dirs[2], 0.0f, 1.0f) * 255.0f + 0.5f) << 8); static const bool s_bDirsStill = std::getenv("XLION_VOX_DIRS_STILL") != nullptr; m_GatherTable[33] = s_bDirsStill ? 0u : std::uint32_t(m_Device.getFrameIndex()); }      /* (STILL: the same samples each frame: the store's own flicker, not the read's) */
                     }
                     {   // X1: the clipmap the gather reads instead (words 20 on, xlionrender_gi_gather_frag.glsl); 20: 0 none
                         static const std::array<float, 2> s_ClipCell = [] { std::array<float, 2> A{ 0.0f, 0.5f }; if( const char* p = std::getenv("XLION_GI_CLIP") ) (void)std::sscanf(p, "%f,%f", &A[0], &A[1]); return A; }();
