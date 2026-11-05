@@ -61,7 +61,7 @@ layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_Pr
 #include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
-shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured;
+shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured, s_SharpSeen;
 shared uvec2 s_Pair[64];       // (the full-size dispatch: two pixels a record)
 
 // Heitz 2018: a visible normal of an isotropic GGX (alpha a) for the view Ve (local frame, z the normal)
@@ -187,7 +187,7 @@ vec4 PlanarAt(vec2 uv, float Lod)
 
 void main()
 {
-    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; }
+    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; s_SharpSeen = 0u; }
     barrier();
     const bool  bList = Push.m_Full.x < 0;
     const bool  bFull = Push.m_Full.x != 0;
@@ -224,7 +224,7 @@ void main()
         const bool  bPlanarHere = Push.m_Mode == 0u && Push.m_bPlanar > 0.5 && Rough < Push.m_MaxRough && abs(PlaneDist) < 0.01 + 0.002 * length(P) && dot(N, Push.m_Plane.xyz) > 0.95;
         const bool  bSharpHere  = Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpMax;      // (traced at full size)
         // (a sharp receiver seen, whether or not the full size runs: Stats' top bit: an empty full size dispatch cost 2 ms on Bistro)
-        if (Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpSeen) atomicOr(Stats[Push.m_Slot * 8u + 7u], 0x80000000u);
+        if (Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpSeen) s_SharpSeen = 1u;      // (one global atomic a group, at the end)
         bool bListed = false;
         if (bFull && !bList && bSharpHere) { const uint a = atomicAdd(SharpList[Par], 1u); if (a < refl_sharp_cap_v) { SharpList[2u + a] = uint(p.x) | (uint(p.y) << 16); bListed = true; } }
         if (bFull && (!bSharpHere || bListed)) { }      // (the full-size dispatch: the sharp ones only; the rest: none - the half-size records serve them)
@@ -515,6 +515,7 @@ void main()
         if (s_Planar != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 3u], s_Planar);
         if (s_PlanarRough != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 4u], s_PlanarRough);
         if (s_Incomplete != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 5u], s_Incomplete);
-        if (s_Textured != 0u) atomicAdd(Stats[Push.m_Slot * 8u + (bFull ? 7u : 6u)], s_Textured);     // (an empty group none: 94000 groups' adds on 7 addresses)     // (the textured hits: the half size's, the full size's)
+        if (s_Textured != 0u) atomicAdd(Stats[Push.m_Slot * 8u + (bFull ? 7u : 6u)], s_Textured);
+        if (s_SharpSeen != 0u) atomicOr(Stats[Push.m_Slot * 8u + 7u], 0x80000000u);     // (an empty group none: 94000 groups' adds on 7 addresses)     // (the textured hits: the half size's, the full size's)
     }
 }
