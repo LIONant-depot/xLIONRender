@@ -2272,7 +2272,7 @@ namespace xlionrender
         if( createTailTargets(View) ) { Light.m_LocalCount.m_Y = float(int(light_mode::CELLS)); return; }      // (no targets: the split lists exactly)
         const bool bLights = m_LightModeUsed == light_mode::SCREEN;      // (else only the G-buffer, for the reflections)
         const int W = View.m_TailWidth, H = View.m_TailHeight;
-        if( std::vector<std::uint64_t> Ns; m_TailTimes.getResults(Ns) && Ns.size() >= 5 && Ns[1] >= Ns[0] && Ns[2] >= Ns[1] && Ns[4] >= Ns[2] && Ns[3] >= Ns[4] && Ns[0] != ~0ull )
+        if( std::vector<std::uint64_t> Ns; m_TailTimes.getResults(Ns) && Ns.size() >= 5 && Ns[1] >= Ns[0] && Ns[2] >= Ns[1] && Ns[4] >= Ns[2] && Ns[3] >= Ns[4] && std::ranges::none_of(Ns, [](std::uint64_t t) { return t == ~0ull; }) )     // (the tail lights off: 2 to 4 never written - they read ~0 and passed, 'tail lights 1.6e13 ms')
         {
             m_TailReport.m_GBufferMs = double(Ns[1] - Ns[0]) * 1e-6; m_TailReport.m_TailMs = double(Ns[2] - Ns[1]) * 1e-6; m_TailReport.m_DenoiseMs = double(Ns[3] - Ns[2]) * 1e-6;
             m_TailReport.m_TemporalMs = double(Ns[4] - Ns[2]) * 1e-6;
