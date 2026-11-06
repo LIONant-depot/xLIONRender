@@ -3295,8 +3295,8 @@ namespace xlionrender
                     auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };     // (last frame's lit image, XLION_SSGI's light)
                     const int GX = (View.m_GIScreenWidth + 7) / 8, GY = (View.m_GIScreenHeight + 7) / 8;
                     if( s_bSSGI ) Push.m_Mode = 4u;
-                    Push.m_Mode = s_bSSGI ? 5u : 1u;
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
+                    Push.m_Mode = s_bSSGI ? 5u : 1u;
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                 }
                 View.m_bAOPrev = bAO;
