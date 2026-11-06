@@ -40,6 +40,9 @@ namespace xlionrender
         constexpr std::uint32_t s_ShadowPairsVert[] = {
             #include "xlionrender_shadow_pairs_vert.h"
         };
+        constexpr std::uint32_t s_ShadowSkinPagesVert[] = {
+            #include "xlionrender_shadow_skin_pages_vert.h"
+        };
         constexpr std::uint32_t s_ShadowPairsCutVert[] = {
             #include "xlionrender_shadow_pairs_cut_vert.h"
         };
@@ -277,6 +280,10 @@ namespace xlionrender
         for( std::size_t k = 0; k < m_ShadowPipeline.size(); ++k ) { m_Device.Destroy(std::move(m_ShadowInstance[k])); m_Device.Destroy(std::move(m_ShadowPipeline[k])); }
         m_Device.Destroy(std::move(m_ShadowPairsInstance));
         m_Device.Destroy(std::move(m_ShadowPairsPipeline));
+        m_Device.Destroy(std::move(m_ShadowSkinPagesInstance));
+        m_Device.Destroy(std::move(m_ShadowSkinPagesPipeline));
+        m_Device.Destroy(std::move(m_SkinPagesBuffer));
+        m_Device.Destroy(std::move(m_SkinPagesList));
         m_pShadowPairs.reset();
         m_Device.Destroy(std::move(m_ShadowClearInstance));
         m_Device.Destroy(std::move(m_ShadowClearPipeline));
@@ -941,6 +948,32 @@ namespace xlionrender
                 Setup.m_DepthStencil.m_bDepthClampEnable        = true;
                 if( auto Err = Device.Create(m_ShadowPairsPipeline, Setup); Err ) return Err;
                 if( auto Err = Device.Create(m_ShadowPairsInstance, { .m_PipeLine = m_ShadowPairsPipeline }); Err ) return Err;
+            }
+
+            // SKIN movers into every mover page they reach, a draw a cluster: the caster's depth state, the pages and their lists
+            {
+                xgpu::shader SkinPagesVert;
+                if( auto Err = Device.Create(SkinPagesVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_ShadowSkinPagesVert) }); Err ) return Err;
+                auto SkinBinds = std::array
+                { xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = { .m_bVertex = true }, .m_Type = xgpu::pipeline::uniform_binds::type::UBO_DYNAMIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 0, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 1, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 2, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 3, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 4, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                , xgpu::pipeline::uniform_binds{ .m_BindIndex = 8, .m_Usage = xgpu::shader::type{ xgpu::shader::type::bit::VERTEX }, .m_Type = xgpu::pipeline::uniform_binds::type::SSBO_STATIC }
+                };
+                auto Shaders = std::array<const xgpu::shader*, 2>{ &Depth, &SkinPagesVert };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_SkinGeomVD, .m_Shaders = Shaders, .m_PushConstantsSize = sizeof(details::push_skin_geom), .m_UniformBinds = SkinBinds };
+                Setup.m_Primitive.m_Cull                        = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_DepthBiasConstantFactor  = 2.0f;
+                Setup.m_DepthStencil.m_DepthBiasSlopeFactor     = 4.0f;
+                Setup.m_DepthStencil.m_bDepthBiasEnable         = true;
+                Setup.m_DepthStencil.m_bDepthClampEnable        = true;
+                if( auto Err = Device.Create(m_ShadowSkinPagesPipeline, Setup); Err ) return Err;
+                if( auto Err = Device.Create(m_ShadowSkinPagesInstance, { .m_PipeLine = m_ShadowSkinPagesPipeline }); Err ) return Err;
+                if( auto Err = Device.Create(m_SkinPagesBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 96, .m_EntryCount = int(ring_frames_v) * skin_pages_v, .m_pName = "Shadows: skinned movers' pages" }); Err ) return Err;
+                if( auto Err = Device.Create(m_SkinPagesList, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = int(ring_frames_v) * skin_page_list_v, .m_pName = "Shadows: skinned movers' page lists" }); Err ) return Err;
             }
 
             // The selection's mask: the same vertex paths, the mask's fragment (it samples the scene's depth), no bias, the depth test and write of its own

@@ -2062,6 +2062,92 @@ namespace xlionrender
         }
         else m_bGISunMapValid = false;
 
+        // The skinned casters (XLION_SH_NO_SKIN_PAGES: page by page, cluster by cluster, as before): each one's pages - the sun's of its kind its
+        // light-space rect overlaps, the local lights' its box reaches in the page's frustum - in a list, the pages once, all of it uploaded before
+        // the pass; drawn a cluster at a time, an instance a page (xlionrender_shadow_skin_pages_vert.glsl)
+        static const bool s_bNoSkinPages = xlionrender::Env("XLION_SH_NO_SKIN_PAGES") != nullptr;
+        const auto IsSkin = [&]( std::uint32_t i ) { return Draws[i].m_pMesh->m_bCluster && Draws[i].m_pMesh->m_Geom.m_Kind == geom_kind::SKIN; };
+        struct skin_page { xmath::fmat4 m_W2C; xmath::fvec4 m_Atlas, m_Rect; };
+        static_assert(sizeof(skin_page) == 96);
+        struct skin_run { std::uint32_t m_Draw, m_First, m_Count; };
+        std::vector<skin_page> SkinPages;
+        std::vector<std::uint32_t> SkinList;
+        std::vector<skin_run> SkinSun, SkinLocal;
+        const int SkinSlot = int(m_Device.getFrameIndex() % ring_frames_v);
+        bool bSkinPages = !s_bNoSkinPages && m_ShadowSkinPagesInstance.m_Private;
+        if( bSkinPages )
+        {
+            const float AW = float(sunAtlasWidth()), AH = float(sunAtlasHeight()), T = float(shadows::vsm::page_texels_v);
+            const float LW = float(LocalW), LH = float(LocalH), TL = float(shadows::local_pages::page_texels_v);
+            const std::uint32_t SunBase = std::uint32_t(SkinSlot * skin_pages_v);      // (the list holds the pages' places in the whole buffer: the frame's region first)
+            for( const auto& P : m_VSM.m_ToRender ) SkinPages.push_back({ P.m_W2C, { T / AW, T / AH, (T + 2.0f * float(P.m_AtlasX)) / AW - 1.0f, (T + 2.0f * float(P.m_AtlasY)) / AH - 1.0f }, {} });
+            const std::uint32_t LocalBase = SunBase + std::uint32_t(SkinPages.size());
+            std::vector<frustum> LocalFrustum;
+            for( const auto& P : m_LocalPages.m_ToRender )
+            {
+                SkinPages.push_back({ P.m_W2C, { TL / LW, TL / LH, (TL + 2.0f * float(P.m_AtlasX)) / LW - 1.0f, (TL + 2.0f * float(P.m_AtlasY)) / LH - 1.0f }, {} });
+                LocalFrustum.push_back(frustum::FromW2C(P.m_W2C));
+            }
+            for( std::uint32_t i = 0; i < Draws.size(); ++i )
+            {
+                if( !IsSkin(i) ) continue;
+                skin_run Run{ i, std::uint32_t(SkinList.size()), 0 };
+                for( std::uint32_t p = 0; p < m_VSM.m_ToRender.size(); ++p )
+                {
+                    const auto& P = m_VSM.m_ToRender[p];
+                    if( Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size) ) SkinList.push_back(SunBase + p);
+                }
+                Run.m_Count = std::uint32_t(SkinList.size()) - Run.m_First;
+                if( Run.m_Count ) SkinSun.push_back(Run);
+                Run = { i, std::uint32_t(SkinList.size()), 0 };
+                for( std::uint32_t p = 0; p < m_LocalPages.m_ToRender.size(); ++p )
+                {
+                    const auto& P = m_LocalPages.m_ToRender[p];
+                    const auto& L = Scene.m_LocalLights[std::size_t(P.m_Light)];
+                    if( (!m_bShadowSplitMovers || P.m_bWithMovers || Draws[i].m_bMover == P.m_bMover) && shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius)
+                        && (!m_bShadowFaceCull || LocalFrustum[p].Overlaps(Draws[i].m_World, false)) ) SkinList.push_back(LocalBase + p);
+                }
+                Run.m_Count = std::uint32_t(SkinList.size()) - Run.m_First;
+                if( Run.m_Count ) SkinLocal.push_back(Run);
+            }
+            if( SkinPages.size() > std::size_t(skin_pages_v) || SkinList.size() > std::size_t(skin_page_list_v) ) bSkinPages = false;      // (too many this frame: page by page, as before)
+            else
+            {
+                if( !SkinPages.empty() ) (void)m_SkinPagesBuffer.MemoryMapFrameRegion(SkinSlot * skin_pages_v, int(SkinPages.size()), [&](void* p) { std::memcpy(p, SkinPages.data(), SkinPages.size() * sizeof(skin_page)); });
+                if( !SkinList.empty() )  (void)m_SkinPagesList.MemoryMapFrameRegion(SkinSlot * skin_page_list_v, int(SkinList.size()), [&](void* p) { std::memcpy(p, SkinList.data(), SkinList.size() * sizeof(std::uint32_t)); });
+            }
+        }
+        // A run's skinned draw, a cluster at a time, an instance a page of its list (its first instance: its list's start in the frame's region)
+        const auto DrawSkinPages = [&]( xgpu::cmd_buffer& Cmd, std::span<const skin_run> Runs )
+        {
+            auto& ViewBlock = m_ShadowUBO.allocEntry<details::ubo_geom_view>();
+            ViewBlock.m_w2C         = xmath::fmat4::fromIdentity();
+            ViewBlock.m_WorldOffset = xmath::fvec4(m_Origin, 0);
+            for( const auto& Run : Runs )
+            {
+                const auto& D = *Draws[Run.m_Draw].m_pDraw;
+                const auto& G = Draws[Run.m_Draw].m_pMesh->m_Geom;
+                std::array<xgpu::buffer*, 6> Buffers{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_SkinPagesBuffer, &m_SkinPagesList, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy };
+                Cmd.setPipelineInstance(m_ShadowSkinPagesInstance, std::span{ Buffers });
+                Cmd.setDynamicUBO(m_ShadowUBO, 0);
+                BindClusterStreams(Cmd, G);
+                for( std::size_t s = 0; s < G.LODSubmeshes(0).size(); ++s )
+                {
+                    const auto& Sub = G.LODSubmeshes(0)[s];
+                    auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
+                    const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
+                    if( !Vis.m_bCastsShadow ) continue;         // (a masked skin: its cutout's not here - as an opaque one, ponytail: a skinned cutout caster if one shows)
+                    for( std::uint32_t c = Sub.m_iCluster; c < Sub.m_iCluster + Sub.m_nClusters; ++c )
+                    {
+                        const auto& Cl = G.m_Clusters[c];
+                        Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Draws[Run.m_Draw].m_Slot, 0u, 0u, G.m_PrevBones });
+                        Cmd.DrawInstance(int(Run.m_Count), int(Cl.m_nIndices), int(SkinSlot * skin_page_list_v + Run.m_First), int(Cl.m_iIndex), int(Cl.m_iVertex));
+                        ++m_ShadowDrawStats.m_IndirectDraws; m_ShadowDrawStats.m_IndirectMax += int(Run.m_Count);
+                    }
+                }
+            }
+        };
+
         ShCpu.Lap();
         auto Cmd = Window.StartRenderPass(m_ShadowPass);
 
@@ -2077,8 +2163,14 @@ namespace xlionrender
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);
                 pSunPage = &P;
-                DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); }, PageLOD(P.m_Key.m_Level));
+                DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return !(bSkinPages && IsSkin(i)) && Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); }, PageLOD(P.m_Key.m_Level));
                 pSunPage = nullptr;
+            }
+            if( bSkinPages && !m_VSM.m_ToRender.empty() )        // (the skinned casters into all their sun pages at once: one viewport over the sun's atlas)
+            {
+                Cmd.setViewport(0.0f, 0.0f, float(sunAtlasWidth()), float(sunAtlasHeight()));
+                Cmd.setScissor(0, 0, sunAtlasWidth(), sunAtlasHeight());
+                DrawSkinPages(Cmd, SkinSun);
             }
             if( !m_VSM.m_ToRender.empty() && bPairs )      // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
             {
@@ -2109,7 +2201,13 @@ namespace xlionrender
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
             const frustum Page = frustum::FromW2C(P.m_W2C);
-            DrawCasters(Cmd, P.m_W2C, C, [&](std::uint32_t i) { return (!m_bShadowSplitMovers || P.m_bWithMovers || Draws[i].m_bMover == P.m_bMover) && (!m_bShadowFaceCull || Page.Overlaps(Draws[i].m_World, false)); });
+            DrawCasters(Cmd, P.m_W2C, C, [&](std::uint32_t i) { return !(bSkinPages && IsSkin(i)) && (!m_bShadowSplitMovers || P.m_bWithMovers || Draws[i].m_bMover == P.m_bMover) && (!m_bShadowFaceCull || Page.Overlaps(Draws[i].m_World, false)); });
+        }
+        if( bSkinPages && !m_LocalPages.m_ToRender.empty() )        // (the skinned casters into all their local pages at once: one viewport over the local part)
+        {
+            Cmd.setViewport(float(LocalX), 0.0f, float(LocalW), float(LocalH));
+            Cmd.setScissor(LocalX, 0, LocalW, LocalH);
+            DrawSkinPages(Cmd, SkinLocal);
         }
         if( !m_LocalPages.m_ToRender.empty() && bPairs )      // the pairs' local runs: one viewport over the local part (each instance into its page)
         {

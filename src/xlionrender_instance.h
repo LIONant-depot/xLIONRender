@@ -807,6 +807,12 @@ namespace xlionrender
         std::array<xgpu::pipeline_instance, 3>  m_ShadowInstance;
         xgpu::pipeline                          m_ShadowPairsPipeline;      // RIGID clusters through the pairs' records (xlionrender_shadow_pairs_vert.glsl)
         xgpu::pipeline_instance                 m_ShadowPairsInstance;
+        xgpu::pipeline                          m_ShadowSkinPagesPipeline;  // SKIN movers into all their mover pages, a draw a cluster (xlionrender_shadow_skin_pages_vert.glsl)
+        xgpu::pipeline_instance                 m_ShadowSkinPagesInstance;
+        xgpu::buffer                            m_SkinPagesBuffer;          // (its pages: world -> clip, the atlas fold - a frame's region of the ring)
+        xgpu::buffer                            m_SkinPagesList;            // (its page lists: a skinned draw's pages, contiguous)
+        static constexpr int                    skin_pages_v      = 4096;   // pages a frame
+        static constexpr int                    skin_page_list_v  = 65536;  // list entries a frame
         std::unique_ptr<shadow_pairs>           m_pShadowPairs;             // null: not supported (drawIndirectCount)
         pairs_report                            m_PairsReport;
         xgpu::buffer                            m_ShadowUBO;
