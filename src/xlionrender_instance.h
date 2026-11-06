@@ -460,6 +460,13 @@ namespace xlionrender
         std::vector<tile_graph>     m_TileGraphs;
         xgpu::shader                m_TileVert;
         const tile_graph*           m_pBuildTile = nullptr;         // (buildMaterialPipeline: that pipeline)
+        xgpu::shader                m_NoiseLagsShader;              // XLION_NOISE_LAGS (xlionrender_noise_lags_comp.glsl): the noise by lag, at the real frame rate
+        xgpu::compute               m_NoiseLagsCompute;
+        xgpu::buffer                m_NoiseLagsRing;
+        std::vector<std::uint8_t>   m_NoiseLagsHist;
+        int                         m_NoiseLagsN = 0;
+        double                      m_NoiseLagsSum[7] = {}, m_NoiseLagsCnt[7] = {}, m_NoiseLagsOver[7][3] = {};
+        std::chrono::steady_clock::time_point m_NoiseLagsT0{}, m_NoiseLagsT1{};
         xgpu::shader                m_ContactShader;                // the sun's contact shadow (XLION_CONTACT; xlionrender_contact_comp.glsl)
         xgpu::compute               m_ContactCompute;
         xgpu::shader                m_GIDenoiseShader;              // the voxels' GI read cleaned on the screen (XLION_GI_DENOISE)

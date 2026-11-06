@@ -4490,6 +4490,51 @@ namespace xlionrender
             Cmd.WriteTimestamp(m_Timestamps, 3);
             if( pTS ) Cmd.WriteTimestamp(*pTS, 5);
         }
+        // XLION_NOISE_LAGS="<seconds to wait> <frames>" (measurement, Tomas 2026-11-06): the noise of the tone-mapped image by how far apart in time, at the
+        // real frame rate - every 4th pixel's luminance a frame into a CPU-readable ring (xlionrender_noise_lags_comp.glsl), compared on the CPU at lags
+        // 1 to 60 frames once the GPU is done with them; a NOISELAGS line when it ends
+        static const std::array<float, 2> s_NoiseLags = [] { std::array<float, 2> A{ 0.0f, 0.0f }; if( const char* p = std::getenv("XLION_NOISE_LAGS") ) (void)std::sscanf(p, "%f %f", &A[0], &A[1]); return A; }();
+        if( s_NoiseLags[1] > 0.0f )
+        {
+            static const auto s_T0 = std::chrono::steady_clock::now();
+            constexpr int lags_v[7] = { 1, 2, 4, 8, 15, 30, 60 }, hist_v = 61;
+            const int SubW = View.m_Width / 4, SubH = View.m_Height / 4, nSub = SubW * SubH, nWords = (nSub + 3) / 4, nFrames = int(s_NoiseLags[1]);
+            const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+            if( std::chrono::duration<float>(std::chrono::steady_clock::now() - s_T0).count() > s_NoiseLags[0] && m_NoiseLagsN < nFrames + int(ring_frames_v) )
+            {
+                if( !m_NoiseLagsRing.m_Private ) { (void)m_Device.Create(m_NoiseLagsRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = int(ring_frames_v) * nWords, .m_pName = "Debug: noise lags" }); m_NoiseLagsHist.assign(std::size_t(hist_v) * nSub, 0); }
+                if( m_NoiseLagsN >= int(ring_frames_v) )      // (this slot's frame, ring_frames_v ago, is done: its image in the history)
+                {
+                    const int f = m_NoiseLagsN - int(ring_frames_v);
+                    if( f == 0 ) m_NoiseLagsT0 = std::chrono::steady_clock::now();
+                    m_NoiseLagsT1 = std::chrono::steady_clock::now();
+                    std::uint8_t* pCur = m_NoiseLagsHist.data() + std::size_t(f % hist_v) * nSub;
+                    (void)m_NoiseLagsRing.MemoryMap(Slot * nWords, nWords, [&](void* p) { std::memcpy(pCur, p, std::size_t(nSub)); });
+                    for( int l = 0; l < 7; ++l )
+                    {
+                        if( f < lags_v[l] ) continue;
+                        const std::uint8_t* pOld = m_NoiseLagsHist.data() + std::size_t((f - lags_v[l]) % hist_v) * nSub;
+                        double S = 0.0, O2 = 0.0, O4 = 0.0, O8 = 0.0;
+                        for( int i = 0; i < nSub; ++i ) { const float d = float(int(pCur[i]) - int(pOld[i])), s = std::abs(d) * 0.70710678f; S += d * d * 0.5; O2 += s > 2.0f; O4 += s > 4.0f; O8 += s > 8.0f; }
+                        m_NoiseLagsSum[l] += S; m_NoiseLagsCnt[l] += nSub; m_NoiseLagsOver[l][0] += O2; m_NoiseLagsOver[l][1] += O4; m_NoiseLagsOver[l][2] += O8;
+                    }
+                }
+                if( m_NoiseLagsN < nFrames )
+                {
+                    const std::uint32_t Push[4] = { std::uint32_t(SubW), std::uint32_t(SubH), std::uint32_t(Slot * nWords), 0u };
+                    auto Buffers = std::array<xgpu::buffer*, 1>{ &m_NoiseLagsRing };
+                    auto Textures = std::array<const xgpu::texture*, 1>{ &View.m_Output };
+                    Window.Dispatch(m_NoiseLagsCompute, Buffers, Textures, Push, sizeof(Push), (nWords + 63) / 64, 1);
+                }
+                if( ++m_NoiseLagsN == nFrames + int(ring_frames_v) )
+                {
+                    const int nF = nFrames; const double Ms = nF > 1 ? std::chrono::duration<double, std::milli>(m_NoiseLagsT1 - m_NoiseLagsT0).count() / double(nF - 1) : 0.0;
+                    std::printf("NOISELAGS %d frames, %.2f ms apart, every 4th pixel: lag, ms, rms, over 2 %%, over 4 %%, over 8 %%\n", nF, Ms);
+                    for( int l = 0; l < 7; ++l ) if( m_NoiseLagsCnt[l] > 0.0 ) std::printf("NOISELAG %d %.0f ms: %.3f %.2f %.3f %.4f\n", lags_v[l], Ms * lags_v[l], std::sqrt(m_NoiseLagsSum[l] / m_NoiseLagsCnt[l]), 100.0 * m_NoiseLagsOver[l][0] / m_NoiseLagsCnt[l], 100.0 * m_NoiseLagsOver[l][1] / m_NoiseLagsCnt[l], 100.0 * m_NoiseLagsOver[l][2] / m_NoiseLagsCnt[l]);
+                    std::fflush(stdout);
+                }
+            }
+        }
 
         // Editor overlays over the tone-mapped image, depth-tested against the scene
         if( Overlay )
