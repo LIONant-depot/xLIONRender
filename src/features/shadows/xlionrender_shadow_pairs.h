@@ -50,15 +50,6 @@ namespace xlionrender
             const std::vector<std::uint32_t> Zeros(std::size_t(3) * max_records_v, 0u);     // (a device-local buffer is made from its first data)
             auto* pZeros = const_cast<std::uint32_t*>(Zeros.data());
             return Device.hasDrawIndirectCount()
-#if defined(__linux__)
-                // LION patch (WSL + Dozen only): Dozen advertises drawIndirectCount, but
-                // vkCmdDrawIndexedIndirectCount SIGSEGVs in libvulkan_dzn.so from
-                // instance::renderShadows DrawPairs (local and sun GPU pair runs).
-                // The CPU caster path (DrawCasters) is the existing fallback when pairs
-                // are unavailable. Native Linux and Windows use the standard GPU-pairs path.
-                // Remove when Dozen's indirect-count draws are safe.
-                && !Device.isDozenCompat()
-#endif
                 && !Device.Create(m_Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ reinterpret_cast<const std::int32_t*>(SPIRV.data()), SPIRV.size() } } })
                 && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 6, .m_PushConstantsSize = 32 })
                 && !Device.Create(m_Candidates, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(candidate), .m_EntryCount = ring_frames_v * max_candidates_v, .m_pName = "Shadows: pair candidates" })

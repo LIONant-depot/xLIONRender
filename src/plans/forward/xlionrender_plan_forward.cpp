@@ -1358,15 +1358,6 @@ namespace xlionrender
             if( LightKey != St.m_LightKey ) { if( St.m_LightKey != 0 ) St.m_bDirty = true; St.m_LightKey = LightKey; }
         }
 
-#if defined(__linux__)
-        // LION patch (WSL + Dozen only): probe cubemap capture calls renderScenePass
-        // into a cube face and SIGSEGVs in libvulkan_dzn.so at setPipelineInstance
-        // (address 0x8) from instance::updateProbes. Skip face captures; probes stay
-        // invalid and lighting uses the fallback. Native Linux and Windows capture
-        // as usual. Remove when Dozen can record renderScenePass into a cubemap face.
-        if( m_Device.isDozenCompat() ) return;
-#endif
-
         for( int Budget = std::max(m_ProbeFacesPerFrame, 1); Budget > 0; )
         {
             if( m_ProbeCapturing < 0 )
@@ -1892,15 +1883,6 @@ namespace xlionrender
         // light-space rect too (a caster's box - a Bistro section's - passed every page: the cutout clusters were 52M triangles a frame)
         const shadows::vsm::page_to_render* pSunPage = nullptr;
         bool bOpaqueCut = false;        // (the GI's sun map: masked submeshes drawn whole - the GI's rays block on them alike; their cutout's fragment cost 49 ms a map in Bistro)
-#if defined(__linux__)
-        // LION patch (WSL + Dozen only): DrawCasters binding a material texture table
-        // (vkCmdBindDescriptorSets set 3) on a cutout shadow pipeline SIGSEGVs in
-        // libvulkan_dzn.so from instance::renderShadows local-page DrawCasters
-        // (setTextureTable). Treat masked casters as opaque, same as the GI sun map
-        // (bOpaqueCut). Native Linux and Windows keep the cutout path.
-        // Remove when Dozen's set-3 binds in a depth-only shadow pass are safe.
-        if( m_Device.isDozenCompat() ) bOpaqueCut = true;
-#endif
         std::vector<std::vector<decltype(m_VSM.Bounds(xmath::fbbox{}))>> ClusterLight(Draws.size());     // (DrawCasters: a draw's clusters in light space, this frame)
         const auto DrawCasters = [&]( xgpu::cmd_buffer& Cmd, const xmath::fmat4& W2C, std::span<const std::uint32_t> Indices, const auto& Keep, int Lod = 0 )
         {
@@ -2156,19 +2138,6 @@ namespace xlionrender
     // the tail's parameters; anything missing: mode 2 (the inline sampled tail)
     void instance::renderTail( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept
     {
-#if defined(__linux__)
-        // LION patch (WSL + Dozen only): DrawGBuffer into the tail G-buffer
-        // (View.m_TailGPass) SIGSEGVs in libvulkan_dzn.so at setPipelineInstance
-        // (null) from instance::renderTail. Fall back to cell lighting, same as
-        // when createTailTargets fails. Native Linux and Windows use the tail.
-        // Remove when Dozen can record the tail G-buffer pass.
-        if( m_Device.isDozenCompat() )
-        {
-            Light.m_LocalCount.m_Y = float(int(light_mode::CELLS));
-            m_TailReport.m_bOn = false;
-            return;
-        }
-#endif
         if( createTailTargets(View) ) { Light.m_LocalCount.m_Y = float(int(light_mode::CELLS)); return; }      // (no targets: the split lists exactly)
         const bool bLights = m_LightModeUsed == light_mode::SCREEN;      // (else only the G-buffer, for the reflections)
         const int W = View.m_TailWidth, H = View.m_TailHeight;
