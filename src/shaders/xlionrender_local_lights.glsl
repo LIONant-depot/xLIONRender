@@ -188,6 +188,19 @@ float LocalBlocker(in const local_face F, in const vec3 Receiver, in const int l
     const ivec2 T  = ivec2(floor((clamp(UV, vec2(-1.0), vec2(1.0)) * 0.5 + 0.5) * float(NT) - 0.5)) - 1;
     float Sum = 0.0, n = 0.0;
     const local_fp P = LocalFootprint(F, l, clamp(T, ivec2(0), ivec2(NT - 1)), clamp(T + ivec2(3), ivec2(0), ivec2(NT - 1)));
+    if (P.bFast && all(greaterThanEqual(T, ivec2(0))) && all(lessThanEqual(T + 3, ivec2(NT - 1))))      // (one page, inside the face: 4 gathers)
+    {
+        const vec2 Inv = 1.0 / vec2(textureSize(SamplerShadowMap, 0));
+        for (int k = 0; k < 4; ++k)
+        {
+            const ivec2 At = T + ivec2(2 * (k & 1), 2 * (k >> 1));
+            vec4 G = textureGather(SamplerShadowMap, (vec2(P.S + At) + 1.0) * Inv);
+            if (P.bM) G = min(G, textureGather(SamplerShadowMap, (vec2(P.M + At) + 1.0) * Inv));
+            const bvec4 Near = lessThan(G, vec4(Ref));
+            Sum += dot(mix(vec4(0.0), F.B / (G - F.A), Near), vec4(1.0)); n += dot(vec4(Near), vec4(1.0));     // (bvec mix: a select - no 0 x inf)
+        }
+        return n > 0.0 ? Sum / n : -1.0;
+    }
     for (int y = 0; y < 4; ++y)
     for (int x = 0; x < 4; ++x)
     {
