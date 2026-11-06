@@ -3792,7 +3792,9 @@ namespace xlionrender
                         Blended.push_back({ pMat->m_State.m_SortPriority, ((B.m_Min + B.m_Max) * 0.5f - Eye).LengthSq(), std::uint32_t(iDraw), &Sub, pMat });
                         continue;
                     }
-                    if( !CulledOnGPU(iDraw, pMesh->m_Geom, Sub) && !TileMat(pMat) ) DrawSubmesh(iDraw, Sub, pMat);
+                    // (a skinned mesh is not in the G-buffer prepass - so not in the tile pass either, whatever its material: it shades here. It drew nothing and
+                    // showed as a flat silhouette in every level with characters, Bistro Game 2026-11-06)
+                    if( !CulledOnGPU(iDraw, pMesh->m_Geom, Sub) && (!TileMat(pMat) || pMesh->m_Geom.m_Kind == geom_kind::SKIN) ) DrawSubmesh(iDraw, Sub, pMat);
                 }
             }
 
