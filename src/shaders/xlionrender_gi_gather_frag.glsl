@@ -53,6 +53,7 @@ uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
 bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
 float g_ClipTrust = 0.0;       // (X1c: how much the last ClipLevel can be believed: its samples, how far from its edge)
+uint g_VoxBucket = 0u;      // (XLION_VOX_AO_BUCKET: the records' kind a read takes, 1: a contact's; the faces' keys + 64)
 vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 EyeL, in const float Cell0)
 {
     const float Cell = Cell0 * float(1 << L);
@@ -67,7 +68,7 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
     {
         const float wa = n[a] * n[a];
         if (wa < 0.02) continue;
-        const uint Face = uint(2 * a + (n[a] < 0.0 ? 1 : 0));
+        const uint Face = uint(2 * a + (n[a] < 0.0 ? 1 : 0)) + 64u * g_VoxBucket;
         vec3  Num = vec3(0.0);
         float Den = 0.0, Raw = 0.0;
         vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;     // (X1c: finer along the face's own axis)
@@ -317,11 +318,16 @@ void main()
         {
             const uint Rw = GITable[push.TableBase + 28u], Ri = uint(P.y) * Rw + uint(P.x);
             const vec3 Eyw = vec3(TF(25u), TF(26u), TF(27u));
+            const float Ah = push.AO != 0u ? GatherAO(P, W, H, Dist) : 1.0;
             GIRefSample[2u * Ri] = vec4(S.P + Eyw, 1.0);
-            GIRefSample[2u * Ri + 1u] = vec4(N, 0.0);
+            GIRefSample[2u * Ri + 1u] = vec4(N, Ah);      // (w: this reader's AO - XLION_VOX_AO_BUCKET sorts its rays' samples by it)
             GIRefSample[2u * W * H] = vec4(TF(22u), TF(23u), TF(24u), TF(21u));
             g_ClipFloat = true;
+            // (XLION_VOX_AO_BUCKET=<AO>, P1 #1 prototype: readers in a contact - their AO under it - read the records only such readers' rays fed, not the open floor's beside them; none yet: the shared ones)
+            const float BucketAO = uintBitsToFloat(GITable[push.TableBase + 34u]);
             E = VoxReadLevels(S.P, N);
+            const float Wc = BucketAO > 0.0 ? smoothstep(BucketAO + 0.05, BucketAO - 0.1, Ah) : 0.0;      // (a soft hand-over by the AO: a hard one speckled - the AO a pixel at a time)
+            if (Wc > 0.0) { g_VoxBucket = 1u; const float Tr = g_ClipTrust; const vec4 Ec = VoxReadLevels(S.P, N); g_VoxBucket = 0u; g_ClipTrust = Tr; if (Ec.w > 0.0) E.rgb = mix(E.rgb, Ec.rgb, Wc); }
             bWeak = E.w < 0.5;
             E.w = 1.0;
             if (GITable[push.TableBase + 29u] == 0u) { g_GIRefl = VoxReflect(S.P, N, E.rgb); if ((GITable[push.TableBase + 32u] & 8u) != 0u) g_GIRefl = VoxDirsRead(S.P, N, g_GIRefl, P); }

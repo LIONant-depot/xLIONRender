@@ -118,6 +118,7 @@ void VoxDirsAdd(in const vec3 Pw, in const vec3 N, in const float Cell0, in cons
     atomicAdd(GIRefAccumU[e].x, c.x); atomicAdd(GIRefAccumU[e].y, c.y); atomicAdd(GIRefAccumU[e].z, c.z); atomicAdd(GIRefAccumU[e].w, w16);
     GIRefAccumU[e + 2u].y = floatBitsToUint(Now);
 }
+uint g_VoxStoreKind = 0u;      // (XLION_VOX_AO_BUCKET: 1 a contact's records - the faces' keys + 64; the direction bins stay shared)
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
     VoxStoreDir(L, Org, g, N, Sample);
@@ -127,7 +128,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;
     const ivec3 i = ivec3(floor(gv)); const vec3 f = gv - vec3(i);
     const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
-    const uint  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+    const uint  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)) + 64u * g_VoxStoreKind), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     vec4 v = GIRefAccum[e], m = GIRefAccum[e + 1u];
     const vec4 d = GIRefAccum[e + 2u];
@@ -363,7 +364,7 @@ void VoxMain()
     // Of a few pixels, the one whose cell knows least: the rays go where they are needed - the cells a moving eye just brought in - and not, as the screen's area would have it, to the near floor
     vec3 P = vec3(0.0), N = vec3(0.0, 1.0, 0.0);
     int L = 0; ivec3 Org = ivec3(0); vec3 g = vec3(0.0);
-    float Least = 1e30;
+    float Least = 1e30, OriginAO = 1.0;
     const bool bCoh = (Push.m_First & 8) != 0;
     if (bCoh)
     {
@@ -382,9 +383,10 @@ void VoxMain()
         const int   Ax = abs(Nk.x) >= abs(Nk.y) && abs(Nk.x) >= abs(Nk.z) ? 0 : abs(Nk.y) >= abs(Nk.z) ? 1 : 2;
         vec3 gq = vec3(Ok) + gk; gq[Ax] *= vox_layers_v;
         const float n  = VoxFace(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))).w;
-        if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; }
+        if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; }
     }
     if (Least >= 1e30) return;
+    const float BucketAO = uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
     vec3 Ph, Nh; bool bHit;
     // (one copy of VoxRay: the shader's compiled size goes with its copies. The second ray: the surface the first hit, seen yet or not: a sample of that surface's own
     // indirect light; off screen surfaces are lit before the eye turns to them. A group in four, all its lanes: one lane firing it makes its whole group wait)
@@ -402,6 +404,7 @@ void VoxMain()
 #endif
         if (!any(isnan(Sample)) && all(lessThan(Sample, vec3(1e6))))
         {
+            g_VoxStoreKind = r == 0 && BucketAO > 0.0 && OriginAO < BucketAO ? 1u : 0u;
             VoxStore(L, Org, g, N, Sample);
             if ((Push.m_First & 2048) != 0) VoxDirsAdd(P, N, Hd.w, g_HasSeen ? g_SeenSample : Sample);
             int Lp; ivec3 Op; vec3 gp;

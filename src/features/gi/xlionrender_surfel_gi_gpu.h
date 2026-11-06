@@ -960,6 +960,8 @@ namespace xlionrender::gi
             if (s_bKept) Push.m_Bounces = -3;
             static const bool s_bFirstOnly = std::getenv("XLION_VOX_FIRST_ONLY") != nullptr;
             if (s_bFirstOnly) Push.m_First |= 2;
+            static const float s_BucketAO = [] { const char* p = std::getenv("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }();     // (P1 #1 prototype: a contact's rays feed their own records)
+            if (s_BucketAO > 0.0f) { std::uint32_t u; std::memcpy(&u, &s_BucketAO, 4); Push.m_First = int((std::uint32_t(Push.m_First) & 0xFFFFu) | (u & 0xFFFF0000u)); }
             static const bool s_bBinPdf = std::getenv("XLION_VOX_NO_BIN_PDF") == nullptr;      // (a bin's mean over its directions: xlionrender_gi_ref.glsl VoxStoreDir)
             if (s_bBinPdf) Push.m_First |= 4;
             static const int s_DirsBits = [] { float L = -1.0f, K = 8.0f; if( const char* p = std::getenv("XLION_VOX_DIRS") ) std::sscanf(p, "%f,%f", &L, &K); return L < 0.0f ? 0 : 2048 | (int(L) & 3) << 12 | (K > 8.5f ? 16384 : 0); }();      // (a prototype: xlionrender_gi_ref.glsl VoxDirsAdd)

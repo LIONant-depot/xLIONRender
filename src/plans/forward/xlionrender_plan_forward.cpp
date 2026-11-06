@@ -2921,6 +2921,7 @@ namespace xlionrender
                     static const bool s_bBinPdf = std::getenv("XLION_VOX_NO_BIN_PDF") == nullptr;
                     m_GatherTable[31] = s_bBinPdf ? 1u : 0u;
                     {   // (XLION_VOX_DIRS=<level>,<k>[,<roughness>]: a prototype, the reflections' light in a coarse level by k x k directions: words 32, 33, xlionrender_gi_gather_frag.glsl VoxDirsRead. The read knows one roughness, XLION_REFL_GRADE's)
+                    { static const float s_BucketAO = [] { const char* p = std::getenv("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }(); std::memcpy(&m_GatherTable[34], &s_BucketAO, 4); }      // (XLION_VOX_AO_BUCKET: the gather's read)
                         static const std::array<float, 3> s_Dirs = [] { std::array<float, 3> D{ -1.0f, 8.0f, 0.3f }; if( const char* p = std::getenv("XLION_VOX_DIRS") ) std::sscanf(p, "%f,%f,%f", &D[0], &D[1], &D[2]); if( const char* g = std::getenv("XLION_REFL_GRADE"); g && !std::getenv("XLION_VOX_DIRS_BAND") ) D[2] = float(std::atof(g)); return D; }();      /* (XLION_VOX_DIRS_BAND: the read's roughness stays the third number, whatever is graded) */
                         static const bool s_bDirsFixed = std::getenv("XLION_VOX_DIRS_FIXED") != nullptr;
                         static const bool s_bDirsInTrace = std::getenv("XLION_VOX_DIRS_TRACE") != nullptr;      /* (the read in the reflections' pass instead: refl_trace_comp) */
