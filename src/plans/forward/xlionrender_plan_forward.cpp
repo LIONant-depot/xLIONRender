@@ -513,10 +513,14 @@ namespace xlionrender
                 if( GIFrame % 600 == 0 ) { const auto C = W.FilterCounts(); std::printf("GIFILTER %zu surfels, %zu neighbor links (%.1f a surfel): a pass reads ~%.0f MB\n", C[0], C[1], double(C[1]) / double(std::max<std::size_t>(C[0], 1)), double(C[1]) * (36 + 12) / 1048576.0 + double(C[0]) * 72 / 1048576.0); std::fflush(stdout); }
             }
             // The probe grid (skinned meshes' GI): 32 x 16 x 32 probes a meter apart around the eye, 1024 updated a frame
-            static const bool s_bNoProbes = xlionrender::Env("XLION_GI_NO_PROBES") != nullptr;     // (measurement: A/B)
+            static const bool s_bNoProbes = [] { const char* p = xlionrender::Env("XLION_GI_NO_PROBES"); return p != nullptr && p[0] != '0'; }();     // (the editor's default 1 with the voxel GI; 0: the grid on - the skinned meshes' GI)
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 4);
+            static int s_ProbeRuns = 0, s_ProbeSkips = 0;      // (XLION_GPU_TIMES, measurement: whether the grid updates - it waits while the GI relights)
+            if( xlionrender::Env("XLION_GPU_TIMES") && GIFrame % 600 == 0 ) std::printf("GIPROBES %p the last 600 frames: updated %d, skipped while relighting %d (on %d, GI %d, probes setting %d, no-probes switch %d)\n", (const void*)this, s_ProbeRuns, s_ProbeSkips, int(Scene.m_GI.m_bProbes && !s_bNoProbes), int(Scene.m_GI.m_bEnable), int(Scene.m_GI.m_bProbes), int(s_bNoProbes)), std::fflush(stdout), s_ProbeRuns = s_ProbeSkips = 0;
+            if( Scene.m_GI.m_bProbes && !s_bNoProbes && !s_bNoSurfels && m_pGITrace->isRelighting() ) ++s_ProbeSkips;
             if( Scene.m_GI.m_bProbes && !s_bNoProbes && (s_bNoSurfels || !m_pGITrace->isRelighting()) )
             {
+                ++s_ProbeRuns;
                 XPROFILE_SCOPE("GI: probes");
                 // the grid's readers: the drawn meshes without surfels of their own (skinned, moving) - their probes every frame, the rest
                 // 64 a frame (a full pass ~4 s)
