@@ -4,7 +4,7 @@
 //      UVs and indices, cluster SSBO) and decoded by GeomStaticBasicShader_vert.glsl,
 // must give the same HDR image up to quantization. The test does the quantization itself (mirroring the decode in
 // shaders/xgeom_static_mb_input_full.vert) so it needs no compiled resources.
-#include "xlionrender_env.h"
+#include "../xlionrender_env.h"
 #include "xlionrender_test_common.h"
 
 using namespace xlionrender::test;

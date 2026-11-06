@@ -12,7 +12,7 @@
 // surfel on the CPU. Before each slice the world's changes go up: its estimator changes as ops (world::TakeGPUOps, _ops_comp), the
 // links' emitted light that changed, the means, the setup and the lights (_scatter_comp). The shown light is made on the GPU (Show,
 // _filter_comp), straight into the renderer's ring. ReadBack fills the world's arrays from the GPU's light (its tests, its dump)
-#include "xlionrender_env.h"
+#include "../../xlionrender_env.h"
 #include "xlionrender_surfel_gi.h"
 #include <chrono>
 #include <span>

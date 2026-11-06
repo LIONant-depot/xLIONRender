@@ -7,7 +7,7 @@
 //   - B12 boundaries: against the GI's rays on the same triangles, pixels whose filter crosses a page border disagree no more than the rest
 //   - B11 overflow: a small pool - rejections, pixels shaded by a coarser level, none by no level (resolution lost, no hole)
 //   - B7 teleport: the recovery per frame (pixels by their own level / a coarser one / none) after a jump to unvisited ground
-#include "xlionrender_env.h"
+#include "../xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #include "features/shadows/xlionrender_shadow_vsm.h"
 #include "features/gi/xlionrender_surfel_gi.h"

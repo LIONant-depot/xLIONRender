@@ -2,7 +2,7 @@
 //  - CPU: boxes in front, behind, beside, straddling and beyond far, against a camera's frustum
 //  - GPU: a field of spheres around the camera: the culled image equals the image with culling off, with fewer draws
 //  - GPU cluster culling (features/cull): the field as cluster meshes, culled on the GPU: the CPU path's image
-#include "xlionrender_env.h"
+#include "../xlionrender_env.h"
 #include "xlionrender_test_common.h"
 
 using namespace xlionrender::test;

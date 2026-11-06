@@ -6,7 +6,7 @@
 //  - GI adds light (the bounces) and nothing breaks (no validation errors)
 //  - a moved box re-lights (the world follows the draws) and a removed draw leaves the world
 //  - the per-pixel read: matches the vertex read on dense meshes, and on sparse ones (2 triangles a face) stays near the dense image
-#include "xlionrender_env.h"
+#include "../xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../../stb/stb_image_write.h"

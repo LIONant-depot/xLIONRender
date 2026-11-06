@@ -3,7 +3,7 @@
 // re-levelled when the scene is packed again) must hold, read back, the light of the same world on the CPU, update for update: the
 // Cornell box (a point light; an emissive panel through its links; events), the GI render test's room, and its shown light against the
 // CPU's filter. The CPU's main-thread time per update in GPU mode is printed
-#include "xlionrender_env.h"
+#include "../xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #include "features/gi/xlionrender_surfel_gi_gpu.h"
 #include "features/gi/xlionrender_surfel_gi_chunks.h"

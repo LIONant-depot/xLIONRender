@@ -4,7 +4,7 @@
 // slots (copies of other chunks' surfels within reach of its surface: the reads near a border blend across it), all with chunk-local
 // 16-bit indices; its read grid, neighbours and origins are built on that chunk with the whole geometry's visibility. Every surfel has
 // exactly one owner; ghosts are never traced, never emit, never count as coverage. Equal levels only (mixed levels are gated: plan v3).
-#include "xlionrender_env.h"
+#include "../../xlionrender_env.h"
 #include "xlionrender_surfel_gi.h"
 #include <algorithm>
 #include <chrono>

@@ -23,7 +23,7 @@
 // world cells' lists when lights are many), one albedo per instance, no coarse-to-fine solve yet (experiment 1: 3x faster
 // convergence after a change - next).
 
-#include "xlionrender_env.h"
+#include "../../xlionrender_env.h"
 #include "dependencies/xmath/source/xmath.h"
 #include "dependencies/xscheduler/source/xscheduler.h"
 #include "xlionrender_world_sdf_bake.h"

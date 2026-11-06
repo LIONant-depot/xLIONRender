@@ -9,7 +9,7 @@
 //  - released: no override material left
 //  - one state: 64 draws on 64 override materials of one pipeline bind it once (they share it; only the texture table is theirs)
 //  - many: 9000 override materials, more blocks than a frame's ring region (their copies spread over two frames): the last one draws its value
-#include "xlionrender_env.h"
+#include "../xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #include "scene/xlionrender_material_overrides.h"
 

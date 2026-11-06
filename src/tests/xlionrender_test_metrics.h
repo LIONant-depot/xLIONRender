@@ -6,7 +6,7 @@
 // SelfTestMetrics() checks each on synthetic images (a test calls it before trusting the numbers)
 #ifndef XLIONRENDER_TEST_METRICS_H
 #define XLIONRENDER_TEST_METRICS_H
-#include "xlionrender_env.h"
+#include "../xlionrender_env.h"
 #include <vector>
 #include <span>
 #include <cmath>

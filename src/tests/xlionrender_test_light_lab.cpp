@@ -5,7 +5,7 @@
 //  - few lights per cell (all in the head): SAMPLED == CELLS
 //  - dense overlap: SAMPLED averaged over frames converges to EXACT (unbiased), and is noisy per frame (it does sample)
 //  - prints, per mode: GPU scene time and the CPU cell build
-#include "xlionrender_env.h"
+#include "../xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #include <bit>
 #include <random>

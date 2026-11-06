@@ -1,5 +1,5 @@
 // Plan A - forward. instance::Render lives here so each plan is one file to read.
-#include "xlionrender_env.h"
+#include "../../xlionrender_env.h"
 #include "xlionrender_instance.h"
 #include "plans/forward/xlionrender_plan_forward.h"
 // The profiler (xprofile / Tracy): the frame's passes as CPU and GPU zones - in LIONRender.dll; the tests are built without it
