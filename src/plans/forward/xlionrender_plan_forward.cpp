@@ -4424,6 +4424,7 @@ namespace xlionrender
         // read it. (A skin's mesh is its entity's own: setting it here touches no other draw)
         {
             static const float s_LODPixels = [] { const char* p = xlionrender::Env("XLION_LOD_PIXELS"); return p ? float(std::atof(p)) : 1.0f; }();
+            static const int   s_SkinLOD   = [] { const char* p = xlionrender::Env("XLION_SKIN_LOD"); return p ? std::atoi(p) : -1; }();     // (to see them: every skin at LOD k)
             m_SkinLODReport = {};
             for( const auto& D : Scene.m_Draws )
             {
@@ -4437,9 +4438,19 @@ namespace xlionrender
                 const int   Finest = std::max(G.m_FinestLOD, G.m_DrawnLOD), nLODs = int(G.m_LODSubmeshes.size());
                 for( std::size_t s = 0; s < G.m_Submeshes.size() && s < G.m_LODSubmeshes[0].size(); ++s )
                 {
-                    const int Lod = std::clamp(std::max(Finest, s_LODPixels > 0 ? G.PickLOD(s, Dist, Scale, ProjScale, s_LODPixels) : 0), 0, nLODs - 1);
+                    const int Lod = std::clamp(std::max(Finest, s_SkinLOD >= 0 ? s_SkinLOD : s_LODPixels > 0 ? G.PickLOD(s, Dist, Scale, ProjScale, s_LODPixels) : 0), 0, nLODs - 1);
                     G.m_Submeshes[s] = G.m_LODSubmeshes[std::size_t(Lod)][s];
                     ++m_SkinLODReport.m_nSubmeshes[std::size_t(std::min(Lod, 3))];
+                }
+                // (XLION_SKIN_LOD_LOG, measurement: each skinned draw's distance and its first submesh's LOD, every 120 frames)
+                static const bool s_bSkinLODLog = xlionrender::Env("XLION_SKIN_LOD_LOG") != nullptr;
+                if( s_bSkinLODLog && m_Device.getFrameIndex() % 120 == 0 && !G.m_Submeshes.empty() )
+                {
+                    int Lod0 = 0;
+                    for( int k = 0; k < nLODs; ++k ) if( G.m_LODSubmeshes[std::size_t(k)][0].m_iCluster == G.m_Submeshes[0].m_iCluster ) Lod0 = k;
+                    std::printf("SKINLOD entity %016llX: %.2f m, scale %.3f, LOD %d of %d (LOD 1 error %g)\n", (unsigned long long)D.m_UserID, Dist, Scale, Lod0, nLODs
+                               , G.m_LODErrors.size() > 1 && !G.m_LODErrors[1].empty() ? G.m_LODErrors[1][0] : 0.0f);
+                    std::fflush(stdout);
                 }
             }
         }
