@@ -31,6 +31,7 @@ namespace xlionrender
         bool        m_bNoGPUCull      = false;
         bool        m_bNoGPUOcclusion = false;
         bool        m_bFreezeCull     = false;
+        bool        m_bPathTraced     = false;  // the GI's indirect light from the brute path tracer: the ground truth lit_grade grades a Level against (version 13)
         bool operator==(const view_options&) const noexcept = default;
     };
 

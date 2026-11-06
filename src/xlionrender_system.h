@@ -298,6 +298,7 @@ namespace xlionrender
                 if (m_ViewOptions.m_bNoGI)        G.m_bEnable   = false;
                 if (m_ViewOptions.m_bNoPerPixel)  G.m_bPerPixel = false;
                 if (m_ViewOptions.m_bNoMoments)   G.m_bMoments  = false;
+                if (m_ViewOptions.m_bPathTraced)  G.m_bPathTraced = true;
                 if (m_ViewOptions.m_GITraceAllowanceMs >= 0) G.m_TraceAllowanceMs = m_ViewOptions.m_GITraceAllowanceMs;
             }
             R.m_Renderer.m_bBoxesOnly    = m_ViewOptions.m_bBoxesOnly;         // huge meshes: their boxes, or the clusters a frame budget allows
