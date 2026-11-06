@@ -2,6 +2,7 @@
 //  - CPU: boxes in front, behind, beside, straddling and beyond far, against a camera's frustum
 //  - GPU: a field of spheres around the camera: the culled image equals the image with culling off, with fewer draws
 //  - GPU cluster culling (features/cull): the field as cluster meshes, culled on the GPU: the CPU path's image
+#include "xlionrender_env.h"
 #include "xlionrender_test_common.h"
 
 using namespace xlionrender::test;
@@ -106,8 +107,8 @@ int main()
         CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, GPU), "Render GPU culled");
         const auto Stats = Renderer.getCullStats();
         std::printf("GPU cull: %d candidates, %d runs\n", Stats.m_nCandidates, Stats.m_nRuns);
-        if (Device.hasDrawIndirectCount() && std::getenv("XLION_NO_GPU_CULL") == nullptr)
-            CHECK(Stats.m_nCandidates == int(Scene.m_Draws.size()) && Stats.m_nRuns == (std::getenv("XLION_NO_PREPASS") ? 1 : 2), "Every cluster a candidate (%d), one run and its prepass run (%d)", Stats.m_nCandidates, Stats.m_nRuns);
+        if (Device.hasDrawIndirectCount() && xlionrender::Env("XLION_NO_GPU_CULL") == nullptr)
+            CHECK(Stats.m_nCandidates == int(Scene.m_Draws.size()) && Stats.m_nRuns == (xlionrender::Env("XLION_NO_PREPASS") ? 1 : 2), "Every cluster a candidate (%d), one run and its prepass run (%d)", Stats.m_nCandidates, Stats.m_nRuns);
         int nCovered = 0, nDiff = 0;
         for (std::size_t i = 0; i < CPU.size(); ++i)
         {
@@ -126,12 +127,12 @@ int main()
         for (int k = 0; k < 4; ++k) CHECK(App.RenderFrame(Scene, View, Camera), "Render GPU culled %d", k);
         const auto Kept = Renderer.getCullStats();
         std::printf("GPU cull kept %d of %d (prepass %d); the CPU's draw test %d\n", Kept.m_nDrawn, Kept.m_nCandidates, Kept.m_nPrepassDrawn, nCulled);
-        if (Device.hasDrawIndirectCount() && std::getenv("XLION_NO_GPU_CULL") == nullptr)
-            CHECK(Kept.m_nDrawn > 0 && Kept.m_nDrawn <= nCulled && Kept.m_nPrepassDrawn == (std::getenv("XLION_NO_PREPASS") ? 0 : Kept.m_nDrawn), "The GPU kept %d (prepass %d), the CPU's draw test %d", Kept.m_nDrawn, Kept.m_nPrepassDrawn, nCulled);
+        if (Device.hasDrawIndirectCount() && xlionrender::Env("XLION_NO_GPU_CULL") == nullptr)
+            CHECK(Kept.m_nDrawn > 0 && Kept.m_nDrawn <= nCulled && Kept.m_nPrepassDrawn == (xlionrender::Env("XLION_NO_PREPASS") ? 0 : Kept.m_nDrawn), "The GPU kept %d (prepass %d), the CPU's draw test %d", Kept.m_nDrawn, Kept.m_nPrepassDrawn, nCulled);
 
         // Occlusion, two passes: a big sphere in front hides most of the field. The camera moves each frame (what was hidden comes out
         // from behind it): every frame's image equals the CPU path's - nothing appears a frame late - and the hidden spheres are not drawn
-        if (Device.hasDrawIndirectCount() && std::getenv("XLION_NO_GPU_CULL") == nullptr)
+        if (Device.hasDrawIndirectCount() && xlionrender::Env("XLION_NO_GPU_CULL") == nullptr)
         {
             auto Occluded = Scene;
             Occluded.m_Draws.push_back({ .m_Mesh = Clusters, .m_L2W = xmath::fmat4::fromTranslation({ 1.2f, 0.4f, 4.0f }) * xmath::fmat4::fromScale({ 5, 5, 5 }), .m_Materials = { Material } });
@@ -162,7 +163,7 @@ int main()
             const auto Frus = Renderer.getCullStats();
             Renderer.m_bGPUOcclusion = true;
             std::printf("occlusion: %d drawn (pass 2: %d), the frustum only %d; every moving frame exact (worst %d texels)\n", Occl.m_nDrawn, Occl.m_nDrawnPass2, Frus.m_nDrawn, nWorst);
-            if (std::getenv("XLION_NO_GPU_OCCLUSION") == nullptr)
+            if (xlionrender::Env("XLION_NO_GPU_OCCLUSION") == nullptr)
                 CHECK(Occl.m_nDrawn > 0 && Occl.m_nDrawn < Frus.m_nDrawn, "Occlusion drew %d clusters, the frustum only %d", Occl.m_nDrawn, Frus.m_nDrawn);
             CHECK(Occl.m_nDrawnPass2 == 0, "A still camera: pass 1 draws everything visible (%d in pass 2)", Occl.m_nDrawnPass2);
             CHECK(Occl.m_nTriangles == std::int64_t(Occl.m_nDrawn) * (Buffers.m_nIndices / 3), "Triangles shaded %lld, %d clusters of %u", (long long)Occl.m_nTriangles, Occl.m_nDrawn, Buffers.m_nIndices / 3);
@@ -198,7 +199,7 @@ int main()
 
             // Adaptive occlusion: looking down at the open field (it hides nothing) it is skipped after a while - the same picture; a camera
             // cut tries it again at once
-            if (std::getenv("XLION_NO_GPU_OCCLUSION") == nullptr)
+            if (xlionrender::Env("XLION_NO_GPU_OCCLUSION") == nullptr)
             {
                 Camera.LookAt(xmath::fvec3{ 0, 30, 0.1f }, xmath::fvec3{ 0, 0, 0 });
                 bool bSkipped = false;

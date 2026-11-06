@@ -7,6 +7,7 @@
 //   - B12 boundaries: against the GI's rays on the same triangles, pixels whose filter crosses a page border disagree no more than the rest
 //   - B11 overflow: a small pool - rejections, pixels shaded by a coarser level, none by no level (resolution lost, no hole)
 //   - B7 teleport: the recovery per frame (pixels by their own level / a coarser one / none) after a jump to unvisited ground
+#include "xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #include "features/shadows/xlionrender_shadow_vsm.h"
 #include "features/gi/xlionrender_surfel_gi.h"
@@ -289,7 +290,7 @@ int main()
 
     // Unshadowed, then the pages settled (a budget for everything, as the full redraw below needs)
     std::vector<float> Unlit, Lit;
-    const float Bias = std::getenv("XLION_VSM_TEST_BIAS") ? float(std::atof(std::getenv("XLION_VSM_TEST_BIAS"))) : vsm::setup{}.m_ResolutionBias;
+    const float Bias = xlionrender::Env("XLION_VSM_TEST_BIAS") ? float(std::atof(xlionrender::Env("XLION_VSM_TEST_BIAS"))) : vsm::setup{}.m_ResolutionBias;
     Renderer.configureVSM({ .m_PoolTexels = 8192, .m_PoolHeight = 4096, .m_Budget = 100000, .m_ResolutionBias = Bias });     // (the renderer's pool)
     Scene.m_Sun.m_bCastShadows = false;
     CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, Unlit), "render unshadowed");
@@ -400,7 +401,7 @@ int main()
         int nInDarkV = 0, nInLeakV = 0;                         // away from the edges: shadowed where the rays see the sun (acne), lit where they do not (leaks)
         int nVisDarkV = 0, nVisLeakV = 0;                       // of them, those with a tenth of the view's strongest sunlight at least (a terminator pixel,
         const float Visible = 0.1f * *std::max_element(Unlit.begin(), Unlit.end());   //  N.L near 0, is black whatever its shadow)
-        std::vector<std::uint8_t> Dump(std::getenv("XLION_VSM_TEST_DUMP") ? std::size_t(S) * S * 3 : 0, 0);    // (where the pages disagree: acne red, leaks blue)
+        std::vector<std::uint8_t> Dump(xlionrender::Env("XLION_VSM_TEST_DUMP") ? std::size_t(S) * S * 3 : 0, 0);    // (where the pages disagree: acne red, leaks blue)
         for (int y = 1; y < S - 1; ++y) for (int x = 1; x < S - 1; ++x)
         {
             const std::size_t i = std::size_t(y) * S + x;
@@ -435,7 +436,7 @@ int main()
             nUnderV += rV < 0;
         }
         if (!Dump.empty())
-            if (FILE* f = std::fopen((std::string(pName).substr(0, std::string(pName).find(' ')) + "_disagree.ppm").c_str(), "wb")) { std::fprintf(f, "P6 %d %d 255\n", S, S); std::fwrite(Dump.data(), 1, Dump.size(), f); std::fclose(f); }
+            if (FILE* f = xlionrender::Open((std::string(pName).substr(0, std::string(pName).find(' ')) + "_disagree.ppm").c_str(), "wb")) { std::fprintf(f, "P6 %d %d 255\n", S, S); std::fwrite(Dump.data(), 1, Dump.size(), f); std::fclose(f); }
         std::printf("%s: against the rays: pages disagree on %.2f%% of %d lit pixels (%.2f%% of %d at shadow edges), the clipmap had %.2f%% (%.2f%% at edges)\n"
                    , pName, Pct(nDisV, nPix), nPix, Pct(nEdgeV, nEdge), nEdge, Ref.m_Dis, Ref.m_Edge);
         std::printf("%s: texel against pixel: pages %.1f%% within [pixel/2, pixel], %.1f%% larger than the pixel; the clipmap had %.1f%% larger\n"

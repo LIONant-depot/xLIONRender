@@ -3,6 +3,7 @@
 // re-levelled when the scene is packed again) must hold, read back, the light of the same world on the CPU, update for update: the
 // Cornell box (a point light; an emissive panel through its links; events), the GI render test's room, and its shown light against the
 // CPU's filter. The CPU's main-thread time per update in GPU mode is printed
+#include "xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #include "features/gi/xlionrender_surfel_gi_gpu.h"
 #include "features/gi/xlionrender_surfel_gi_chunks.h"
@@ -598,7 +599,7 @@ int main()
             W.Update(L, v3{ 0, 1.6f, -1.9f }, 1 << 30, 100 + u);
             T.Submit(App.m_Window, W, L, Frame, 1000.0f, v3{ 0, 1.6f, -1.9f });
             T.PumpLinks(App.m_Window, W, L, Frame, 64, 4, 1 << 20);     // (links after 4 frames, all at once)
-            if (std::getenv("XLION_TEST_DEBUG")) std::printf("u %d state %d solves %zu\n", u, T.LinkState(), T.LinkSolves());
+            if (xlionrender::Env("XLION_TEST_DEBUG")) std::printf("u %d state %d solves %zu\n", u, T.LinkState(), T.LinkSolves());
             { auto Cmd = App.m_Window.getCmdBuffer(); }
             App.m_Window.PageFlip();
         }

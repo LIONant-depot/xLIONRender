@@ -5,6 +5,7 @@
 //  - few lights per cell (all in the head): SAMPLED == CELLS
 //  - dense overlap: SAMPLED averaged over frames converges to EXACT (unbiased), and is noisy per frame (it does sample)
 //  - prints, per mode: GPU scene time and the CPU cell build
+#include "xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #include <bit>
 #include <random>
@@ -525,7 +526,7 @@ int main()
 
     // Benchmark (XLIONRENDER_LAB_BENCH=1; build Release): 1280x720, 256 / 1024 / 4096 lights over a wider area, each mode: GPU
     // scene time (mean of 16 frames), CPU cell build, cell data size, the mode actually used (a full cell buffer falls back)
-    if (std::getenv("XLIONRENDER_LAB_BENCH"))
+    if (xlionrender::Env("XLIONRENDER_LAB_BENCH"))
     {
         xlionrender::render_view Big;
         CHECK(!Renderer.CreateView(Big, { .m_Width = 1280, .m_Height = 720 }), "CreateView 1280x720");

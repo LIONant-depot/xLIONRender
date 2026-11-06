@@ -4,6 +4,7 @@
 //      UVs and indices, cluster SSBO) and decoded by GeomStaticBasicShader_vert.glsl,
 // must give the same HDR image up to quantization. The test does the quantization itself (mirroring the decode in
 // shaders/xgeom_static_mb_input_full.vert) so it needs no compiled resources.
+#include "xlionrender_env.h"
 #include "xlionrender_test_common.h"
 
 using namespace xlionrender::test;
@@ -174,7 +175,7 @@ int main()
             for (float v : M) if (v != 0) { CHECK(std::abs(v - Expected) < 0.01f, "Shared material %d: texel %f, expected %f", i, v, Expected); ++n; }
             CHECK(n == nCovered, "Shared material %d covered %d texels, the standard path %d", i, n, nCovered);
         }
-        const int nCull = std::getenv("XLION_NO_GPU_CULL") || !Device.hasDrawIndirectCount() ? 0 : 1;      // (GPU culling: the records path's pipeline as well)
+        const int nCull = xlionrender::Env("XLION_NO_GPU_CULL") || !Device.hasDrawIndirectCount() ? 0 : 1;      // (GPU culling: the records path's pipeline as well)
         CHECK(Renderer.getPipelineCount() == Before + 1 + nCull, "Drawing them made %d pipelines, expected %d", Renderer.getPipelineCount() - Before, 1 + nCull);
 
         xlionrender::material_id Other;
@@ -244,7 +245,7 @@ int main()
         CHECK(!Renderer.SetMaterialTexture(A, 0, T[2]), "SetMaterialTexture");
         CHECK(Expect(A, Red(2), "table A swapped"), "The swapped texture is drawn (%.3f)", Red(2));
         CHECK(Expect(B, Red(1), "table B again"), "The other material keeps its own");
-        const int nCull = std::getenv("XLION_NO_GPU_CULL") || !Device.hasDrawIndirectCount() ? 0 : 1;      // (drawn: the records path's pipeline as well)
+        const int nCull = xlionrender::Env("XLION_NO_GPU_CULL") || !Device.hasDrawIndirectCount() ? 0 : 1;      // (drawn: the records path's pipeline as well)
         CHECK(Renderer.getPipelineCount() == Before + 1 + nCull, "A texture swap made no pipeline");
 
         Renderer.DestroyMaterial(A);

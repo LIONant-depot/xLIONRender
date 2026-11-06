@@ -6,6 +6,7 @@
 //  - GI adds light (the bounces) and nothing breaks (no validation errors)
 //  - a moved box re-lights (the world follows the draws) and a removed draw leaves the world
 //  - the per-pixel read: matches the vertex read on dense meshes, and on sparse ones (2 triangles a face) stays near the dense image
+#include "xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../../stb/stb_image_write.h"
@@ -28,7 +29,7 @@ namespace
     // XLIONRENDER_TEST_DUMP=<folder>: <folder>/<Name>.png (x / (1 + x), gamma 2.2)
     void DumpRGB(const char* pName, const std::vector<std::array<float, 3>>& Img, int W, int H)
     {
-        const char* pDir = std::getenv("XLIONRENDER_TEST_DUMP");
+        const char* pDir = xlionrender::Env("XLIONRENDER_TEST_DUMP");
         if (pDir == nullptr) return;
         std::vector<unsigned char> Bytes(Img.size() * 3);
         for (std::size_t i = 0; i < Img.size(); ++i)

@@ -9,6 +9,7 @@
 //  - released: no override material left
 //  - one state: 64 draws on 64 override materials of one pipeline bind it once (they share it; only the texture table is theirs)
 //  - many: 9000 override materials, more blocks than a frame's ring region (their copies spread over two frames): the last one draws its value
+#include "xlionrender_env.h"
 #include "xlionrender_test_common.h"
 #include "scene/xlionrender_material_overrides.h"
 
@@ -98,7 +99,7 @@ int main()
     // Texture swap: slot 1's texture overridden, in place
     auto PA4 = std::array{ Over(100, 0), Over(101, 1), xlionrender::param_override{ .m_ID = 201, .m_pTexture = &T[2], .m_TextureKey = 3 } };
     const auto IdA4 = Overrides.Acquire(Renderer, Source, PA4, A);
-    const int nCull = std::getenv("XLION_NO_GPU_CULL") || !Device.hasDrawIndirectCount() ? 0 : 1;      // (drawn: the records path's pipeline as well - GPU culling)
+    const int nCull = xlionrender::Env("XLION_NO_GPU_CULL") || !Device.hasDrawIndirectCount() ? 0 : 1;      // (drawn: the records path's pipeline as well - GPU culling)
     CHECK(IdA4 == IdA2 && Overrides.m_nInPlace == 2 && Renderer.getPipelineCount() == Pipelines0 + 1 + nCull, "Texture swap in place, no pipeline made");
     CHECK(Expect(IdA4, 3 * Red(2), "texture swap") && Expect(IdB, 3 * Red(1), "texture swap: B"), "A draws the swapped texture, B its own");
 

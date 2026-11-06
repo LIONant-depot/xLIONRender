@@ -1,3 +1,4 @@
+#include "xlionrender_env.h"
 #include "xlionrender_instance.h"
 #include "plans/forward/xlionrender_plan_forward.h"
 #include <cstring>
@@ -408,12 +409,12 @@ namespace xlionrender
         {
             const std::uint32_t Zero = 0u;
             const auto          Mips = std::array{ xgpu::texture::setup::mip_size{ sizeof(Zero) } };
-            if( const char* pContact = std::getenv("XLION_CONTACT"); pContact && std::atof(pContact) > 0.0 )      // (before anything binds LitBindings)
+            if( const char* pContact = xlionrender::Env("XLION_CONTACT"); pContact && std::atof(pContact) > 0.0 )      // (before anything binds LitBindings)
                 if( auto Err = Device.Create(m_ContactTex, { .m_Format = xgpu::texture::format::R32_SFLOAT, .m_Width = sun_mask_w_v, .m_Height = sun_mask_h_v, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: contact shadow" }); Err ) return Err;
             if( auto Err = Device.Create(m_SunMaskDummy, { .m_Format = xgpu::texture::format::R32_UINT, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
                                                          , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Zero), sizeof(Zero) }, .m_isGamma = false, .m_pName = "Shadows: sun mask dummy" }); Err ) return Err;
         }
-        if( const char* p = std::getenv("XLION_SUN_MASK") ) m_SunMaskMode = std::atoi(p);
+        if( const char* p = xlionrender::Env("XLION_SUN_MASK") ) m_SunMaskMode = std::atoi(p);
         if( m_SunMaskMode > 0 && Setup.m_bSunMask )
         {
             // (cleared by m_SunMaskClear before the first render's draws: every lit pipeline binds it, any draw may sample it)
@@ -650,7 +651,7 @@ namespace xlionrender
                 }
                 {   // the G-buffer prepass (gi_gbuffer_gather_plan.md): the prepass's vertex shaders, the normal and the submesh instance written
                     xgpu::shader GPreFrag;
-                    if( const char* pTile = std::getenv("XLION_TILE"); pTile && pTile[0] != '0' )      // (the tile pass: the attributes too)
+                    if( const char* pTile = xlionrender::Env("XLION_TILE"); pTile && pTile[0] != '0' )      // (the tile pass: the attributes too)
                     {
                         if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPreTileFrag) }); Err ) return Err;
                         if( auto Err = Device.Create(m_TileVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
@@ -782,7 +783,7 @@ namespace xlionrender
         // near the camera came last, a frame or more late while moving - a sharp patch overtaking a blurred one, Tomas); a new epoch (the sun
         // moved: every page again) keeps the budget, the previous epoch bridging it
         m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = sunAtlasHeight(), .m_Window = 128, .m_PinnedRadius = ShadowSetup.m_SunPinnedRadius, .m_SteadyBudget = 128 });     // (128 pages a level side: Unreal's clipmap levels' 16k texels - with 32 the fine levels ended 4, 8, 16 m from the eye, the walls beyond on coarse levels whatever the bias, Tomas)     // (~4 ms at most: a cut after a rebuild cost 12)
-        if( const char* p = std::getenv("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
+        if( const char* p = xlionrender::Env("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
         {
             using usage = xgpu::buffer::setup::usage;
             const int nMax = shadows::vsm::max_levels_v * m_VSM.getSetup().m_Window * m_VSM.getSetup().m_Window;
@@ -828,7 +829,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 16, .m_nTextures = 6, .m_PushConstantsSize = 128 }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdfShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_WorldSdfComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdf, { .m_pShader = &m_WorldSdfShader, .m_nBuffers = 7, .m_PushConstantsSize = 40 }); Err ) return Err;
-            if( std::getenv("XLION_SDF") )
+            if( xlionrender::Env("XLION_SDF") )
             {
                 const std::vector<float> Zero(4 + 4 * 128 * 128 * 128, 0.0f);
                 if( auto Err = Device.Create(m_WorldSdfB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = int(Zero.size()), .m_pData = const_cast<float*>(Zero.data()), .m_pName = "World SDF" }); Err ) return Err;
@@ -850,7 +851,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 8 * ring_frames_v, .m_pData = Zeros.data(), .m_pName = "Debug: reflection stats" }); Err ) return Err;
             { const std::vector<std::uint32_t> ListZeros(2 + 262144, 0u); if( auto Err = Device.Create(m_ReflSharpList, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(ListZeros.size()), .m_pData = const_cast<std::uint32_t*>(ListZeros.data()), .m_pName = "Reflections: the sharp receivers' list" }); Err ) return Err; }
             if( auto Err = Device.Create(m_ReflTimes, { .m_Count = 7 }); Err ) return Err;     // (the start, after the trace, the sharp trace, the hits' shading, the reconstruction)
-            if( const char* p = std::getenv("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } if( m_ReflTraceBench > 0 ) m_LightMode = light_mode::SCREEN; }     // (its rays start from the thin G-buffer: the screen tail's)
+            if( const char* p = xlionrender::Env("XLION_REFL_BENCH") ) { m_ReflTraceBench = std::atoi(p); if( m_ReflTraceBench == 9 ) { m_ReflTraceBench = 1; m_bReflTraceCycle = true; } if( m_ReflTraceBench > 0 ) m_LightMode = light_mode::SCREEN; }     // (its rays start from the thin G-buffer: the screen tail's)
             if( auto Err = Device.Create(m_LocalFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::local_request_frame), .m_EntryCount = ring_frames_v, .m_pName = "Shadows: local light frames" }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nLocal, .m_pData = Zeros.data(), .m_pName = "Shadows: local light requests" }); Err ) return Err;
             if( auto Err = Device.Create(m_LocalReqHost, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * nLocal, .m_pName = "Shadows: local light requests readback" }); Err ) return Err;
@@ -1730,7 +1731,7 @@ namespace xlionrender
     #ifdef _WIN32
         if( fopen_s(&f, pPath, "w") != 0 ) f = nullptr;
     #else
-        f = std::fopen(pPath, "w");
+        f = xlionrender::Open(pPath, "w");
     #endif
         if( f == nullptr ) return -1;
         std::fprintf(f, "# GI frame log (documentation/gi_dynamic_master_plan.md, Phase 0): times in ms (main thread), LongestSurfelUs in us; the trace's worker time is TraceMs (the main thread waits for it); Hits evaluate the direct light (shadow rays)\n");
@@ -1791,7 +1792,7 @@ namespace xlionrender
         // (the HDR target first, cleared here: the scene pass then loads it as it loads the depth - loaded without a clear this frame it was
         // in no attachment layout: nothing drew)
         auto Attachments = std::vector{ xgpu::renderpass::attachment{ View.m_HDR }, xgpu::renderpass::attachment{ View.m_GPreNormal }, xgpu::renderpass::attachment{ View.m_GPreId } };
-        if( const char* pTile = std::getenv("XLION_TILE"); pTile && pTile[0] != '0' )
+        if( const char* pTile = xlionrender::Env("XLION_TILE"); pTile && pTile[0] != '0' )
         {
             for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1 } )
             {

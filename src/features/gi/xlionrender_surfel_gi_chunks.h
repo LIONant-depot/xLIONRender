@@ -4,6 +4,7 @@
 // slots (copies of other chunks' surfels within reach of its surface: the reads near a border blend across it), all with chunk-local
 // 16-bit indices; its read grid, neighbours and origins are built on that chunk with the whole geometry's visibility. Every surfel has
 // exactly one owner; ghosts are never traced, never emit, never count as coverage. Equal levels only (mixed levels are gated: plan v3).
+#include "xlionrender_env.h"
 #include "xlionrender_surfel_gi.h"
 #include <algorithm>
 #include <chrono>
@@ -181,7 +182,7 @@ namespace xlionrender::gi
             const auto G = Groups[g];       // (a copy: a group that does not fit appends its parts to Groups)
             auto TS = clock::now();                                 // (XLION_GI_CHUNK_TRACE: each chunk's steps, ms, to stderr)
             std::string Trace;
-            const auto Step = [&](const char* pN) { if (!std::getenv("XLION_GI_CHUNK_TRACE")) return; const auto T = clock::now(); Trace += std::string(" ") + pN + " " + std::to_string(int(std::chrono::duration<double, std::milli>(T - TS).count())); TS = T; };
+            const auto Step = [&](const char* pN) { if (!xlionrender::Env("XLION_GI_CHUNK_TRACE")) return; const auto T = clock::now(); Trace += std::string(" ") + pN + " " + std::to_string(int(std::chrono::duration<double, std::milli>(T - TS).count())); TS = T; };
             const std::size_t Chunk = Out.m_Chunks.size();
             std::vector<char> InG(std::size_t(nClusters), 0);
             for (const int c : G) InG[std::size_t(c)] = 1;
@@ -312,7 +313,7 @@ namespace xlionrender::gi
             Step("neighbours");
             C.BuildReadGrid();
             Step("readgrid");
-            if (std::getenv("XLION_GI_CHUNK_TRACE")) Trace += " (probes " + std::to_string(int(C.m_ReadGridMs[0])) + ", samples " + std::to_string(int(C.m_ReadGridMs[1])) + ", parts " + std::to_string(int(C.m_ReadGridMs[2])) + ", lists " + std::to_string(int(C.m_ReadGridMs[3])) + ")";
+            if (xlionrender::Env("XLION_GI_CHUNK_TRACE")) Trace += " (probes " + std::to_string(int(C.m_ReadGridMs[0])) + ", samples " + std::to_string(int(C.m_ReadGridMs[1])) + ", parts " + std::to_string(int(C.m_ReadGridMs[2])) + ", lists " + std::to_string(int(C.m_ReadGridMs[3])) + ")";
             // Only the ghosts its consumers name stay (the bounds' ghosts were 129% of the owned on Police, 9% named): the read lists, the
             // vertex surfels, and the neighbour lists from the owned surfels out chunk_halo_passes_v filter passes; the rest are dropped and
             // the indices remapped (the owned keep theirs), its neighbours and origins made again on what is left
@@ -505,7 +506,7 @@ namespace xlionrender::gi
             std::printf("GI section %zu: its packed structures (%u words) do not fit it (%zu surfels, %zu vertices): made again\n", k, R.m_nDerived, C.m_Levels[0].size(), C.m_Pos.size()); std::fflush(stdout);
             C.BuildNeighbors();
         }
-        if (std::getenv("XLION_GI_REGRID")) C.BuildReadGrid();     // measurement: the grid rebuilt at load (as SurfelsFromXGeomStatic), no recompile
+        if (xlionrender::Env("XLION_GI_REGRID")) C.BuildReadGrid();     // measurement: the grid rebuilt at load (as SurfelsFromXGeomStatic), no recompile
         if (pVMap) *pVMap = std::move(VMap);
         return true;
     }

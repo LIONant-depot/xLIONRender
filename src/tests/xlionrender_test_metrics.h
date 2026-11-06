@@ -6,6 +6,7 @@
 // SelfTestMetrics() checks each on synthetic images (a test calls it before trusting the numbers)
 #ifndef XLIONRENDER_TEST_METRICS_H
 #define XLIONRENDER_TEST_METRICS_H
+#include "xlionrender_env.h"
 #include <vector>
 #include <span>
 #include <cmath>
@@ -83,9 +84,9 @@ namespace xlionrender::test
     // With XLIONRENDER_TEST_DUMP=<folder>: <folder>/<Name>.ppm (x / (1 + x) per channel, 8 bits)
     inline void DumpRGB(const char* pName, std::span<const float> I, int W, int H) noexcept
     {
-        const char* pDir = std::getenv("XLIONRENDER_TEST_DUMP");
+        const char* pDir = xlionrender::Env("XLIONRENDER_TEST_DUMP");
         if (pDir == nullptr) return;
-        if (FILE* f = std::fopen((std::string(pDir) + "/" + pName + ".ppm").c_str(), "wb"))
+        if (FILE* f = xlionrender::Open((std::string(pDir) + "/" + pName + ".ppm").c_str(), "wb"))
         {
             std::fprintf(f, "P6 %d %d 255\n", W, H);
             for (std::size_t k = 0; k < std::size_t(W) * H * 3; ++k) { const float v = std::max(I[k], 0.0f); std::fputc(int(255.0f * v / (1.0f + v)), f); }

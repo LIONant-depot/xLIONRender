@@ -1,4 +1,5 @@
 // Plan A - forward. instance::Render lives here so each plan is one file to read.
+#include "xlionrender_env.h"
 #include "xlionrender_instance.h"
 #include "plans/forward/xlionrender_plan_forward.h"
 // The profiler (xprofile / Tracy): the frame's passes as CPU and GPU zones - in LIONRender.dll; the tests are built without it
@@ -178,7 +179,7 @@ namespace xlionrender
     namespace { struct gi_times { xgpu::timestamps m_T; bool m_bOk = false; std::vector<std::uint64_t> m_Ns; double m_Sum[6] = {}; int m_n = 0; }; }
     static gi_times* GITimes(const void* pKey, xgpu::device& Device) noexcept
     {
-        static const bool s_bOn = std::getenv("XLION_GPU_TIMES") != nullptr;
+        static const bool s_bOn = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
         if( !s_bOn ) return nullptr;
         static std::unordered_map<const void*, gi_times> s_Map;      // ponytail: per renderer, never erased (a measurement hook)
         auto [It, bNew] = s_Map.try_emplace(pKey);
@@ -236,7 +237,7 @@ namespace xlionrender
         static std::unordered_map<const void*, bool> s_TransportAsked;     // measurement (XLION_GI_TRANSPORT): compiled at the dump, below (ponytail: never erased)
         if( !m_GIDumpPath.empty() && m_bGIDumpAsked && (!m_pGITrace || !m_pGITrace->ReadBackPending()) )        // DumpGI: the GPU's light came back
         {
-            if( std::getenv("XLION_GI_TRANSPORT") ) s_TransportAsked[this] = true;
+            if( xlionrender::Env("XLION_GI_TRANSPORT") ) s_TransportAsked[this] = true;
             (void)W.Dump(m_GIDumpPath.c_str()); (void)DumpGIFrames((m_GIDumpPath + ".frames.csv").c_str());
             m_GIDumpPath.clear(); m_bGIDumpAsked = false;
         }
@@ -374,7 +375,7 @@ namespace xlionrender
         if( auto It = s_TransportAsked.find(this); It != s_TransportAsked.end() && It->second )      // measurement: experiment D at a real size
         {
             It->second = false;
-            const int Rays = std::max(16, std::atoi(std::getenv("XLION_GI_TRANSPORT")));
+            const int Rays = std::max(16, std::atoi(xlionrender::Env("XLION_GI_TRANSPORT")));
             const auto T = W.CompileTransport(L, Rays);
             std::vector<gi::v3> Ref; std::vector<char> Near;
             for( int i = 0; i < W.InstanceCount(); ++i )
@@ -434,7 +435,7 @@ namespace xlionrender
         // anything here changes the world, whose copy of the GPU's state must be current first)
         // Diagnostic (gi_dynamic_master_plan.md 7a, smoke/gi_startup.py --captures-first): with XLION_GI_HOLD_CAPTURES set, no solve until
         // the material captures have been done for 10 frames (the control: the solve never sees an uncaptured material)
-        static const bool s_bHold = std::getenv("XLION_GI_HOLD_CAPTURES") != nullptr;
+        static const bool s_bHold = xlionrender::Env("XLION_GI_HOLD_CAPTURES") != nullptr;
         {   // (gi_dynamic_master_plan.md 7a) an instance is provisional until no capture of it is queued: all of them in (or dropped)
             XPROFILE_SCOPE("GI: provisional");
             std::vector<char> Queued(std::size_t(W.InstanceCount()), 0);
@@ -449,8 +450,8 @@ namespace xlionrender
         // default 15, of this renderer's GI the slices are traced, their stats kept, the light not committed: the cache stays as it settled), "hits" (frozen, and the
         // pass's hits read a constant instead of the cache), "pixel_vertex" (the pixels read their vertices' surfels only: no per-pixel walk),
         // "pixel_nomoments" (the per-pixel read without its moment test), "pixel_none" (no GI read in shading at all; the solver still runs)
-        static const std::string s_Ablate = [] { const char* p = std::getenv("XLION_GI_ABLATE"); return std::string(p ? p : ""); }();
-        static const double      s_FreezeS = [] { const char* p = std::getenv("XLION_GI_FREEZE_S"); return p ? std::atof(p) : 15.0; }();
+        static const std::string s_Ablate = [] { const char* p = xlionrender::Env("XLION_GI_ABLATE"); return std::string(p ? p : ""); }();
+        static const double      s_FreezeS = [] { const char* p = xlionrender::Env("XLION_GI_FREEZE_S"); return p ? std::atof(p) : 15.0; }();
         if( !s_Ablate.empty() )
         {
             static std::unordered_map<const void*, std::chrono::steady_clock::time_point> s_Start;     // ponytail: per renderer, never erased (a measurement hook)
@@ -496,8 +497,8 @@ namespace xlionrender
             // The link solve, on by default (Tomas 2026-10-24: it is what settles the light): the links built on the GPU once the rays settled (30
             // frames), then solved every frame and the rays stop (moving objects still get them). XLION_GI_LINKS=<rays>[,settle frames[,surfels a
             // frame]] changes it; XLION_GI_LINKS=0 turns it off
-            static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 64, 30, 2048 }; if (const char* p = std::getenv("XLION_GI_LINKS")) (void)std::sscanf(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
-            static const bool s_bProbesOnly = std::getenv("XLION_GI_PROBES_ONLY") != nullptr;
+            static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 64, 30, 2048 }; if (const char* p = xlionrender::Env("XLION_GI_LINKS")) (void)xlionrender::Scan(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
+            static const bool s_bProbesOnly = xlionrender::Env("XLION_GI_PROBES_ONLY") != nullptr;
             if( s_Links[0] > 0 && !s_bProbesOnly ) { XPROFILE_SCOPE("GI: links"); m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]); }
             if( auto* pT = GITimes(this, m_Device) )
             {
@@ -505,7 +506,7 @@ namespace xlionrender
                 if( GIFrame % 600 == 0 ) { const auto C = W.FilterCounts(); std::printf("GIFILTER %zu surfels, %zu neighbor links (%.1f a surfel): a pass reads ~%.0f MB\n", C[0], C[1], double(C[1]) / double(std::max<std::size_t>(C[0], 1)), double(C[1]) * (36 + 12) / 1048576.0 + double(C[0]) * 72 / 1048576.0); std::fflush(stdout); }
             }
             // The probe grid (skinned meshes' GI): 32 x 16 x 32 probes a meter apart around the eye, 1024 updated a frame
-            static const bool s_bNoProbes = std::getenv("XLION_GI_NO_PROBES") != nullptr;     // (measurement: A/B)
+            static const bool s_bNoProbes = xlionrender::Env("XLION_GI_NO_PROBES") != nullptr;     // (measurement: A/B)
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 4);
             if( Scene.m_GI.m_bProbes && !s_bNoProbes && (s_bProbesOnly || !m_pGITrace->isRelighting()) )
             {
@@ -527,7 +528,7 @@ namespace xlionrender
                     }
                     Focus.push_back(Lo); Focus.push_back(Hi);
                 }
-                static const std::array<float, 4> s_ProbeRead = [] { std::array<float, 4> A{ 0.0f, 64.0f, 1.0f, 0.0f }; if( const char* p = std::getenv("XLION_GI_READ_PROBES") ) (void)std::sscanf(p, "%f %f %f %f", &A[0], &A[1], &A[2], &A[3]); return A; }();
+                static const std::array<float, 4> s_ProbeRead = [] { std::array<float, 4> A{ 0.0f, 64.0f, 1.0f, 0.0f }; if( const char* p = xlionrender::Env("XLION_GI_READ_PROBES") ) (void)xlionrender::Scan(p, "%f %f %f %f", &A[0], &A[1], &A[2], &A[3]); return A; }();
                 (void)m_pGITrace->UpdateProbes(Window, Eye, s_ProbeRead[0] > 0.0f ? s_ProbeRead[0] : Scene.m_GI.m_ProbeSpacing, { 32, 16, 32 }, Focus, 192, int(s_ProbeRead[1]), GIFrame, int(s_ProbeRead[2]), s_ProbeRead[3] != 0.0f);
             }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 1);
@@ -690,7 +691,7 @@ namespace xlionrender
                 T.m_Pending[Slot].clear();
                 DrawGI = { std::uint32_t(Base + T.m_Offset + 1), std::uint32_t(W.Level(Id)) | (Scene.m_GI.m_bPerPixel ? 0x100u : 0u) | GIDebugBits };     // xlionrender_surfel_gi.glsl gi_per_pixel_v, gi_debug_shift_v
                 {   // measurement only (XLION_GI_ABLATE, updateGI above): the pixel read's variants
-                    static const std::string s_Px = [] { const char* p = std::getenv("XLION_GI_ABLATE"); return std::string(p ? p : ""); }();
+                    static const std::string s_Px = [] { const char* p = xlionrender::Env("XLION_GI_ABLATE"); return std::string(p ? p : ""); }();
                     if( s_Px.find("pixel_vertex") != std::string::npos )    DrawGI.second &= ~0x100u;
                     if( s_Px.find("pixel_nomoments") != std::string::npos ) DrawGI.second |= 0x4000u;
                     if( s_Px.find("pixel_nolocal") != std::string::npos )   DrawGI.second |= 0x8000u;     // (mb_standard_pbr.frag: no SurfelGILocalMean)
@@ -698,7 +699,7 @@ namespace xlionrender
                     if( s_Px.find("pixel_lookuponly") != std::string::npos ) DrawGI.second |= 0x02000000u; // (the per-pixel read's cell lookup alone: then unsupported)
                     if( s_Px.find("pixel_nolookup") != std::string::npos )  DrawGI.second |= 0x04000000u; // (the per-pixel read unsupported at once)
                     if( s_Px.find("pixel_none") != std::string::npos )      DrawGI = { 0u, 0xFFFFFFFFu };
-                    static const std::uint32_t s_Cap = [] { const char* p = std::getenv("XLION_GI_PIXEL_CAP"); return p ? std::uint32_t(std::clamp(std::atoi(p), 0, 255)) : 0u; }();
+                    static const std::uint32_t s_Cap = [] { const char* p = xlionrender::Env("XLION_GI_PIXEL_CAP"); return p ? std::uint32_t(std::clamp(std::atoi(p), 0, 255)) : 0u; }();
                     if( s_Cap && DrawGI.second != 0xFFFFFFFFu ) DrawGI.second |= s_Cap << 16;     // (xlionrender_surfel_gi.glsl GIPixelCap)
                 }
             };
@@ -747,10 +748,10 @@ namespace xlionrender
             }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 2);
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 2);
-            static const bool s_bProbesOnlyShow = std::getenv("XLION_GI_PROBES_ONLY") != nullptr;
+            static const bool s_bProbesOnlyShow = xlionrender::Env("XLION_GI_PROBES_ONLY") != nullptr;
             XPROFILE_SCOPE("GI: show"); if( !s_bProbesOnlyShow ) (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation, Scene.m_GI.m_bShowBlend);
             // Experiment X1 (xLION_Docs gi_next_level_analysis.md): XLION_GI_CLIP=<1 splat, 2 with a sight ray per cell>[,<level 0's cell>[,<surfels a frame>]]
-            static const std::array<float, 3> s_Clip = [] { std::array<float, 3> A{ 0.0f, 0.5f, 4096.0f }; if( const char* p = std::getenv("XLION_GI_CLIP") ) (void)std::sscanf(p, "%f,%f,%f", &A[0], &A[1], &A[2]); return A; }();
+            static const std::array<float, 3> s_Clip = [] { std::array<float, 3> A{ 0.0f, 0.5f, 4096.0f }; if( const char* p = xlionrender::Env("XLION_GI_CLIP") ) (void)xlionrender::Scan(p, "%f,%f,%f", &A[0], &A[1], &A[2]); return A; }();
             if( s_Clip[0] > 0.0f ) (void)m_pGITrace->ClipStep(Window, Eye, s_Clip[1], int(s_Clip[2]), s_Clip[0] > 1.5f);
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 3);
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 3);
@@ -765,7 +766,7 @@ namespace xlionrender
         m_GIStats.m_LoadMs = m_GILoadMsAcc; m_GILoadMsAcc = 0;
         {   gpu_times T; const bool bT = getGPUTimes(T);
             m_GIFrames.push_back({ m_Device.getFrameIndex(), m_GIStats, bT ? T.m_SceneMs : -1.0 });     // (the scene pass' GPU time: the per-pixel GI read is in it)
-            static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;     // measurement: the GPU passes, every 120 frames
+            static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;     // measurement: the GPU passes, every 120 frames
             if( s_bTimes && bT && m_Device.getFrameIndex() % 120 == 0 ) std::printf("GPUTIMES shadows %.2f scene %.2f tonemap %.2f GItrace %.2f ms; CPU Render %.2f ms (instances %.2f, shadows %.2f)\n", T.m_ShadowMs, T.m_SceneMs, T.m_ToneMapMs, m_GIStats.m_GPUTraceMs, m_CPUTimes.m_RenderMs, m_CPUTimes.m_InstancesMs, m_CPUTimes.m_ShadowsMs), std::fflush(stdout);
         }
         if( m_GIFrames.size() > gi_frame_log_v ) m_GIFrames.erase(m_GIFrames.begin(), m_GIFrames.begin() + std::ptrdiff_t(m_GIFrames.size() - gi_frame_log_v));
@@ -1033,7 +1034,7 @@ namespace xlionrender
         auto Mode = m_LightMode;
         static const int s_ForcedMode = []                  // measurement only (XLION_LIGHT_MODE): the editor's mode forced
         {
-            const char* p = std::getenv("XLION_LIGHT_MODE");
+            const char* p = xlionrender::Env("XLION_LIGHT_MODE");
             if( p == nullptr ) return -1;
             const std::string_view M(p);
             return M == "exact" ? int(light_mode::EXACT) : M == "cells" ? int(light_mode::CELLS) : M == "sampled" ? int(light_mode::SAMPLED) : M == "screen" ? int(light_mode::SCREEN) : M == "auto" ? int(light_mode::AUTO) : -1;
@@ -1275,7 +1276,7 @@ namespace xlionrender
         const int nProbes = int(Scene.m_Probes.size());
         m_ProbeStates.resize(nProbes);
         if( m_ProbeCapturing >= nProbes ) m_ProbeCapturing = -1;
-        if( static const bool s_bTrace = std::getenv("XLION_PROBE_TRACE") != nullptr; s_bTrace )     // measurement: the probes' state, every 120 frames
+        if( static const bool s_bTrace = xlionrender::Env("XLION_PROBE_TRACE") != nullptr; s_bTrace )     // measurement: the probes' state, every 120 frames
         {
             static int s_n = 0;
             if( ++s_n % 120 == 0 )
@@ -1340,7 +1341,7 @@ namespace xlionrender
             if( St.m_Slot < 0 ) continue;
             const float K[] = { Pr.m_Position.m_X, Pr.m_Position.m_Y, Pr.m_Position.m_Z, Pr.m_BoxMin.m_X, Pr.m_BoxMin.m_Y, Pr.m_BoxMin.m_Z, Pr.m_BoxMax.m_X, Pr.m_BoxMax.m_Y, Pr.m_BoxMax.m_Z };
             const std::uint64_t Key = Hash(1469598103934665603ull, K, sizeof(K)) | 1;
-            if( Key != St.m_Key ) { St.m_Key = Key; St.m_bValid = false; St.m_bDirty = true; if( m_ProbeCapturing == i ) m_ProbeNextFace = 0; if( std::getenv("XLION_PROBE_TRACE") ) std::printf("PROBEMOVE %d at frame %llu\n", i, (unsigned long long)m_Device.getFrameIndex()); }
+            if( Key != St.m_Key ) { St.m_Key = Key; St.m_bValid = false; St.m_bDirty = true; if( m_ProbeCapturing == i ) m_ProbeNextFace = 0; if( xlionrender::Env("XLION_PROBE_TRACE") ) std::printf("PROBEMOVE %d at frame %llu\n", i, (unsigned long long)m_Device.getFrameIndex()); }
 
             const xmath::fbbox Box{ Pr.m_BoxMin, Pr.m_BoxMax };
             for( const auto& C : m_FrameChanged ) if( Touches(C, Box) ) { St.m_bDirty = true; break; }
@@ -1376,7 +1377,7 @@ namespace xlionrender
 
             const auto& Pr = Scene.m_Probes[m_ProbeCapturing];
             // measurement (XLION_PROBE_TRACE): a capture frame's GPU cost - its faces, its prefilter - printed past 10 ms
-            static const bool s_bCost = std::getenv("XLION_PROBE_TRACE") != nullptr;
+            static const bool s_bCost = xlionrender::Env("XLION_PROBE_TRACE") != nullptr;
             static xgpu::timestamps s_TS; static bool s_bTS = false; static std::vector<std::uint64_t> s_Ns;
             if( s_bCost && !s_bTS ) s_bTS = m_Device.Create(s_TS, { .m_Count = 3 }) == nullptr;
             if( s_bCost && s_bTS )
@@ -1422,7 +1423,7 @@ namespace xlionrender
     {
         // Measurement only (XLION_GPU_TIMES): its CPU time by part - the pages' choice, the casters (light bounds, pairs), the recording -
         // SHADOWCPU, the largest of 120 frames (the sun turning added ~3.8 ms of GPU idle before the scene pass, 2026-10-30)
-        static const bool s_bShCpu = std::getenv("XLION_GPU_TIMES") != nullptr;
+        static const bool s_bShCpu = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
         static double s_ShMax[5] = {}; static int s_ShFrames = 0, s_ShBusy = 0;
         struct sh_cpu
         {
@@ -1560,7 +1561,7 @@ namespace xlionrender
         }
         m_PairsReport.m_nCandidates = m_PairsReport.m_nRuns = 0;
         m_PairsReport.m_bGPU        = false;
-        static const bool s_bNoSunShadows = std::getenv("XLION_NO_SUN_SHADOWS") != nullptr;     // (measurement: the sun's pages' cost - an ablation)
+        static const bool s_bNoSunShadows = xlionrender::Env("XLION_NO_SUN_SHADOWS") != nullptr;     // (measurement: the sun's pages' cost - an ablation)
         if( Sun.m_bCastShadows && !s_bNoSunShadows )
         {
             if( std::vector<std::uint64_t> Ns; m_VSMTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
@@ -1615,21 +1616,21 @@ namespace xlionrender
             // (the static pages see the static casters' changes only - every change when the movers are not split; the movers have pages of their own)
             m_VSM.SetDetailDistance(Sun.m_ShadowDetailDistance);
             {   // (measurement: a frame whose pixels found no page at any level - lit where they should be shadowed: VSMNONE)
-                static const bool s_bN = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static const bool s_bN = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                 const auto& C = m_VSMReport.m_Counters;
                 if( s_bN && C[0] && double(C[3]) > 0.005 * double(C[0]) )
                     std::printf("VSMNONE frame %llu: %.1f%% of the pixels without a page (coarser %.1f%%); pages requested %d rendered %d net %d rejected %d deferred %d resident %d, epoch %d, dynamic %.2f\n", (unsigned long long)m_Device.getFrameIndex(), 100.0 * C[3] / C[0], 100.0 * C[2] / C[0]
                                , m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_RenderedPinned, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine, int(m_VSM.HasPrevious()), m_VSM.m_Stats.m_DynamicBias), std::fflush(stdout);
             }
-            { static const bool s_bT = std::getenv("XLION_GPU_TIMES") != nullptr;      // (measurement: the sun's shadow detail reaching the renderer)
+            { static const bool s_bT = xlionrender::Env("XLION_GPU_TIMES") != nullptr;      // (measurement: the sun's shadow detail reaching the renderer)
               if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d\n", Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine), std::fflush(stdout); }
             m_VSMLevelBand = std::clamp(Sun.m_ShadowLevelBlend, 0.01f, 0.95f);
             ShCpu.Lap();
             // The frame's pages by their measured cost: what fits the pages' share of the shadows' slice (XLION_SH_PAGES_MS overrides; 0 off)
-            static const float s_PagesMs = [] { const char* p = std::getenv("XLION_SH_PAGES_MS"); return p ? float(std::atof(p)) : -1.0f; }();
+            static const float s_PagesMs = [] { const char* p = xlionrender::Env("XLION_SH_PAGES_MS"); return p ? float(std::atof(p)) : -1.0f; }();
             const float PagesMs = s_PagesMs >= 0 ? s_PagesMs : m_ShadowPagesMs;
             // a small scene needs no budget: every page within the frame costs less than the budget's own bookkeeping would allow for
-            static const int s_InstantEnv = [] { const char* p = std::getenv("XLION_SH_INSTANT_TRIS"); return p ? std::atoi(p) : -1; }();
+            static const int s_InstantEnv = [] { const char* p = xlionrender::Env("XLION_SH_INSTANT_TRIS"); return p ? std::atoi(p) : -1; }();
             std::int64_t nCasterTris = 0;
             for( const auto& Dr : Draws ) nCasterTris += Dr.m_pMesh->m_bCluster ? std::int64_t(Dr.m_pMesh->m_Geom.m_Clusters.size()) * 256 : Dr.m_pMesh->m_nIndices / 3;      // (ponytail: a cluster taken as half its 512 triangle cap, near enough for this choice)
             const int  InstantTris = s_InstantEnv >= 0 ? s_InstantEnv : m_ShadowInstantTris;
@@ -1645,7 +1646,7 @@ namespace xlionrender
                 for( int k = 0; k < 7; ++k ) s_SecMax[k] = std::max(s_SecMax[k], m_VSM.m_Stats.m_SecMs[k]);
                 if( ++s_SecN == 120 ) { std::printf("VSMUPDATE max of 120 frames: windows %.3f, out %.3f, dirty %.3f, net %.3f, requests %.3f, movers %.3f, rest %.3f ms\n", s_SecMax[0], s_SecMax[1], s_SecMax[2], s_SecMax[3], s_SecMax[4], s_SecMax[5], s_SecMax[6]); std::fflush(stdout); s_SecN = 0; for( auto& v : s_SecMax ) v = 0; }
             }
-            {   static const bool s_bE = std::getenv("XLION_VSM_EVENTS") != nullptr;     // (its own switch: a print and flush most frames while the sun turns, ms of them - not with the GPU times)      // (measurement: a frame that dropped many pages - the dropout hunt)
+            {   static const bool s_bE = xlionrender::Env("XLION_VSM_EVENTS") != nullptr;     // (its own switch: a print and flush most frames while the sun turns, ms of them - not with the GPU times)      // (measurement: a frame that dropped many pages - the dropout hunt)
                 const auto& St = m_VSM.m_Stats;
                 if( s_bE && (St.m_Dirtied > 32 || St.m_Recentred || St.m_Epochs || St.m_Evicted > 32 || St.m_Deferred > 64) )
                     std::printf("VSMEVENT frame %llu: dirtied %d (changed boxes %zu), recentred %d, epochs %d, evicted %d, rendered %d, deferred %d, rejected %d, requested %d, resident %d, dynamic bias %.2f; why: slot moved %d new %d mesh %d materials %d gone %d settled %d hashed settled %d hashed new %d\n", (unsigned long long)m_Device.getFrameIndex(), St.m_Dirtied, (m_bShadowSplitMovers ? SunStatic : Changed).size(), St.m_Recentred, St.m_Epochs, St.m_Evicted, St.m_Rendered, St.m_Deferred, St.m_Rejected, St.m_Requested, St.m_ResidentFine, St.m_DynamicBias, m_ChangeWhy[0], m_ChangeWhy[1], m_ChangeWhy[2], m_ChangeWhy[3], m_ChangeWhy[4], m_ChangeWhy[5], m_ChangeWhy[6], m_ChangeWhy[7]), std::fflush(stdout);
@@ -1713,8 +1714,8 @@ namespace xlionrender
         std::vector<pairs_run> PairRuns;
         // The casters' LOD a sun page draws (cluster_geom::LODSubmeshes): texels up to XLION_SH_LOD_TEXEL (2 cm) the finest, each doubling a
         // LOD coarser - a coarse page drew every full-detail triangle (the shadow pass's cost was its triangles). XLION_SH_NO_LOD: LOD 0
-        static const float s_LODTexel = [] { const char* p = std::getenv("XLION_SH_LOD_TEXEL"); return p ? float(std::atof(p)) : 0.02f; }();
-        static const bool  s_bNoLOD   = std::getenv("XLION_SH_NO_LOD") != nullptr;
+        static const float s_LODTexel = [] { const char* p = xlionrender::Env("XLION_SH_LOD_TEXEL"); return p ? float(std::atof(p)) : 0.02f; }();
+        static const bool  s_bNoLOD   = xlionrender::Env("XLION_SH_NO_LOD") != nullptr;
         const auto PageLOD = [&]( int Level ) -> int
         {
             if( s_bNoLOD || s_LODTexel <= 0.0f ) return 0;
@@ -1922,7 +1923,7 @@ namespace xlionrender
                     const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
                     if( !Vis.m_bCastsShadow ) continue;
                     if( bPairs && Draws[i].m_bGPU && (Vis.m_Opacity != material_visibility::opacity::MASKED || !Draws[i].m_bCut) ) continue;     // (the pairs drew it: a masked one too, unless its cutout had no pipeline - m_bCut)
-                    static const bool s_bNoMaskedCasters = std::getenv("XLION_SH_NO_MASKED") != nullptr;     // (measurement: the masked casters' share)
+                    static const bool s_bNoMaskedCasters = xlionrender::Env("XLION_SH_NO_MASKED") != nullptr;     // (measurement: the masked casters' share)
                     if( s_bNoMaskedCasters && Vis.m_Opacity == material_visibility::opacity::MASKED && !bOpaqueCut ) continue;
                     auto* pCut = Vis.m_Opacity == material_visibility::opacity::MASKED && !bOpaqueCut ? getMaterialInstance(*pMat, G.m_Kind, true) : nullptr;
                     auto* pInstance = pCut ? pCut : &m_ShadowInstance[bSkin ? 2 : 1];
@@ -2027,7 +2028,7 @@ namespace xlionrender
                 M(1, 0) = Y.m_X * SX; M(1, 1) = Y.m_Y * SX; M(1, 2) = Y.m_Z * SX; M(1, 3) = -Cy * SX;
                 M(2, 0) = Z.m_X * SZ; M(2, 1) = Z.m_Y * SZ; M(2, 2) = Z.m_Z * SZ; M(2, 3) = -ZMin * SZ;
                 M(3, 3) = 1.0f;
-                static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                 if( s_bTimes )
                     if( std::vector<std::uint64_t> Ns; m_GISunTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
                         std::printf("GISUNMAP the last draw %.3f ms (%zu casters, %.1f m a texel)\n", double(Ns[1] - Ns[0]) * 1e-6, GICasters.size(), double(Ext) / gi_sun_map_v), std::fflush(stdout);
@@ -2144,10 +2145,10 @@ namespace xlionrender
         {
             m_TailReport.m_GBufferMs = double(Ns[1] - Ns[0]) * 1e-6; m_TailReport.m_TailMs = double(Ns[2] - Ns[1]) * 1e-6; m_TailReport.m_DenoiseMs = double(Ns[3] - Ns[2]) * 1e-6;
             m_TailReport.m_TemporalMs = double(Ns[4] - Ns[2]) * 1e-6;
-        }
-            static const bool s_bTailLog = std::getenv("XLION_GPU_TIMES") != nullptr; static int s_TailN = 0;
+            static const bool s_bTailLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static int s_TailN = 0;
             if( s_bTailLog && ++s_TailN % 120 == 0 ) { std::printf("TAILSPLIT thin G-buffers (half size + sharp full size) %.3f, tail lights %.3f, denoiser %.3f ms\n", m_TailReport.m_GBufferMs, m_TailReport.m_TailMs, m_TailReport.m_DenoiseMs); std::fflush(stdout); }
         m_TailReport.m_bOn = bLights; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
+        }
         m_TailReport.m_MemoryMB = double(W) * double(H) * (4 + 8 + 4 + 4 + 4 + 2 * 16) / (1024.0 * 1024.0);     // (G-buffer, motion, depth, the tail's two, the denoiser's two)
 
         // A camera cut (a jump past 2 m, or the view turned past 45 degrees): no history (the GI screen pass's rule)
@@ -2171,9 +2172,9 @@ namespace xlionrender
         if( bLights ) Light.m_LocalCount.m_Y = float(int(light_mode::SCREEN));
 
         // Reflections' sharp receivers: the G-buffer at full size too (createSharpTargets: made when first needed; its rays a pixel each)
-        static const float s_SharpEnv = [] { const char* p = std::getenv("XLION_REFL_SHARP"); return p ? float(std::atof(p)) : -1.0f; }();      // (measurement)
+        static const float s_SharpEnv = [] { const char* p = xlionrender::Env("XLION_REFL_SHARP"); return p ? float(std::atof(p)) : -1.0f; }();      // (measurement)
         if( s_SharpEnv >= 0.0f ) m_ReflSharpMax = s_SharpEnv;
-        const bool bSharp = std::getenv("XLION_REFL_PT") == nullptr && m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && m_bReflSharpSeen && !Scene.m_bDebugReflectionMirror && std::getenv("XLION_SDF") == nullptr && createSharpTargets(View) == nullptr;
+        const bool bSharp = xlionrender::Env("XLION_REFL_PT") == nullptr && m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && m_bReflSharpSeen && !Scene.m_bDebugReflectionMirror && xlionrender::Env("XLION_SDF") == nullptr && createSharpTargets(View) == nullptr;
         Light.m_TailParams.m_X = bSharp ? float(View.m_SharpWidth) : 0.0f;      // (the materials: the full-size records' row, 0: none)
         Window.WriteTimestamp(m_TailTimes, 0);
         const auto DrawGBuffer = [&]( xgpu::renderpass& Pass )
@@ -2292,15 +2293,15 @@ namespace xlionrender
         // ago, done) into the report, cleared. m_ReflTraceBench > 0: the benchmark's rays only (mirror, roughness 0.5, the materials')
         const auto BvhR = m_pGITrace ? m_pGITrace->getBvh() : gi::gpu_trace::bvh_view{ nullptr, nullptr, nullptr, nullptr, 0, 0, true };
         Light.m_EnvParams.m_W = 0.0f;
-        static const bool s_bGradeRays = std::getenv("XLION_REFL_GRADE_RAYS") != nullptr;      // (rays graded too, at XLION_REFL_GRADE's roughness: half size, one frame, no reconstruction: its noise counts against them)
-        static const int  s_GradeRough = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? int(std::atof(p) * 1000.0 + 0.5) : 0; }();
-        static const bool s_bGrading = std::getenv("XLION_REFL_GRADE") != nullptr && !s_bGradeRays;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
+        static const bool s_bGradeRays = xlionrender::Env("XLION_REFL_GRADE_RAYS") != nullptr;      // (rays graded too, at XLION_REFL_GRADE's roughness: half size, one frame, no reconstruction: its noise counts against them)
+        static const int  s_GradeRough = [] { const char* p = xlionrender::Env("XLION_REFL_GRADE"); return p ? int(std::atof(p) * 1000.0 + 0.5) : 0; }();
+        static const bool s_bGrading = xlionrender::Env("XLION_REFL_GRADE") != nullptr && !s_bGradeRays;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
         const bool bTraced = !s_bGrading && !Scene.m_bDebugReflectionPathTraced && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
-        const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection && std::getenv("XLION_REFL_PT") == nullptr;      // (its colors are last frame's image: in the debug view, reflections of reflections)
+        const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection && xlionrender::Env("XLION_REFL_PT") == nullptr;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
-        static const bool s_bReflPT = std::getenv("XLION_REFL_PT") != nullptr;      // (A12: the reflections' ground truth, real materials)
-        static const bool s_bNoRecon = std::getenv("XLION_REFL_NO_RECON") != nullptr;      // (measurement: the records as traced, no reconstruction)
-        const bool bReconstruct = !s_bReflPT && !s_bNoRecon && Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || std::getenv("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
+        static const bool s_bReflPT = xlionrender::Env("XLION_REFL_PT") != nullptr;      // (A12: the reflections' ground truth, real materials)
+        static const bool s_bNoRecon = xlionrender::Env("XLION_REFL_NO_RECON") != nullptr;      // (measurement: the records as traced, no reconstruction)
+        const bool bReconstruct = !s_bReflPT && !s_bNoRecon && Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || xlionrender::Env("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
         if( bTraced || bScreen )
         {
             if( bScreen || bReconstruct )
@@ -2322,16 +2323,16 @@ namespace xlionrender
                 if( std::vector<std::uint64_t> Ns; m_ReflSSRTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] > Ns[0] )
                 {
                     m_ReflSSRSum += double(Ns[1] - Ns[0]) * 1e-6;
-                    static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                    static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                     if( ++m_ReflSSRSumN == 120 )
                     {
                         if( s_bTimes ) std::printf("SSRGPU %d x %d: %.3f ms (the screen trace and the reconstruction)\n", W, H, m_ReflSSRSum / m_ReflSSRSumN), std::fflush(stdout);
                         m_ReflSSRSum = 0; m_ReflSSRSumN = 0;
                     }
                 }
-                const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
                 constexpr float ssr_max_rough_v = 0.5f;
                     { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, ssr_max_rough_v, 0.0f };
+                const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
                 auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
                 auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };      // (m_HDRPrev: m_HDR itself is cleared by the prepass)
                 Window.WriteTimestamp(m_ReflSSRTimes, 0);
@@ -2365,7 +2366,7 @@ namespace xlionrender
                 {
                     const double n = m_ReflSumN;
                     m_ReflReport = { m_ReflTraceBench, m_ReflSum[0] / n, m_ReflSum[1] / n, m_ReflSum[2] / std::max(m_ReflSum[1], 1.0), m_ReflSum[3] / std::max(m_ReflSum[1], 1.0), m_ReflSumN };
-                    static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                    static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                     if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLBENCH mode %d, %d x %d: %.3f ms, %.0f rays (%.0f Mrays/s), hits %.1f%%, BVH visits %.1f a ray, %.0f planar texels of roughness %.2f, %.0f rays PREFIX_INCOMPLETE (planar view %s, plane %.3f %.3f %.3f %.3f)\n", m_ReflReport.m_Mode, W, H, m_ReflReport.m_Ms
                         , m_ReflReport.m_Rays, m_ReflReport.m_Rays / std::max(m_ReflReport.m_Ms, 1e-6) * 1e-3, 100 * m_ReflReport.m_HitRate, m_ReflReport.m_VisitsPerRay, m_ReflPlanarSum / n, m_ReflPlanarRough, m_ReflIncompleteSum / n
                         , m_bPlanarOn ? "on" : m_PlanarWhy == 4 ? "off: no floor under the eye" : m_PlanarWhy == 5 ? "off: oblique" : m_PlanarWhy == 2 ? "off: view" : "off", m_PlanarPlane.m_X, m_PlanarPlane.m_Y, m_PlanarPlane.m_Z, m_PlanarPlane.m_W);
@@ -2419,7 +2420,7 @@ namespace xlionrender
                 , m_bEnvOn ? 0.0f : Scene.m_Ambient.m_X / gi::pi_v, m_bEnvOn ? 0.0f : Scene.m_Ambient.m_Y / gi::pi_v, m_bEnvOn ? 0.0f : Scene.m_Ambient.m_Z / gi::pi_v };
             const auto Bc = [](const xgpu::buffer* p) { return const_cast<xgpu::buffer*>(p); };
             // (XLION_SDF, prototype, reflections_sdf_plan_2026-11.md's gate: 1 hit or miss by the world's distance field, built here over some frames; 2 by the BVH)
-            static const int s_Sdf = [] { const char* p = std::getenv("XLION_SDF"); return p ? std::atoi(p) : 0; }();
+            static const int s_Sdf = [] { const char* p = xlionrender::Env("XLION_SDF"); return p ? std::atoi(p) : 0; }();
             const bool bSdf = s_Sdf == 1 || (s_Sdf >= 3 && s_Sdf < 11);
             if( bSdf && (E - m_WorldSdfCenter).Length() > 3.0f ) { m_WorldSdfCascade = 0; m_WorldSdfSlice = 0; m_WorldSdfAge = 0; }      // ponytail: the whole field again when the eye leaves; scrolling cascades when it moves in a game
             if( bSdf && ++m_WorldSdfAge == 300 ) { m_WorldSdfCascade = 0; m_WorldSdfSlice = 0; }      // ponytail: and once more when the materials' capture is in: its albedo was 0 before
@@ -2438,12 +2439,12 @@ namespace xlionrender
             }
             Push.m_Full[1] = s_Sdf;
             float MaxRoughOut = 0.0f;
-            static const bool s_bBands = std::getenv("XLION_REFL_BANDS") != nullptr; if( s_bBands && !bPlanar ) Push.m_Plane[0] = -1.0f;
             // XLION_REFL_PT (A12): the reflections' ground truth with the real materials (refl_trace_comp.glsl m_Full.w 5): no planar view, no store, no screen trace
             if( s_bReflPT && !m_ReflPTAccum.m_Private ) { const std::vector<float> Z(8 * std::size_t(W) * std::size_t(H), 0.0f); (void)m_Device.Create(m_ReflPTAccum, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 2 * W * H, .m_pData = const_cast<float*>(Z.data()), .m_pName = "Reflections: the ground truth's sums" }); }
-            static const bool s_bHitPT = std::getenv("XLION_REFL_HIT_PT") != nullptr; if( s_bHitPT && Push.m_Full[3] == 0 ) Push.m_Full[3] = 6;      // (measurement: the hits lit by a path, not the store)
+            static const bool s_bHitPT = xlionrender::Env("XLION_REFL_HIT_PT") != nullptr; if( s_bHitPT && Push.m_Full[3] == 0 ) Push.m_Full[3] = 6;      // (measurement: the hits lit by a path, not the store)
             if( s_bReflPT ) { Push.m_Full[3] = 5; Push.m_Full[2] = 0; for( auto& v : Push.m_Plane ) v = 0.0f; Push.m_bPlanar = 0.0f; Push.m_Frame = View.m_TailFrame; }
-            static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = std::getenv("XLION_VOX_DIRS_TRACE"); const char* d = std::getenv("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; std::sscanf(d, "%f,%f", &D[1], &K); std::sscanf(t, "%f,%f", &D[2], &D[3]); if( D[1] < 0.0f ) return std::array<float, 4>{}; D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
+            static const bool s_bBands = xlionrender::Env("XLION_REFL_BANDS") != nullptr; if( s_bBands && !bPlanar ) Push.m_Plane[0] = -1.0f;
+            static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = xlionrender::Env("XLION_VOX_DIRS_TRACE"); const char* d = xlionrender::Env("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; xlionrender::Scan(d, "%f,%f", &D[1], &K); xlionrender::Scan(t, "%f,%f", &D[2], &D[3]); if( D[1] < 0.0f ) return std::array<float, 4>{}; D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
             if( pVox && s_DirsTrace[0] > 0.0f && !s_bReflPT ) { if( !bPlanar ) std::memcpy(Push.m_Plane, s_DirsTrace.data(), sizeof(Push.m_Plane)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
             auto Buffers  = std::array<xgpu::buffer*, 16>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats, s_bReflPT && m_ReflPTAccum.m_Private ? &m_ReflPTAccum : &m_ReflSharpList };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : bSdf ? &View.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
@@ -2456,18 +2457,18 @@ namespace xlionrender
                 P2.m_Full[0] = int(View.m_SharpWidth | (View.m_SharpHeight << 16)); P2.m_Full[2] = 2 * W * H; P2.m_SharpMax = m_ReflSharpMax;
                 P2.m_Frame = View.m_TailFrame;     // (the sharp ones are not reconstructed: a new ray each frame, TAA averages them; one fixed ray a pixel was static sparkle on Bistro's glass. Same cost, noise over 8 .020 to .028 %)
                 auto T2 = std::array<const xgpu::texture*, 6>{ &View.m_SharpGColor, &View.m_SharpGDepth, &m_EnvAtlas, Textures[3], Textures[4], &View.m_SharpGMotion };
-                Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
                 P2.m_Frame = (P2.m_Frame & ~1u) | (m_ReflSharpRuns++ & 1u);      // (the list's parity: alternates each run, gaps or not)
-            }
+                Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
                 P2.m_Full[0] = -P2.m_Full[0];      // (the list: 64 a group, every lane busy)
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), 262144 / 64, 1);
             Window.WriteTimestamp(m_ReflTimes, 1);
+            }
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
             Window.WriteTimestamp(m_ReflTimes, 2);
             if( bHits ) shadeReflectionHits(Window, Scene, View, BvhR, Slot, HalfKeys, std::uint32_t(2 * W * H));
             Window.WriteTimestamp(m_ReflTimes, 3);
             Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, std::max(MaxRough, MaxRoughOut));
-            static const float s_GradeCut = [] { const char* p = std::getenv("XLION_REFL_GRADE_CUT"); return p ? float(std::atof(p)) : 0.0f; }();      /* (grading: the mirror view asks rays of everything; the cutoff their fade follows) */
+            static const float s_GradeCut = [] { const char* p = xlionrender::Env("XLION_REFL_GRADE_CUT"); return p ? float(std::atof(p)) : 0.0f; }();      /* (grading: the mirror view asks rays of everything; the cutoff their fade follows) */
             if( s_GradeCut > 0.0f ) Light.m_EnvParams.m_W = s_GradeCut;
         }
         if( bTraced || bScreen )
@@ -2556,7 +2557,7 @@ namespace xlionrender
         auto Buffers  = std::array<xgpu::buffer*, 12>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_HitList, &m_HitTables, &m_HitBins, &m_HitCounts, &m_HitDraws, &m_HitCapture, &View.m_TailResult };
         auto Textures = std::array<const xgpu::texture*, 1>{ &m_HitShadeTex };
         struct { std::uint32_t m_Pass, m_Keys, m_Half, m_FullBase, m_Bins, m_Cap, m_Drawn, m_Slot, m_Width, m_TableBase; float m_TexMax; std::uint32_t m_Parity, m_Debug; } Push
-            { 0, hit_cap_v, HalfKeys, FullBase, nBins, hit_cap_v, DrawnAt, std::uint32_t(Slot), hit_width_v, std::uint32_t(Slot) * m_HitTableCap, Scene.m_ReflectionTextureMinReflectance, (View.m_TailFrame & 1023u) & 1u, std::getenv("XLION_REFL_HITS_ALBEDO") ? std::uint32_t(std::atoi(std::getenv("XLION_REFL_HITS_ALBEDO"))) : 0u };
+            { 0, hit_cap_v, HalfKeys, FullBase, nBins, hit_cap_v, DrawnAt, std::uint32_t(Slot), hit_width_v, std::uint32_t(Slot) * m_HitTableCap, Scene.m_ReflectionTextureMinReflectance, (View.m_TailFrame & 1023u) & 1u, xlionrender::Env("XLION_REFL_HITS_ALBEDO") ? std::uint32_t(std::atoi(xlionrender::Env("XLION_REFL_HITS_ALBEDO"))) : 0u };
         for( std::uint32_t Pass = 0; Pass < 3; ++Pass )
         {
             Push.m_Pass = Pass;
@@ -2695,7 +2696,7 @@ namespace xlionrender
         static std::unordered_map<const void*, xgpu::timestamps> s_Pre;      // ponytail: per renderer, never erased (a measurement hook)
         xgpu::timestamps* pPre = nullptr;
         static double s_PreCpuMs = 0;
-        if( bMain && std::getenv("XLION_GPU_TIMES") )
+        if( bMain && xlionrender::Env("XLION_GPU_TIMES") )
         {
             auto [It, bNew] = s_Pre.try_emplace(this);
             if( bNew && m_Device.Create(It->second, { .m_Count = 5 }) ) s_Pre.erase(It);
@@ -2738,14 +2739,14 @@ namespace xlionrender
                 Light.m_ShadowLevels = {};           // (the clipmap's: reserved, zero - the compiled materials' layout keeps them)
                 Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.getSetup().m_ResolutionBias };     // the local lights' pages
                 const auto& VS = m_VSM.getSetup();
-                static const int s_DiscTaps = [] { const char* p = std::getenv("XLION_VSM_DISC_TAPS"); return p ? std::atoi(p) : 0; }();      // (measurement: overrides the sun's)
+                static const int s_DiscTaps = [] { const char* p = xlionrender::Env("XLION_VSM_DISC_TAPS"); return p ? std::atoi(p) : 0; }();      // (measurement: overrides the sun's)
                 // (one tap while the sun turns: its pages rebuild every epoch then and the disc's taps cost 1 to 2.6 ms; a turning sun's soft edge is a blur anyway. XLION_VSM_MOVING_TAPS=<n>, 0: off)
-                static const int s_MovingTaps = [] { const char* p = std::getenv("XLION_VSM_MOVING_TAPS"); return p ? std::atoi(p) : 1; }();
+                static const int s_MovingTaps = [] { const char* p = xlionrender::Env("XLION_VSM_MOVING_TAPS"); return p ? std::atoi(p) : 1; }();
                 { const xmath::fvec3 Sd = Scene.m_Sun.m_Direction; if( (Sd - m_SunDirSeen).Length() > 1e-5f ) { m_SunDirSeen = Sd; m_SunMoved = std::chrono::steady_clock::now(); } }
                 const bool bSunTurning = s_MovingTaps > 0 && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_SunMoved).count() < 0.5f;
                 Light.m_VSMParams  = bVSM ? xmath::fvec4{ float(std::clamp(s_DiscTaps > 0 ? s_DiscTaps : bSunTurning ? std::min(s_MovingTaps, Scene.m_Sun.m_ShadowDiscTaps) : Scene.m_Sun.m_ShadowDiscTaps, 1, 16)), m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };     // (x: the disc's taps; 0: no sun shadow)
-                static const float s_Band = [] { const char* p = std::getenv("XLION_VSM_BAND"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement: the levels' blend band)
-                static const bool  s_bNoDisc = std::getenv("XLION_VSM_NO_DISC") != nullptr;                                                         // (measurement: no contact-hardening)
+                static const float s_Band = [] { const char* p = xlionrender::Env("XLION_VSM_BAND"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement: the levels' blend band)
+                static const bool  s_bNoDisc = xlionrender::Env("XLION_VSM_NO_DISC") != nullptr;                                                         // (measurement: no contact-hardening)
                 Light.m_VSMParams2 = { float(VS.m_Window), s_Band > 0.0f ? s_Band : m_VSMLevelBand, float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
                 for( int i = 0; i < shadows::vsm::max_levels_v; ++i )
                 {
@@ -2769,8 +2770,8 @@ namespace xlionrender
                 writeLocalLights(Window, Scene, Eye, Light);
                 if( m_LightModeUsed == light_mode::SCREEN && !bMain ) Light.m_LocalCount.m_Y = float(int(light_mode::CELLS));     // (the screen tail is the main view's: the others' every light of the list)
                 // XLION_REFL_GRADE=<roughness below 1>: the mirror view at that roughness on every surface, for grading against the ground truth (with XLION_GI_REF: it is what shows: 4 +)
-                static const float s_Grade = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) : -1.0f; }();
-                static const float s_GradeBase = s_Grade >= 0.0f ? (std::getenv("XLION_GI_REF") ? 4.0f : std::getenv("XLION_REFL_GRADE_RAW_PROBE") ? 6.0f : 2.0f) + s_Grade : 2.0f;
+                static const float s_Grade = [] { const char* p = xlionrender::Env("XLION_REFL_GRADE"); return p ? float(std::atof(p)) : -1.0f; }();
+                static const float s_GradeBase = s_Grade >= 0.0f ? (xlionrender::Env("XLION_GI_REF") ? 4.0f : xlionrender::Env("XLION_REFL_GRADE_RAW_PROBE") ? 6.0f : 2.0f) + s_Grade : 2.0f;
                 Light.m_EnvParams = { m_bEnvOn ? 1.0f : 0.0f, m_EnvIntensity, bMain && Scene.m_bDebugReflection ? (Scene.m_bDebugReflectionMirror ? (Scene.m_bDebugReflectionPathTraced ? 4.01f : s_GradeBase) : 1.0f) : 0.0f, 0 };     // (the main view only: a probe captures the lit scene)
 
             }
@@ -2822,7 +2823,7 @@ namespace xlionrender
                 if( bPlan ) planClusters(Scene, Eye, Frustum);
             }
 
-            static const bool s_bNoPrepass = std::getenv("XLION_NO_PREPASS") != nullptr;
+            static const bool s_bNoPrepass = xlionrender::Env("XLION_NO_PREPASS") != nullptr;
             // The G-buffer prepass (gi_gbuffer_gather_plan.md): the main view's prepass in a pass of its own writing each pixel's normal and
             // submesh instance too (a masked one's through its cutout); the scene pass loads its depth
             const bool bGPre = bMain && !s_bNoPrepass && !(bPlan && m_bBoxesOnly) && createGPreTargets(View) == nullptr;
@@ -2835,7 +2836,7 @@ namespace xlionrender
             };
             // ... and a masked one too (the ivy): on the half-resolution read as if solid - its cutout is the full-resolution pass's, whose
             // upsample keeps the most alike of the 4 (never the per-pixel walk again: 5.9 of Bistro's 13.7 ms). XLION_GI_SCREEN_MASKED=0: off
-            static const bool s_bScreenMasked = [] { const char* p = std::getenv("XLION_GI_SCREEN_MASKED"); return !(p && p[0] == '0'); }();
+            static const bool s_bScreenMasked = [] { const char* p = xlionrender::Env("XLION_GI_SCREEN_MASKED"); return !(p && p[0] == '0'); }();
             const auto ScreenOk = [&]( const material_slot* pMat )
             {
                 if( Opaque(pMat) ) return true;
@@ -2848,14 +2849,14 @@ namespace xlionrender
             // gathered from the G-buffer prepass (GatherGI, below: no geometry drawn for it) into the view's buffer; the scene pass's GI draws
             // upsample it (SurfelGIScreen) instead of reading the surfels each pixel. With the per-pixel read off (the vertex read alone) none:
             // the gather has no vertices - the scene pass's own vertex read
-            static const int s_HalfResEnv = [] { const char* p = std::getenv("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
+            static const int s_HalfResEnv = [] { const char* p = xlionrender::Env("XLION_GI_HALFRES"); return p ? std::atoi(p) : -1; }();     // (measurement: 0 off, 1 on)
             // (the GI off: the same pass, no GI in it - the ambient occlusion's way to the materials)
             // (the voxels' light view: the surfels hold nothing to show, the gather's read does)
             const bool bVoxLightView = Scene.m_GI.m_Debug == gi_debug::LIGHT && gi::gpu_trace::VoxConfig()[0] > 0.0f;
             if( pLight ) pLight->m_ShadowLevels[1].m_X = bVoxLightView ? 2.0f : 0.0f;
             const bool bScreen = bGPre && (s_HalfResEnv >= 0 ? s_HalfResEnv != 0 : Scene.m_GI.m_bHalfRes) && (Scene.m_GI.m_Debug == gi_debug::NONE || bVoxLightView)
                               && (Scene.m_GI.m_bPerPixel || !Scene.m_GI.m_bEnable) && createGIScreenTargets(View) == nullptr;
-            static const bool s_bTile = [] { const char* p = std::getenv("XLION_TILE"); return p && p[0] != '2' && p[0] != '0'; }();        // (2: the attributes written, no tile pass: the prepass's cost)
+            static const bool s_bTile = [] { const char* p = xlionrender::Env("XLION_TILE"); return p && p[0] != '2' && p[0] != '0'; }();        // (2: the attributes written, no tile pass: the prepass's cost)
             const bool bTile = s_bTile && bGPre && bScreen && View.m_TilePass.m_Private;
             const auto TileMat = [&]( const material_slot* pMat )       // (opaque or masked, one or two sided: the prepass has them all)
             {
@@ -2866,7 +2867,7 @@ namespace xlionrender
             // What the prepass keeps for the tile pass: the material's base, or nothing (+ 1 in the id's w: 0, the raster path)
             const auto TileBase = [&]( const material_slot* pMat ) { return TileMat(pMat) ? pMat->m_ParamBase : 0xFFFFFFFFu; };
             // The ambient occlusion (scene::gi_settings::m_bAO; XLION_AO=0/1 overrides): with the half-resolution pass, the GI on or off
-            static const int s_AOEnv = [] { const char* p = std::getenv("XLION_AO"); return p ? std::atoi(p) : -1; }();
+            static const int s_AOEnv = [] { const char* p = xlionrender::Env("XLION_AO"); return p ? std::atoi(p) : -1; }();
             const bool bAO = bScreen && (s_AOEnv >= 0 ? s_AOEnv != 0 : Scene.m_GI.m_bAO);
             if( pPre ) Window.WriteTimestamp(*pPre, 1);
             const auto PreCpu0 = std::chrono::steady_clock::now();     // (measurement: the half-res block's CPU, PRESCENE)
@@ -2877,7 +2878,7 @@ namespace xlionrender
                 // Temporal (XLION_GI_TEMPORAL=0: off): last frame's buffer becomes the one reprojected from; this frame's is cleared (a pixel no
                 // GI surface covers keeps nothing of an older frame) and gets the header: the size, the frame's 2x2 pattern, whether last
                 // frame's is there, its world to clip and the eye's move (xlionrender_gi_gather_frag.glsl)
-                static const int s_TemporalEnv = [] { const char* p = std::getenv("XLION_GI_TEMPORAL"); return p ? std::atoi(p) : -1; }();     // (0 off, 1/2/4 the rate)
+                static const int s_TemporalEnv = [] { const char* p = xlionrender::Env("XLION_GI_TEMPORAL"); return p ? std::atoi(p) : -1; }();     // (0 off, 1/2/4 the rate)
                 const bool bTemporal = s_TemporalEnv >= 0 ? s_TemporalEnv != 0 : Scene.m_GI.m_bTemporal;
                 const int  Rate      = s_TemporalEnv > 0 ? s_TemporalEnv : Scene.m_GI.m_TemporalRate;
                 const std::uint32_t RateLog2 = Rate >= 4 ? 2u : Rate >= 2 ? 1u : 0u;
@@ -2922,19 +2923,19 @@ namespace xlionrender
                     // The gather's table (xlionrender_gi_gather_common.glsl): every visible rigid GI instance's clusters - their GI reference
                     // and GI buffer, the passes' list of buffers (GatherBuffers); the passes run after the G-buffer prepass, below
                     m_GatherTable.assign(40, 0u);
-                    static const bool s_bNoGatherRefl = std::getenv("XLION_GI_NO_REFL") != nullptr;      // (measurement: the gather's reflection term off - the path traced view has none: read against it fairly)
+                    static const bool s_bNoGatherRefl = xlionrender::Env("XLION_GI_NO_REFL") != nullptr;      // (measurement: the gather's reflection term off - the path traced view has none: read against it fairly)
                     m_GatherTable[29] = s_bNoGatherRefl ? 1u : 0u;
-                    static const bool s_bBinPdf = std::getenv("XLION_VOX_NO_BIN_PDF") == nullptr;
+                    static const bool s_bBinPdf = xlionrender::Env("XLION_VOX_NO_BIN_PDF") == nullptr;
                     m_GatherTable[31] = s_bBinPdf ? 1u : 0u;
                     {   // (XLION_VOX_DIRS=<level>,<k>[,<roughness>]: a prototype, the reflections' light in a coarse level by k x k directions: words 32, 33, xlionrender_gi_gather_frag.glsl VoxDirsRead. The read knows one roughness, XLION_REFL_GRADE's)
-                    { static const float s_BucketAO = [] { const char* p = std::getenv("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }(); std::memcpy(&m_GatherTable[34], &s_BucketAO, 4); }      // (XLION_VOX_AO_BUCKET: the gather's read)
-                        static const std::array<float, 3> s_Dirs = [] { std::array<float, 3> D{ -1.0f, 8.0f, 0.3f }; if( const char* p = std::getenv("XLION_VOX_DIRS") ) std::sscanf(p, "%f,%f,%f", &D[0], &D[1], &D[2]); if( const char* g = std::getenv("XLION_REFL_GRADE"); g && !std::getenv("XLION_VOX_DIRS_BAND") ) D[2] = float(std::atof(g)); return D; }();      /* (XLION_VOX_DIRS_BAND: the read's roughness stays the third number, whatever is graded) */
-                        static const bool s_bDirsFixed = std::getenv("XLION_VOX_DIRS_FIXED") != nullptr;
-                        static const bool s_bDirsInTrace = std::getenv("XLION_VOX_DIRS_TRACE") != nullptr;      /* (the read in the reflections' pass instead: refl_trace_comp) */
-                        if( s_Dirs[0] >= 0.0f && !s_bDirsInTrace ) { m_GatherTable[32] = 8u | (s_bDirsFixed ? 16u : 0u) | (std::uint32_t(s_Dirs[0]) & 3u) | (s_Dirs[1] > 8.5f ? 4u : 0u) | (std::uint32_t(std::clamp(s_Dirs[2], 0.0f, 1.0f) * 255.0f + 0.5f) << 8); static const bool s_bDirsStill = std::getenv("XLION_VOX_DIRS_STILL") != nullptr; m_GatherTable[33] = s_bDirsStill ? 0u : std::uint32_t(m_Device.getFrameIndex()); }      /* (STILL: the same samples each frame: the store's own flicker, not the read's) */
+                    { static const float s_BucketAO = [] { const char* p = xlionrender::Env("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }(); std::memcpy(&m_GatherTable[34], &s_BucketAO, 4); }      // (XLION_VOX_AO_BUCKET: the gather's read)
+                        static const std::array<float, 3> s_Dirs = [] { std::array<float, 3> D{ -1.0f, 8.0f, 0.3f }; if( const char* p = xlionrender::Env("XLION_VOX_DIRS") ) xlionrender::Scan(p, "%f,%f,%f", &D[0], &D[1], &D[2]); if( const char* g = xlionrender::Env("XLION_REFL_GRADE"); g && !xlionrender::Env("XLION_VOX_DIRS_BAND") ) D[2] = float(std::atof(g)); return D; }();      /* (XLION_VOX_DIRS_BAND: the read's roughness stays the third number, whatever is graded) */
+                        static const bool s_bDirsFixed = xlionrender::Env("XLION_VOX_DIRS_FIXED") != nullptr;
+                        static const bool s_bDirsInTrace = xlionrender::Env("XLION_VOX_DIRS_TRACE") != nullptr;      /* (the read in the reflections' pass instead: refl_trace_comp) */
+                        if( s_Dirs[0] >= 0.0f && !s_bDirsInTrace ) { m_GatherTable[32] = 8u | (s_bDirsFixed ? 16u : 0u) | (std::uint32_t(s_Dirs[0]) & 3u) | (s_Dirs[1] > 8.5f ? 4u : 0u) | (std::uint32_t(std::clamp(s_Dirs[2], 0.0f, 1.0f) * 255.0f + 0.5f) << 8); static const bool s_bDirsStill = xlionrender::Env("XLION_VOX_DIRS_STILL") != nullptr; m_GatherTable[33] = s_bDirsStill ? 0u : std::uint32_t(m_Device.getFrameIndex()); }      /* (STILL: the same samples each frame: the store's own flicker, not the read's) */
                     }
                     {   // X1: the clipmap the gather reads instead (words 20 on, xlionrender_gi_gather_frag.glsl); 20: 0 none
-                        static const std::array<float, 2> s_ClipCell = [] { std::array<float, 2> A{ 0.0f, 0.5f }; if( const char* p = std::getenv("XLION_GI_CLIP") ) (void)std::sscanf(p, "%f,%f", &A[0], &A[1]); return A; }();
+                        static const std::array<float, 2> s_ClipCell = [] { std::array<float, 2> A{ 0.0f, 0.5f }; if( const char* p = xlionrender::Env("XLION_GI_CLIP") ) (void)xlionrender::Scan(p, "%f,%f", &A[0], &A[1]); return A; }();
                         m_pGatherClip = s_ClipCell[0] > 0.0f && m_pGITrace ? m_pGITrace->ClipBuffer() : nullptr;
                         if( m_pGatherClip )
                         {
@@ -2944,7 +2945,7 @@ namespace xlionrender
                             std::memcpy(m_GatherTable.data() + 21, C, sizeof(C));
                         }
                         // The ground truth instead (scene::gi_settings::m_bPathTraced, or XLION_GI_REF=<paths a frame>[,<bounces>]): words 20 = 2, 28 the half-size width; the gather writes each pixel's point, reads its mean
-                        static const std::array<int, 2> s_Ref = [] { std::array<int, 2> A{ 0, 4 }; if( const char* p = std::getenv("XLION_GI_REF") ) (void)std::sscanf(p, "%d,%d", &A[0], &A[1]); return A; }();
+                        static const std::array<int, 2> s_Ref = [] { std::array<int, 2> A{ 0, 4 }; if( const char* p = xlionrender::Env("XLION_GI_REF") ) (void)xlionrender::Scan(p, "%d,%d", &A[0], &A[1]); return A; }();
                         m_pGatherRefS = m_pGatherRefA = nullptr;
                         // Experiment X1c (gpu_trace::VoxConfig): the gather reads voxels of light on the surfaces (xlionrender_gi_ref_comp.glsl VoxMain), the rays go out in updateGI
                         const auto& s_Vox = gi::gpu_trace::VoxConfig();
@@ -2957,7 +2958,7 @@ namespace xlionrender
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum();
                             const float Ey[3] = { Eye[0], Eye[1], Eye[2] };
                             m_GatherTable[20] = 2u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
-                            static const float s_GradeRef = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? float(std::atof(p)) + (std::getenv("XLION_REFL_REF_NO_WEIGHT") ? 2.0f : 0.0f) : -1.0f; }();      // (the reflections' ground truth at this roughness; none: the irradiance)
+                            static const float s_GradeRef = [] { const char* p = xlionrender::Env("XLION_REFL_GRADE"); return p ? float(std::atof(p)) + (xlionrender::Env("XLION_REFL_REF_NO_WEIGHT") ? 2.0f : 0.0f) : -1.0f; }();      // (the reflections' ground truth at this roughness; none: the irradiance)
                             const float GradeRef = Scene.m_bDebugReflectionPathTraced ? 0.01f : s_GradeRef;      // (the mirror view's path traced option: a mirror's ground truth)
                             std::memcpy(m_GatherTable.data() + 30, &GradeRef, sizeof(GradeRef));
                             std::memcpy(m_GatherTable.data() + 25, Ey, sizeof(Ey));
@@ -2965,11 +2966,11 @@ namespace xlionrender
                         if( s_Vox[0] > 0.0f ) { m_VoxPixels = std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight; m_VoxKey = LightsKey; }
                         // Experiment X1c: the voxels' rays (here, not in updateGI: at the frame's start they measured 3.4 ms whatever their number), as many as fit their ms a frame by what they measured
                         // (64 rays cost about as much as 32768 and long rays are what cost - why is not known yet (gi_next_level_analysis.md) -, so with nothing changing, none on most frames, not fewer on each)
-            static const double s_VoxStop = [] { const char* p = std::getenv("XLION_VOX_STOP"); return p ? std::atof(p) : 0.0; }();      /* (measurement: the voxels' rays stop this many seconds after the first: what still moves is not the store) */
+            static const double s_VoxStop = [] { const char* p = xlionrender::Env("XLION_VOX_STOP"); return p ? std::atof(p) : 0.0; }();      /* (measurement: the voxels' rays stop this many seconds after the first: what still moves is not the store) */
             static const auto s_VoxT0 = std::chrono::steady_clock::now();
             // Settled (XLION_VOX_SETTLE seconds, 0: never): lights, eye and view all still that long: no more rays until one of them moves. With the rays stopped a still moto's whole surfaces stop shifting
             // (mean change 0.6 to 0.2 of 255, Tomas: rough reflections should settle). ponytail: moving objects don't wake it, they aren't in the lights' key; wake on a changed caster when they matter
-            static const double s_VoxSettle = [] { const char* p = std::getenv("XLION_VOX_SETTLE"); return p ? std::atof(p) : 0.0; }();
+            static const double s_VoxSettle = [] { const char* p = xlionrender::Env("XLION_VOX_SETTLE"); return p ? std::atof(p) : 0.0; }();
             const float* pFw = reinterpret_cast<const float*>(&W2C);
             const xmath::fvec3 VoxFw = xmath::fvec3{ pFw[3], pFw[7], pFw[11] } / std::max(xmath::fvec3{ pFw[3], pFw[7], pFw[11] }.Length(), 1e-12f);
             if( VoxFw.Dot(m_VoxFwd) < 0.999999f ) { m_VoxFwd = VoxFw; m_VoxTurned = std::chrono::steady_clock::now(); }
@@ -2981,9 +2982,9 @@ namespace xlionrender
                             {
                                 const double Ms = double(Ns[1] - Ns[0]) * 1e-6, Budget = double(Vox[1]);
                                 m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 2048.0, 65536.0);     // (groups of 4 lanes: the cost follows the rays - in groups of 64 a dispatch cost 2 ms and more with any rays at all, and the budget could only starve them. The top: past it many small groups cost more than the rays)
-                                static const char* s_pFixed = std::getenv("XLION_VOX_RAYS");      // (measurement: the rays' cost against their number)
+                                static const char* s_pFixed = xlionrender::Env("XLION_VOX_RAYS");      // (measurement: the rays' cost against their number)
                                 if( s_pFixed ) m_VoxRays = std::atof(s_pFixed);
-                                static const bool s_bVoxLog = std::getenv("XLION_GPU_TIMES") != nullptr;
+                                static const bool s_bVoxLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                                 if( s_bVoxLog && m_Device.getFrameIndex() % 120 == 0 ) { std::printf("VOXRAYS %.2f ms, %.0f rays, budget %.2f\n", Ms, m_VoxRays, Budget); std::fflush(stdout); }
                             }
                             if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
@@ -3052,7 +3053,7 @@ namespace xlionrender
                                 pBuf = &pMesh->m_GISections[k].m_Buffer;
                             }
                             // Experiment X1b, its cheapest step (XLION_GI_READ_PROBES=<spacing> [<probes a frame> [<cascades> [1: the rays' hits read them too, not the surfels]]]): every surface reads the ray-traced probe grid
-                            static const bool s_bReadProbes = std::getenv("XLION_GI_READ_PROBES") != nullptr;
+                            static const bool s_bReadProbes = xlionrender::Env("XLION_GI_READ_PROBES") != nullptr;
                             if( const xgpu::buffer* pP = s_bReadProbes && m_pGITrace ? m_pGITrace->ProbeBuffer() : nullptr ) { R = { 0u, 0xFFFFFFFEu }; pBuf = pP; }
                             m_GatherTable.insert(m_GatherTable.end(), { R.first, R.second, R.second == 0xFFFFFFFFu ? 0u : BufferIndex(pBuf), 0u });
                         }
@@ -3075,7 +3076,7 @@ namespace xlionrender
             {
                 const auto* pMesh  = findMesh(Scene.m_Draws[iDraw].m_Mesh);
                 const bool  bRigid = pMesh->m_Geom.m_Kind != geom_kind::SKIN;
-                static const bool s_bBlendNone = [] { const char* p = std::getenv("XLION_GI_ABLATE"); return p && std::string_view(p).find("blend_none") != std::string_view::npos; }();     // (measurement: the blended draws without GI)
+                static const bool s_bBlendNone = [] { const char* p = xlionrender::Env("XLION_GI_ABLATE"); return p && std::string_view(p).find("blend_none") != std::string_view::npos; }();     // (measurement: the blended draws without GI)
                 const bool  bNoGI  = s_bBlendNone && pMat && pMat->m_State.m_Blend != material_state::blend::OFF;
                 const auto  GI     = iDraw < m_DrawGI.size() && !bNoGI ? m_DrawGI[iDraw] : std::pair<std::uint32_t, std::uint32_t>{ 0u, 0xFFFFFFFFu };
                 const bool  bSections0 = !bNoGI && bRigid && !pMesh->m_GISections.empty() && pMesh->m_GIClusterSection.size() == pMesh->m_Geom.m_Clusters.size();
@@ -3084,12 +3085,12 @@ namespace xlionrender
                 // a blended draw (glass) reads the probe grid - 8 probes, O(1) - not the surfels a pixel: no prepass under it, each layer paid
                 // the walk (Bistro: 22 of its 33 ms scene pass). Frostbite's GIBS lights what is outside its deferred path from a probe volume,
                 // Lumen's translucency from a volume too. XLION_GI_BLEND_PIXEL=1: the per-pixel read, as before (measurement)
-                static const bool s_bBlendPixel = std::getenv("XLION_GI_BLEND_PIXEL") != nullptr;
+                static const bool s_bBlendPixel = xlionrender::Env("XLION_GI_BLEND_PIXEL") != nullptr;
                 // (BLENDED only: a masked one - the ivy, its alpha test - read the street's probes, flat pale patches on the walls, Tomas)
                 const bool  bBlendProbes = !s_bBlendPixel && bRigid && Probes && pMat && MaterialVisibilityOf(pMat->m_State).m_Opacity == material_visibility::opacity::BLENDED;
                 const bool  bSections = bSections0 && !bScreenSub && !bBlendProbes;
                 // measurement (XLION_GPU_TIMES): why a main-view GI draw misses the half-resolution read - GIHALFMISS every 240 frames
-                static const bool s_bHalfMiss = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static const bool s_bHalfMiss = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                 if( s_bHalfMiss && bMain && bScreen )
                 {
                     static int s_n[8] = {}; static std::uint64_t s_Frame = 0;
@@ -3123,8 +3124,8 @@ namespace xlionrender
             if( pPre ) { Window.WriteTimestamp(*pPre, 2); s_PreCpuMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - PreCpu0).count(); }
             // GPU culling (features/cull, documentation/gpu_cluster_culling.md): the main view's opaque rigid clusters with a material, a
             // candidate each, in runs (a bind state each; a prepass run a geometry), culled here - outside the pass - into their runs' commands
-            static const bool s_bNoGPUCull     = std::getenv("XLION_NO_GPU_CULL") != nullptr;
-            static const bool s_bNoGPUOcclusion = std::getenv("XLION_NO_GPU_OCCLUSION") != nullptr;
+            static const bool s_bNoGPUCull     = xlionrender::Env("XLION_NO_GPU_CULL") != nullptr;
+            static const bool s_bNoGPUOcclusion = xlionrender::Env("XLION_NO_GPU_OCCLUSION") != nullptr;
             m_CullCandidates.clear(); m_CullMatrices.clear(); m_CullRuns.clear(); m_CullRunOf.clear(); m_CullSub.clear();
             if( bMain ) m_LODReport = {};
             m_CullSubBase.assign(Scene.m_Draws.size(), ~0u);
@@ -3155,11 +3156,11 @@ namespace xlionrender
                     bool bAny = false;
                     // Measurement only (XLION_MAIN_LOD=k): every rigid geometry's LOD k in the main view (its GI not mapped: the upper bound of
                     // the main view's LODs, shadows_gpu_plan.md)
-                    static const int s_MainLOD = [] { const char* p = std::getenv("XLION_MAIN_LOD"); return p ? std::atoi(p) : 0; }();
+                    static const int s_MainLOD = [] { const char* p = xlionrender::Env("XLION_MAIN_LOD"); return p ? std::atoi(p) : 0; }();
                     // The LOD a submesh (a LOD group) draws: the coarsest whose error projects under XLION_LOD_PIXELS (1) pixels at the group's
                     // box (its nearest point; inside it: LOD 0) - groups meet crack-free at any mix (xgeom_static's locked group borders).
                     // XLION_LOD_PIXELS=0: LOD 0
-                    static const float s_LODPixels = [] { const char* p = std::getenv("XLION_LOD_PIXELS"); return p ? float(std::atof(p)) : 1.0f; }();
+                    static const float s_LODPixels = [] { const char* p = xlionrender::Env("XLION_LOD_PIXELS"); return p ? float(std::atof(p)) : 1.0f; }();
                     const bool  bPick    = s_MainLOD == 0 && s_LODPixels > 0 && G.m_LODSubmeshes.size() > 1 && G.m_SubBoxes.size() == G.m_Submeshes.size() && m_LODProjScale > 0;
                     const float L2WScale = bPick ? std::max({ (D.m_L2W * xmath::fvec3{ 1, 0, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length(), (D.m_L2W * xmath::fvec3{ 0, 1, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length()
                                                             , (D.m_L2W * xmath::fvec3{ 0, 0, 1 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length() }) : 1.0f;
@@ -3230,7 +3231,7 @@ namespace xlionrender
                     m_pCull->Begin(m_Device.getFrameIndex());
                     bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
                     m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
-                    static const bool s_bCullTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                    static const bool s_bCullTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                     if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
                         std::printf("CULLGPU pass 1 cull %.3f, pyramid + pass 2 cull %.3f ms; occlusion %s (it hid %.0f%% of the triangles it tested); %d clusters, %lld triangles shaded\n"
                                    , m_pCull->m_CullGpuMs, m_pCull->m_OccludeGpuMs, m_pCull->isOcclusionSkipped() ? "skipped" : "on", 100.0 * m_pCull->m_OccludedShare, m_pCull->m_Drawn, (long long)m_pCull->m_Triangles), std::fflush(stdout);
@@ -3255,7 +3256,7 @@ namespace xlionrender
             {
                 // Measurement only (XLION_GPU_TIMES): its start, the classification's end, its end - SCREENSPLIT as the geometry read's (the
                 // tools wait for its "GI read")
-                static const bool s_bGatherSplit = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static const bool s_bGatherSplit = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                 static std::unordered_map<const void*, xgpu::timestamps> s_GatherSplit;      // ponytail: per renderer, never erased (a measurement hook)
                 xgpu::timestamps* pGS = nullptr;
                 if( s_bGatherSplit )
@@ -3279,8 +3280,8 @@ namespace xlionrender
                 // takes the AO entries' (mb_standard_pbr.frag SurfelGIScreen): the GI on or off, no extra read. Last frame's: the history
                 if( pGS ) Window.WriteTimestamp(*pGS, 0);
                 if( bAO )
-                static const bool s_bSSGI = std::getenv("XLION_SSGI") != nullptr;
-                static const float s_AORadius = [] { const char* p = std::getenv("XLION_AO_RADIUS"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: the AO's and the screen GI's range)      // (prototype, A32: screen GI on the AO's bitmask - xLION_Docs ssgi_bitmask_plan_2026-11-06.md)
+                static const bool s_bSSGI = xlionrender::Env("XLION_SSGI") != nullptr;
+                static const float s_AORadius = [] { const char* p = xlionrender::Env("XLION_AO_RADIUS"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: the AO's and the screen GI's range)      // (prototype, A32: screen GI on the AO's bitmask - xLION_Docs ssgi_bitmask_plan_2026-11-06.md)
                 {
                     std::swap(View.m_AO, View.m_AOPrev);
                     const float* pM = reinterpret_cast<const float*>(&W2C);      // (column major: the clip y row's scale, P11 - the view's rotation keeps it)
@@ -3292,9 +3293,9 @@ namespace xlionrender
                     auto Buffers  = std::array<xgpu::buffer*, 5>{ &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AOPrev, &View.m_AO, &View.m_AORaw };
                     auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };     // (last frame's lit image, XLION_SSGI's light)
                     const int GX = (View.m_GIScreenWidth + 7) / 8, GY = (View.m_GIScreenHeight + 7) / 8;
-                    Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                     if( s_bSSGI ) Push.m_Mode = 4u;
                     Push.m_Mode = s_bSSGI ? 5u : 1u;
+                    Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                 }
                 View.m_bAOPrev = bAO;
@@ -3322,7 +3323,7 @@ namespace xlionrender
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 3);
                 }
                 // The voxels' read cleaned on the screen (XLION_GI_DENOISE="<strides as cells> <largest stride>"; two passes, the second on the first)
-                static const std::array<float, 2> s_Denoise = [] { std::array<float, 2> A{ 0.0f, 32.0f }; if( const char* p = std::getenv("XLION_GI_DENOISE") ) (void)std::sscanf(p, "%f %f", &A[0], &A[1]); return A; }();
+                static const std::array<float, 2> s_Denoise = [] { std::array<float, 2> A{ 0.0f, 32.0f }; if( const char* p = xlionrender::Env("XLION_GI_DENOISE") ) (void)xlionrender::Scan(p, "%f %f", &A[0], &A[1]); return A; }();
                 if( s_Denoise[0] > 0.0f && m_bVoxOn && !m_pGatherRefS && View.m_GIScreenFilter.m_Private )
                 {
                     const float* pM = reinterpret_cast<const float*>(&W2C);
@@ -3409,7 +3410,7 @@ namespace xlionrender
                     m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;
                 }
                 if( std::vector<std::uint64_t> Ns; m_SunMaskTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] >= Ns[0] && Ns[0] != ~0ull ) { m_SunMaskSum += double(Ns[1] - Ns[0]) * 1e-6; ++m_SunMaskSumN; }
-                static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                 if( s_bTimes && m_SunMaskSumN >= 120 ) { std::printf("SUNMASKGPU %d x %d: %.3f ms (mode %d)\n", View.m_Width, View.m_Height, m_SunMaskSum / m_SunMaskSumN, m_SunMaskMode); std::fflush(stdout); m_SunMaskSum = 0; m_SunMaskSumN = 0; }
             };
 
@@ -3418,7 +3419,7 @@ namespace xlionrender
             auto& Cmd = *CmdPass;
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
             // Measurement only (XLION_GPU_TIMES): the main view's scene pass split - its start, the depth prepass's end, its end (SCENESPLIT)
-            static const bool s_bSplit = std::getenv("XLION_GPU_TIMES") != nullptr;
+            static const bool s_bSplit = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
             static std::unordered_map<const void*, xgpu::timestamps> s_Split;      // ponytail: per renderer, never erased (a measurement hook)
             xgpu::timestamps* pSplit = nullptr;
             if( s_bSplit && bMain )
@@ -3454,11 +3455,11 @@ namespace xlionrender
             // The GPU culled prepass runs (a run a geometry), a pass's
             // The material tile pass's prototype (XLION_TILE): the opaque texture-table materials shaded full-screen from the prepass, before the scene pass; that pass no longer draws them
             // The sun's contact shadow (XLION_CONTACT="length steps thickness fade div", world units; xlionrender_contact_comp.glsl): before the shading reads it
-            static const std::array<float, 5> s_Contact = [] { std::array<float, 5> A{ 0.0f, 8.0f, 0.15f, 30.0f, 1.0f }; if( const char* p = std::getenv("XLION_CONTACT") ) (void)std::sscanf(p, "%f %f %f %f %f", &A[0], &A[1], &A[2], &A[3], &A[4]); return A; }();
+            static const std::array<float, 5> s_Contact = [] { std::array<float, 5> A{ 0.0f, 8.0f, 0.15f, 30.0f, 1.0f }; if( const char* p = xlionrender::Env("XLION_CONTACT") ) (void)xlionrender::Scan(p, "%f %f %f %f %f", &A[0], &A[1], &A[2], &A[3], &A[4]); return A; }();
             const bool bContact = s_Contact[0] > 0.0f && bGPre && bScreen && pLight && m_ContactTex.m_Private && View.m_Width <= sun_mask_w_v && View.m_Height <= sun_mask_h_v && Scene.m_Sun.m_bCastShadows;
             const auto ContactPass = [&]
             {
-                static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+                static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                 static double s_Sum = 0.0; static int s_n = 0;
                 if( std::vector<std::uint64_t> Ns; s_bTimes && m_ContactTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
                 {
@@ -3611,7 +3612,7 @@ namespace xlionrender
                 // A masked material (the ivy, the leaves): its own pipeline in its cutout mode (the shadow casters' flag, m_LightParams.w 1: the
                 // fragment stops after the cut) - its depth alpha-tested, as its shading's, so it too shades once a pixel (its per-pixel GI read
                 // ran for every leaf layer: 22 ms of Bistro's 32 ms scene pass). Its color is written over by its shading. XLION_PREPASS_MASKED=0: none
-                static const bool s_bMaskedPrepass = [] { const char* p = std::getenv("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
+                static const bool s_bMaskedPrepass = [] { const char* p = xlionrender::Env("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
                 bool bCutLight = false;
                 const void* pPrepassBound = nullptr;
                 // (Mode 0: all of it; with the G-buffer prepass 1: all of it into the G-buffer - a masked one's cutout writes its normal and
@@ -4273,7 +4274,7 @@ namespace xlionrender
         assert(m_bReady && View.m_Width > 0);
         m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
         if( m_SunMaskTex.m_Private && !m_bSunMaskCleared ) { (void)Window.StartRenderPass(m_SunMaskClear); m_bSunMaskCleared = true; }      // (slot 11 sampled from the first draw)
-        static const bool s_bNoBudget = std::getenv("XLION_NO_FRAME_BUDGET") != nullptr;    // measurement only (GI review): every cluster drawn, whatever the host's budget
+        static const bool s_bNoBudget = xlionrender::Env("XLION_NO_FRAME_BUDGET") != nullptr;    // measurement only (GI review): every cluster drawn, whatever the host's budget
         if( s_bNoBudget ) m_FrameBudgetMs = 0;
 
         // The render target's viewport is for this render: on a copy. The host's own view keeps the viewport it has (the editor's panel, in screen
@@ -4284,9 +4285,9 @@ namespace xlionrender
         // Camera-centered world (same as the editors): precision stays near the eye in large worlds
         const xmath::fvec3 Eye     = Camera.getPosition();
         const xmath::fmat4 W2CNoJitter = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
-        static const int s_EnvTAA = [] { const char* p = std::getenv("XLION_TAA"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();      // (measurement: 0 off, else on)
+        static const int s_EnvTAA = [] { const char* p = xlionrender::Env("XLION_TAA"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();      // (measurement: 0 off, else on)
         // (the path tracers accumulate while each texel's point holds: TAA's sub-pixel jitter moved it every frame and they never converged - Tomas, 2026-11-06: off with them, always)
-        static const bool s_bPTRefl = std::getenv("XLION_REFL_PT") != nullptr || std::getenv("XLION_GI_REF") != nullptr;
+        static const bool s_bPTRefl = xlionrender::Env("XLION_REFL_PT") != nullptr || xlionrender::Env("XLION_GI_REF") != nullptr;
         const bool bPathTracing = s_bPTRefl || Scene.m_GI.m_bPathTraced || Scene.m_bDebugReflectionPathTraced;
         const bool bTAA = !bPathTracing && (s_EnvTAA >= 0 ? s_EnvTAA == 1 : Scene.m_Post.m_bTAA);
         const xmath::fmat4 W2C = [&]
@@ -4316,7 +4317,7 @@ namespace xlionrender
         // the geometries' residency (cluster_geom::Refresh): a geometry whose buffers dropped or regained LOD 0 draws what they hold
         for( auto& M : m_Meshes ) if( M.m_bAlive && M.m_bCluster ) (void)M.m_Geom.Refresh();
         // Measurement only (XLION_GPU_TIMES): the whole Render on the GPU (its start, after the GI and the captures, after the tone map, its end)
-        static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;
+        static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
         static std::unordered_map<const void*, xgpu::timestamps> s_TS;      // ponytail: per renderer, never erased (a measurement hook)
         xgpu::timestamps* pTS = nullptr;
         if( s_bTimes )
@@ -4333,7 +4334,7 @@ namespace xlionrender
             {
                 for( int k = 0; k < 6; ++k ) s_Sum[k] += (s_Ns[k + 1] - s_Ns[k]) * 1e-6;
                 // measurement (XLION_FRAME_CSV=<file>, the scorecard's game sequence): every frame's parts, for p95 / max
-                static FILE* s_pCsv = [] { const char* p = std::getenv("XLION_FRAME_CSV"); FILE* f = p ? std::fopen(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands,shadow_pass,probes_planar,wall_ms,sh_pair_tris\n"); return f; }();
+                static FILE* s_pCsv = [] { const char* p = xlionrender::Env("XLION_FRAME_CSV"); FILE* f = p ? xlionrender::Open(p, "w") : nullptr; if (f) std::fprintf(f, "frame,environment,instances,gi_update,captures,shadows_scene_tonemap,overlays,total,shadows,scene,tonemap,vsm_pages,vsm_net,vsm_epoch,sh_cpu_draws,sh_cpu_tris,sh_cpu_casters,sh_indirect,sh_indirect_max,sh_page_clears,sh_pair_cands,shadow_pass,probes_planar,wall_ms,sh_pair_tris\n"); return f; }();
                 if( s_pCsv )
                 {
                     std::fprintf(s_pCsv, "%llu", (unsigned long long)m_Device.getFrameIndex());
@@ -4390,7 +4391,7 @@ namespace xlionrender
         { XPROFILE_SCOPE("Render: scene pass"); XPROFILE_GPU_SCOPE(Window, "Render: scene pass"); renderScenePass(Window, Scene, View, W2C, Eye, true); }
         {
             XPROFILE_SCOPE("Render: shadow requests"); XPROFILE_GPU_SCOPE(Window, "Render: shadow requests");
-            if( Scene.m_Sun.m_bCastShadows && !std::getenv("XLION_NO_SUN_SHADOWS") ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
+            if( Scene.m_Sun.m_bCastShadows && !xlionrender::Env("XLION_NO_SUN_SHADOWS") ) vsmRequestPass(Window, View, W2C, Eye);      // (the main view's depth: the pages it asks for)
             localRequestPass(Window, Scene, View, W2C, Eye);
         }
         const auto T2c = clock::now();
@@ -4398,19 +4399,18 @@ namespace xlionrender
         // HDR -> bloom, exposure -> LionMapper -> sRGB output (alpha = coverage)
         {
             XPROFILE_SCOPE("Render: tone map"); XPROFILE_GPU_SCOPE(Window, "Render: tone map");
-            static const float s_EnvBloom = [] { const char* p = std::getenv("XLION_BLOOM"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement)
-            static const int   s_EnvAuto = [] { const char* p = std::getenv("XLION_AUTO_EXPOSURE"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();     // (measurement: 0 off, else on)
+            static const float s_EnvBloom = [] { const char* p = xlionrender::Env("XLION_BLOOM"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement)
+            static const int   s_EnvAuto = [] { const char* p = xlionrender::Env("XLION_AUTO_EXPOSURE"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();     // (measurement: 0 off, else on)
             const float Bloom = s_EnvBloom >= 0.0f ? s_EnvBloom : Scene.m_Post.m_Bloom;
             const bool  bAuto = s_EnvAuto >= 0 ? s_EnvAuto == 1 : Scene.m_Post.m_bAutoExposure;
-            const xgpu::texture* pHDR = &View.m_HDR;
             // (last frame's lit image for the next frame's screen reads: the prepass clears m_HDR - they had read black)
-            static const bool s_bSSGIPrev = std::getenv("XLION_SSGI") != nullptr || std::getenv("XLION_VOX_SEEN") != nullptr;      // (and the voxels' lit feed)
+            static const bool s_bSSGIPrev = xlionrender::Env("XLION_SSGI") != nullptr || xlionrender::Env("XLION_VOX_SEEN") != nullptr;      // (and the voxels' lit feed)
             if( s_bSSGIPrev || Scene.m_bReflectionScreen )
             {
                 if( !View.m_HDRPrev.m_Private ) (void)m_Device.Create(View.m_HDRPrev, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: last frame's HDR" });
                 if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true; }
             }
-            static const float s_EnvExposure = [] { const char* p = std::getenv("XLION_EXPOSURE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: a fixed exposure with auto exposure off - graded lit images)
+            static const float s_EnvExposure = [] { const char* p = xlionrender::Env("XLION_EXPOSURE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: a fixed exposure with auto exposure off - graded lit images)
             if( s_EnvExposure > 0.0f ) View.m_Exposure = s_EnvExposure;
             const xgpu::texture* pHDR = &View.m_HDR;
             xgpu::pipeline_instance* pToneMap = &View.m_ToneMapInstance;
@@ -4433,7 +4433,7 @@ namespace xlionrender
                     View.m_bTAAHistory = false;
                 }
                 const int Cur = View.m_TAAFrame & 1;
-                static const float s_TAABlendEnv = [] { const char* p = std::getenv("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: this frame's share)
+                static const float s_TAABlendEnv = [] { const char* p = xlionrender::Env("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: this frame's share)
                 struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, s_TAABlendEnv > 0.0f ? s_TAABlendEnv : Scene.m_Post.m_TAABlend, View.m_bTAAHistory ? 1.0f : 0.0f };
                 const xgpu::texture* T[] = { &View.m_HDR, &View.m_Depth, &View.m_TAA[1 - Cur] }; const xgpu::texture* I[] = { &View.m_TAA[Cur] };
                 Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
@@ -4494,7 +4494,7 @@ namespace xlionrender
         // XLION_NOISE_LAGS="<seconds to wait> <frames>" (measurement, Tomas 2026-11-06): the noise of the tone-mapped image by how far apart in time, at the
         // real frame rate - every 4th pixel's luminance a frame into a CPU-readable ring (xlionrender_noise_lags_comp.glsl), compared on the CPU at lags
         // 1 to 60 frames once the GPU is done with them; a NOISELAGS line when it ends
-        static const std::array<float, 2> s_NoiseLags = [] { std::array<float, 2> A{ 0.0f, 0.0f }; if( const char* p = std::getenv("XLION_NOISE_LAGS") ) (void)std::sscanf(p, "%f %f", &A[0], &A[1]); return A; }();
+        static const std::array<float, 2> s_NoiseLags = [] { std::array<float, 2> A{ 0.0f, 0.0f }; if( const char* p = xlionrender::Env("XLION_NOISE_LAGS") ) (void)xlionrender::Scan(p, "%f %f", &A[0], &A[1]); return A; }();
         if( s_NoiseLags[1] > 0.0f )
         {
             static const auto s_T0 = std::chrono::steady_clock::now();
@@ -4554,7 +4554,7 @@ namespace xlionrender
         // per row, per renderer (its view's size names it). Rows that do not exist yet (reconstruction, rays, cache maintenance) print 0;
         // direct shading is fused in the scene pass, so the scene pass is the row (paired variants attribute it). The GPU times are the
         // previous frames': each timing set once, whoever read it (getGPUTimes: the GI's log or the host may have)
-        static const bool s_bLedger = std::getenv("XLION_LEDGER") != nullptr;
+        static const bool s_bLedger = xlionrender::Env("XLION_LEDGER") != nullptr;
         if( s_bLedger )
         {
             struct ledger { std::array<std::vector<double>, 4> m_Rows; std::uint64_t m_Serial = 0; };
@@ -4596,7 +4596,7 @@ namespace xlionrender
             }
         }
         // Measurement only (XLION_FRAME_TIMES): Render's CPU parts, the mean of 120 frames
-        static const bool s_bFrameTimes = std::getenv("XLION_FRAME_TIMES") != nullptr;
+        static const bool s_bFrameTimes = xlionrender::Env("XLION_FRAME_TIMES") != nullptr;
         if( s_bFrameTimes )
         {
             static double Sum[5] = {}, nB = 0, nD = 0; static int n = 0;

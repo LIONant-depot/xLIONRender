@@ -23,6 +23,7 @@
 // world cells' lists when lights are many), one albedo per instance, no coarse-to-fine solve yet (experiment 1: 3x faster
 // convergence after a change - next).
 
+#include "xlionrender_env.h"
 #include "dependencies/xmath/source/xmath.h"
 #include "dependencies/xscheduler/source/xscheduler.h"
 #include "xlionrender_world_sdf_bake.h"
@@ -650,7 +651,7 @@ namespace xlionrender::gi
         // nearest. Called after the grid is built or unpacked; the reads that sum a whole list are unchanged (the order of a sum)
         void SortReadLists() noexcept
         {
-            if (std::getenv("XLION_GI_GRIDSTATS"))     // measurement: each loaded or built read grid (GI review)
+            if (xlionrender::Env("XLION_GI_GRIDSTATS"))     // measurement: each loaded or built read grid (GI review)
             {
                 std::size_t nCells = 0, nPatch = 0, MaxPatch = 0, nEnt = 0, MaxEnt = 0, nPast32 = 0, nPast16 = 0;
                 for (const auto& E : m_ReadTable) { if (E[1] == 0xFFFFFFFFu) continue; ++nCells; nPatch += E[3]; MaxPatch = std::max<std::size_t>(MaxPatch, E[3]);
@@ -775,7 +776,7 @@ namespace xlionrender::gi
                 }
                 E[2] = At;
             }
-            if (std::getenv("XLION_GI_GRIDSTATS")) std::printf("GISPARSE ratio %.1f: lists %zu -> %zu words (%.1f%%)\n", Ratio, m_ReadList.size(), List.size(), 100.0 * double(List.size()) / std::max<double>(1, double(m_ReadList.size()))), std::fflush(stdout);
+            if (xlionrender::Env("XLION_GI_GRIDSTATS")) std::printf("GISPARSE ratio %.1f: lists %zu -> %zu words (%.1f%%)\n", Ratio, m_ReadList.size(), List.size(), 100.0 * double(List.size()) / std::max<double>(1, double(m_ReadList.size()))), std::fflush(stdout);
             m_ReadList = std::move(List);
             RefreshPackedReadGrid();
         }
@@ -1727,7 +1728,7 @@ namespace xlionrender::gi
             if (bTag3) BuildOrigins();                                  // (a GID3 resource: its origins made again from the vertex surfels, the same ones)
             else { m_OriginFirst.assign(pOF, pOF + nOFirst); m_OriginVert.assign(pOV, pOV + nO); }
             SortReadLists();
-            if (const char* pS = std::getenv("XLION_GI_SPARSEGRID")) SparsifyReadGrid(float(std::atof(pS)));     // (experiment)
+            if (const char* pS = xlionrender::Env("XLION_GI_SPARSEGRID")) SparsifyReadGrid(float(std::atof(pS)));     // (experiment)
             return true;
         }
 
@@ -2103,7 +2104,7 @@ namespace xlionrender::gi
         bool bDerived = false;
         if constexpr (requires { Geom.getGIDerived(); }) bDerived = M.UnpackDerived(Geom.getGIDerived());
         if (!bDerived) M.BuildNeighbors();
-        if (std::getenv("XLION_GI_REGRID")) M.BuildReadGrid();      // measurement: the grid rebuilt at load (BuildReadGrid's cell), no recompile
+        if (xlionrender::Env("XLION_GI_REGRID")) M.BuildReadGrid();      // measurement: the grid rebuilt at load (BuildReadGrid's cell), no recompile
         return true;
     }
 
@@ -2862,7 +2863,7 @@ namespace xlionrender::gi
         #ifdef _WIN32
             if (fopen_s(&f, pPath, "w") != 0) f = nullptr;
         #else
-            f = std::fopen(pPath, "w");
+            f = xlionrender::Open(pPath, "w");
         #endif
             if (f == nullptr) return -1;
             std::fprintf(f, "# RaysPerSurfel=%d FilterPasses=%d EmissiveScale=%g SpreadOrigins=%d LodDistance=%g\n"
@@ -2894,7 +2895,7 @@ namespace xlionrender::gi
         #ifdef _WIN32
             if (fopen_s(&f, (std::string(pPath) + ".unsupported.csv").c_str(), "w") != 0) f = nullptr;
         #else
-            f = std::fopen((std::string(pPath) + ".unsupported.csv").c_str(), "w");
+            f = xlionrender::Open((std::string(pPath) + ".unsupported.csv").c_str(), "w");
         #endif
             if (f)                                                  // the last update's unsupported queries (the first per surfel, up to 4096)
             {

@@ -4,6 +4,7 @@
 
 // Shared by the xLIONRender tests: a window + renderer, validation-message counting, HDR readback, a test sphere.
 
+#include "xlionrender_env.h"
 #include "xlionrender.h"
 #include "xlionrender_test_no_dialogs.h"
 #include "dependencies/xprim_geom/source/xprim_geom.h"
@@ -45,19 +46,19 @@ namespace xlionrender::test
 
         void Image(const std::vector<std::byte>& Raw) noexcept
         {
-            static const char* pSave = std::getenv("XLIONRENDER_BASELINE_SAVE");
-            static const char* pLoad = std::getenv("XLIONRENDER_BASELINE");
-            static const double Tol  = std::getenv("XLIONRENDER_BASELINE_TOL") ? std::atof(std::getenv("XLIONRENDER_BASELINE_TOL")) : 0.0;
+            static const char* pSave = xlionrender::Env("XLIONRENDER_BASELINE_SAVE");
+            static const char* pLoad = xlionrender::Env("XLIONRENDER_BASELINE");
+            static const double Tol  = xlionrender::Env("XLIONRENDER_BASELINE_TOL") ? std::atof(xlionrender::Env("XLIONRENDER_BASELINE_TOL")) : 0.0;
             if (!pSave && !pLoad) return;
             m_bUsed = true;
             const std::string Path = std::string(pSave ? pSave : pLoad) + "/hdr_" + std::to_string(m_n++) + ".bin";
             if (pSave)
             {
-                if (FILE* f = std::fopen(Path.c_str(), "wb")) { std::fwrite(Raw.data(), 1, Raw.size(), f); std::fclose(f); }
+                if (FILE* f = xlionrender::Open(Path.c_str(), "wb")) { std::fwrite(Raw.data(), 1, Raw.size(), f); std::fclose(f); }
                 return;
             }
             std::vector<std::byte> Old;
-            if (FILE* f = std::fopen(Path.c_str(), "rb"))
+            if (FILE* f = xlionrender::Open(Path.c_str(), "rb"))
             {
                 std::fseek(f, 0, SEEK_END); Old.resize(std::size_t(std::ftell(f))); std::fseek(f, 0, SEEK_SET);
                 if (std::fread(Old.data(), 1, Old.size(), f) != Old.size()) Old.clear();
@@ -92,10 +93,10 @@ namespace xlionrender::test
     // To look at a ReadHDR image: with XLIONRENDER_TEST_DUMP=<folder>, writes <folder>/<Name>.pgm (red, x / (1 + x) to 8 bits)
     inline void Dump(const char* pName, const std::vector<float>& Red) noexcept
     {
-        const char* pDir = std::getenv("XLIONRENDER_TEST_DUMP");
+        const char* pDir = xlionrender::Env("XLIONRENDER_TEST_DUMP");
         if (pDir == nullptr) return;
         const int Side = int(std::sqrt(double(Red.size())));
-        if (FILE* f = std::fopen((std::string(pDir) + "/" + pName + ".pgm").c_str(), "wb"))
+        if (FILE* f = xlionrender::Open((std::string(pDir) + "/" + pName + ".pgm").c_str(), "wb"))
         {
             std::fprintf(f, "P5 %d %d 255\n", Side, Side);
             for (float V : Red) std::fputc(int(255.0f * std::max(V, 0.0f) / (1.0f + std::max(V, 0.0f))), f);
@@ -263,9 +264,9 @@ namespace xlionrender::test
         {
             // Validation: on in Debug (XLION_NO_VALIDATION=1: off), off in Release (XLION_VALIDATION=1: on) - as the editor
 #ifdef NDEBUG
-            const bool bValidation = std::getenv("XLION_VALIDATION") != nullptr;
+            const bool bValidation = xlionrender::Env("XLION_VALIDATION") != nullptr;
 #else
-            const bool bValidation = std::getenv("XLION_NO_VALIDATION") == nullptr;
+            const bool bValidation = xlionrender::Env("XLION_NO_VALIDATION") == nullptr;
 #endif
             if (xgpu::CreateInstance(m_Instance, { .m_bDebugMode = bValidation, .m_bEnableRenderDoc = false, .m_pLogErrorFunc = LogError, .m_pLogWarning = LogWarning })) return false;
             if (m_Instance.Create(m_Device))                                    return false;

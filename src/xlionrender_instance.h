@@ -6,6 +6,7 @@
 // Owns the GPU side: pipelines, meshes, per-frame uniforms and GPU timings. Draws a scene (snapshot) into a
 // render_view as seen from an xgpu::tools::view camera.
 
+#include "xlionrender_env.h"
 #include "scene/xlionrender_scene.h"
 #include "view/xlionrender_render_view.h"
 #include "meshes/xlionrender_cluster_geom.h"
@@ -77,13 +78,13 @@ namespace xlionrender
             static setup Preview( void ) noexcept
             {
                 setup S;
-                if( std::getenv("XLION_PREVIEW_FULL_POOLS") ) return S;      // (A/B: the previews with the renderer's sizes)
+                if( xlionrender::Env("XLION_PREVIEW_FULL_POOLS") ) return S;      // (A/B: the previews with the renderer's sizes)
                 S.m_Shadows.m_SunPoolWidth   = S.m_Shadows.m_SunPoolHeight = 2048;
                 S.m_Shadows.m_SunPinnedRadius = 4;
                 S.m_Shadows.m_LocalAtlasSize = 1024;
                 S.m_Shadows.m_LocalAtlasHeight = 512;
                 S.m_bProbes = false;
-                S.m_bSunMask = std::getenv("XLION_SUN_MASK_PREVIEW") != nullptr;     // (measurement: the scorecard's sequence is a preview)
+                S.m_bSunMask = xlionrender::Env("XLION_SUN_MASK_PREVIEW") != nullptr;     // (measurement: the scorecard's sequence is a preview)
                 return S;
             }
         };
@@ -425,7 +426,7 @@ namespace xlionrender
         // The GI screen read's resolution: 1 / this of the view's - a quarter (Bistro moving run, frame p95: half 15.9, quarter 13.7, an
         // eighth 12.7 ms; the scorecard's GI views alike, 0.08% / 0.23% of pixels over 8 levels; Lumen's screen probes: 1 a 16 x 16).
         // XLION_GI_SCREEN_DIV overrides (2..16)
-        static int                  GIScreenDivisor( void ) noexcept { static const int s = [] { const char* p = std::getenv("XLION_GI_SCREEN_DIV"); const int d = p ? std::atoi(p) : 2; return d >= 2 && d <= 16 ? d : 2; }(); return s; }     // (half: Tomas - the others do it at half; the single geometry pass is the fix)
+        static int                  GIScreenDivisor( void ) noexcept { static const int s = [] { const char* p = xlionrender::Env("XLION_GI_SCREEN_DIV"); const int d = p ? std::atoi(p) : 2; return d >= 2 && d <= 16 ? d : 2; }(); return s; }     // (half: Tomas - the others do it at half; the single geometry pass is the fix)
         void                        destroyGIScreenTargets( render_view& View ) noexcept;
         xgpu::device::error*        createCullTargets   ( render_view& View ) noexcept;      // render_view::m_ScenePassLoad, m_HiZ (the first time)
         xgpu::device::error*        createGPreTargets   ( render_view& View ) noexcept;      // render_view::m_GPrePass, its targets, the GI gather's (the first time)
@@ -678,7 +679,7 @@ namespace xlionrender
         // sun turns or that box changes; the relight's sun visibility reads it (gi::gpu_trace::SetSunMap). XLION_GI_SUN_RAYS: shadow rays
         static constexpr int        gi_sun_map_v = 2048;
         float                       m_VSMLevelBand = 0.1f;          // the sun's shadow-level blend this frame (scene's sun_light::m_ShadowLevelBlend: the request pass and the shading)
-        bool                        m_bGISunRays = std::getenv("XLION_GI_SUN_RAYS") != nullptr;     // (tests, measurement: the shadow rays instead)
+        bool                        m_bGISunRays = xlionrender::Env("XLION_GI_SUN_RAYS") != nullptr;     // (tests, measurement: the shadow rays instead)
         xgpu::texture               m_GISunMap;
         xgpu::renderpass            m_GISunPass;
         bool                        m_bGISunMapMade = false, m_bGISunMapTried = false, m_bGISunMapValid = false;

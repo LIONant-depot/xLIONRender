@@ -12,6 +12,7 @@
 // surfel on the CPU. Before each slice the world's changes go up: its estimator changes as ops (world::TakeGPUOps, _ops_comp), the
 // links' emitted light that changed, the means, the setup and the lights (_scatter_comp). The shown light is made on the GPU (Show,
 // _filter_comp), straight into the renderer's ring. ReadBack fills the world's arrays from the GPU's light (its tests, its dump)
+#include "xlionrender_env.h"
 #include "xlionrender_surfel_gi.h"
 #include <chrono>
 #include <span>
@@ -126,13 +127,13 @@ namespace xlionrender::gi
             const auto TP1 = std::chrono::steady_clock::now();
             if (!Refresh(Window, W, L)) return false;
             const auto TP2 = std::chrono::steady_clock::now();
-            if (std::getenv("XLION_GI_CPU_TRACE"))         // measurement: the main thread's parts of a Submit, mean ms, about every 200 frames
+            if (xlionrender::Env("XLION_GI_CPU_TRACE"))         // measurement: the main thread's parts of a Submit, mean ms, about every 200 frames
             {
                 m_CpuTrace[0] += std::chrono::duration<double, std::milli>(TP1 - TP0).count(); m_CpuTrace[1] += std::chrono::duration<double, std::milli>(TP2 - TP1).count();
                 if (++m_nCpuTrace % 200 == 0) { std::printf("GICPU ops %.2f refresh %.2f ranges %.2f ms, staged words %zu, run words %zu, run jobs %zu\n", m_CpuTrace[0] / 200, m_CpuTrace[1] / 200, m_CpuTrace[2] / 200, m_Stage.size() / 2, m_RunStage.size(), m_RunJobs.size()); std::fflush(stdout); m_CpuTrace = {}; }
             }
             bool bSlice = false;
-            static const bool s_bProbesOnly = std::getenv("XLION_GI_PROBES_ONLY") != nullptr;     // (experiment X1b: no surfel work at all, the scene's data and lights kept for the probes' rays)
+            static const bool s_bProbesOnly = xlionrender::Env("XLION_GI_PROBES_ONLY") != nullptr;     // (experiment X1b: no surfel work at all, the scene's data and lights kept for the probes' rays)
             if (s_bProbesOnly) return false;
             if (m_LinkState == 2 && m_LinkSolves > 0) return false;      // experiment D: the links own the light (no more slices: they would overwrite it)
             if (m_NextRange >= m_Ranges.size())
@@ -273,7 +274,7 @@ namespace xlionrender::gi
             if (First >= End) return true;
             const std::size_t nThreads = (End - First + std::size_t(Stride) - 1) / std::size_t(Stride);
             const int nGroups = int((nThreads + 63) / 64);
-            static const int s_NoLamps = (std::getenv("XLION_GI_RELIGHT_NO_LAMPS") ? 1 : 0) | (std::getenv("XLION_GI_RELIGHT_NO_SUN_SHADOW") ? 2 : 0);      // (measurement: the lamps' share of the relight; the sun's shadow ray's)
+            static const int s_NoLamps = (xlionrender::Env("XLION_GI_RELIGHT_NO_LAMPS") ? 1 : 0) | (xlionrender::Env("XLION_GI_RELIGHT_NO_SUN_SHADOW") ? 2 : 0);      // (measurement: the lamps' share of the relight; the sun's shadow ray's)
             const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First, m_Mode, m_Pad[3]; } Push{ int(End), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, int(First), 1, { s_NoLamps, Stride, 0 } };
             if (!LinkAux()) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_LinkItemB, &m_LinkB, &m_LinkDB, &m_LinkDirB, &m_LinkListB, &m_LinkChangedB, &m_LinkFlagB, &m_LinkHitB, &m_LinkInstFirstB, &m_LinkDirTmpB };
@@ -282,7 +283,7 @@ namespace xlionrender::gi
             Window.Dispatch(m_LinksC, LinkBuffers(B), LinkTextures(), &Smooth, sizeof(Smooth), nGroups);
             m_bLinkDirValid = true;
             ++m_nRelights; m_nRelitItems += nThreads;
-            if (std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS relit %zu items, %u lamps in the GPU data\n", nItems, m_Data.size() > 3 ? m_Data[3] : 0u); std::fflush(stdout); }     // (measurement)
+            if (xlionrender::Env("XLION_GI_LINK_TRACE")) { std::printf("GILINKS relit %zu items, %u lamps in the GPU data\n", nItems, m_Data.size() > 3 ? m_Data[3] : 0u); std::fflush(stdout); }     // (measurement)
             return true;
         }
         // The relight's smoothing alone (the links shader's mode 4) over every item: each its first bounce with its mesh neighbours'
@@ -317,7 +318,7 @@ namespace xlionrender::gi
             if (!LinkAux()) return false;
             xgpu::buffer* B[] = { &m_DataB, &m_LinkB, &m_LinkDLocalB, &m_LinkItemLocalB, &m_MeansB2[m_LastMeans], &m_LinkNextB, &m_LinkDirB };
             struct { int m_nItems, m_Mode, m_nInst, m_Links; } Push{ int(nItems), 0, int(m_Data[1]), links_v };
-            static const int s_Iters = [] { const char* p = std::getenv("XLION_GI_SOLVE_ITERS"); return p ? std::max(std::atoi(p), 1) : 1; }();     // (measurement: iterations a frame)
+            static const int s_Iters = [] { const char* p = xlionrender::Env("XLION_GI_SOLVE_ITERS"); return p ? std::max(std::atoi(p), 1) : 1; }();     // (measurement: iterations a frame)
             for (int k = 0; k < s_Iters; ++k)
             {
                 Push.m_Mode = 0;
@@ -389,7 +390,7 @@ namespace xlionrender::gi
             if (List.empty()) return true;
             auto& LB = m_ProbeListB2[Frame % 2];
             if (!Fit(LB, int(sizeof(std::uint32_t)), List.size()) || LB.MemoryMapFrameRegion(0, int(List.size()), [&](void* p) { std::memcpy(p, List.data(), List.size() * 4); })) return false;
-            static const bool s_bFixedRays = std::getenv("XLION_GI_PROBE_FIXED_RAYS") != nullptr;     // (experiment X1b: each probe's rays the same every frame - the temporal noise off)
+            static const bool s_bFixedRays = xlionrender::Env("XLION_GI_PROBE_FIXED_RAYS") != nullptr;     // (experiment X1b: each probe's rays the same every frame - the temporal noise off)
             const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, s_bFixedRays ? 0 : int(Frame), int(List.size()), int(CascadeWords * Cascade), bHitsReadProbes ? 1 : 0 };
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ProbeB, &LB };
             Window.Dispatch(m_ProbesC, B, &Push, sizeof(Push), int(List.size()));
@@ -501,7 +502,7 @@ namespace xlionrender::gi
                 (void)Rays; (void)L;
                 (void)RelightLinks(Window, nItems);
                 ++m_nLocalRebuilds; m_nLocalRows += m_LocalList.size();
-                if (std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS rebuilt %zu of %zu rows (a move or a material)\n", m_LocalList.size(), nItems); std::fflush(stdout); }
+                if (xlionrender::Env("XLION_GI_LINK_TRACE")) { std::printf("GILINKS rebuilt %zu of %zu rows (a move or a material)\n", m_LocalList.size(), nItems); std::fflush(stdout); }
                 m_LocalState = 0;
             }
         }
@@ -551,13 +552,13 @@ namespace xlionrender::gi
             const std::uint64_t Local = m_LinkState == 2 ? m_LinkLocalKey : ((m_XformGen << 20) * 0x9E3779B97F4A7C15ull ^ W.MaterialGenSum());
             if (m_LinkState != 2) m_LinkLocalKey = Local;
             const std::uint64_t Key = ((m_Gen ^ (m_LevelGen << 40)) * 0x9E3779B97F4A7C15ull ^ Local) * 0xC2B2AE3D27D4EB4Full ^ SkyKey;
-            if (Key != m_LinkKey && std::getenv("XLION_GI_LINK_TRACE")) { std::printf("GILINKS dropped at frame %llu: gen %llu xform %llu level %llu materials %llu sky %llx (state %d)\n", (unsigned long long)Frame, (unsigned long long)m_Gen, (unsigned long long)m_XformGen, (unsigned long long)m_LevelGen, (unsigned long long)W.MaterialGenSum(), (unsigned long long)SkyKey, m_LinkState); std::fflush(stdout); }     // (measurement)
+            if (Key != m_LinkKey && xlionrender::Env("XLION_GI_LINK_TRACE")) { std::printf("GILINKS dropped at frame %llu: gen %llu xform %llu level %llu materials %llu sky %llx (state %d)\n", (unsigned long long)Frame, (unsigned long long)m_Gen, (unsigned long long)m_XformGen, (unsigned long long)m_LevelGen, (unsigned long long)W.MaterialGenSum(), (unsigned long long)SkyKey, m_LinkState); std::fflush(stdout); }     // (measurement)
             if (Key != m_LinkKey) { m_LinkKey = Key; m_LinkState = 0; m_LinkSince = Frame; m_LinkItems.clear(); m_bLinksLocal = false; }
             if (m_LinkState == 0 && Frame >= m_LinkSince + std::uint64_t(Settle))
             {
                 for (int i = 0; i < W.InstanceCount(); ++i)
                     if (W.IsAlive(i) && W.Level(i) == 0) for (std::size_t s = 0; s < W.InstanceSurfels0(i); ++s) m_LinkItems.push_back({ i, int(s) });
-                if (std::getenv("XLION_GI_SURFEL_STATS"))      // measurement: the surfel-count levers' upper bounds (xLION_Docs gi_convergence)
+                if (xlionrender::Env("XLION_GI_SURFEL_STATS"))      // measurement: the surfel-count levers' upper bounds (xLION_Docs gi_convergence)
                 {
                     std::size_t nFine = 0, nParent = 0, nNear[3] = {}, nCells[2] = {};
                     double SumR = 0; std::vector<float> Radii;
@@ -641,7 +642,7 @@ namespace xlionrender::gi
             {
                 if (m_LinkSolves == 0) std::printf("GILINKS %zu surfels' links built in %.0f ms (%d rays each, %d a frame); solving\n", m_LinkItems.size(),
                                                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_LinkT0).count(), Rays, PerFrame), std::fflush(stdout);
-                if (m_LinkSolves == 0 && std::getenv("XLION_GEOM_SIZES"))      // measurement: the GI's GPU memory (MB)
+                if (m_LinkSolves == 0 && xlionrender::Env("XLION_GEOM_SIZES"))      // measurement: the GI's GPU memory (MB)
                 {
                     const auto MB = [](std::size_t b) { return double(b) / (1024.0 * 1024.0); };
                     const std::size_t n = m_LinkItems.size();
@@ -658,7 +659,7 @@ namespace xlionrender::gi
                 // frequency (the display filter's freshness fills between them). (An every-8th-item stride for that was slow - scattered
                 // memory, over 1 ms a 128-item unit: 80 ms a frame; and the chunks' centers, for a nearest-first order, were all the
                 // instance's: a run of random surfels has no place)
-                static const bool s_bNoRelight = std::getenv("XLION_GI_NO_RELIGHT") != nullptr;      // (measurement: the relight's upper bound)
+                static const bool s_bNoRelight = xlionrender::Env("XLION_GI_NO_RELIGHT") != nullptr;      // (measurement: the relight's upper bound)
                 const std::size_t nItems = m_LinkItems.size();
                 const std::size_t nUnits = (nItems + relight_unit_v - 1) / relight_unit_v;
                 if (!m_bLinkDirValid)
@@ -690,11 +691,11 @@ namespace xlionrender::gi
                         else if (m_bRelightTimedFrame) m_RelightLatencyMs = m_RelightLatencyMs > 0 ? 0.8 * m_RelightLatencyMs + 0.2 * Ms : Ms;
                         m_RelightTimedItems = 0; m_bRelightTimedFrame = false;
                     }
-                    static const char* s_pMs = std::getenv("XLION_GI_RELIGHT_MS");     // (measurement: the budget)
+                    static const char* s_pMs = xlionrender::Env("XLION_GI_RELIGHT_MS");     // (measurement: the budget)
                     const double BudgetMs = s_pMs ? std::atof(s_pMs) : double(m_RelightBudgetMs);
                     const std::size_t PerFrame = m_RelightMsUnit > 0 ? std::clamp(std::size_t(std::max(BudgetMs, m_bRelightLatencyFloor ? m_RelightLatencyMs : 0.0) / m_RelightMsUnit), std::size_t(1), nUnits) : std::size_t(16);
                     const std::size_t nTake = std::min(m_RelightOwed, PerFrame);
-                    static const bool s_bTrace = std::getenv("XLION_GPU_TIMES") != nullptr;     // (measurement: the relight's budget at work)
+                    static const bool s_bTrace = xlionrender::Env("XLION_GPU_TIMES") != nullptr;     // (measurement: the relight's budget at work)
                     if (s_bTrace && (Frame % 60 == 0 || m_RelightOwed == nUnits))
                     {
                         std::printf("GIRELIGHT frame %llu: %zu of %zu units owed, %zu this frame (budget %.2f ms, latency %.2f ms, %.4f ms a unit measured), epoch %u\n", (unsigned long long)Frame, m_RelightOwed, nUnits, nTake, BudgetMs, m_RelightLatencyMs, m_RelightMsUnit, m_RelightEpoch);
@@ -841,7 +842,7 @@ namespace xlionrender::gi
                 if (!Local(m_ShownB, std::vector<float>(9 * m_nShown, 0.0f)) || !Local(m_TargetB, std::vector<float>(9 * m_nShown, 0.0f))) return false;
                 m_ShownN = m_nShown; Dt = 0;
             }
-            static const bool s_bNoBlend = std::getenv("XLION_GI_NO_BLEND") != nullptr;     // (measurement: the blend off)
+            static const bool s_bNoBlend = xlionrender::Env("XLION_GI_NO_BLEND") != nullptr;     // (measurement: the blend off)
             if (s_bNoBlend || !bBlend) Dt = 0;
             const bool  bComplete = Dt == 0 || !(m_LinkState == 2 && (m_RelightOwed > 0 || !m_bLinkDirValid));
             const float A = Dt > 0 ? 1.0f - std::exp(-std::min(Dt, 0.25f) / show_tau_v) : 1.0f;     // (a hitch: one step, not a jump)
@@ -849,7 +850,7 @@ namespace xlionrender::gi
             xgpu::buffer* Bufs[] = { &m_DataB, &m_OwnerB, &m_ScratchB, &PlaceB, &Light, &Moments, &m_DataB, &m_DataB, &m_ShownB, &m_TargetB };
             struct { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push{ 0, int(m_nShown), 1, Base, Saturation, 0, 0, 0 };
             const int Groups = int((m_nShown + 63) / 64);
-            static const bool s_bTimes = std::getenv("XLION_GPU_TIMES") != nullptr;     // measurement: the three steps' GPU time
+            static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;     // measurement: the three steps' GPU time
             if (s_bTimes && !m_ShowTimesOk) { xgpu::device D; Window.getDevice(D); m_ShowTimesOk = D.Create(m_ShowTimes, { .m_Count = 4 }) == nullptr; }
             const bool bT = s_bTimes && m_ShowTimesOk;
             if (bT)
@@ -940,7 +941,7 @@ namespace xlionrender::gi
             const std::size_t nEntries = std::size_t(vox_slots_v) * 3;
             if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
             // (XLION_VOX_RELIGHT=<connections a frame>, a prototype: rays keep what they found, 200000 of them; that many are relit each frame, no traversal; its buffer a token otherwise)
-            static const int s_Relight = [] { const char* p = std::getenv("XLION_VOX_RELIGHT"); return p ? std::atoi(p) : 0; }();
+            static const int s_Relight = [] { const char* p = xlionrender::Env("XLION_VOX_RELIGHT"); return p ? std::atoi(p) : 0; }();
             if (!m_ConnB.m_Private && !FitLocal(m_ConnB, 16, s_Relight > 0 ? 1 + 200000 * 7 : 8)) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0], &m_ConnB };
             m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z };
@@ -954,37 +955,37 @@ namespace xlionrender::gi
                 if (m_VoxCleared >= nEntries && s_Relight > 0) { auto Cl = Push; Cl.m_Bounces = -6; Cl.m_First = 0; Cl.m_Count = 0; Window.Dispatch(m_VoxC, B, VoxTex, &Cl, sizeof(Cl), (1 + 200000 * 7 + 63) / 64); }
                 return true;
             }
-            static const bool s_bHits = std::getenv("XLION_GI_VOX_HITS") != nullptr;     // (the rays' hits feed the voxels too)
+            static const bool s_bHits = xlionrender::Env("XLION_GI_VOX_HITS") != nullptr;     // (the rays' hits feed the voxels too)
             if (s_bHits) Push.m_Epoch = -Push.m_Epoch;
-            static const bool s_bKept = std::getenv("XLION_VOX_NO_KEPT") == nullptr;     // (a hit's direct light from what its surface was found to have: xlionrender_gi_ref_comp.glsl VoxDirectKept)
+            static const bool s_bKept = xlionrender::Env("XLION_VOX_NO_KEPT") == nullptr;     // (a hit's direct light from what its surface was found to have: xlionrender_gi_ref_comp.glsl VoxDirectKept)
             if (s_bKept) Push.m_Bounces = -3;
-            static const bool s_bFirstOnly = std::getenv("XLION_VOX_FIRST_ONLY") != nullptr;
+            static const bool s_bFirstOnly = xlionrender::Env("XLION_VOX_FIRST_ONLY") != nullptr;
             if (s_bFirstOnly) Push.m_First |= 2;
-            static const float s_BucketAO = [] { const char* p = std::getenv("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }();     // (P1 #1 prototype: a contact's rays feed their own records)
+            static const float s_BucketAO = [] { const char* p = xlionrender::Env("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }();     // (P1 #1 prototype: a contact's rays feed their own records)
             if (s_BucketAO > 0.0f) { std::uint32_t u; std::memcpy(&u, &s_BucketAO, 4); Push.m_First = int((std::uint32_t(Push.m_First) & 0xFFFFu) | (u & 0xFFFF0000u)); }
-            static const bool s_bBinPdf = std::getenv("XLION_VOX_NO_BIN_PDF") == nullptr;      // (a bin's mean over its directions: xlionrender_gi_ref.glsl VoxStoreDir)
+            static const bool s_bBinPdf = xlionrender::Env("XLION_VOX_NO_BIN_PDF") == nullptr;      // (a bin's mean over its directions: xlionrender_gi_ref.glsl VoxStoreDir)
             if (s_bBinPdf) Push.m_First |= 4;
-            static const int s_DirsBits = [] { float L = -1.0f, K = 8.0f; if( const char* p = std::getenv("XLION_VOX_DIRS") ) std::sscanf(p, "%f,%f", &L, &K); return L < 0.0f ? 0 : 2048 | (int(L) & 3) << 12 | (K > 8.5f ? 16384 : 0); }();      // (a prototype: xlionrender_gi_ref.glsl VoxDirsAdd)
+            static const int s_DirsBits = [] { float L = -1.0f, K = 8.0f; if( const char* p = xlionrender::Env("XLION_VOX_DIRS") ) xlionrender::Scan(p, "%f,%f", &L, &K); return L < 0.0f ? 0 : 2048 | (int(L) & 3) << 12 | (K > 8.5f ? 16384 : 0); }();      // (a prototype: xlionrender_gi_ref.glsl VoxDirsAdd)
             Push.m_First |= s_DirsBits;
-            static const bool s_bCoherent = std::getenv("XLION_VOX_COHERENT") != nullptr;
+            static const bool s_bCoherent = xlionrender::Env("XLION_VOX_COHERENT") != nullptr;
             if (s_bCoherent) Push.m_First |= 8;
-            static const double s_HitCachedAfter = [] { const char* p = std::getenv("XLION_VOX_HIT_CACHED"); return p ? std::atof(p) : 0.0; }();      // (seconds after the first rays: a warm cache first)
+            static const double s_HitCachedAfter = [] { const char* p = xlionrender::Env("XLION_VOX_HIT_CACHED"); return p ? std::atof(p) : 0.0; }();      // (seconds after the first rays: a warm cache first)
             static const auto s_HitT0 = std::chrono::steady_clock::now();
             if (s_HitCachedAfter > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - s_HitT0).count() > s_HitCachedAfter) Push.m_First |= 16;
-            static const bool s_bNoSweep = std::getenv("XLION_VOX_NO_SWEEP") != nullptr;      // (measurement: its cost)
+            static const bool s_bNoSweep = xlionrender::Env("XLION_VOX_NO_SWEEP") != nullptr;      // (measurement: its cost)
             if (!s_bNoSweep)
             {   // The direction bins' halving (VoxMain, -4): an eighth of the slots a frame, before the rays
                 auto Sw = Push; const int Slice = int(vox_slots_v / 8);
                 // The samples a bin keeps: many, with the lights still (with atomic bins, 256 to 8192: whole surfaces stopped shifting on a still moto, pixels off from the final image 30000 to 5000); few while they change: it catches up (XLION_VOX_BIN_CAP)
-                static const int s_BinCap = [] { const char* p = std::getenv("XLION_VOX_BIN_CAP"); return p ? std::atoi(p) : 8192; }();
+                static const int s_BinCap = [] { const char* p = xlionrender::Env("XLION_VOX_BIN_CAP"); return p ? std::atoi(p) : 8192; }();
                 Sw.m_Bounces = -4; Sw.m_First = int(m_VoxSweep) * Slice; Sw.m_Count = Slice; Sw.m_Epoch = bStill ? s_BinCap : std::min(s_BinCap, 128); m_VoxSweep = (m_VoxSweep + 1) % 8;
                 Window.Dispatch(m_VoxC, B, VoxTex, &Sw, sizeof(Sw), (Slice + 63) / 64);
             }
             if (s_Relight > 0) Push.m_First |= 32;
-            static const int s_Ablate = [] { const char* p = std::getenv("XLION_VOX_ABLATE"); return p ? std::atoi(p) : 0; }();      // (measurement: where a voxel ray's time goes: xlionrender_gi_ref.glsl g_Ablate)
+            static const int s_Ablate = [] { const char* p = xlionrender::Env("XLION_VOX_ABLATE"); return p ? std::atoi(p) : 0; }();      // (measurement: where a voxel ray's time goes: xlionrender_gi_ref.glsl g_Ablate)
             if (s_Ablate > 0) Push.m_First |= s_Ablate << 8;
             // (XLION_VOX_SEEN=<pixels a frame>: the lit image feeds the records hits read for the bins; only when the image is the lit one, not a debug view)
-            static const int s_Seen = [] { const char* p = std::getenv("XLION_VOX_SEEN"); return p ? std::atoi(p) : 0; }();
+            static const int s_Seen = [] { const char* p = xlionrender::Env("XLION_VOX_SEEN"); return p ? std::atoi(p) : 0; }();
             if (s_Seen > 0)
             {
                 Push.m_First |= 128;
@@ -998,10 +999,10 @@ namespace xlionrender::gi
         // (VoxQuiet - rays one frame in 8 - only once enough rays went out since the last change: it had begun 1 to 5 s after one, and a still view took
         // minutes to settle - graded lit against the path tracer at tomas, % pixels off: 37.1 at 20 s, 29.5 at 120 s; never quiet 29.9 at 20 s, 26.9 at 60 s.
         // A moving camera has every frame's rays anyway: the frame's worst case is the same. XLION_VOX_QUIET_AFTER=<rays>, default 50 M: about 30 s at 16384 a frame)
-        static inline const double s_QuietAfterRays = [] { const char* p = std::getenv("XLION_VOX_QUIET_AFTER"); return p ? std::atof(p) : 50.0e6; }();
-        bool                 VoxQuiet(void) const noexcept { static const bool s_bNoQuiet = std::getenv("XLION_VOX_NO_QUIET") != nullptr; if (s_bNoQuiet || m_VoxRaysSince < s_QuietAfterRays) return false; return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
+        static inline const double s_QuietAfterRays = [] { const char* p = xlionrender::Env("XLION_VOX_QUIET_AFTER"); return p ? std::atof(p) : 50.0e6; }();
+        bool                 VoxQuiet(void) const noexcept { static const bool s_bNoQuiet = xlionrender::Env("XLION_VOX_NO_QUIET") != nullptr; if (s_bNoQuiet || m_VoxRaysSince < s_QuietAfterRays) return false; return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
         // XLION_GI_VOX=<level 0's cell> [<ms a frame> [<samples a face keeps>]]
-        static const std::array<float, 3>& VoxConfig(void) noexcept { static const std::array<float, 3> s_A = [] { std::array<float, 3> A{ 0.0f, 1.0f, 16384.0f }; if (const char* p = std::getenv("XLION_GI_VOX")) (void)std::sscanf(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }(); return s_A; }
+        static const std::array<float, 3>& VoxConfig(void) noexcept { static const std::array<float, 3> s_A = [] { std::array<float, 3> A{ 0.0f, 1.0f, 16384.0f }; if (const char* p = xlionrender::Env("XLION_GI_VOX")) (void)xlionrender::Scan(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }(); return s_A; }
         std::array<float, 3> VoxAnchor(void) const noexcept { return m_VoxAnchor; }
         xgpu::buffer*        VoxBuffer(void) noexcept { return m_ClipB[0].m_Private ? &m_ClipB[0] : nullptr; }
         xgpu::buffer*        RefSamples(void) noexcept { return m_RefSampleB.m_Private ? &m_RefSampleB : nullptr; }
