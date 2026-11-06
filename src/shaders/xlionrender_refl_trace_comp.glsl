@@ -435,7 +435,7 @@ void main()
                         SurfaceAt(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Albedo, Emission);
                         vec3 Ei;
                         g_HitGridRead = true;
-                        if (Push.m_Full.w == 5) Ei = PTIrradiance(Py, Ny, h);
+                        if (Push.m_Full.w == 5 || Push.m_Full.w == 6) Ei = PTIrradiance(Py, Ny, h);      // (6: XLION_REFL_HIT_PT, measurement: the store's light at the hits replaced, nothing else)
                         else if (Push.m_Vox.w > 0.0) Ei = VoxRead(Py, Ny, Push.m_Vox.xyz, Push.m_Vox.w);
                         else if (!Indirect(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Ei)) Ei = Unsupported(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V);
                         const bool bSpec = (GD[R + 47u] & 128u) != 0u;      // (its triangles' specular: world::SetTriangleSpecular)

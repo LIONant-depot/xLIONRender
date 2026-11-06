@@ -2297,7 +2297,8 @@ namespace xlionrender
         const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection && std::getenv("XLION_REFL_PT") == nullptr;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
         static const bool s_bReflPT = std::getenv("XLION_REFL_PT") != nullptr;      // (A12: the reflections' ground truth, real materials)
-        const bool bReconstruct = !s_bReflPT && Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || std::getenv("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
+        static const bool s_bNoRecon = std::getenv("XLION_REFL_NO_RECON") != nullptr;      // (measurement: the records as traced, no reconstruction)
+        const bool bReconstruct = !s_bReflPT && !s_bNoRecon && Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || std::getenv("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
         if( bTraced || bScreen )
         {
             if( bScreen || bReconstruct )
@@ -2438,6 +2439,7 @@ namespace xlionrender
             static const bool s_bBands = std::getenv("XLION_REFL_BANDS") != nullptr; if( s_bBands && !bPlanar ) Push.m_Plane[0] = -1.0f;
             // XLION_REFL_PT (A12): the reflections' ground truth with the real materials (refl_trace_comp.glsl m_Full.w 5): no planar view, no store, no screen trace
             if( s_bReflPT && !m_ReflPTAccum.m_Private ) { const std::vector<float> Z(8 * std::size_t(W) * std::size_t(H), 0.0f); (void)m_Device.Create(m_ReflPTAccum, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 2 * W * H, .m_pData = const_cast<float*>(Z.data()), .m_pName = "Reflections: the ground truth's sums" }); }
+            static const bool s_bHitPT = std::getenv("XLION_REFL_HIT_PT") != nullptr; if( s_bHitPT && Push.m_Full[3] == 0 ) Push.m_Full[3] = 6;      // (measurement: the hits lit by a path, not the store)
             if( s_bReflPT ) { Push.m_Full[3] = 5; Push.m_Full[2] = 0; for( auto& v : Push.m_Plane ) v = 0.0f; Push.m_bPlanar = 0.0f; Push.m_Frame = View.m_TailFrame; }
             static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = std::getenv("XLION_VOX_DIRS_TRACE"); const char* d = std::getenv("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; std::sscanf(d, "%f,%f", &D[1], &K); std::sscanf(t, "%f,%f", &D[2], &D[3]); if( D[1] < 0.0f ) return std::array<float, 4>{}; D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
             if( pVox && s_DirsTrace[0] > 0.0f && !s_bReflPT ) { if( !bPlanar ) std::memcpy(Push.m_Plane, s_DirsTrace.data(), sizeof(Push.m_Plane)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
