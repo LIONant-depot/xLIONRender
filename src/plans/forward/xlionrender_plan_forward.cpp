@@ -3169,7 +3169,7 @@ namespace xlionrender
                             // (B8, XLION_SKIN_VOX: with the voxel GI - the editor's default, the probe grid off - a skinned surface had no entry, so the gather
                             // skipped its pixels: no indirect light on the characters. The voxel read is the gather's for every pixel with an entry (the
                             // entry's source unread), so the skin gets one: the scene's own store at its points)
-                            static const bool s_bSkinVox = [] { const char* p = xlionrender::Env("XLION_SKIN_VOX"); return p == nullptr || p[0] != '0'; }();     // (on: graded 2026-11-07, the characters' region 52.8 to 45.6 % off, mean 12.93 to 8.82, no cost; XLION_SKIN_VOX=0 off)
+                            static const bool s_bSkinVox = [] { const char* p = xlionrender::Env("XLION_SKIN_VOX"); return p != nullptr && p[0] != '0'; }();     // (OFF by default again 2026-11-07: on, the live editor's whole voxel GI went black - GI light view mean 0.2 against 45.9 off - though the frozen grade improved (characters 52.8 to 45.6 % off). Cause not found; XLION_SKIN_VOX=1 on)
                             // (the path traced ground truth, mode 2, likewise: its rays start from every pixel with an entry - without one the reference's
                             // characters had no indirect light either, and a character without GI graded as right. Always: the reference must light them)
                             const bool bVoxRead = m_GatherTable.size() > 20 && ((s_bSkinVox && m_GatherTable[20] == 3u) || m_GatherTable[20] == 2u);
