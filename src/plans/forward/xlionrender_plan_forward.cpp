@@ -505,8 +505,8 @@ namespace xlionrender
             // frames), then solved every frame and the rays stop (moving objects still get them). XLION_GI_LINKS=<rays>[,settle frames[,surfels a
             // frame]] changes it; XLION_GI_LINKS=0 turns it off
             static const std::array<int, 3> s_Links = [] { std::array<int, 3> A{ 64, 30, 2048 }; if (const char* p = xlionrender::Env("XLION_GI_LINKS")) (void)xlionrender::Scan(p, "%d,%d,%d", &A[0], &A[1], &A[2]); return A; }();
-            static const bool s_bProbesOnly = xlionrender::Env("XLION_GI_PROBES_ONLY") != nullptr;
-            if( s_Links[0] > 0 && !s_bProbesOnly ) { XPROFILE_SCOPE("GI: links"); m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]); }
+            static const bool s_bNoSurfels = xlionrender::Env("XLION_GI_NO_SURFELS") != nullptr;     // disables surfel GI; voxel GI unaffected
+            if( s_Links[0] > 0 && !s_bNoSurfels ) { XPROFILE_SCOPE("GI: links"); m_pGITrace->PumpLinks(Window, W, L, GIFrame, s_Links[0], s_Links[1], s_Links[2]); }
             if( auto* pT = GITimes(this, m_Device) )
             {
                 Window.WriteTimestamp(pT->m_T, 5);
@@ -515,7 +515,7 @@ namespace xlionrender
             // The probe grid (skinned meshes' GI): 32 x 16 x 32 probes a meter apart around the eye, 1024 updated a frame
             static const bool s_bNoProbes = xlionrender::Env("XLION_GI_NO_PROBES") != nullptr;     // (measurement: A/B)
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 4);
-            if( Scene.m_GI.m_bProbes && !s_bNoProbes && (s_bProbesOnly || !m_pGITrace->isRelighting()) )
+            if( Scene.m_GI.m_bProbes && !s_bNoProbes && (s_bNoSurfels || !m_pGITrace->isRelighting()) )
             {
                 XPROFILE_SCOPE("GI: probes");
                 // the grid's readers: the drawn meshes without surfels of their own (skinned, moving) - their probes every frame, the rest
@@ -755,8 +755,8 @@ namespace xlionrender
             }
             if( auto* pT = GITimes(this, m_Device) ) Window.WriteTimestamp(pT->m_T, 2);
             if( m_bGISliceTS ) Window.WriteTimestamp(m_GISliceTS, 2);
-            static const bool s_bProbesOnlyShow = xlionrender::Env("XLION_GI_PROBES_ONLY") != nullptr;
-            XPROFILE_SCOPE("GI: show"); if( !s_bProbesOnlyShow ) (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation, Scene.m_GI.m_bShowBlend);
+            static const bool s_bNoSurfelsShow = xlionrender::Env("XLION_GI_NO_SURFELS") != nullptr;     // disables surfel GI; voxel GI unaffected
+            XPROFILE_SCOPE("GI: show"); if( !s_bNoSurfelsShow ) (void)m_pGITrace->Show(Window, Places, m_GILightRing, m_GIMomentRing, Base, W.m_Setup.m_FilterPasses, W.m_Setup.m_Saturation, Scene.m_GI.m_bShowBlend);
             // Experiment X1 (xLION_Docs gi_next_level_analysis.md): XLION_GI_CLIP=<1 splat, 2 with a sight ray per cell>[,<level 0's cell>[,<surfels a frame>]]
             static const std::array<float, 3> s_Clip = [] { std::array<float, 3> A{ 0.0f, 0.5f, 4096.0f }; if( const char* p = xlionrender::Env("XLION_GI_CLIP") ) (void)xlionrender::Scan(p, "%f,%f,%f", &A[0], &A[1], &A[2]); return A; }();
             if( s_Clip[0] > 0.0f ) (void)m_pGITrace->ClipStep(Window, Eye, s_Clip[1], int(s_Clip[2]), s_Clip[0] > 1.5f);

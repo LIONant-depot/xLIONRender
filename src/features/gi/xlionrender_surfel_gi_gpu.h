@@ -133,8 +133,8 @@ namespace xlionrender::gi
                 if (++m_nCpuTrace % 200 == 0) { std::printf("GICPU ops %.2f refresh %.2f ranges %.2f ms, staged words %zu, run words %zu, run jobs %zu\n", m_CpuTrace[0] / 200, m_CpuTrace[1] / 200, m_CpuTrace[2] / 200, m_Stage.size() / 2, m_RunStage.size(), m_RunJobs.size()); std::fflush(stdout); m_CpuTrace = {}; }
             }
             bool bSlice = false;
-            static const bool s_bProbesOnly = xlionrender::Env("XLION_GI_PROBES_ONLY") != nullptr;     // (experiment X1b: no surfel work at all, the scene's data and lights kept for the probes' rays)
-            if (s_bProbesOnly) return false;
+            static const bool s_bNoSurfels = xlionrender::Env("XLION_GI_NO_SURFELS") != nullptr;     // disables surfel GI; voxel GI unaffected (it runs separately in VoxStep)
+            if (s_bNoSurfels) return false;
             if (m_LinkState == 2 && m_LinkSolves > 0) return false;      // experiment D: the links own the light (no more slices: they would overwrite it)
             if (m_NextRange >= m_Ranges.size())
             {
