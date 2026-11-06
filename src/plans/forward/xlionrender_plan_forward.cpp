@@ -3166,10 +3166,17 @@ namespace xlionrender
                         if( pMesh->m_Geom.m_Kind == geom_kind::SKIN )         // (a skinned one: the probe grid - its GI read is the gather's too)
                         {
                             const xgpu::buffer* pProbes = Scene.m_GI.m_bEnable && Scene.m_GI.m_bProbes && m_pGITrace ? m_pGITrace->ProbeBuffer() : nullptr;
-                            if( pProbes == nullptr || m_GatherTable.size() + 1 + 4 * pMesh->m_Geom.m_Clusters.size() > std::size_t(gather_table_uints_v) ) continue;
+                            // (B8, XLION_SKIN_VOX: with the voxel GI - the editor's default, the probe grid off - a skinned surface had no entry, so the gather
+                            // skipped its pixels: no indirect light on the characters. The voxel read is the gather's for every pixel with an entry (the
+                            // entry's source unread), so the skin gets one: the scene's own store at its points)
+                            static const bool s_bSkinVox = [] { const char* p = xlionrender::Env("XLION_SKIN_VOX"); return p == nullptr || p[0] != '0'; }();     // (on: graded 2026-11-07, the characters' region 52.8 to 45.6 % off, mean 12.93 to 8.82, no cost; XLION_SKIN_VOX=0 off)
+                            // (the path traced ground truth, mode 2, likewise: its rays start from every pixel with an entry - without one the reference's
+                            // characters had no indirect light either, and a character without GI graded as right. Always: the reference must light them)
+                            const bool bVoxRead = m_GatherTable.size() > 20 && ((s_bSkinVox && m_GatherTable[20] == 3u) || m_GatherTable[20] == 2u);
+                            if( (pProbes == nullptr && !bVoxRead) || m_GatherTable.size() + 1 + 4 * pMesh->m_Geom.m_Clusters.size() > std::size_t(gather_table_uints_v) ) continue;
                             m_GatherTable.push_back(std::uint32_t(pMesh->m_Geom.m_Clusters.size()));     // (its clusters' count before them: the gather reads no other instance's)
                             m_GatherTable[40 + Slot] = std::uint32_t(m_GatherTable.size());
-                            const std::uint32_t k = BufferIndex(pProbes);
+                            const std::uint32_t k = pProbes ? BufferIndex(pProbes) : 0u;
                             for( std::size_t c = 0; c < pMesh->m_Geom.m_Clusters.size(); ++c ) m_GatherTable.insert(m_GatherTable.end(), { 0u, 0xFFFFFFFEu, k, 0u });     // (xlionrender_surfel_gi.glsl gi_probes_v)
                             continue;
                         }
