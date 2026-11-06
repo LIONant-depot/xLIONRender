@@ -761,6 +761,28 @@ int main()
         CHECK(Settle(12), "P1c done");
     }
 
+    // P1d - a draw's own bounds (draw::m_Bounds, a skinned mesh's pose): its pages follow them, not its mesh's box. The same moving sphere with its
+    // bounds out of the view has no mover pages; without them (its mesh's box), it has
+    {
+        const auto Mover = [](float X, float Z) { return xmath::fmat4::fromTranslation({ X, 0.6f, Z }) * xmath::fmat4::fromScale({ 0.5f, 0.5f, 0.5f }); };
+        int Pages[2] = {};
+        for (int Own = 0; Own < 2; ++Own)
+        {
+            Scene.m_Draws.push_back({ .m_Mesh = Sphere, .m_L2W = Mover(0.2f, 0.8f) });
+            if (Own) Scene.m_Draws.back().m_Bounds = { xmath::fvec3{ -5000.0f, 0.0f, -5000.0f }, xmath::fvec3{ -4999.0f, 1.0f, -4999.0f } };
+            for (int f = 0; f < 4; ++f)
+            {
+                Scene.m_Draws.back().m_L2W = Mover(0.2f + 0.05f * float(f & 1), 0.8f);
+                CHECK(App.RenderFrame(Scene, View, Camera), "P1d: moving frame %d", f);
+            }
+            Pages[Own] = Renderer.getVSMReport().m_Pages.m_ResidentMover;
+            Scene.m_Draws.pop_back();
+            CHECK(Settle(12), "P1d settle");
+        }
+        std::printf("P1d: mover pages by its mesh's box %d, by its own bounds out of the view %d\n", Pages[0], Pages[1]);
+        CHECK(Pages[0] > 0 && Pages[1] == 0, "P1d: the draw's own bounds not followed: %d mover pages (its mesh's box: %d)", Pages[1], Pages[0]);
+    }
+
     // B11 overflow: a pool too small for the view. Without dynamic resolution: pages rejected, patches by a coarser level; with it (the
     // default): the whole view's bias rises until the pages fit - fewer rejected, fewer patches coarser. Never a pixel by no level
     {

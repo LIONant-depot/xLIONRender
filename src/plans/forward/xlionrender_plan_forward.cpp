@@ -1474,7 +1474,7 @@ namespace xlionrender
         const std::uint64_t Pass = ++m_ShadowPassCount;
         m_CasterSlots.clear();
         const auto MaterialsHash = [](const draw& D) { return Hash(1469598103934665603ull, D.m_Materials.data(), D.m_Materials.size() * sizeof(material_id)); };     // alpha test, displacement
-        const auto WorldOf       = [](const mesh_slot& M, const draw& D) { return (M.m_bCluster ? M.m_Geom.m_BBox : M.m_BBox).TransformCopy(D.m_L2W); };
+        const auto WorldOf       = [](const mesh_slot& M, const draw& D) { return D.m_Bounds.m_Min.m_X <= D.m_Bounds.m_Max.m_X ? D.m_Bounds : (M.m_bCluster ? M.m_Geom.m_BBox : M.m_BBox).TransformCopy(D.m_L2W); };
         for( std::size_t iDraw = 0; iDraw < Scene.m_Draws.size(); ++iDraw )
         {
             const auto& D     = Scene.m_Draws[iDraw];

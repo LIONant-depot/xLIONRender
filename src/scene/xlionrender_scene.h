@@ -120,6 +120,9 @@ namespace xlionrender
         // High 32 bits: flags. Bits 32-33: its gi_role (draw_gi_role_shift_v).
         std::uint64_t               m_Instance      = 0;
         entity_params               m_EntityParams;     // read by the materials through its instance slot
+        // Its world bounds when its geometry's box is not them (a skinned mesh's pose: the box of its bones this frame - its casters' pages,
+        // the shadows' overlaps). Empty (the default, min > max): its mesh's box times m_L2W
+        xmath::fbbox                m_Bounds        { xmath::fvec3(1e30f), xmath::fvec3(-1e30f) };
     };
 
     // What an instance does in the GI's transport (documentation/gi_dynamic_master_plan.md, Phase 5), overriding its geometry's GI mode:

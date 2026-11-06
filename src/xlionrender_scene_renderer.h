@@ -85,6 +85,8 @@ namespace xlionrender
             std::array<xgpu::buffer, skin_frames_v> m_Bones;
             std::array<mesh_id, skin_frames_v>  m_Mesh;
             std::uint32_t                       m_Frame  = 0;
+            std::vector<bool>                   m_BoundBone;        // the bones its bounds follow: those inside its bind box at rest (not a camera target's, an effect root's)
+            float                               m_Margin = 0;       // how far its mesh reaches past those bones at rest (each side, the largest)
         };
         std::unordered_map<std::uint64_t, skinned_entity> m_Skinned;
         std::vector<xmath::fmat4>                       m_PoseWorlds, m_SkinMatrices;
@@ -409,6 +411,26 @@ namespace xlionrender
                 }
                 E.m_Last.clear();
                 E.m_pGeom = pGeom; E.m_nBones = nBones;
+
+                // Its bounds (draw::m_Bounds): the box of its bones this frame, grown by how far its mesh reaches past them at rest. The bind box
+                // grown 2x (MakeSkinGeom) put Bistro Game's 10 characters in 344 sun and 316 lamp pages a frame
+                // ponytail: one margin for every side and pose; per bone radii (the vertices each bone moves) if a pose reaches past it
+                std::vector<xmath::fmat4> Rest;
+                xgpu::tools::editors::ComputeRestBoneWorlds(*pSkel, Rest);
+                const auto& Bind = pGeom->m_BBox;
+                const auto  Slack = (Bind.m_Max - Bind.m_Min) * 0.05f;
+                xmath::fbbox Bones{ xmath::fvec3(1e30f), xmath::fvec3(-1e30f) };
+                E.m_BoundBone.assign(std::size_t(nBones), false);
+                for (int i = 0; i < nBones && i < int(Rest.size()); ++i)
+                {
+                    const auto P = Rest[std::size_t(i)].ExtractPosition();
+                    if (!(P.m_X >= Bind.m_Min.m_X - Slack.m_X && P.m_Y >= Bind.m_Min.m_Y - Slack.m_Y && P.m_Z >= Bind.m_Min.m_Z - Slack.m_Z
+                       && P.m_X <= Bind.m_Max.m_X + Slack.m_X && P.m_Y <= Bind.m_Max.m_Y + Slack.m_Y && P.m_Z <= Bind.m_Max.m_Z + Slack.m_Z)) continue;
+                    E.m_BoundBone[std::size_t(i)] = true;
+                    Bones.m_Min = xmath::fvec3::Min(Bones.m_Min, P); Bones.m_Max = xmath::fvec3::Max(Bones.m_Max, P);
+                }
+                const auto Lo = Bones.m_Min - Bind.m_Min, Hi = Bind.m_Max - Bones.m_Max;
+                E.m_Margin = Bones.m_Min.m_X <= Bones.m_Max.m_X ? std::max({ 0.0f, Lo.m_X, Lo.m_Y, Lo.m_Z, Hi.m_X, Hi.m_Y, Hi.m_Z }) : -1.0f;      // (-1: no bone inside: the mesh's box)
             }
             E.m_Frame = m_Frame;
             const int k = int(m_Frame % skin_frames_v);
@@ -433,6 +455,14 @@ namespace xlionrender
                 m_Stats.m_ConstantSlots += !D.m_Materials[i].isValid();
             }
             ++m_Stats.m_Drawn;
+            if (E.m_Margin >= 0)
+            {
+                xmath::fbbox B{ xmath::fvec3(1e30f), xmath::fvec3(-1e30f) };
+                for (int i = 0; i < nBones && i < int(m_PoseWorlds.size()); ++i)
+                    if (E.m_BoundBone[std::size_t(i)]) { const auto P = m_PoseWorlds[std::size_t(i)].ExtractPosition(); B.m_Min = xmath::fvec3::Min(B.m_Min, P); B.m_Max = xmath::fvec3::Max(B.m_Max, P); }
+                B.m_Min = B.m_Min - xmath::fvec3(E.m_Margin); B.m_Max = B.m_Max + xmath::fvec3(E.m_Margin);
+                D.m_Bounds = B.TransformCopy(L2W);
+            }
             m_Scene.m_Draws.push_back(std::move(D));
         }
         void ReleaseSkinned(skinned_entity& E) noexcept
