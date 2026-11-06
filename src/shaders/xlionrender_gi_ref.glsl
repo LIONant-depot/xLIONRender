@@ -432,8 +432,11 @@ void main()
     const bool  bSpec = Grade.w >= 0.0;
     float SpecW = 1.0;
     if (!bSpec && GD[15] > 0u && !EmitterDirectExternal()) Sum += EmitterIrradianceAt(P, N, g_Seed) * (1.0 / gi_pi_v);      // (the point's own: lighting doesn't shade them, the GI shows them)
-    for (int b = 0; b <= Push.m_Bounces; ++b)
+    // (Russian roulette past m_Bounces, as Unreal's path tracer: a fixed count cut the light that took more bounces off - a dark bias in closed places.
+    // Kept with the path's throughput, at most .95, the survivors weighed up by it; 16 bounces at most)
+    for (int b = 0; b < 16; ++b)
     {
+        if (b > Push.m_Bounces) { const float q = clamp(max(Th.r, max(Th.g, Th.b)), 0.05, 0.95); if (Rnd() >= q) break; Th /= q; }
         const vec3 D = bSpec && b == 0 ? SpecDir(N, normalize(Grade.xyz - P), max(fract(Grade.w) * fract(Grade.w), 1e-3), SpecW) : CosineDir(N);
         if (SpecW <= 0.0) return;
         if (Grade.w >= 2.0) SpecW = 1.0;      // (XLION_REFL_REF_NO_WEIGHT, measurement: the lobe's samples unweighted, as the reflection rays' records are)

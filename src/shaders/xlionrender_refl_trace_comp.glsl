@@ -106,9 +106,10 @@ bool g_ShadowBySDF = false;     // (XLION_SDF 3: its shadow rays march the field
 vec3 PTIrradiance(vec3 P, vec3 N, uint s)
 {
     vec3 Sum = vec3(0.0), Th = vec3(1.0);
-    for (int b = 0; b < 3; ++b)
+    for (int b = 0; b < 16; ++b)
     {
         s = Hash32(s + 0x9E3779B9u); const float u = float(s & 0xFFFFu) / 65536.0, v = float(s >> 16) / 65536.0;
+        if (b >= 3) { s = Hash32(s + 0x7F4A7C15u); const float q = clamp(max(Th.r, max(Th.g, Th.b)), 0.05, 0.95); if (float(s & 0xFFFFu) / 65536.0 >= q) break; Th /= q; }      // (Russian roulette past 3, as the GI reference)
         const vec3 T = normalize(cross(abs(N.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), N)), B = cross(N, T);
         const float r = sqrt(u), Ph = 6.2831853 * v;
         const vec3 D = normalize(T * (r * cos(Ph)) + B * (r * sin(Ph)) + N * sqrt(max(0.0, 1.0 - u)));
