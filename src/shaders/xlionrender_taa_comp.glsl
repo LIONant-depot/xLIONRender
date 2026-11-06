@@ -46,7 +46,11 @@ void main()
             M1 /= 9.0; const vec3 Sd = sqrt(max(M2 / 9.0 - M1 * M1, vec3(0.0)));
             const vec3 Lo = M1 - 1.25 * Sd, Hi = M1 + 1.25 * Sd;
             const vec3 H = FromYCoCg(clamp(ToYCoCg(SampleHistory(puv)), Lo, Hi));
-            const float Wc = Push.m_Blend / (1.0 + Luma(C)), Wh = (1.0 - Push.m_Blend) / (1.0 + Luma(max(H, vec3(0.0))));      // (by the displayed brightness: a bright pixel doesn't flash)
+            // (this frame's share by how far the pixel moved: still, half of it - the jitter's difference times the share was a shimmer with its 8-frame cycle,
+            // noise by lag 1 frame .87 at .1, .77 at .05; moving, the full share and a little more: no added ghosting)
+            const float Moved = length(puv * vec2(Push.m_W, Push.m_H) - (vec2(p) + 0.5));
+            const float Share = Push.m_Blend * mix(0.5, 1.5, clamp(Moved / 2.0, 0.0, 1.0));
+            const float Wc = Share / (1.0 + Luma(C)), Wh = (1.0 - Share) / (1.0 + Luma(max(H, vec3(0.0))));      // (by the displayed brightness: a bright pixel doesn't flash)
             C = (C * Wc + max(H, vec3(0.0)) * Wh) / (Wc + Wh);
         }
     }

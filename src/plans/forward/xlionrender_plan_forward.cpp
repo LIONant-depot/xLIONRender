@@ -4433,7 +4433,8 @@ namespace xlionrender
                     View.m_bTAAHistory = false;
                 }
                 const int Cur = View.m_TAAFrame & 1;
-                struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, Scene.m_Post.m_TAABlend, View.m_bTAAHistory ? 1.0f : 0.0f };
+                static const float s_TAABlendEnv = [] { const char* p = std::getenv("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: this frame's share)
+                struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, s_TAABlendEnv > 0.0f ? s_TAABlendEnv : Scene.m_Post.m_TAABlend, View.m_bTAAHistory ? 1.0f : 0.0f };
                 const xgpu::texture* T[] = { &View.m_HDR, &View.m_Depth, &View.m_TAA[1 - Cur] }; const xgpu::texture* I[] = { &View.m_TAA[Cur] };
                 Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
                 pHDR = &View.m_TAA[Cur]; pToneMap = &View.m_ToneMapTAA[Cur];
