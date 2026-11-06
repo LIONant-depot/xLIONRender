@@ -948,7 +948,8 @@ namespace xlionrender::gi
             struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), bStill ? 0 : 1, PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, -1, Keep };
             if (m_VoxCleared < nEntries)
             {
-                const std::size_t n = std::min<std::size_t>(nEntries - m_VoxCleared, std::size_t(1) << 22);
+                // (a piece a frame: 2^22 entries, at most the device's work groups along X - 64 entries a group: 2^22 was 65536 groups, one past llvmpipe's 65535)
+                const std::size_t n = std::min<std::size_t>({ nEntries - m_VoxCleared, std::size_t(1) << 22, std::size_t(m_pDevice->getMaxComputeGroupsX()) * 64 });
                 Push.m_Bounces = -2; Push.m_First = int(m_VoxCleared); Push.m_Count = int(n);
                 Window.Dispatch(m_VoxC, B, VoxTex, &Push, sizeof(Push), int((n + 63) / 64));
                 m_VoxCleared += n;
@@ -1069,7 +1070,7 @@ namespace xlionrender::gi
         {
             n = std::max<std::size_t>(n, 1);
             if (B.m_Private && std::size_t(B.getEntryCount()) >= n) return true;
-            const int Count = int(n + n / 2);
+            const int Count = int(Grown(std::size_t(Size), n));
             if (B.m_Private) return B.Resize(Count) == nullptr;
             return m_pDevice->Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = Size, .m_EntryCount = Count, .m_pName = "GI: host-visible data" }) == nullptr;
         }
@@ -1080,7 +1081,15 @@ namespace xlionrender::gi
             n = std::max<std::size_t>(n, 1);
             const std::size_t Words = std::size_t(Size / 4) * n;
             if (B.m_Private && std::size_t(B.getEntryCount()) >= Words) return true;
-            return Local(B, std::vector<std::uint32_t>(Words + Words / 2, 0u));
+            return Local(B, std::vector<std::uint32_t>(Grown(4, Words), 0u));
+        }
+
+        // n entries of Size bytes and half again of slack - the slack only up to the device's storage buffer range (llvmpipe: 128 MB; a 96 MB need was
+        // made 144 MB, which no shader could see whole). What is needed past the range is not made (xGPU refuses it, by name)
+        std::size_t Grown(std::size_t Size, std::size_t n) const noexcept
+        {
+            const std::size_t Fits = std::size_t(m_pDevice->getMaxStorageBufferBytes()) / Size;
+            return std::max(n, std::min(n + n / 2, Fits));
         }
 
         // Everything again (ponytail: any structural change packs the whole scene; incremental records and TLAS refits when it shows), the

@@ -43,6 +43,14 @@ foreach(NAME xlionrender_forward_standard_frag xlionrender_geom_standard_frag xl
     COMMENT "glslc ${NAME} (G-buffer variant)")
   list(APPEND SHADER_HEADERS ${OUT})
 endforeach()
+# Non-clustered GI surfel pass: runtime-selected when the device lacks VK_SUBGROUP_FEATURE_CLUSTERED_BIT
+set(OUT "${SHADER_OUT_DIR}/xlionrender_gi_surfel_pass_comp_noclustered.h")
+file(GLOB SHADER_LIBRARY "${SHADER_DIR}/*")
+add_custom_command(OUTPUT ${OUT}
+  COMMAND ${GLSLC} -fshader-stage=compute --target-env=vulkan1.2 -DGI_NO_CLUSTERED -I "${SHADER_DIR}" "${SHADER_DIR}/xlionrender_gi_surfel_pass_comp.glsl" -mfmt=num -o ${OUT}
+  DEPENDS ${SHADER_LIBRARY}
+  COMMENT "glslc xlionrender_gi_surfel_pass_comp (no clustered subgroups)")
+list(APPEND SHADER_HEADERS ${OUT})
 
 # Test-only shaders (src/tests/shaders), compiled against the same shader library
 set(TEST_SHADER_DIR "${XLIONRENDER_DIR}/src/tests/shaders")

@@ -20,6 +20,9 @@ namespace xlionrender
         constexpr std::uint32_t s_GISurfelPassComp[] = {
             #include "xlionrender_gi_surfel_pass_comp.h"
         };
+        constexpr std::uint32_t s_GISurfelPassCompNoClustered[] = {
+            #include "xlionrender_gi_surfel_pass_comp_noclustered.h"
+        };
         constexpr std::uint32_t s_GIScatterComp[] = {
             #include "xlionrender_gi_scatter_comp.h"
         };
@@ -213,7 +216,11 @@ namespace xlionrender
         if( Scene.m_GI.m_bGPUTrace && !m_pGITrace && !m_bGITraceFailed )
         {
             m_pGITrace = std::make_unique<gi::gpu_trace>();
-            if( !m_pGITrace->Init(m_Device, { s_GISurfelPassComp, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp, s_GIProbesComp, s_GIClipComp, s_GIRefComp, s_GIVoxComp }) )
+            // GroupNonUniformClustered only when the device reports VK_SUBGROUP_FEATURE_CLUSTERED_BIT (every platform)
+            const std::span<const std::uint32_t> GISurfelPass = m_Device.hasSubgroupClustered()
+                ? std::span<const std::uint32_t>{ s_GISurfelPassComp }
+                : std::span<const std::uint32_t>{ s_GISurfelPassCompNoClustered };
+            if( !m_pGITrace->Init(m_Device, { GISurfelPass, s_GIScatterComp, s_GICommitComp, s_GIOpsComp, s_GIFilterComp, s_GIExpandComp, s_GIMeansComp, s_GICubeComp, s_GIMigrateComp, s_GIReadBackComp, s_GILinksComp, s_GISolveComp, s_GIGhostsComp, s_GIProbesComp, s_GIClipComp, s_GIRefComp, s_GIVoxComp }) )
                 { m_pGITrace.reset(); m_bGITraceFailed = true; }
         }
         // The light lives on the GPU (m_bGPUOwned). Turned off, the GPU's light comes back into the world first (a read back: one frame
@@ -2038,9 +2045,10 @@ namespace xlionrender
                     SunCmd.setViewport(0.0f, 0.0f, float(gi_sun_map_v), float(gi_sun_map_v));
                     SunCmd.setScissor(0, 0, gi_sun_map_v, gi_sun_map_v);
                     const bool bPairsWas = bPairs; bPairs = false;      // (the pairs draw the camera's pages only: every caster by the CPU path here)
+                    const bool bOpaqueCutWas = bOpaqueCut;
                     bOpaqueCut = true;
                     DrawCasters(SunCmd, M, GICasters, [](std::uint32_t) { return true; });
-                    bOpaqueCut = false;
+                    bOpaqueCut = bOpaqueCutWas;
                     bPairs = bPairsWas;
                 }
                 Window.WriteTimestamp(m_GISunTimes, 1);

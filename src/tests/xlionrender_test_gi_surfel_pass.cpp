@@ -13,6 +13,9 @@ namespace
     constexpr std::uint32_t s_PassComp[] = {
         #include "xlionrender_gi_surfel_pass_comp.h"
     };
+    constexpr std::uint32_t s_PassCompNoClustered[] = {
+        #include "xlionrender_gi_surfel_pass_comp_noclustered.h"
+    };
 
     template <class T> bool MakeBuffer(xgpu::device& Device, xgpu::buffer& B, const std::vector<T>& Data, std::size_t Count = 0)
     {
@@ -114,7 +117,10 @@ int main()
     app App;
     CHECK(App.Init(), "Init");
     xgpu::shader Shader;
-    CHECK(!App.m_Device.Create(Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_PassComp, std::size(s_PassComp) } } }), "the pass shader");
+    const std::span<const std::uint32_t> PassWords = App.m_Device.hasSubgroupClustered()
+        ? std::span<const std::uint32_t>{ s_PassComp }
+        : std::span<const std::uint32_t>{ s_PassCompNoClustered };
+    CHECK(!App.m_Device.Create(Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ reinterpret_cast<const std::int32_t*>(PassWords.data()), PassWords.size() } } }), "the pass shader");
     xgpu::compute Pass;
     CHECK(!App.m_Device.Create(Pass, { .m_pShader = &Shader, .m_nBuffers = 8, .m_PushConstantsSize = 16 }), "the pass compute");
 

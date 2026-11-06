@@ -67,6 +67,16 @@ foreach(NAME xlionrender_forward_standard_frag xlionrender_geom_standard_frag xl
   )
   list(APPEND XLIONRENDER_LIB_SHADERS ${SHADER_OUT})
 endforeach()
+# Non-clustered GI surfel pass: runtime-selected when the device lacks VK_SUBGROUP_FEATURE_CLUSTERED_BIT
+set(SHADER_OUT "${CMAKE_BINARY_DIR}/sprv_shaders_h/xlionrender_gi_surfel_pass_comp_noclustered.h")
+file(GLOB XLIONRENDER_SHADER_LIBRARY CONFIGURE_DEPENDS "${XLIONRENDER_SHADER_DIR}/*")
+add_custom_command(
+  OUTPUT ${SHADER_OUT}
+  COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=comp --target-env=vulkan1.2 -DGI_NO_CLUSTERED -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/xlionrender_gi_surfel_pass_comp.glsl" -mfmt=num -o ${SHADER_OUT}
+  DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
+  COMMENT "Compiling xLIONRender compute shader xlionrender_gi_surfel_pass_comp (no clustered subgroups)"
+)
+list(APPEND XLIONRENDER_LIB_SHADERS ${SHADER_OUT})
 
 # The compiled shaders are built by their own target: a custom command's output is not visible to the consumers'
 # directories, so it cannot be an INTERFACE source (CMake 3.19+ propagates the dependency to whoever links the library)
