@@ -15,6 +15,9 @@ namespace
     constexpr std::uint32_t s_PassComp[] = {
         #include "xlionrender_gi_surfel_pass_comp.h"
     };
+    constexpr std::uint32_t s_PassCompNoClustered[] = {
+        #include "xlionrender_gi_surfel_pass_comp_noclustered.h"
+    };
     constexpr std::uint32_t s_ScatterComp[] = {
         #include "xlionrender_gi_scatter_comp.h"
     };
@@ -54,7 +57,11 @@ namespace
     constexpr std::uint32_t s_ReadBackComp[] = {
         #include "xlionrender_gi_readback_comp.h"
     };
-    const gpu_trace::shaders s_Shaders{ s_PassComp, s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp, s_LinksComp, s_SolveComp, s_GhostsComp, s_ProbesComp };
+    gpu_trace::shaders ShadersOf(xgpu::device& Device)
+    {
+        return { Device.hasSubgroupClustered() ? std::span<const std::uint32_t>{ s_PassComp } : std::span<const std::uint32_t>{ s_PassCompNoClustered }
+               , s_ScatterComp, s_CommitComp, s_OpsComp, s_FilterComp, s_ExpandComp, s_MeansComp, s_CubeComp, s_MigrateComp, s_ReadBackComp, s_LinksComp, s_SolveComp, s_GhostsComp, s_ProbesComp };
+    }
 
     // The GPU's light into the world's arrays: the last slice delivered, the read back copied, then in (two frames)
     // Empty frames until the slices out are back (gpu_trace::Collect reads them lag_frames_v frames on)
@@ -196,7 +203,7 @@ namespace
         Wg.m_Setup.m_bGPUTrace = Wg.m_Setup.m_bGPUOwned = true;
         gpu_trace T;
         const auto TInit = std::chrono::steady_clock::now();
-        CHECK(T.Init(App.m_Device, s_Shaders), "gpu_trace::Init");
+        CHECK(T.Init(App.m_Device, ShadersOf(App.m_Device)), "gpu_trace::Init");
         R.m_InitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TInit).count();
         const auto Event = [&](world& W, std::vector<surfel_mesh>& M, int u)
         {
@@ -387,7 +394,7 @@ int main()
         Wg.m_Setup.m_bGPUTrace = Wg.m_Setup.m_bGPUOwned = true;
         Wc.m_Setup.m_RaysPerSurfel = Wg.m_Setup.m_RaysPerSurfel = 24;     // (a batch of several 1024-ray slices: at 8 it was just over one, and SliceEnd takes such a leftover whole)
         gpu_trace T;
-        CHECK(T.Init(App.m_Device, s_Shaders), "gpu_trace::Init");
+        CHECK(T.Init(App.m_Device, ShadersOf(App.m_Device)), "gpu_trace::Init");
         const v3 Eye{ 0, 0, -0.9f };
         for (int u = 0; u < 80; ++u) Wc.Update(L, Eye, 1 << 30, 500 + u);
         int Frames = 0;
@@ -433,7 +440,7 @@ int main()
         std::vector<std::array<int, 2>> Items;
         for (int i = 0; i < W.InstanceCount(); ++i) for (std::size_t s = 0; s < W.InstanceSurfels0(i); ++s) Items.push_back({ i, int(s) });
         gpu_trace G;
-        CHECK(G.Init(App.m_Device, s_Shaders), "gpu_trace::Init (links)");
+        CHECK(G.Init(App.m_Device, ShadersOf(App.m_Device)), "gpu_trace::Init (links)");
         while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
         CHECK(G.BuildLinks(App.m_Window, W, L, Items, 256, 0, Items.size()), "BuildLinks");
         { auto Cmd = App.m_Window.getCmdBuffer(); }
@@ -497,7 +504,7 @@ int main()
             // lost the Vulkan device in the editor
             {
                 world We; gpu_trace Ge;
-                CHECK(Ge.Init(App.m_Device, s_Shaders), "gpu_trace::Init (empty)");
+                CHECK(Ge.Init(App.m_Device, ShadersOf(App.m_Device)), "gpu_trace::Init (empty)");
                 while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
                 We.Update(L, v3{ 0, 0, 0 }, 1 << 20, 1);
                 (void)Ge.Submit(App.m_Window, We, L, 1, 1000.0f, v3{ 0, 0, 0 });
@@ -587,7 +594,7 @@ int main()
         MakeSectionRoom(M, W);
         W.m_Setup.m_bGPUTrace = W.m_Setup.m_bGPUOwned = true;
         gpu_trace T;
-        CHECK(T.Init(App.m_Device, s_Shaders), "gpu_trace::Init");
+        CHECK(T.Init(App.m_Device, ShadersOf(App.m_Device)), "gpu_trace::Init");
         std::size_t nSolves = 0;
         for (int u = 0; u < 40; ++u)
         {

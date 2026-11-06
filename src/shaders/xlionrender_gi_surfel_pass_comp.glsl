@@ -1,13 +1,79 @@
 #version 450
+#ifndef GI_NO_CLUSTERED
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_clustered : require
+#endif
 // Part II, G2 (documentation/gi_dynamic_master_plan.md): a surfel pass on the GPU. Each work item's rays (gi::world::TraceChunk's) are
 // traced by gi_lanes_v invocations, which write what TraceChunk accumulates before it finishes the pass (the light's sum, its share per basis
 // direction, the depth moments' sums, the back-face and hit counts). Every function mirrors its CPU twin in xlionrender_surfel_gi.h; the
 // data is gi::world::PackGPUSurfels's (its layout is written there) and PackGPU's
 layout(local_size_x = 64) in;                                // (gi::world::gpu_group_v)
 const int gi_lanes_v = 8;                                    // invocations per item (gi::world::gpu_lanes_v; the subgroup has 8 at least)
+
+#ifdef GI_NO_CLUSTERED
+// Shared-memory reductions of each gi_lanes_v cluster: the same groups subgroupClustered* uses when
+// the workgroup is 64 and local IDs map in order. Selected when the device lacks
+// VK_SUBGROUP_FEATURE_CLUSTERED_BIT (every platform, not a Dozen-only path).
+shared vec3  gi_sV3[64];
+shared float gi_sF[64];
+shared int   gi_sI[64];
+shared ivec4 gi_sIV4[64];
+
+vec3 giClusteredAdd(vec3 V)
+{
+    gi_sV3[gl_LocalInvocationIndex] = V;
+    barrier();
+    vec3 S = vec3(0);
+    const int B = int(gl_LocalInvocationIndex) & ~(gi_lanes_v - 1);
+    for (int i = 0; i < gi_lanes_v; ++i) S += gi_sV3[B + i];
+    barrier();
+    return S;
+}
+float giClusteredAdd(float V)
+{
+    gi_sF[gl_LocalInvocationIndex] = V;
+    barrier();
+    float S = 0.0;
+    const int B = int(gl_LocalInvocationIndex) & ~(gi_lanes_v - 1);
+    for (int i = 0; i < gi_lanes_v; ++i) S += gi_sF[B + i];
+    barrier();
+    return S;
+}
+int giClusteredAdd(int V)
+{
+    gi_sI[gl_LocalInvocationIndex] = V;
+    barrier();
+    int S = 0;
+    const int B = int(gl_LocalInvocationIndex) & ~(gi_lanes_v - 1);
+    for (int i = 0; i < gi_lanes_v; ++i) S += gi_sI[B + i];
+    barrier();
+    return S;
+}
+ivec4 giClusteredAdd(ivec4 V)
+{
+    gi_sIV4[gl_LocalInvocationIndex] = V;
+    barrier();
+    ivec4 S = ivec4(0);
+    const int B = int(gl_LocalInvocationIndex) & ~(gi_lanes_v - 1);
+    for (int i = 0; i < gi_lanes_v; ++i) S += gi_sIV4[B + i];
+    barrier();
+    return S;
+}
+int giClusteredMin(int V)
+{
+    gi_sI[gl_LocalInvocationIndex] = V;
+    barrier();
+    const int B = int(gl_LocalInvocationIndex) & ~(gi_lanes_v - 1);
+    int M = gi_sI[B];
+    for (int i = 1; i < gi_lanes_v; ++i) M = min(M, gi_sI[B + i]);
+    barrier();
+    return M;
+}
+#else
+#define giClusteredAdd(V) subgroupClusteredAdd((V), gi_lanes_v)
+#define giClusteredMin(V) subgroupClusteredMin((V), gi_lanes_v)
+#endif
 
 struct GIItem     { ivec4 m_Ids; vec4 m_Offsets; };          // instance, surfel, level, rays; off1, off2, shift (bits), -
 struct GIResult   { float m_V[72]; };                         // sum 3, basis 9, moments 48, back, back all, unsupported, hits (int bits: gi::world::gpu_result), unsupported at 3, -
@@ -127,14 +193,14 @@ void main()
         }
     }
     // the cluster's sums (the first unsupported ray's hit: the lane with the item's lowest such ray)
-    Sum = subgroupClusteredAdd(Sum, gi_lanes_v); BA0 = subgroupClusteredAdd(BA0, gi_lanes_v); BA1 = subgroupClusteredAdd(BA1, gi_lanes_v); BA2 = subgroupClusteredAdd(BA2, gi_lanes_v);
-    for (int t = 0; t < 48; ++t) MA[t] = subgroupClusteredAdd(MA[t], gi_lanes_v);
-    nBack = subgroupClusteredAdd(nBack, gi_lanes_v); nBackAll = subgroupClusteredAdd(nBackAll, gi_lanes_v);
-    nUns = subgroupClusteredAdd(nUns, gi_lanes_v); nHits = subgroupClusteredAdd(nHits, gi_lanes_v);
-    const int First = subgroupClusteredMin(FirstUns, gi_lanes_v);
-    UnsAt = subgroupClusteredAdd(FirstUns == First && First != 0x7FFFFFFF ? UnsAt : vec3(0), gi_lanes_v);
-    const ivec4 Work = subgroupClusteredAdd(ivec4(g_GIBvhVisits, g_Shadows, g_ReadEntries, g_Probes), gi_lanes_v);
-    const int   nAccepted = subgroupClusteredAdd(g_Accepted, gi_lanes_v);
+    Sum = giClusteredAdd(Sum); BA0 = giClusteredAdd(BA0); BA1 = giClusteredAdd(BA1); BA2 = giClusteredAdd(BA2);
+    for (int t = 0; t < 48; ++t) MA[t] = giClusteredAdd(MA[t]);
+    nBack = giClusteredAdd(nBack); nBackAll = giClusteredAdd(nBackAll);
+    nUns = giClusteredAdd(nUns); nHits = giClusteredAdd(nHits);
+    const int First = giClusteredMin(FirstUns);
+    UnsAt = giClusteredAdd(FirstUns == First && First != 0x7FFFFFFF ? UnsAt : vec3(0));
+    const ivec4 Work = giClusteredAdd(ivec4(g_GIBvhVisits, g_Shadows, g_ReadEntries, g_Probes));
+    const int   nAccepted = giClusteredAdd(g_Accepted);
     if (!bItem || Lane != 0) return;
     GIResults[k].m_V[0] = Sum.x; GIResults[k].m_V[1] = Sum.y; GIResults[k].m_V[2] = Sum.z;
     GIResults[k].m_V[3] = BA0.x; GIResults[k].m_V[4] = BA0.y; GIResults[k].m_V[5] = BA0.z;
