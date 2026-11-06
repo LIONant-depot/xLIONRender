@@ -132,14 +132,22 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     vec4 v = GIRefAccum[e], m = GIRefAccum[e + 1u];
     const vec4 d = GIRefAccum[e + 2u];
+    const uvec4 dU = GIRefAccumU[e + 2u];
+    // (the lean moments, A15: running means of the luminance against the normal's two other components and of those components - the read fits the light's slope
+    // across the normals that fed this face, so a sphere's bottom isn't read as its side. Halves in the spare words: e+1.w (variance, mean l.l), e+2.z (L.lu, L.lv; low bit
+    // set: never the direction bins' 1.0 marker), e+2.w (lu, lv))
+    vec2 Pv = unpackHalf2x16(GIRefAccumU[e + 1u].w), PL = unpackHalf2x16(dU.z & ~1u), Pl = unpackHalf2x16(dU.w);
     if (d.x != Tag)
     {
         // someone else's: taken only if nobody has fed it for 2 seconds or so: a face in use keeps its slot and its history (a face that finds no room waits)
         if (d.x != 0.0 && abs(Now - d.y) < 120.0) return;
-        v = vec4(0.0); m = vec4(0.0);
+        v = vec4(0.0); m = vec4(0.0); Pv = PL = Pl = vec2(0.0);
     }
+    m.w = Pv.x;
     const float Ls = dot(Sample, vec3(0.2126, 0.7152, 0.0722));
-    if (v.w <= 0.0) m = vec4(Sample, 0.0);
+    const int   ua = (a + 1) % 3, va = (a + 2) % 3;
+    const vec2  Ln = vec2(N[ua], N[va]);
+    if (v.w <= 0.0) { m = vec4(Sample, 0.0); Pv.y = dot(Ln, Ln); PL = Ls * Ln; Pl = Ln; }
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
     m.rgb += (Sample - m.rgb) * vox_short_v;
     m.w   += (Ds * Ds - m.w) * vox_short_v;
@@ -152,7 +160,11 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     }
     v += vec4(Sample, 1.0);
     if (v.w >= float(abs(Push.m_Epoch))) v *= 0.5 * float(abs(Push.m_Epoch)) / v.w;       // (ponytail: another lane's write to this face in this frame can be lost: samples, not light)
-    GIRefAccum[e] = v; GIRefAccum[e + 1u] = m; GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
+    const float Al = max(1.0 / v.w, 1.0 / 256.0);
+    Pv.y += (dot(Ln, Ln) - Pv.y) * Al; PL += (clamp(Ls, 0.0, 60000.0) * Ln - PL) * Al; Pl += (Ln - Pl) * Al;
+    GIRefAccum[e] = v;
+    GIRefAccumU[e + 1u] = uvec4(floatBitsToUint(m.rgb), packHalf2x16(vec2(min(m.w, 60000.0), Pv.y)));
+    GIRefAccumU[e + 2u] = uvec4(floatBitsToUint(Tag), floatBitsToUint(Now), packHalf2x16(PL) | 1u, packHalf2x16(Pl));
 }
 // The emitters' light by light sampling at a budget: EmitterIrradianceAt, but over a few of the table picked at random, not all of it per ray (Bistro's table: 3 ms a frame at any
 // number of rays). The pick's weight scaled up by the table over the few. As noisy as it needs; a face averages it
@@ -436,7 +448,8 @@ void main()
     // Kept with the path's throughput, at most .95, the survivors weighed up by it; 16 bounces at most)
     for (int b = 0; b < 16; ++b)
     {
-        if (b > Push.m_Bounces) { const float q = clamp(max(Th.r, max(Th.g, Th.b)), 0.05, 0.95); if (Rnd() >= q) break; Th /= q; }
+        if (Push.m_Bounces >= 100) { if (b >= Push.m_Bounces - 100) break; }      // (XLION_GI_REF=<paths>,1<nn>, measurement: a hard cap of nn bounces, no roulette - the voxels' XLION_VOX_FIRST_ONLY's ground truth)
+        else if (b > Push.m_Bounces) { const float q = clamp(max(Th.r, max(Th.g, Th.b)), 0.05, 0.95); if (Rnd() >= q) break; Th /= q; }
         const vec3 D = bSpec && b == 0 ? SpecDir(N, normalize(Grade.xyz - P), max(fract(Grade.w) * fract(Grade.w), 1e-3), SpecW) : CosineDir(N);
         if (SpecW <= 0.0) return;
         if (Grade.w >= 2.0) SpecW = 1.0;      // (XLION_REFL_REF_NO_WEIGHT, measurement: the lobe's samples unweighted, as the reflection rays' records are)

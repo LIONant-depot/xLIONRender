@@ -48,9 +48,22 @@ float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]);
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
 const float vox_layers_v = 4.0;            // (xlionrender_gi_ref_comp.glsl)
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 72u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
 uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
+const bool vox_lean_v = true;
+// (A15, the lean moments the store keeps - xlionrender_gi_ref.glsl VoxStore: the light's slope across the normals that fed a face, by component, at this reader's normal; a ratio, clamped)
+float VoxLeanScale(in const vec4 v, in const uint Wv, in const uvec4 dU, in const vec3 n, in const int a)
+{
+    if (!vox_lean_v) return 1.0;
+    const int  u = (a + 1) % 3, w = (a + 2) % 3;
+    const float El2 = unpackHalf2x16(Wv).y, Lm = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w;
+    const vec2 EL = unpackHalf2x16(dU.z & ~1u), El = unpackHalf2x16(dU.w);
+    if (Lm <= 1e-4 || v.w < 8.0) return 1.0;
+    const float Var = max(0.5 * (El2 - dot(El, El)), 0.01);      // (the leans' spread, one number for both: the spare words hold six)
+    const vec2  S = (EL - Lm * El) / Var;
+    return clamp(1.0 + dot(S, vec2(n[u], n[w]) - El) / Lm, 0.25, 4.0);
+}
 bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
 float g_ClipTrust = 0.0;       // (X1c: how much the last ClipLevel can be believed: its samples, how far from its edge)
 uint g_VoxBucket = 0u;      // (XLION_VOX_AO_BUCKET: the records' kind a read takes, 1: a contact's; the faces' keys + 64)
@@ -82,7 +95,8 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
             {
                 const uint h = VoxHash(L, iv + o, Face), e = VoxEntryOf(h);
                 // (each corner its mean, trusted up to 32 samples: by raw count a corner with thousands of samples drowned one with dozens, the light outdoors over the floor indoors)
-                if (uintBitsToFloat(GIClip[e + 2u].x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * cw; Den += cw; Raw += min(v.w, 256.0) * t; } }
+                const uvec4 dU = GIClip[e + 2u];
+                if (uintBitsToFloat(dU.x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * VoxLeanScale(v, GIClip[e + 1u].w, dU, n, a) * cw; Den += cw; Raw += min(v.w, 256.0) * t; } }
                 continue;
             }
             const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(q.x) + uint(q.y) * uint(clip_dim_v) + uint(q.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
@@ -94,7 +108,7 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
     if (g_ClipFloat && SumW > 0.0)
     {
         const vec3 Inside = min(g, vec3(clip_dim_v - 1) - g);
-        g_ClipTrust = clamp(Samples / SumW / 256.0, 0.0, 1.0) * clamp(min(Inside.x, min(Inside.y, Inside.z)) / 4.0, 0.0, 1.0);
+        g_ClipTrust = clamp(Samples / SumW / (TF(35u) > 0.0 ? TF(35u) : 256.0), 0.0, 1.0) * clamp(min(Inside.x, min(Inside.y, Inside.z)) / 4.0, 0.0, 1.0);
     }
     return SumW > 0.0 ? vec4(Sum / SumW, SumW) : vec4(0.0);
 }

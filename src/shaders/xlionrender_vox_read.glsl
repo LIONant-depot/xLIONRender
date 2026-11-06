@@ -16,10 +16,21 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in co
     return false;
 }
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 72u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
 uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
 vec4 VoxFace(in const int L, in const ivec3 q, in const uint Face) { const uint h = VoxHash(L, q, Face), e = VoxEntryOf(h); return GIRefAccum[e + 2u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0); }
+// (A15, the lean moments: xlionrender_gi_gather_frag.glsl VoxLeanScale's copy - the hits' read too)
+float VoxLean(in const uint e, in const vec4 v, in const vec3 n, in const int a)
+{
+    const int  u = (a + 1) % 3, w = (a + 2) % 3;
+    const float El2 = unpackHalf2x16(floatBitsToUint(GIRefAccum[e + 1u].w)).y, Lm = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w;
+    const uvec2 dU = floatBitsToUint(GIRefAccum[e + 2u].zw);
+    const vec2 EL = unpackHalf2x16(dU.x & ~1u), El = unpackHalf2x16(dU.y);
+    if (Lm <= 1e-4 || v.w < 8.0) return 1.0;
+    const float Var = max(0.5 * (El2 - dot(El, El)), 0.01);
+    return clamp(1.0 + dot((EL - Lm * El) / Var, vec2(n[u], n[w]) - El) / Lm, 0.25, 4.0);
+}
 vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const float Cell0)
 {
     int L = -1; ivec3 Org; vec3 g;
@@ -37,8 +48,9 @@ vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const f
             {
                 const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
                 const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-                const vec4  v = VoxFace(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0)));
-                if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * cw; Den += cw; }     // (as the read: each corner its mean, trusted up to 32 samples)
+                const uint  h = VoxHash(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+                const vec4  v = GIRefAccum[e + 2u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0);
+                if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * VoxLean(e, v, n, a) * cw; Den += cw; }     // (as the read: each corner its mean, trusted up to 32 samples)
             }
             if (Den > 1e-3) { Sum += Num / Den * wa; SumW += wa; }
         }
