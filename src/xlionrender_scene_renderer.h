@@ -27,6 +27,7 @@
 #include "plugins/xanim_package.plugin/source/xanim_package_xgpu_rsc_loader.h"
 #include "dependencies/xGPU/source/Tools/editors/xgpu_editor_anim_pose.h"     // the pose of a skeleton at a clip's time (the skin editor's preview poses it the same way)
 
+#include "dependencies/xLIONRender/src/xlionrender_env.h"
 #include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
@@ -49,6 +50,7 @@ namespace xlionrender
         std::uint32_t                                   m_UpdateCount = 0;              // xlioncore::resources::UpdateCount when the materials were last checked
         instance_ids                                    m_InstanceIds;                  // per drawn entity: its draw's instance id
         std::unordered_set<std::uint64_t>               m_StaleReported;                // the instances E_LAYOUT_STALE was said for (once each)
+        std::unordered_map<std::uint64_t, int>          m_SourceTries;                  // an instance whose textures did not load: the times it was asked (MaterialSources' bAllowMissing)
         // The Meshes' "Override materials": the entity slots' own materials (shared when equal, copy on write), per (entity, slot) the one it
         // draws with and the frame it last did (a slot not drawn for a frame lets it go)
         material_overrides                              m_Overrides;
@@ -192,7 +194,7 @@ namespace xlionrender
             if (MIInstance == 0) return {};
             if (auto It = m_Materials.find(MIInstance); It != m_Materials.end()) return It->second.m_Id;
             std::vector<const void*> From;
-            if (!MaterialSources(MIInstance, From)) return {};
+            if (!MaterialSources(MIInstance, From, AllowMissing(MIInstance))) return {};
             auto* pMI  = static_cast<xmaterial_instance::rt*>(const_cast<void*>(From[0]));
             auto* pMat = static_cast<xmaterial::rt*>(const_cast<void*>(From[1]));
             std::vector<xgpu::texture*> Textures;
@@ -243,7 +245,7 @@ namespace xlionrender
             if (S.m_Check == Check) return S.m_Slot.m_Id;
 
             std::vector<const void*> From;
-            if (!MaterialSources(MIInstance, From)) return {};
+            if (!MaterialSources(MIInstance, From, AllowMissing(MIInstance))) return {};
             auto* pMI  = static_cast<xmaterial_instance::rt*>(const_cast<void*>(From[0]));
             auto* pMat = static_cast<xmaterial::rt*>(const_cast<void*>(From[1]));
             if (pMI->m_LayoutHash != pMat->m_LayoutHash) return {};
@@ -290,21 +292,31 @@ namespace xlionrender
 
         // What a material instance's renderer material is made from, as loaded now: the instance, its material, its textures (but slot 0's).
         // False while one of them cannot be had.
-        static bool MaterialSources(std::uint64_t MIInstance, std::vector<const void*>& From) noexcept
+        // A texture that never loads (missing, or a compiled file of another layout - "the size of the structure ... is different") made the whole slot
+        // draw the constant material, the skin editor's preview drawing it with white there (Bistro Game 2026-11-06: four characters grey in the level,
+        // textured in the skin editor). After an instance has asked for missing_tries_v frames, its missing textures are null: the material white
+        // there (instance::LitBindings), the rest of it as it is; a texture compiled again later rebuilds it (UpdateCount: its sources changed)
+        static constexpr int missing_tries_v = 300;
+        bool AllowMissing(std::uint64_t MIInstance) noexcept { return ++m_SourceTries[MIInstance] > missing_tries_v; }
+        static bool MaterialSources(std::uint64_t MIInstance, std::vector<const void*>& From, bool bAllowMissing = false) noexcept
         {
             using namespace xlioncore::resources;
             From.clear();
+            // (XLION_MATERIAL_LOG, measurement: why a slot draws the constant material - once an instance and reason)
+            static const bool s_bLog = xlionrender::Env("XLION_MATERIAL_LOG") != nullptr;
+            const auto Why = [&](const char* pWhat, std::uint64_t Of) { if (s_bLog) { static std::unordered_set<std::uint64_t> s_Seen; if (s_Seen.insert(MIInstance ^ (Of * 31)).second) { std::printf("MATERIAL %016llX: %s %016llX\n", (unsigned long long)MIInstance, pWhat, (unsigned long long)Of); std::fflush(stdout); } } return false; };
             auto* pMI  = static_cast<xmaterial_instance::rt*>(GetResource(material_instance_type_guid_v.m_Value, MIInstance));
-            if (!pMI) return false;
+            if (!pMI) return Why("no instance", MIInstance);
             auto* pMat = GetResource(material_type_guid_v.m_Value, pMI->m_MaterialRef.m_Instance.m_Value);
-            if (!pMat) return false;
+            if (!pMat) return Why("no material", pMI->m_MaterialRef.m_Instance.m_Value);
             From = { pMI, pMat };
             const bool bFrom1 = static_cast<xmaterial::rt*>(pMat)->m_Flags.m_bSamplersFrom1;
             for (auto& E : pMI->getTextures())
             {
                 if (!bFrom1 && &E == pMI->getTextures().data()) continue;
                 auto* pTexture = GetResource(texture_type_guid_v.m_Value, E.m_TexureRef.m_Instance.m_Value);
-                if (!pTexture) return false;
+                if (!pTexture && !bAllowMissing) return Why("no texture", E.m_TexureRef.m_Instance.m_Value);
+                if (!pTexture) Why("no texture, white in its place", E.m_TexureRef.m_Instance.m_Value);
                 From.push_back(pTexture);
             }
             return true;
@@ -511,7 +523,7 @@ namespace xlionrender
                 std::vector<const void*> Now;
                 for (auto It = m_Materials.begin(); It != m_Materials.end();)
                 {
-                    if (MaterialSources(It->first, Now) && Now == It->second.m_From) { ++It; continue; }
+                    if (MaterialSources(It->first, Now, m_SourceTries[It->first] > missing_tries_v) && Now == It->second.m_From) { ++It; continue; }
                     m_Renderer.DestroyMaterial(It->second.m_Id);
                     It = m_Materials.erase(It);
                 }

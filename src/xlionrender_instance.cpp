@@ -1340,7 +1340,7 @@ namespace xlionrender
             for( std::size_t i = 1; i < M.m_Textures.size(); ++i )
             {
                 const auto& T = M.m_Textures[i];
-                Slots.push_back(T.m_Private ? xgpu::texture_table::slot{ T.getID(), T.getSampler() } : xgpu::texture_table::slot{});
+                Slots.push_back(T.m_Private ? xgpu::texture_table::slot{ T.getID(), T.getSampler() } : xgpu::texture_table::slot{ m_WhiteTexture.getID(), m_WhiteTexture.getSampler() });     // (a texture that did not load: white, as the bound path's LitBindings)
             }
             if( auto Err = m_Device.Create(M.m_Table, { .m_Slots = Slots }); Err ) return Err;
             M.m_bTable = true;
