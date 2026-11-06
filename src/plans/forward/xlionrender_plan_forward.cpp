@@ -2147,8 +2147,8 @@ namespace xlionrender
             m_TailReport.m_TemporalMs = double(Ns[4] - Ns[2]) * 1e-6;
             static const bool s_bTailLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static int s_TailN = 0;
             if( s_bTailLog && ++s_TailN % 120 == 0 ) { std::printf("TAILSPLIT thin G-buffers (half size + sharp full size) %.3f, tail lights %.3f, denoiser %.3f ms\n", m_TailReport.m_GBufferMs, m_TailReport.m_TailMs, m_TailReport.m_DenoiseMs); std::fflush(stdout); }
-        m_TailReport.m_bOn = bLights; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
         }
+        m_TailReport.m_bOn = bLights; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
         m_TailReport.m_MemoryMB = double(W) * double(H) * (4 + 8 + 4 + 4 + 4 + 2 * 16) / (1024.0 * 1024.0);     // (G-buffer, motion, depth, the tail's two, the denoiser's two)
 
         // A camera cut (a jump past 2 m, or the view turned past 45 degrees): no history (the GI screen pass's rule)
@@ -2331,8 +2331,8 @@ namespace xlionrender
                     }
                 }
                 constexpr float ssr_max_rough_v = 0.5f;
-                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, ssr_max_rough_v, 0.0f };
                 const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
+                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, ssr_max_rough_v, 0.0f };
                 auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
                 auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };      // (m_HDRPrev: m_HDR itself is cleared by the prepass)
                 Window.WriteTimestamp(m_ReflSSRTimes, 0);
@@ -2461,8 +2461,8 @@ namespace xlionrender
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
                 P2.m_Full[0] = -P2.m_Full[0];      // (the list: 64 a group, every lane busy)
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), 262144 / 64, 1);
-            Window.WriteTimestamp(m_ReflTimes, 1);
             }
+            Window.WriteTimestamp(m_ReflTimes, 1);
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
             Window.WriteTimestamp(m_ReflTimes, 2);
             if( bHits ) shadeReflectionHits(Window, Scene, View, BvhR, Slot, HalfKeys, std::uint32_t(2 * W * H));
@@ -3280,9 +3280,9 @@ namespace xlionrender
                 // each pixel of the GI screen buffer - the gather multiplies its irradiance by the AO where it has GI, the materials' upsample
                 // takes the AO entries' (mb_standard_pbr.frag SurfelGIScreen): the GI on or off, no extra read. Last frame's: the history
                 if( pGS ) Window.WriteTimestamp(*pGS, 0);
-                if( bAO )
                 static const bool s_bSSGI = xlionrender::Env("XLION_SSGI") != nullptr;
                 static const float s_AORadius = [] { const char* p = xlionrender::Env("XLION_AO_RADIUS"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: the AO's and the screen GI's range)      // (prototype, A32: screen GI on the AO's bitmask - xLION_Docs ssgi_bitmask_plan_2026-11-06.md)
+                if( bAO )
                 {
                     std::swap(View.m_AO, View.m_AOPrev);
                     const float* pM = reinterpret_cast<const float*>(&W2C);      // (column major: the clip y row's scale, P11 - the view's rotation keeps it)
