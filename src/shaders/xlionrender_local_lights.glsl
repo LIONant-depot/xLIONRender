@@ -151,6 +151,22 @@ float LocalShadowAt(in const local_face F, in const vec3 Receiver, in const int 
     const int   nT = g_LocalTaps == 0 ? 1 : 4;
     const local_fp P = LocalFootprint(F, l, clamp(T, ivec2(0), ivec2(NT - 1)), clamp(T + ivec2(nT - 1), ivec2(0), ivec2(NT - 1)));
     float Lit = 0.0;
+    // (one page, all 16 taps inside the face: 4 gathers - the sun's VSMGather4x4 - the same texels as the 16 fetches. Gather order: x (0, 1),
+    // y (1, 1), z (1, 0), w (0, 0))
+    if (P.bFast && nT == 4 && all(greaterThanEqual(T, ivec2(0))) && all(lessThanEqual(T + 3, ivec2(NT - 1))))
+    {
+        const vec2 Inv = 1.0 / vec2(textureSize(SamplerShadowMap, 0));
+        for (int by = 0; by < 2; ++by)
+        for (int bx = 0; bx < 2; ++bx)
+        {
+            const ivec2 At = T + ivec2(2 * bx, 2 * by);
+            vec4 G = textureGather(SamplerShadowMap, (vec2(P.S + At) + 1.0) * Inv);
+            if (P.bM) G = min(G, textureGather(SamplerShadowMap, (vec2(P.M + At) + 1.0) * Inv));
+            const vec4 Lt = vec4(greaterThanEqual(G, vec4(Ref)));                    // (z < Ref: 0)
+            Lit += Wx[2 * bx] * Wy[2 * by + 1] * Lt.x + Wx[2 * bx + 1] * Wy[2 * by + 1] * Lt.y + Wx[2 * bx + 1] * Wy[2 * by] * Lt.z + Wx[2 * bx] * Wy[2 * by] * Lt.w;
+        }
+        return Lit / 9.0;
+    }
     for (int y = 0; y < nT; ++y)
     for (int x = 0; x < nT; ++x)
     {
