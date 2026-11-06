@@ -2145,6 +2145,8 @@ namespace xlionrender
             m_TailReport.m_GBufferMs = double(Ns[1] - Ns[0]) * 1e-6; m_TailReport.m_TailMs = double(Ns[2] - Ns[1]) * 1e-6; m_TailReport.m_DenoiseMs = double(Ns[3] - Ns[2]) * 1e-6;
             m_TailReport.m_TemporalMs = double(Ns[4] - Ns[2]) * 1e-6;
         }
+            static const bool s_bTailLog = std::getenv("XLION_GPU_TIMES") != nullptr; static int s_TailN = 0;
+            if( s_bTailLog && ++s_TailN % 120 == 0 ) { std::printf("TAILSPLIT thin G-buffers (half size + sharp full size) %.3f, tail lights %.3f, denoiser %.3f ms\n", m_TailReport.m_GBufferMs, m_TailReport.m_TailMs, m_TailReport.m_DenoiseMs); std::fflush(stdout); }
         m_TailReport.m_bOn = bLights; m_TailReport.m_Width = W; m_TailReport.m_Height = H;
         m_TailReport.m_MemoryMB = double(W) * double(H) * (4 + 8 + 4 + 4 + 4 + 2 * 16) / (1024.0 * 1024.0);     // (G-buffer, motion, depth, the tail's two, the denoiser's two)
 
