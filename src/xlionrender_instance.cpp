@@ -384,10 +384,22 @@ namespace xlionrender
             if( auto Err = Device.Create(m_GIDummy, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(Zeros), .m_EntryCount = 1, .m_pData = const_cast<std::uint32_t*>(Zeros), .m_pName = "GI: dummy" }); Err ) return Err;
         }
         {
+#if defined(__linux__)
+            // LION patch (Linux/WSL only): Dozen (Mesa dzn) has no VK_EXT_extended_dynamic_state,
+            // so xGPU cannot set a vertex stream's stride to 0 at bind time. Repeat each constant
+            // default enough times that a static-stride fetch stays in-bounds. Remove when Dozen
+            // advertises Vulkan 1.3.
+            constexpr int kDozenRepeat = 1 << 20;
+            std::vector<std::uint32_t> White(static_cast<std::size_t>(kDozenRepeat), 0xFFFFFFFFu);
+            if( auto Err = Device.Create(m_WhiteColorStream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = kDozenRepeat, .m_pData = White.data(), .m_pName = "Geometry: white colour stream" }); Err ) return Err;
+            std::vector<float> NoUV1(static_cast<std::size_t>(kDozenRepeat) * 2, -3.0e38f);   // mb_input_definition_full.vert mb_UV1: below -1e38 reads UV0
+            if( auto Err = Device.Create(m_NoUV1Stream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = kDozenRepeat, .m_pData = NoUV1.data(), .m_pName = "Geometry: no uv1 stream" }); Err ) return Err;
+#else
             std::uint32_t White = 0xFFFFFFFFu;
             if( auto Err = Device.Create(m_WhiteColorStream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(White), .m_EntryCount = 1, .m_pData = &White, .m_pName = "Geometry: white colour stream" }); Err ) return Err;
             float NoUV1[2] = { -3.0e38f, -3.0e38f };   // mb_input_definition_full.vert mb_UV1: below -1e38 reads UV0
             if( auto Err = Device.Create(m_NoUV1Stream, { .m_Type = xgpu::buffer::type::VERTEX, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(NoUV1), .m_EntryCount = 1, .m_pData = NoUV1, .m_pName = "Geometry: no uv1 stream" }); Err ) return Err;
+#endif
         }
         if( auto Err = Device.Create(m_CellRing,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * max_cell_uints_v, .m_pName = "Lights: cell ring", .m_bWriteOnly = true }); Err ) return Err;
         if( auto Err = Device.Create(m_MaterialUBO, { .m_Type = xgpu::buffer::type::UNIFORM, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::ubo_material), .m_EntryCount = max_draws_per_frame_v, .m_pName = "Materials: material uniforms" }); Err ) return Err;
