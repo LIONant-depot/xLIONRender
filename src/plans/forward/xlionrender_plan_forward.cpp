@@ -2737,7 +2737,11 @@ namespace xlionrender
                 Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.getSetup().m_ResolutionBias };     // the local lights' pages
                 const auto& VS = m_VSM.getSetup();
                 static const int s_DiscTaps = [] { const char* p = std::getenv("XLION_VSM_DISC_TAPS"); return p ? std::atoi(p) : 0; }();      // (measurement: overrides the sun's)
-                Light.m_VSMParams  = bVSM ? xmath::fvec4{ float(std::clamp(s_DiscTaps > 0 ? s_DiscTaps : Scene.m_Sun.m_ShadowDiscTaps, 1, 16)), m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };     // (x: the disc's taps; 0: no sun shadow)
+                // (one tap while the sun turns: its pages rebuild every epoch then and the disc's taps cost 1 to 2.6 ms; a turning sun's soft edge is a blur anyway. XLION_VSM_MOVING_TAPS=<n>, 0: off)
+                static const int s_MovingTaps = [] { const char* p = std::getenv("XLION_VSM_MOVING_TAPS"); return p ? std::atoi(p) : 1; }();
+                { const xmath::fvec3 Sd = Scene.m_Sun.m_Direction; if( (Sd - m_SunDirSeen).Length() > 1e-5f ) { m_SunDirSeen = Sd; m_SunMoved = std::chrono::steady_clock::now(); } }
+                const bool bSunTurning = s_MovingTaps > 0 && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_SunMoved).count() < 0.5f;
+                Light.m_VSMParams  = bVSM ? xmath::fvec4{ float(std::clamp(s_DiscTaps > 0 ? s_DiscTaps : bSunTurning ? std::min(s_MovingTaps, Scene.m_Sun.m_ShadowDiscTaps) : Scene.m_Sun.m_ShadowDiscTaps, 1, 16)), m_VSM.Level0Texel(), float(VS.m_Levels), float(vsmTableBase()) } : xmath::fvec4{ 0, 0, 0, 0 };     // (x: the disc's taps; 0: no sun shadow)
                 static const float s_Band = [] { const char* p = std::getenv("XLION_VSM_BAND"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement: the levels' blend band)
                 static const bool  s_bNoDisc = std::getenv("XLION_VSM_NO_DISC") != nullptr;                                                         // (measurement: no contact-hardening)
                 Light.m_VSMParams2 = { float(VS.m_Window), s_Band > 0.0f ? s_Band : m_VSMLevelBand, float(VS.SlotsPerRow()), float(m_VSMDebugView > 0 ? m_VSMDebugView : m_bVSMTapTranslation ? 1 : 0) };
