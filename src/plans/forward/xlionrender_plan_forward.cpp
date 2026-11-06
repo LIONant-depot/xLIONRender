@@ -2481,7 +2481,8 @@ namespace xlionrender
                 auto DTextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_TailGMotion };
                 for( std::uint32_t Pass = 0; Pass < 2; ++Pass )
                 {
-                    const std::uint32_t DPush[4] = { Pass, std::uint32_t(Slot), 0, 0 };
+                    static const bool s_bDiskFresh = xlionrender::Env("XLION_REFL_DISK_FRESH") != nullptr;      // (measurement: the spatial disk only for fresh histories)
+                    const std::uint32_t DPush[4] = { Pass, std::uint32_t(Slot), s_bDiskFresh ? 1u : 0u, 0 };
                     Window.Dispatch(m_ReflDenoise, DBuffers, DTextures, DPush, sizeof(DPush), (W + 7) / 8, (H + 7) / 8);
                 }
             }

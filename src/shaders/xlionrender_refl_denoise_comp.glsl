@@ -154,7 +154,10 @@ void SpatialPass(ivec2 p)
     const vec2  rf = unpackHalf2x16(T.z);                               // (roughness, frames)
     const vec3  N  = MetaNormal(T.w);
     const float d  = MetaDist(T.w);
-    const float r  = min(rf.x * 12.0, 6.0) * (rf.y < 4.0 ? 1.5 : 1.0);
+    // (m_Pad0, XLION_REFL_DISK_FRESH: the disk only for a history just started (2 frames or fewer) - the disk blurs the normal map's detail away (the cobbles'
+    // edges, a rough ball's highlight): lit 22.9 to 21.8 % off at tomas, but the slow noise rises (lag 30 over 8 .043 to .074 %): off until decided)
+    const bool  bFresh = Push.m_Pad0 != 0u;
+    const float r  = bFresh ? (rf.y <= 2.0 ? min(rf.x * 12.0, 6.0) * 1.5 : 0.0) : min(rf.x * 12.0, 6.0) * (rf.y < 4.0 ? 1.5 : 1.0);
     vec4  S = RecQ(T);
     float W = 1.0;
     if (r >= 0.75)
@@ -174,7 +177,7 @@ void SpatialPass(ivec2 p)
         }
         S /= W;
     }
-    else
+    else if (!bFresh || rf.x * 12.0 < 0.75)      // (a mirror's; with XLION_REFL_DISK_FRESH a rough one with a history is left as it is)
     {
         // a sharp receiver (no lobe to filter): its coverage feathered over its 3 x 3 neighbours of the same surface - the screen trace's
         // hit / miss edge (a ray passing behind a sphere: the probe beyond) was a hard, aliased cut in a mirror (Tomas). Its light stays its
