@@ -89,6 +89,39 @@ float LocalTexel(in const local_face F, in const int l, in const ivec2 t)
     return z;
 }
 
+// A tap footprint's page, resolved once (its 4 x 4 taps from A to B within one page - nearly always: 4 texels of a page's 128): the
+// static and the mover slots' atlas origins less the page's own, so a tap t of the level reads at S + t (and M + t). bFast false: the
+// footprint crosses a page's edge, or its page is not there - the taps go through the table one by one (LocalTexel). Every tap walking the
+// table cost Bistro Game's 7 shadowed lamps 6.35 ms of shading (XLION_NO_LOCAL_SHADOWS)
+struct local_fp { bool bFast, bM; ivec2 S, M; };
+local_fp LocalFootprint(in const local_face F, in const int l, in const ivec2 A, in const ivec2 B)
+{
+    local_fp P; P.bFast = false; P.bM = false; P.S = ivec2(0); P.M = ivec2(0);
+    const ivec2 Pg = A / kLocalPageTexels;
+    if (any(notEqual(Pg, B / kLocalPageTexels))) return P;
+    const int W = kLocalLevel0Pages >> l;
+    uint LB = 0u;
+    for (int k = 0; k < l; ++k) LB += uint((kLocalLevel0Pages >> k) * (kLocalLevel0Pages >> k));
+    const uint  i  = F.FaceBase + LB + uint(Pg.y * W + Pg.x);
+    const uint  T0 = uint(UBOLight.ShadowParams.y), MW = LightCells[T0];
+    const uint  E  = (LightCells[T0 + 1u + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
+    if (E == 0u) return P;
+    const int   Row = int(UBOLight.ShadowParams.z), X0 = int(UBOLight.ShadowParams.x);
+    const int   s = int(E) - 1;
+    P.S = ivec2(X0 + (s % Row) * kLocalPageTexels, (s / Row) * kLocalPageTexels) - Pg * kLocalPageTexels;
+    const uint  M  = (LightCells[T0 + 1u + MW + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
+    if (M != 0u) { const int m = int(M) - 1; P.bM = true; P.M = ivec2(X0 + (m % Row) * kLocalPageTexels, (m / Row) * kLocalPageTexels) - Pg * kLocalPageTexels; }
+    P.bFast = true;
+    return P;
+}
+float LocalTexelFp(in const local_face F, in const local_fp P, in const int l, in const ivec2 t)
+{
+    if (!P.bFast) return LocalTexel(F, l, t);
+    float z = texelFetch(SamplerShadowMap, P.S + t, 0).r;
+    if (P.bM) z = min(z, texelFetch(SamplerShadowMap, P.M + t, 0).r);
+    return z;
+}
+
 // The receiver at level l: moved along its triangle's normal by half the level's texel; its face coordinates (UV, -1..1), depth along
 // the axis and stored depth to compare with. False: nearer than the near plane or outside the spot's frustum (lit)
 bool LocalAt(in const local_face F, in const vec3 Receiver, in const int l, out vec2 UV, out float d, out float Ref)
@@ -116,11 +149,12 @@ float LocalShadowAt(in const local_face F, in const vec3 Receiver, in const int 
     const vec2  f  = U - floor(U);
     const vec4  Wx = vec4(1.0 - f.x, 1.0, 1.0, f.x), Wy = vec4(1.0 - f.y, 1.0, 1.0, f.y);
     const int   nT = g_LocalTaps == 0 ? 1 : 4;
+    const local_fp P = LocalFootprint(F, l, clamp(T, ivec2(0), ivec2(NT - 1)), clamp(T + ivec2(nT - 1), ivec2(0), ivec2(NT - 1)));
     float Lit = 0.0;
     for (int y = 0; y < nT; ++y)
     for (int x = 0; x < nT; ++x)
     {
-        const float z = LocalTexel(F, l, clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1)));
+        const float z = LocalTexelFp(F, P, l, clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1)));
         if (z < 0.0) return -1.0;
         Lit += (z < Ref ? 0.0 : 1.0) * (nT == 1 ? 1.0 : Wx[x] * Wy[y]);
     }
@@ -137,10 +171,11 @@ float LocalBlocker(in const local_face F, in const vec3 Receiver, in const int l
     const int   NT = (kLocalLevel0Pages >> l) * kLocalPageTexels;
     const ivec2 T  = ivec2(floor((clamp(UV, vec2(-1.0), vec2(1.0)) * 0.5 + 0.5) * float(NT) - 0.5)) - 1;
     float Sum = 0.0, n = 0.0;
+    const local_fp P = LocalFootprint(F, l, clamp(T, ivec2(0), ivec2(NT - 1)), clamp(T + ivec2(3), ivec2(0), ivec2(NT - 1)));
     for (int y = 0; y < 4; ++y)
     for (int x = 0; x < 4; ++x)
     {
-        const float z = LocalTexel(F, l, clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1)));
+        const float z = LocalTexelFp(F, P, l, clamp(T + ivec2(x, y), ivec2(0), ivec2(NT - 1)));
         if (z < 0.0) return -2.0;
         if (z < Ref) { Sum += F.B / (z - F.A); n += 1.0; }                          // (the stored depth A + B / d, back to d)
     }

@@ -2869,7 +2869,8 @@ namespace xlionrender
                 }
                 Light.m_CameraPos = xmath::fvec4(Eye, 1);
                 Light.m_ShadowLevels = {};           // (the clipmap's: reserved, zero - the compiled materials' layout keeps them)
-                Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.ResolutionBias() };     // the local lights' pages
+                static const bool s_bNoLocalShadows = xlionrender::Env("XLION_NO_LOCAL_SHADOWS") != nullptr;     // (measurement: the lamps' shadow taps' share of the shading)
+                Light.m_ShadowParams = { s_bNoLocalShadows ? 0.0f : float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.ResolutionBias() };     // the local lights' pages
                 const auto& VS = m_VSM.getSetup();
                 static const int s_DiscTaps = [] { const char* p = xlionrender::Env("XLION_VSM_DISC_TAPS"); return p ? std::atoi(p) : 0; }();      // (measurement: overrides the sun's)
                 // (one tap while the sun turns: its pages rebuild every epoch then and the disc's taps cost 1 to 2.6 ms; a turning sun's soft edge is a blur anyway. XLION_VSM_MOVING_TAPS=<n>, 0: off)
