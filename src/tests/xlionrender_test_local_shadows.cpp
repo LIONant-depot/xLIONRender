@@ -93,6 +93,28 @@ int main()
         S.Update(L, {}, true, {}, 2);
         CHECK(S.m_ToRender.empty(), "an unchanged frame renders nothing (%d)", int(S.m_ToRender.size()));
 
+        // Movers apart (the sun's P1b, Tomas 2026-11-06): a mover never dirties a page - it gets a mover page each frame it is there, the movers only,
+        // in the second table; gone, its mover pages go; a static change still dirties
+        {
+            pages T;
+            T.Init({ .m_PoolTexels = 512, .m_Budget = 2 });
+            T.Update(L, {}, true, {}, 1);
+            const xmath::fbbox Mover{ L[0].m_Position + xmath::fvec3(-0.2f, -1.5f, -0.2f), L[0].m_Position + xmath::fvec3(0.2f, -0.5f, 0.2f) };      // (under the point: its -Y face)
+            const std::vector<xmath::fbbox> Movers{ Mover };
+            T.Update(L, {}, true, {}, 2, Movers);
+            int nMover = 0; for (const auto& R : T.m_ToRender) nMover += R.m_bMover;
+            CHECK(T.m_Stats.m_Rendered == 0 && T.m_Stats.m_RenderedPinned == 0 && T.m_Stats.m_Dirtied == 0 && nMover > 0 && nMover == T.m_Stats.m_RenderedMover, "a mover: mover pages only (%d), no static page again (%d, %d)", nMover, T.m_Stats.m_Rendered, T.m_Stats.m_RenderedPinned);
+            std::vector<std::uint32_t> Both; T.BuildTables(Both);
+            bool bMoverEntry = false; for (std::size_t w = 1 + Both[0]; w < Both.size(); ++w) bMoverEntry |= Both[w] != 0;
+            CHECK(Both.size() == 1 + 2 * std::size_t(Both[0]) && bMoverEntry && T.Validate(Table(T)), "the mover table holds the mover pages; the static table invariant 1");
+            T.Update(L, {}, true, {}, 3);
+            CHECK(T.m_ToRender.empty() && T.m_Stats.m_RenderedMover == 0, "the mover gone: nothing renders (%d)", int(T.m_ToRender.size()));
+            T.BuildTables(Both); bMoverEntry = false; for (std::size_t w = 1 + Both[0]; w < Both.size(); ++w) bMoverEntry |= Both[w] != 0;
+            CHECK(!bMoverEntry, "the mover gone: its mover pages freed");
+            T.Update(L, Movers, true, {}, 4);
+            CHECK(T.m_Stats.m_Dirtied > 0 && T.m_Stats.m_RenderedPinned > 0, "a static change there dirties and renders again (%d)", T.m_Stats.m_Dirtied);
+        }
+
         // 5 requests, a budget of 2: coarse first, 2 a frame
         const int f0 = S.SlotOfLight(0) * pages::faces_per_light_v;
         std::vector<pages::key> Req{ { f0, 0, 3, 4 }, { f0, 2, 1, 1 }, { f0, 1, 2, 2 }, { f0, 0, 5, 5 }, { f0 + 1, 3, 0, 1 } };
@@ -261,7 +283,9 @@ int main()
     // Its shadow
     Scene.m_LocalLights[0].m_bCastShadows = Scene.m_LocalLights[1].m_bCastShadows = true;
     CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateLocalPages(), "Render with shadows");
-    CHECK(Pinned() == 12 && Renderer.getShadowTilesRendered() == 12, "The first frame renders the pinned pages, 6 a point light (%d of %d)", Pinned(), Renderer.getShadowTilesRendered());
+    // (and the mover pages of the casters still new - movers for their first frames, as the sun's: they draw apart until they settle)
+    const auto Movers = [&]() { int k = 0; for (const auto& P : Renderer.getLocalPagesRendered()) k += P.m_bMover; return k; };
+    CHECK(Pinned() == 12 && Renderer.getShadowTilesRendered() - Movers() == 12, "The first frame renders the pinned pages, 6 a point light (%d of %d, %d mover pages)", Pinned(), Renderer.getShadowTilesRendered(), Movers());
     CHECK(Settle(8) && ReadHDR(Device, View, On), "Settle with shadows");
     {
         const auto& R = Renderer.getLocalReport();

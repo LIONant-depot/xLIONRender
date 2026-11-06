@@ -810,7 +810,7 @@ namespace xlionrender
         const std::uint64_t Frame = m_Device.getFrameIndex();
         beginCellFrame(Frame);
         if( m_LocalTableFrame == Frame ) return m_LocalTableBase;
-        m_LocalPages.BuildTable(m_LocalTable);
+        m_LocalPages.BuildTables(m_LocalTable);       // ([mover offset][static][mover]: xlionrender_local_lights.glsl LocalTexel)
         const int n = std::max(int(m_LocalTable.size()), 1);
         m_LocalTable.resize(std::size_t(n), 0u);
         m_LocalTableBase = int(Frame % ring_frames_v) * m_CellStride + m_CellRingUsed;
@@ -1675,8 +1675,12 @@ namespace xlionrender
                 m_LocalReqValid[Slot] = false;
             }
             m_LocalPages.setBudget(m_ShadowUpdatesPerFrame);
-            m_LocalPages.Update(Scene.m_LocalLights, Changed, m_bShadowCache, m_LocalRequests, m_Device.getFrameIndex());
+            // (movers apart, as the sun's: a page keeps the static casters, dirtied by their changes only; the movers draw into mover pages each frame)
+            if( m_bShadowSplitMovers ) m_LocalPages.Update(Scene.m_LocalLights, SunStatic, m_bShadowCache, m_LocalRequests, m_Device.getFrameIndex(), SunMovers);
+            else                       m_LocalPages.Update(Scene.m_LocalLights, Changed, m_bShadowCache, m_LocalRequests, m_Device.getFrameIndex());
             m_LocalReport.m_Pages = m_LocalPages.m_Stats;
+            static const bool s_bLocalLog = xlionrender::Env("XLION_LOCAL_LOG") != nullptr; static int s_LocalN = 0;      // (measurement: the local pages a frame, every 120 frames)
+            if( s_bLocalLog && ++s_LocalN % 120 == 0 ) { const auto& St = m_LocalPages.m_Stats; std::printf("LOCALPAGES rendered %d pinned %d mover %d (rejected %d) dirtied %d requested %d resident %d stale %d movers %zu static changes %zu\n", St.m_Rendered, St.m_RenderedPinned, St.m_RenderedMover, St.m_RejectedMover, St.m_Dirtied, St.m_Requested, St.m_Resident, St.m_Stale, SunMovers.size(), SunStatic.size()); std::fflush(stdout); }
         }
         m_LightStats.m_nShadowed = m_LightStats.m_nShadowFallback = 0;
         for( std::size_t i = 0; i < Scene.m_LocalLights.size(); ++i ) if( Scene.m_LocalLights[i].m_bCastShadows )
@@ -1758,7 +1762,7 @@ namespace xlionrender
             for( const auto& P : m_LocalPages.m_ToRender )
             {
                 const float LW = float(LocalW), LH = float(LocalH), TL = float(shadows::local_pages::page_texels_v);
-                Pages.push_back({ P.m_W2C, { TL / LW, TL / LH, (TL + 2.0f * float(P.m_AtlasX)) / LW - 1.0f, (TL + 2.0f * float(P.m_AtlasY)) / LH - 1.0f }, { 0, 0, 0, 2.0f } });
+                Pages.push_back({ P.m_W2C, { TL / LW, TL / LH, (TL + 2.0f * float(P.m_AtlasX)) / LW - 1.0f, (TL + 2.0f * float(P.m_AtlasY)) / LH - 1.0f }, { 0, 0, 0, P.m_bMover ? 3.0f : 2.0f } });     // (2: a local page, 3: its mover page)
                 if( std::find(Lit.begin(), Lit.end(), P.m_Light) == Lit.end() ) Lit.push_back(P.m_Light);
             }
             // ponytail: a caster against every page of its kind until one overlaps (the epoch's hundreds of static pages: a grid if it shows)
@@ -1786,7 +1790,7 @@ namespace xlionrender
             {
                 const auto& D    = *Draws[i].m_pDraw;
                 const auto& G    = Draws[i].m_pMesh->m_Geom;
-                const auto  Draw = std::uint32_t(L2L.size()) | (bLocal ? shadow_pairs::local_v : Draws[i].m_bMover ? shadow_pairs::mover_v : 0u);
+                const auto  Draw = std::uint32_t(L2L.size()) | (bLocal ? shadow_pairs::local_v : 0u) | (Draws[i].m_bMover ? shadow_pairs::mover_v : 0u);
                 const auto RunFor = [&](material_slot* pCut)
                 {
                     const auto [It, bNew] = RunOf.try_emplace({ &G, bLocal, pCut }, std::uint32_t(PairRuns.size()));
@@ -2105,7 +2109,7 @@ namespace xlionrender
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
             const frustum Page = frustum::FromW2C(P.m_W2C);
-            DrawCasters(Cmd, P.m_W2C, C, [&](std::uint32_t i) { return !m_bShadowFaceCull || Page.Overlaps(Draws[i].m_World, false); });
+            DrawCasters(Cmd, P.m_W2C, C, [&](std::uint32_t i) { return (!m_bShadowSplitMovers || P.m_bWithMovers || Draws[i].m_bMover == P.m_bMover) && (!m_bShadowFaceCull || Page.Overlaps(Draws[i].m_World, false)); });
         }
         if( !m_LocalPages.m_ToRender.empty() && bPairs )      // the pairs' local runs: one viewport over the local part (each instance into its page)
         {

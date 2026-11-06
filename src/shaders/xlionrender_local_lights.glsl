@@ -72,11 +72,21 @@ float LocalTexel(in const local_face F, in const int l, in const ivec2 t)
     for (int k = 0; k < l; ++k) LB += uint((kLocalLevel0Pages >> k) * (kLocalLevel0Pages >> k));
     const ivec2 Pg = t / kLocalPageTexels;
     const uint  i  = F.FaceBase + LB + uint(Pg.y * W + Pg.x);
-    const uint  E  = (LightCells[uint(UBOLight.ShadowParams.y) + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
+    // (the tables: [the mover table's offset][static][mover] - shadow_local_pages.h BuildTables; a mover page's depth: the movers only, the nearer one wins)
+    const uint  T0 = uint(UBOLight.ShadowParams.y), MW = LightCells[T0];
+    const uint  E  = (LightCells[T0 + 1u + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
     if (E == 0u) return -1.0;
-    const int   s   = int(E) - 1, Row = int(UBOLight.ShadowParams.z);
-    const ivec2 At  = ivec2(int(UBOLight.ShadowParams.x) + (s % Row) * kLocalPageTexels, (s / Row) * kLocalPageTexels) + (t - Pg * kLocalPageTexels);
-    return texelFetch(SamplerShadowMap, At, 0).r;
+    const int   Row = int(UBOLight.ShadowParams.z);
+    const ivec2 In  = t - Pg * kLocalPageTexels;
+    const int   s   = int(E) - 1;
+    float z = texelFetch(SamplerShadowMap, ivec2(int(UBOLight.ShadowParams.x) + (s % Row) * kLocalPageTexels, (s / Row) * kLocalPageTexels) + In, 0).r;
+    const uint  M  = (LightCells[T0 + 1u + MW + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu;
+    if (M != 0u)
+    {
+        const int m = int(M) - 1;
+        z = min(z, texelFetch(SamplerShadowMap, ivec2(int(UBOLight.ShadowParams.x) + (m % Row) * kLocalPageTexels, (m / Row) * kLocalPageTexels) + In, 0).r);
+    }
+    return z;
 }
 
 // The receiver at level l: moved along its triangle's normal by half the level's texel; its face coordinates (UV, -1..1), depth along

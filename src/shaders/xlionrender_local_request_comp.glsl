@@ -70,7 +70,7 @@ void Basis(vec3 Fw, out vec3 R, out vec3 U)
 
 uint LevelBase(int L) { uint b = 0u; for (int l = 0; l < L; ++l) b += uint((kLevel0Pages >> l) * (kLevel0Pages >> l)); return b; }
 
-uint Entry(uint i) { return (Cells[uint(F[Push.m_Frame].P0.z) + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu; }
+uint Entry(uint i) { return (Cells[uint(F[Push.m_Frame].P0.z) + 1u + (i >> 1)] >> ((i & 1u) * 16u)) & 0xFFFFu; }      // (the static table after word 0: shadow_local_pages.h BuildTables)
 
 void main()
 {

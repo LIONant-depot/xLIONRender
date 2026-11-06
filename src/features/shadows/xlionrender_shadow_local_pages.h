@@ -20,6 +20,11 @@
 //    moves or turns (the same scene light, the same type: a torch, a car's lights) keeps its slot and its requests (a page's key is
 //    relative to the light): its requested pages render again every frame it moves, mandatory as the pinned ones (Unreal re-renders a
 //    moving light's pages uncached alike), the ones not asked for go - none keeps a render from where the light was.
+//  - Movers (as the sun's, xlionrender_shadow_vsm.h P1b; Tomas 2026-11-06: "static objects (cached shadows) and dynamic objects (render each
+//    frame)"): with movers given (Update's Movers), a page holds the static casters only and only a static change dirties it; each frame every
+//    page in use (pinned, or asked for this frame) that a mover's box reaches gets a mover page - a slot of the same pool, freed the next frame -
+//    with only the movers drawn, in a second table (BuildTables: [mover table offset][static table][mover table]); the shading takes the
+//    nearer of the two depths per tap. Bistro Game's 10 characters under 7 shadowed lamps re-rendered ~1000 static pages a frame (24.6 ms).
 // ponytail: a page's casters by a frustum test per caster and page on the CPU (the sun's pairs: P1c); dirty pages by a frustum test per
 // changed box and resident page of the lights it reaches
 
@@ -65,11 +70,15 @@ namespace xlionrender::shadows
             int             m_AtlasX, m_AtlasY;     // in the pool (the caller adds the pool's origin)
             xmath::fmat4    m_W2C;                  // world -> the page's clip space
             bool            m_bPinned;
+            bool            m_bMover = false;       // a mover page: the movers only (else the static casters only, when movers are given)
+            bool            m_bWithMovers = false;  // a static page drawn with its movers too: its mover page found no slot (the pool full) - dirty, so
+                                                    // its static-only render comes back when the pool has room
         };
 
         struct stats
         {
             int m_Requested = 0, m_Rendered = 0, m_RenderedPinned = 0, m_Rejected = 0, m_Dirtied = 0, m_Resident = 0, m_ResidentPinned = 0, m_Stale = 0, m_Lights = 0;
+            int m_RenderedMover = 0, m_RejectedMover = 0;
         };
 
         static constexpr int LevelBase(int L) noexcept { int b = 0; for (int l = 0; l < L; ++l) b += (level0_pages_v >> l) * (level0_pages_v >> l); return b; }
@@ -129,11 +138,13 @@ namespace xlionrender::shadows
 
         // The frame: the lights matched to their slots (a new or changed light: a new slot, its old pages freed), the pages a changed caster
         // touches dirtied, the pinned pages, then the requested ones within the budget (bCache false: every resident page again, no budget)
-        void Update(const std::vector<local_light>& Lights, std::span<const xmath::fbbox> Changed, bool bCache, std::span<const key> Requests, std::uint64_t Frame) noexcept
+        void Update(const std::vector<local_light>& Lights, std::span<const xmath::fbbox> Changed, bool bCache, std::span<const key> Requests, std::uint64_t Frame
+                   , std::span<const xmath::fbbox> Movers = {}) noexcept
         {
             m_ToRender.clear();
             m_Stats = {};
             m_Frame = Frame;
+            for (int s = 0; s < int(m_Slots.size()); ++s) if (m_Slots[s].m_bMover) FreeMover(s);      // (last frame's mover pages: this frame makes its own)
             const int nLights = std::min(int(Lights.size()), max_local_lights_v);
             m_SlotOf.assign(Lights.size(), -1);
 
@@ -284,9 +295,44 @@ namespace xlionrender::shadows
                         Render(Lights[std::size_t(iLight)], iLight, s, m_Slots[s].m_bPinned);
                     }
 
+            // The mover pages: a page in use this frame (pinned, or asked for) that a mover reaches, the movers only - every frame, outside the budget
+            if (!Movers.empty())
+            {
+                const int nStatic = int(m_Slots.size());
+                for (int s = 0; s < nStatic; ++s)
+                {
+                    const auto S = m_Slots[s];
+                    if (!S.m_bUsed || S.m_bMover || !S.m_bValid || S.m_LastRequested != Frame) continue;
+                    const auto& LS = m_Lights[S.m_Key.m_Face / faces_per_light_v];
+                    if (!LS.m_bUsed) continue;
+                    const auto& L = Lights[std::size_t(LS.m_iLight)];
+                    bool bNear = false;
+                    for (const auto& B : Movers) if (Overlaps(B, L.m_Position, L.m_Radius)) { bNear = true; break; }
+                    if (!bNear) continue;
+                    const frustum F = frustum::FromW2C(PageW2C(L, S.m_Key));
+                    bool bHit = false;
+                    for (std::size_t c = 0; !bHit && c < Movers.size(); ++c) bHit = F.Overlaps(Movers[c], false);
+                    if (!bHit) continue;
+                    const int m = AdmitMover(S.m_Key);
+                    if (m < 0)
+                    {
+                        ++m_Stats.m_RejectedMover;
+                        m_Slots[s].m_bDirty = true;         // (a fallback: this frame the page with its movers, the static render again later)
+                        const int R = m_Setup.SlotsPerRow();
+                        m_ToRender.push_back({ LS.m_iLight, S.m_Key, s, (s % R) * page_texels_v, (s / R) * page_texels_v, PageW2C(L, S.m_Key), S.m_bPinned, false, true });
+                        continue;
+                    }
+                    auto& M = m_Slots[m];
+                    M.m_bValid = true;
+                    const int R = m_Setup.SlotsPerRow();
+                    m_ToRender.push_back({ LS.m_iLight, M.m_Key, m, (m % R) * page_texels_v, (m / R) * page_texels_v, PageW2C(L, M.m_Key), false, true });
+                    ++m_Stats.m_RenderedMover;
+                }
+            }
+
             for (const auto& S : m_Slots)
             {
-                if (!S.m_bUsed) continue;
+                if (!S.m_bUsed || S.m_bMover) continue;
                 ++(S.m_bPinned ? m_Stats.m_ResidentPinned : m_Stats.m_Resident);
                 m_Stats.m_Stale += S.m_bValid && S.m_bDirty;
             }
@@ -305,9 +351,28 @@ namespace xlionrender::shadows
             for (int s = 0; s < int(m_Slots.size()); ++s)
             {
                 const auto& S = m_Slots[s];
-                if (!S.m_bUsed || !S.m_bValid) continue;
+                if (!S.m_bUsed || !S.m_bValid || S.m_bMover) continue;
                 const int i = Entry(S.m_Key);
                 if (std::size_t(i >> 1) < Out.size()) Out[std::size_t(i) >> 1] |= std::uint32_t(s + 1) << ((i & 1) * 16);
+            }
+        }
+
+        // What the shading reads: word 0 the mover table's offset W (after word 0), then the static table (BuildTable, W words), then the mover
+        // table (W words, the same entries: a mover page's slot + 1, 0 none)
+        void BuildTables(std::vector<std::uint32_t>& Out) const noexcept
+        {
+            std::vector<std::uint32_t> Static;
+            BuildTable(Static);
+            const std::size_t W = Static.size();
+            Out.assign(1 + 2 * W, 0u);
+            Out[0] = std::uint32_t(W);
+            std::copy(Static.begin(), Static.end(), Out.begin() + 1);
+            for (int s = 0; s < int(m_Slots.size()); ++s)
+            {
+                const auto& S = m_Slots[s];
+                if (!S.m_bUsed || !S.m_bValid || !S.m_bMover) continue;
+                const int i = Entry(S.m_Key);
+                if (std::size_t(i >> 1) < W) Out[1 + W + (std::size_t(i) >> 1)] |= std::uint32_t(s + 1) << ((i & 1) * 16);
             }
         }
 
@@ -319,7 +384,7 @@ namespace xlionrender::shadows
                 const std::uint32_t E = (Table[std::size_t(i) >> 1] >> ((i & 1) * 16)) & 0xFFFFu;
                 if (E == 0) continue;
                 const int s = int(E) - 1;
-                if (s >= int(m_Slots.size()) || !m_Slots[s].m_bUsed || !m_Slots[s].m_bValid || !(m_Slots[s].m_Key == KeyOf(i))) return false;
+                if (s >= int(m_Slots.size()) || !m_Slots[s].m_bUsed || !m_Slots[s].m_bValid || m_Slots[s].m_bMover || !(m_Slots[s].m_Key == KeyOf(i))) return false;
             }
             return true;
         }
@@ -357,6 +422,7 @@ namespace xlionrender::shadows
             key             m_Key;
             std::uint64_t   m_LastRequested = 0;
             bool            m_bUsed = false, m_bValid = false, m_bDirty = false, m_bPinned = false;
+            bool            m_bMover = false;           // a mover page (in m_DynMap): the movers only, this frame
         };
         struct light_slot
         {
@@ -380,7 +446,7 @@ namespace xlionrender::shadows
             {
                 const auto& S = m_Slots[s];
                 if (!S.m_bUsed) { Best = s; break; }
-                if (S.m_bPinned || S.m_LastRequested == m_Frame) continue;
+                if (S.m_bPinned || S.m_bMover || S.m_LastRequested == m_Frame) continue;
                 if (Best < 0 || S.m_LastRequested < m_Slots[Best].m_LastRequested) Best = s;
             }
             if (Best < 0) return -1;
@@ -392,8 +458,33 @@ namespace xlionrender::shadows
 
         void Free(int s) noexcept
         {
+            if (m_Slots[s].m_bMover) { FreeMover(s); return; }
             m_Map.erase(Entry(m_Slots[s].m_Key));
             m_Slots[s] = {};
+        }
+        void FreeMover(int s) noexcept
+        {
+            m_DynMap.erase(Entry(m_Slots[s].m_Key));
+            m_Slots[s] = {};
+        }
+
+        // A mover page's slot for K: a free one, else the least recently requested unpinned static page not asked for this frame (-1: none)
+        int AdmitMover(const key& K) noexcept
+        {
+            if (const auto It = m_DynMap.find(Entry(K)); It != m_DynMap.end()) return It->second;
+            int Best = -1;
+            for (int s = 0; s < int(m_Slots.size()); ++s)
+            {
+                const auto& S = m_Slots[s];
+                if (!S.m_bUsed) { Best = s; break; }
+                if (S.m_bPinned || S.m_bMover || S.m_LastRequested == m_Frame) continue;
+                if (Best < 0 || S.m_LastRequested < m_Slots[Best].m_LastRequested) Best = s;
+            }
+            if (Best < 0) return -1;
+            if (m_Slots[Best].m_bUsed) Free(Best);
+            m_Slots[Best] = { K, m_Frame, true, false, false, false, true };
+            m_DynMap[Entry(K)] = Best;
+            return Best;
         }
 
         void FreeLight(int LightSlot) noexcept
@@ -437,6 +528,7 @@ namespace xlionrender::shadows
         setup                                       m_Setup;
         std::vector<slot>                           m_Slots;
         std::unordered_map<int, int>                m_Map;          // table entry -> slot
+        std::unordered_map<int, int>                m_DynMap;       // table entry -> its mover page's slot (this frame)
         std::array<light_slot, max_local_lights_v>  m_Lights{};
         std::vector<int>                            m_SlotOf;       // scene light -> light slot (-1: none)
         std::unordered_map<int, std::uint64_t>      m_Waiting;      // a wanted page not rendered yet: the frame it was first wanted
