@@ -2171,7 +2171,7 @@ namespace xlionrender
         // Reflections' sharp receivers: the G-buffer at full size too (createSharpTargets: made when first needed; its rays a pixel each)
         static const float s_SharpEnv = [] { const char* p = std::getenv("XLION_REFL_SHARP"); return p ? float(std::atof(p)) : -1.0f; }();      // (measurement)
         if( s_SharpEnv >= 0.0f ) m_ReflSharpMax = s_SharpEnv;
-        const bool bSharp = m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && m_bReflSharpSeen && !Scene.m_bDebugReflectionMirror && std::getenv("XLION_SDF") == nullptr && createSharpTargets(View) == nullptr;
+        const bool bSharp = std::getenv("XLION_REFL_PT") == nullptr && m_ReflTraceBench == 0 && Scene.m_ReflectionMaxRoughness > 0 && m_ReflSharpMax > 0 && m_bReflSharpSeen && !Scene.m_bDebugReflectionMirror && std::getenv("XLION_SDF") == nullptr && createSharpTargets(View) == nullptr;
         Light.m_TailParams.m_X = bSharp ? float(View.m_SharpWidth) : 0.0f;      // (the materials: the full-size records' row, 0: none)
         Window.WriteTimestamp(m_TailTimes, 0);
         const auto DrawGBuffer = [&]( xgpu::renderpass& Pass )
@@ -2294,9 +2294,10 @@ namespace xlionrender
         static const int  s_GradeRough = [] { const char* p = std::getenv("XLION_REFL_GRADE"); return p ? int(std::atof(p) * 1000.0 + 0.5) : 0; }();
         static const bool s_bGrading = std::getenv("XLION_REFL_GRADE") != nullptr && !s_bGradeRays;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
         const bool bTraced = !s_bGrading && !Scene.m_bDebugReflectionPathTraced && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
-        const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection;      // (its colors are last frame's image: in the debug view, reflections of reflections)
+        const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection && std::getenv("XLION_REFL_PT") == nullptr;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
-        const bool bReconstruct = Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || std::getenv("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
+        static const bool s_bReflPT = std::getenv("XLION_REFL_PT") != nullptr;      // (A12: the reflections' ground truth, real materials)
+        const bool bReconstruct = !s_bReflPT && Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || std::getenv("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
         if( bTraced || bScreen )
         {
             if( bScreen || bReconstruct )
@@ -2435,9 +2436,12 @@ namespace xlionrender
             Push.m_Full[1] = s_Sdf;
             float MaxRoughOut = 0.0f;
             static const bool s_bBands = std::getenv("XLION_REFL_BANDS") != nullptr; if( s_bBands && !bPlanar ) Push.m_Plane[0] = -1.0f;
+            // XLION_REFL_PT (A12): the reflections' ground truth with the real materials (refl_trace_comp.glsl m_Full.w 5): no planar view, no store, no screen trace
+            if( s_bReflPT && !m_ReflPTAccum.m_Private ) { const std::vector<float> Z(8 * std::size_t(W) * std::size_t(H), 0.0f); (void)m_Device.Create(m_ReflPTAccum, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 2 * W * H, .m_pData = const_cast<float*>(Z.data()), .m_pName = "Reflections: the ground truth's sums" }); }
+            if( s_bReflPT ) { Push.m_Full[3] = 5; Push.m_Full[2] = 0; for( auto& v : Push.m_Plane ) v = 0.0f; Push.m_bPlanar = 0.0f; Push.m_Frame = View.m_TailFrame; }
             static const std::array<float, 4> s_DirsTrace = [] { std::array<float, 4> D{ 0.0f, 3.0f, 0.15f, 0.8f }; float K = 8.0f; const char* t = std::getenv("XLION_VOX_DIRS_TRACE"); const char* d = std::getenv("XLION_VOX_DIRS"); if( !t || !d ) return std::array<float, 4>{}; std::sscanf(d, "%f,%f", &D[1], &K); std::sscanf(t, "%f,%f", &D[2], &D[3]); if( D[1] < 0.0f ) return std::array<float, 4>{}; D[0] = K; return D; }();      // (rays below D[2], the store's read to D[3]: the shader)
-            if( pVox && s_DirsTrace[0] > 0.0f ) { if( !bPlanar ) std::memcpy(Push.m_Plane, s_DirsTrace.data(), sizeof(Push.m_Plane)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
-            auto Buffers  = std::array<xgpu::buffer*, 16>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats, &m_ReflSharpList };
+            if( pVox && s_DirsTrace[0] > 0.0f && !s_bReflPT ) { if( !bPlanar ) std::memcpy(Push.m_Plane, s_DirsTrace.data(), sizeof(Push.m_Plane)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
+            auto Buffers  = std::array<xgpu::buffer*, 16>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats, s_bReflPT && m_ReflPTAccum.m_Private ? &m_ReflPTAccum : &m_ReflSharpList };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : bSdf ? &View.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
             // list's places before the glossy ones
@@ -4272,7 +4276,10 @@ namespace xlionrender
         const xmath::fvec3 Eye     = Camera.getPosition();
         const xmath::fmat4 W2CNoJitter = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
         static const int s_EnvTAA = [] { const char* p = std::getenv("XLION_TAA"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();      // (measurement: 0 off, else on)
-        const bool bTAA = s_EnvTAA >= 0 ? s_EnvTAA == 1 : Scene.m_Post.m_bTAA;
+        // (the path tracers accumulate while each texel's point holds: TAA's sub-pixel jitter moved it every frame and they never converged - Tomas, 2026-11-06: off with them, always)
+        static const bool s_bPTRefl = std::getenv("XLION_REFL_PT") != nullptr || std::getenv("XLION_GI_REF") != nullptr;
+        const bool bPathTracing = s_bPTRefl || Scene.m_GI.m_bPathTraced || Scene.m_bDebugReflectionPathTraced;
+        const bool bTAA = !bPathTracing && (s_EnvTAA >= 0 ? s_EnvTAA == 1 : Scene.m_Post.m_bTAA);
         const xmath::fmat4 W2C = [&]
         {
             if( !bTAA ) return W2CNoJitter;
@@ -4394,6 +4401,9 @@ namespace xlionrender
                 if( !View.m_HDRPrev.m_Private ) (void)m_Device.Create(View.m_HDRPrev, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: last frame's HDR" });
                 if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true; }
             }
+            static const float s_EnvExposure = [] { const char* p = std::getenv("XLION_EXPOSURE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: a fixed exposure with auto exposure off - graded lit images)
+            if( s_EnvExposure > 0.0f ) View.m_Exposure = s_EnvExposure;
+            const xgpu::texture* pHDR = &View.m_HDR;
             xgpu::pipeline_instance* pToneMap = &View.m_ToneMapInstance;
             if( bTAA )
             {

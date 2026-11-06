@@ -32,7 +32,12 @@ layout(std430, set = 0, binding = 14) readonly buffer baked_sdf_b { uint BakedSD
 // in a row) traces the list, every lane busy, and writes its half of the pair. Past refl_sharp_cap_v the first traces them itself.
 // (The sparse sharp texels had cost a group each: 35000 rays 1.9 ms on Bistro against 74000 half size ones 2.2)
 layout(std430, set = 0, binding = 15) buffer sharp_list_b { uint SharpList[]; };
-const uint refl_sharp_cap_v = 262144u;     // (XLION_SDF 11, 12: xlionrender_baked_sdf.glsl)
+const uint refl_sharp_cap_v = 262144u;
+// XLION_REFL_PT (A12, m_Full.w 5): the reflections' ground truth with the real materials - each half size texel's ray from its own
+// roughness and mapped normal, its hit lit by a path (cosine bounces, the GI reference's: Direct at each, SkyAt past the last)
+// instead of the store, the mean kept over frames while the point holds (PTAccum: sum by w, w; the point) - no reconstruction.
+// With PATH_TRACED's diffuse it makes a lit image to grade the lit one against (screen trace, sharp pass)
+layout(std430, set = 0, binding = 15) buffer pt_accum_b { vec4 PTAccum[]; };      // (binding 15 as the sharp list: no sharp pass in this mode; xGPU's compute holds 16 buffers at most)     // (XLION_SDF 11, 12: xlionrender_baked_sdf.glsl)
 #include "xlionrender_baked_sdf.glsl"
 layout(std430, set = 0, binding = 9) readonly buffer planar_b  { planar_t PL[]; };        // (a ring slot each)
 // The hits to texture (xlionrender_refl_hits_comp.glsl), a list: Hits[0] its counts (x, y: by the frame's parity - the hits pass clears
@@ -97,6 +102,32 @@ bool PrefixIncomplete(vec3 O, vec3 D, float TMax)
 // The GI's Direct (xlionrender_gi_pass_common.glsl: the sun and its lights, a shadow ray each) with each light's GGX highlight toward V
 // (mb_standard_pbr.frag's: D, correlated Smith, Schlick) for a surface of F0 and roughness Rough: E the irradiance, S the radiance
 bool g_ShadowBySDF = false;     // (XLION_SDF 3: its shadow rays march the field too)
+// (XLION_REFL_PT: the irradiance at a hit by one path, 3 cosine bounces - xlionrender_gi_ref.glsl's model, emitters as surfaces)
+vec3 PTIrradiance(vec3 P, vec3 N, uint s)
+{
+    vec3 Sum = vec3(0.0), Th = vec3(1.0);
+    for (int b = 0; b < 3; ++b)
+    {
+        s = Hash32(s + 0x9E3779B9u); const float u = float(s & 0xFFFFu) / 65536.0, v = float(s >> 16) / 65536.0;
+        const vec3 T = normalize(cross(abs(N.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), N)), B = cross(N, T);
+        const float r = sqrt(u), Ph = 6.2831853 * v;
+        const vec3 D = normalize(T * (r * cos(Ph)) + B * (r * sin(Ph)) + N * sqrt(max(0.0, 1.0 - u)));
+        const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
+        if (H.m_Inst < 0) { Sum += Th * SkyAt(D); break; }
+        const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
+        const uvec3 HT = MTri(HM, H.m_Tri);
+        const float B0 = 1.0 - H.m_U - H.m_V;
+        const vec3 Nh = NormalToWorld(HR, MNrm(HM, HT.x) * B0 + MNrm(HM, HT.y) * H.m_U + MNrm(HM, HT.z) * H.m_V);
+        if (dot(Nh, D) > 0.0) break;
+        vec3 Albedo, Emission;
+        SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
+        const vec3 Phh = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
+        Sum += Th * (Albedo * Direct(Phh, Nh) * (1.0 / gi_pi_v) + Emission / max(GF(5u), 1e-6));
+        Th *= Albedo;
+        P = Phh; N = Nh;
+    }
+    return Sum * gi_pi_v;
+}
 bool ShadowRay(vec3 O, vec3 L, float TMax) { if (!g_ShadowBySDF) return Occluded(O, L, TMax); float t; return SDFCast(O, L, t) && t < TMax; }
 void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec, out vec3 E, out vec3 S)
 {
@@ -404,7 +435,8 @@ void main()
                         SurfaceAt(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Albedo, Emission);
                         vec3 Ei;
                         g_HitGridRead = true;
-                        if (Push.m_Vox.w > 0.0) Ei = VoxRead(Py, Ny, Push.m_Vox.xyz, Push.m_Vox.w);
+                        if (Push.m_Full.w == 5) Ei = PTIrradiance(Py, Ny, h);
+                        else if (Push.m_Vox.w > 0.0) Ei = VoxRead(Py, Ny, Push.m_Vox.xyz, Push.m_Vox.w);
                         else if (!Indirect(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V, Ei)) Ei = Unsupported(Hit.m_Inst, Hit.m_Tri, Hit.m_U, Hit.m_V);
                         const bool bSpec = (GD[R + 47u] & 128u) != 0u;      // (its triangles' specular: world::SetTriangleSpecular)
                         const uint Sb = bSpec ? GD[R + 48u] + 4u * uint(Hit.m_Tri) : 0u;
@@ -451,6 +483,15 @@ void main()
                     }
                     g_ShadowBySDF = false;
                     const float Conf = 1.0 - smoothstep(0.5 * Push.m_MaxRough, Push.m_MaxRough, Rough);     // (B: sharp receivers; glossy ones fade to the probes until the reconstruction)
+                    if (Push.m_Full.w == 5 && !bFull)      // (XLION_REFL_PT: the mean so far; a moved point starts over)
+                    {
+                        const vec3 Pw = P + Push.m_Eye;
+                        vec4 A = PTAccum[2u * i - 2u * uint(Size.x * Size.y)]; const vec4 Pa = PTAccum[2u * i - 2u * uint(Size.x * Size.y) + 1u];
+                        if (Pa.w < 0.5 || dot(Pa.xyz - Pw, Pa.xyz - Pw) > 1e-4) { A = vec4(0.0); PTAccum[2u * i - 2u * uint(Size.x * Size.y) + 1u] = vec4(Pw, 1.0); }
+                        if (!any(isnan(Lr)) && !any(isinf(Lr))) A += vec4(min(Lr, vec3(64.0)) * w, w);      // (a firefly clamp per sample, labelled)
+                        PTAccum[2u * i - 2u * uint(Size.x * Size.y)] = A;
+                        Lr = A.w > 0.0 ? A.rgb / A.w : Lr;
+                    }
                     Rec.x = packHalf2x16(HalfSafe(Lr).rg);
                     Rec.y = packHalf2x16(vec2(HalfSafe(Lr).b, Conf));
                     Rec.z = packHalf2x16(vec2(Dist, w));
