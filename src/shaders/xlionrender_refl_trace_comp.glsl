@@ -68,6 +68,7 @@ const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 
 
 shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured, s_SharpSeen;
 shared uvec2 s_Pair[64];       // (the full-size dispatch: two pixels a record)
+shared uint  s_Listed[64];     // (a listed texel: the first dispatch keeps its half of the pair - its history - for the list's)
 
 // Heitz 2018: a visible normal of an isotropic GGX (alpha a) for the view Ve (local frame, z the normal)
 vec3 SampleVNDF(vec3 Ve, float a, vec2 u)
@@ -108,8 +109,8 @@ vec3 PTIrradiance(vec3 P, vec3 N, uint s)
     vec3 Sum = vec3(0.0), Th = vec3(1.0);
     for (int b = 0; b < 16; ++b)
     {
-        s = Hash32(s + 0x9E3779B9u); const float u = float(s & 0xFFFFu) / 65536.0, v = float(s >> 16) / 65536.0;
         if (b >= 3) { s = Hash32(s + 0x7F4A7C15u); const float q = clamp(max(Th.r, max(Th.g, Th.b)), 0.05, 0.95); if (float(s & 0xFFFFu) / 65536.0 >= q) break; Th /= q; }      // (Russian roulette past 3, as the GI reference)
+        s = Hash32(s + 0x9E3779B9u); const float u = float(s & 0xFFFFu) / 65536.0, v = float(s >> 16) / 65536.0;
         const vec3 T = normalize(cross(abs(N.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0), N)), B = cross(N, T);
         const float r = sqrt(u), Ph = 6.2831853 * v;
         const vec3 D = normalize(T * (r * cos(Ph)) + B * (r * sin(Ph)) + N * sqrt(max(0.0, 1.0 - u)));
@@ -220,6 +221,7 @@ vec4 PlanarAt(vec2 uv, float Lod)
 void main()
 {
     if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; s_SharpSeen = 0u; }
+    s_Listed[gl_LocalInvocationIndex] = 0u;
     barrier();
     const bool  bList = Push.m_Full.x < 0;
     const bool  bFull = Push.m_Full.x != 0;
@@ -258,7 +260,7 @@ void main()
         // (a sharp receiver seen, whether or not the full size runs: Stats' top bit: an empty full size dispatch cost 2 ms on Bistro)
         if (Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpSeen) s_SharpSeen = 1u;      // (one global atomic a group, at the end)
         bool bListed = false;
-        if (bFull && !bList && bSharpHere) { const uint a = atomicAdd(SharpList[Par], 1u); if (a < refl_sharp_cap_v) { SharpList[2u + a] = uint(p.x) | (uint(p.y) << 16); bListed = true; } }
+        if (bFull && !bList && bSharpHere) { const uint a = atomicAdd(SharpList[Par], 1u); if (a < refl_sharp_cap_v) { SharpList[2u + a] = uint(p.x) | (uint(p.y) << 16); bListed = true; s_Listed[gl_LocalInvocationIndex] = 1u; } }
         if (bFull && (!bSharpHere || bListed)) { }      // (the full-size dispatch: the sharp ones only; the rest: none - the half-size records serve them)
         else if (!bFull && bSharpHere) { }  // (the half-size dispatch leaves the sharp ones to the full-size one)
         else if (bPlanarHere)
@@ -541,13 +543,28 @@ void main()
         const float Conf  = unpackHalf2x16(Rec.y).y;
         const uvec2 v = Conf > 0.0 ? uvec2(Rec.x, packHalf2x16(vec2(unpackHalf2x16(Rec.y).x, Depth))) : uvec2(0u);
         const uint  k = uint(p.y * ((Size.x + 1) & ~1) + p.x);
-        if ((k & 1u) == 0u) Records[uint(Push.m_Full.z) + k / 2u].xy = v; else Records[uint(Push.m_Full.z) + k / 2u].zw = v;
+        // (a short history, the camera still - the same view depth within 1 %: a fresh ray each frame shimmered on glass, Tomas; a quarter new)
+        const uint  At = uint(Push.m_Full.z) + k / 2u;
+        const uvec2 Old = (k & 1u) == 0u ? Records[At].xy : Records[At].zw;
+        uvec2 w = v;
+        if (v != uvec2(0u) && Old != uvec2(0u))
+        {
+            const vec2 Ob = unpackHalf2x16(Old.y), Nb = unpackHalf2x16(v.y);
+            if (abs(Ob.y - Nb.y) < 0.01 * Nb.y)
+            {
+                const vec3 C = mix(vec3(unpackHalf2x16(Old.x), Ob.x), vec3(unpackHalf2x16(v.x), Nb.x), 0.25);
+                if (!any(isnan(C)) && !any(isinf(C))) w = uvec2(packHalf2x16(C.rg), packHalf2x16(vec2(C.b, Nb.y)));
+            }
+        }
+        if ((k & 1u) == 0u) Records[At].xy = w; else Records[At].zw = w;
     }
     if (bFull && !bList && bIn && Push.m_Mode == 0u && (p.x & 1) == 0)
     {
         const uint  k = uint(p.y * ((Size.x + 1) & ~1) + p.x);     // (rows padded to even: a record never spans two)
-        const uvec2 b = p.x + 1 < Size.x ? s_Pair[gl_LocalInvocationIndex + 1u] : uvec2(0u);
-        Records[uint(Push.m_Full.z) + k / 2u] = uvec4(s_Pair[gl_LocalInvocationIndex], b);
+        const uvec4 Old = Records[uint(Push.m_Full.z) + k / 2u];
+        const uvec2 a = s_Listed[gl_LocalInvocationIndex] != 0u ? Old.xy : s_Pair[gl_LocalInvocationIndex];
+        const uvec2 b = p.x + 1 < Size.x ? (s_Listed[gl_LocalInvocationIndex + 1u] != 0u ? Old.zw : s_Pair[gl_LocalInvocationIndex + 1u]) : uvec2(0u);
+        Records[uint(Push.m_Full.z) + k / 2u] = uvec4(a, b);
     }
     if (gl_LocalInvocationIndex == 0u)
     {

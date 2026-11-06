@@ -552,7 +552,8 @@ int main()
         DumpRGB("refl_b_today", Today, size_v, size_v);
         DumpRGB("refl_b_traced", Traced, size_v, size_v);
         DumpRGB("refl_b_planar", Planar, size_v, size_v);
-        CHECK(FloorPlanar < FloorTraced, "the planar view does not improve the floor over the traced rays (%.3f against %.3f)", FloorPlanar, FloorTraced);
+        // (at least as good: since the sharp records keep a short history (2026-11-06) the traced floor at .1 reaches the planar view's level, .251 both)
+        CHECK(FloorPlanar <= FloorTraced * 1.01, "the planar view is worse than the traced rays on the floor (%.3f against %.3f)", FloorPlanar, FloorTraced);
         CHECK(FloorTraced < 0.7 * FloorToday, "the traced reflections do not improve the floor (%.3f against today's %.3f)", FloorTraced, FloorToday);
         CHECK(ChromeTraced < 0.5 * ChromeToday, "the traced reflections do not improve the chrome sphere (%.3f against today's %.3f)", ChromeTraced, ChromeToday);
         // A rough floor (roughness 0.3): the planar view filtered by the lobe's footprint (its pyramid), against the reference, today's
