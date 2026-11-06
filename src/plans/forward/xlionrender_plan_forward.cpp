@@ -2071,7 +2071,7 @@ namespace xlionrender
         const auto IsSkin = [&]( std::uint32_t i ) { return Draws[i].m_pMesh->m_bCluster && Draws[i].m_pMesh->m_Geom.m_Kind == geom_kind::SKIN; };
         struct skin_page { xmath::fmat4 m_W2C; xmath::fvec4 m_Atlas, m_Rect; };
         static_assert(sizeof(skin_page) == 96);
-        struct skin_run { std::uint32_t m_Draw, m_First, m_Count; };
+        struct skin_run { std::uint32_t m_Draw, m_First, m_Count; float m_Texel = 1e30f; };     // (m_Texel: its pages' finest texel at the skin, world units - its LOD)
         std::vector<skin_page> SkinPages;
         std::vector<std::uint32_t> SkinList;
         std::vector<skin_run> SkinSun, SkinLocal;
@@ -2097,7 +2097,11 @@ namespace xlionrender
                 for( std::uint32_t p = 0; p < m_VSM.m_ToRender.size(); ++p )
                 {
                     const auto& P = m_VSM.m_ToRender[p];
-                    if( Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size) ) SkinList.push_back(SunBase + p);
+                    if( Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size) )
+                    {
+                        SkinList.push_back(SunBase + p);
+                        Run.m_Texel = std::min(Run.m_Texel, m_VSM.Level0Texel() * float(1 << P.m_Key.m_Level));
+                    }
                 }
                 Run.m_Count = std::uint32_t(SkinList.size()) - Run.m_First;
                 if( Run.m_Count ) SkinSun.push_back(Run);
@@ -2107,7 +2111,14 @@ namespace xlionrender
                     const auto& P = m_LocalPages.m_ToRender[p];
                     const auto& L = Scene.m_LocalLights[std::size_t(P.m_Light)];
                     if( (!m_bShadowSplitMovers || P.m_bWithMovers || Draws[i].m_bMover == P.m_bMover) && shadows::Overlaps(Draws[i].m_World, L.m_Position, L.m_Radius)
-                        && (!m_bShadowFaceCull || LocalFrustum[p].Overlaps(Draws[i].m_World, false)) ) SkinList.push_back(LocalBase + p);
+                        && (!m_bShadowFaceCull || LocalFrustum[p].Overlaps(Draws[i].m_World, false)) )
+                    {
+                        SkinList.push_back(LocalBase + p);
+                        // (a face's texel at the skin: 2 d tan(half fov) over the level's texels across)
+                        const float Dist = ((Draws[i].m_World.m_Min + Draws[i].m_World.m_Max) * 0.5f - L.m_Position).Length();
+                        const float Tan  = L.m_Type == local_light::type::POINT ? 1.0f : shadows::SpotTanHalf(L);
+                        Run.m_Texel = std::min(Run.m_Texel, 2.0f * Dist * Tan / float((shadows::local_pages::level0_pages_v >> P.m_Key.m_Level) * shadows::local_pages::page_texels_v));
+                    }
                 }
                 Run.m_Count = std::uint32_t(SkinList.size()) - Run.m_First;
                 if( Run.m_Count ) SkinLocal.push_back(Run);
@@ -2133,9 +2144,17 @@ namespace xlionrender
                 Cmd.setPipelineInstance(m_ShadowSkinPagesInstance, std::span{ Buffers });
                 Cmd.setDynamicUBO(m_ShadowUBO, 0);
                 BindClusterStreams(Cmd, G);
-                for( std::size_t s = 0; s < G.LODSubmeshes(0).size(); ++s )
+                // Each submesh at the coarsest LOD whose error (times the draw's scale) stays within its pages' finest texel - the static casters' rule
+                // (PageSub), apart from the main view's pick: LOD 0 here drew every character's full mesh into every page (Bistro Game 2026-11-07:
+                // 6.9 ms of shadow pass; the main view's LOD 3.2, every skin's coarsest 1.6)
+                const float Scale = std::max({ (D.m_L2W * xmath::fvec3{ 1, 0, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length(), (D.m_L2W * xmath::fvec3{ 0, 1, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length()
+                                             , (D.m_L2W * xmath::fvec3{ 0, 0, 1 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length() });
+                static const int s_SkinLOD = [] { const char* p = xlionrender::Env("XLION_SKIN_LOD"); return p ? std::atoi(p) : -1; }();
+                for( std::size_t s = 0; s < G.m_Submeshes.size(); ++s )
                 {
-                    const auto& Sub = G.LODSubmeshes(0)[s];
+                    int j = s_SkinLOD >= 0 ? s_SkinLOD : int(G.m_LODErrors.size()) - 1;
+                    if( s_SkinLOD < 0 ) while( j > 0 && (std::size_t(j) >= G.m_LODErrors.size() || s >= G.m_LODErrors[std::size_t(j)].size() || G.m_LODErrors[std::size_t(j)][s] * Scale > Run.m_Texel) ) --j;
+                    const auto& Sub = G.LODSubmeshes(j)[s];
                     auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                     const auto Vis = pMat ? MaterialVisibilityOf(pMat->m_State) : material_visibility{};
                     if( !Vis.m_bCastsShadow ) continue;         // (a masked skin: its cutout's not here - as an opaque one, ponytail: a skinned cutout caster if one shows)
