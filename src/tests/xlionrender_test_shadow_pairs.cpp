@@ -127,7 +127,9 @@ int main()
         return true;
     };
 
-    // The GPU pairs draw what the CPU path draws: every page rendered again by each (the cache off), the same frame - the images agree
+    // The GPU pairs draw what the CPU path draws: every page rendered again by each (the cache off), the same frame - the images agree. (The movers
+    // at the pages' own level: a caster that changed is a mover the first frame, a level coarser by default, settled the next - another image by design)
+    Renderer.m_bShadowMoversCoarse = false;
     const auto Compare = [&](const char* pWhat)
     {
         std::vector<float> GPU, CPU;

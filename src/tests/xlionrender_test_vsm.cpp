@@ -672,7 +672,9 @@ int main()
     // P1b - movers in pages of their own: the six transitions (a mover enters a page, crosses into another, leaves the view, is deleted,
     // settles into the static pages, moves again after being cached). Each against the same frame with every caster in one layer
     // (m_bShadowSplitMovers off, every page rendered again): the two layers composed per tap must give the same image, bit for bit.
-    // While the mover moves, no static page renders (the split's point): the movers' pages only
+    // While the mover moves, no static page renders (the split's point): the movers' pages only. (Bit for bit with the movers at the pages' own level:
+    // coarse movers - the default - draw them a level coarser, a different image by design)
+    Renderer.m_bShadowMoversCoarse = false;
     {
         const auto Reference = [&](const char* pWhat) -> bool
         {
@@ -724,6 +726,39 @@ int main()
         Scene.m_Draws.pop_back();
         CHECK(Settle(12), "P1b done");
         CHECK(nStaticWhileMoving == 0, "P1b: %d static pages rendered while only the mover moved", nStaticWhileMoving);
+    }
+
+    // P1c - coarse movers (the default, Tomas 2026-11-06 "a parallel dynamic vsm"): the moving sphere's pages a level coarser. Its shadow is there
+    // (the image far from the one without it), close to the one layer image (its edges at twice the texel), on fewer mover pages than the same level
+    {
+        const auto Mover = [](float X, float Z) { return xmath::fmat4::fromTranslation({ X, 0.6f, Z }) * xmath::fmat4::fromScale({ 0.5f, 0.5f, 0.5f }); };
+        const auto Diff = [](const std::vector<float>& A, const std::vector<float>& B) { int n = 0; for (std::size_t i = 0; i < A.size(); ++i) n += std::abs(A[i] - B[i]) > 0.05f; return n; };
+        std::vector<float> None, One, Coarse;
+        CHECK(Settle(12) && ReadHDR(Device, View, None), "P1c: the image without the mover");
+        Scene.m_Draws.push_back({ .m_Mesh = Sphere, .m_L2W = Mover(0.2f, 0.8f) });
+        const std::size_t iMover = Scene.m_Draws.size() - 1;
+        int MoverPages[2] = {};
+        for (int Coarser = 0; Coarser < 2; ++Coarser)
+        {
+            Renderer.m_bShadowMoversCoarse = Coarser != 0;
+            for (int f = 0; f < 4; ++f)
+            {
+                Scene.m_Draws[iMover].m_L2W = Mover(0.2f + 0.05f * float(f & 1), 0.8f);
+                CHECK(App.RenderFrame(Scene, View, Camera) && Renderer.validateVSM(), "P1c: moving frame %d", f);
+            }
+            MoverPages[Coarser] = Renderer.getVSMReport().m_Pages.m_ResidentMover;
+            if (Coarser) CHECK(ReadHDR(Device, View, Coarse), "P1c: the coarse movers' image");
+        }
+        Renderer.m_bShadowSplitMovers = false; Renderer.m_bShadowCache = false;
+        CHECK(App.RenderFrame(Scene, View, Camera) && ReadHDR(Device, View, One), "P1c: one layer");
+        Renderer.m_bShadowSplitMovers = true; Renderer.m_bShadowCache = true;
+        const int nShadow = Diff(None, One), nCoarse = Diff(Coarse, One);
+        std::printf("P1c: the mover's shadow %d pixels, coarse movers differ from one layer on %d; mover pages same level %d, coarse %d\n", nShadow, nCoarse, MoverPages[0], MoverPages[1]);
+        CHECK(nShadow > 0 && Diff(None, Coarse) > nShadow / 2, "P1c: the coarse movers' shadow is missing (%d of %d pixels)", Diff(None, Coarse), nShadow);
+        CHECK(nCoarse <= nShadow / 2, "P1c: the coarse movers' shadow is far from one layer's: %d pixels of %d", nCoarse, nShadow);
+        CHECK(MoverPages[1] > 0 && MoverPages[1] < MoverPages[0], "P1c: coarse movers on %d pages, the same level on %d", MoverPages[1], MoverPages[0]);
+        Scene.m_Draws.pop_back();
+        CHECK(Settle(12), "P1c done");
     }
 
     // B11 overflow: a pool too small for the view. Without dynamic resolution: pages rejected, patches by a coarser level; with it (the

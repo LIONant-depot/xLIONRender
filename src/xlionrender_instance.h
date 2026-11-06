@@ -181,6 +181,7 @@ namespace xlionrender
         int                                        m_ShadowUpdatesPerFrame = 64;
         // Local light pages draw only the casters in the page's frustum (false: every caster in the light's sphere)
         bool                                       m_bShadowFaceCull = true;
+        bool                                       m_bShadowMoversCoarse = true;    // the sun's movers' pages a level coarser (shadows::vsm::m_bMoversCoarse)
         // The sun's movers (casters changed lately, skinned) in mover pages of their own, never dirtying the static pages (P1b); false: every
         // caster in the pages (the tests' reference: the two layers composed must equal it)
         bool                                       m_bShadowSplitMovers = true;

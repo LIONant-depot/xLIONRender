@@ -434,8 +434,15 @@ namespace xlionrender::shadows
                 std::vector<lbox> Movers;
                 for (const auto& B : MoverWorld) Movers.push_back(Bounds(B));
                 std::vector<key> Need;
-                const auto Consider = [&](const key& K)
+                // (m_bMoversCoarse, Tomas 2026-11-06 "a parallel dynamic vsm": a page asked for at level L has its movers in the page above it, L + 1 - a
+                // quarter of the pages, the movers' shadow at twice the texel; the shading reads the movers one level coarser: xlionrender_shadow_vsm.glsl)
+                const auto Consider = [&](key K)
                 {
+                    if (m_bMoversCoarse && K.m_Level + 1 < m_Setup.m_Levels)
+                    {
+                        K = { K.m_Level + 1, K.m_X >= 0 ? K.m_X / 2 : (K.m_X - 1) / 2, K.m_Y >= 0 ? K.m_Y / 2 : (K.m_Y - 1) / 2 };
+                        if (!InWindow(K)) return;
+                    }
                     const float P = m_Levels[K.m_Level].m_PageSize;
                     for (const auto& M : Movers) if (RectOverlaps(M, K.m_X * P, K.m_Y * P, P)) { Need.push_back(K); return; }
                 };
@@ -535,6 +542,7 @@ namespace xlionrender::shadows
             }
         }
         bool HasMovers(void) const noexcept { return !m_DynMap.empty(); }
+        bool m_bMoversCoarse = true;        // the movers' pages a level coarser than the pages asked for (XLION_VSM_MOVER_SAME_LEVEL: the same level)
 
         // The previous epoch's table (its windows; empty when there is none): the same layout
         void BuildPrevTable(std::vector<std::uint32_t>& Out) const noexcept

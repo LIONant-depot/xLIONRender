@@ -91,7 +91,8 @@ bool VSMReachCheck(in const vec3 World, in const vec3 Ng, in const bool bLit)
             {
                 if (VSMBounds[MaskPush.Params.z + E - 1u] == MaskPush.Params.y) return false;      // (rendered this frame: changed)
                 ivec2 MB;
-                if (VSMMoverBase(Lv, P, uint(UBOLight.VSMParams3.w), MB)) return false;           // (a mover's page: drawn each frame)
+                if (UBOLight.VSMParams3.w < 0.0 && VSMMoverBase(min(Lv + 1, int(UBOLight.VSMParams.z) - 1), ivec2(floor(vec2(P) * 0.5)), uint(-UBOLight.VSMParams3.w), MB)) return false;     // (coarse movers: the page above)
+                if (UBOLight.VSMParams3.w > 0.0 && VSMMoverBase(Lv, P, uint(UBOLight.VSMParams3.w), MB)) return false;           // (a mover's page: drawn each frame)
             }
         }
     }

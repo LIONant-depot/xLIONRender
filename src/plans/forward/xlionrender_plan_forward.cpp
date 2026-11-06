@@ -843,7 +843,7 @@ namespace xlionrender
         }
         for( int ls = 0; ls < max_local_lights_v; ++ls ) m_LocalReqGen[Slot][std::size_t(ls)] = m_LocalPages.Generation(ls);
         if( n == 0 ) return;
-        F.m_P0 = { float(n), m_LocalPages.getSetup().m_ResolutionBias, float(localTableBase()), 0 };
+        F.m_P0 = { float(n), m_LocalPages.ResolutionBias(), float(localTableBase()), 0 };
         (void)m_LocalFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p) { std::memcpy(p, &F, sizeof(F)); });
         const xgpu::buffer::copy Z{ 0, 0, nReq };
         Window.CopyBuffer(m_VSMZeros, m_LocalReq, std::span{ &Z, 1 });
@@ -1644,6 +1644,8 @@ namespace xlionrender
             const bool bInstant = InstantTris > 0 && nCasterTris <= std::int64_t(InstantTris);
             m_VSM.SetInstant(bInstant);
             m_VSM.SetFrameBudget(!bInstant && PagesMs > 0 ? std::clamp(int(PagesMs / std::max(m_VSMPageMs, 1e-3)), 8, 1024) : 0);
+            static const bool s_bMoverSameLevel = xlionrender::Env("XLION_VSM_MOVER_SAME_LEVEL") != nullptr;     // (measurement: the movers at the pages' own level)
+            m_VSM.m_bMoversCoarse = m_bShadowMoversCoarse && !s_bMoverSameLevel;
             m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
             ShCpu.Lap();
@@ -2848,7 +2850,7 @@ namespace xlionrender
                 }
                 Light.m_CameraPos = xmath::fvec4(Eye, 1);
                 Light.m_ShadowLevels = {};           // (the clipmap's: reserved, zero - the compiled materials' layout keeps them)
-                Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.getSetup().m_ResolutionBias };     // the local lights' pages
+                Light.m_ShadowParams = { float(sunAtlasWidth()), float(localTableBase()), float(m_LocalPages.getSetup().SlotsPerRow()), m_LocalPages.ResolutionBias() };     // the local lights' pages
                 const auto& VS = m_VSM.getSetup();
                 static const int s_DiscTaps = [] { const char* p = xlionrender::Env("XLION_VSM_DISC_TAPS"); return p ? std::atoi(p) : 0; }();      // (measurement: overrides the sun's)
                 // (one tap while the sun turns: its pages rebuild every epoch then and the disc's taps cost 1 to 2.6 ms; a turning sun's soft edge is a blur anyway. XLION_VSM_MOVING_TAPS=<n>, 0: off)
@@ -2865,7 +2867,7 @@ namespace xlionrender
                     Light.m_VSMLevels[i] = { float(Lv.m_OriginX), float(Lv.m_OriginY), Lv.m_PageSize, Lv.m_DepthCenter };
                 }
                 Light.m_VSMParams3 = { m_VSM.ResolutionBias(), s_bNoDisc ? 0.0f : std::tan(std::max(L.m_SourceAngle, 0.0f) * 0.5f * 3.14159265f / 180.0f), float(m_VSMSoftLevels)
-                                     , m_VSM.HasMovers() ? float(vsmTableBase() + 2 * VS.TableUints() + 1) : 0.0f };     // w: the movers' table + 1 (0: none)
+                                     , m_VSM.HasMovers() ? (m_VSM.m_bMoversCoarse ? -1.0f : 1.0f) * float(vsmTableBase() + 2 * VS.TableUints() + 1) : 0.0f };     // w: the movers' table + 1 (0: none; negative: a level coarser)
                 Light.m_VSMPrevW2Light = xmath::fmat4::fromIdentity();
                 {
                     const float Axis[3][3] = { { m_VSM.m_PX.m_X, m_VSM.m_PX.m_Y, m_VSM.m_PX.m_Z }, { m_VSM.m_PY.m_X, m_VSM.m_PY.m_Y, m_VSM.m_PY.m_Z }, { m_VSM.m_PZ.m_X, m_VSM.m_PZ.m_Y, m_VSM.m_PZ.m_Z } };

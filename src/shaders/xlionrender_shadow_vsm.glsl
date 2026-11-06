@@ -165,9 +165,19 @@ float ShadowVSMAt(in const int Level, in const vec3 World, in const vec3 Ng, in 
 {
     const vec3 Off = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMParams.y * float(1 << Level));
     const vec3 Lo = (UBOLight.W2Light * vec4(Off, 1.0)).xyz;
-    float S = UBOLight.VSMParams3.w == 0.0                                            // (no mover this frame: a copy without the movers' code)
+    // (VSMParams3.w: the movers' table + 1, 0 none; negative: the movers' pages a level coarser - a parallel dynamic map, Tomas 2026-11-06: their
+    // own filtered visibility at Level + 1, the nearer kept; a page they have none of there: lit by them)
+    const float MW = UBOLight.VSMParams3.w;
+    float S = MW <= 0.0                                                                 // (no mover this frame, or coarse ones: the static pages alone here)
             ? ShadowVSMLevel(Level, Lo, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w), 0u)
-            : ShadowVSMLevel(Level, Lo, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w), uint(UBOLight.VSMParams3.w));
+            : ShadowVSMLevel(Level, Lo, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w), uint(MW));
+    if (MW < 0.0 && S >= 0.0)
+    {
+        const int   Lm   = min(Level + 1, int(UBOLight.VSMParams.z) - 1);
+        const vec3  OffM = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMParams.y * float(1 << Lm));
+        const float Sm   = ShadowVSMLevel(Lm, (UBOLight.W2Light * vec4(OffM, 1.0)).xyz, Slope, UBOLight.VSMLevels[Lm], UBOLight.VSMParams.y, uint(-MW) - 1u, 0u);
+        if (Sm >= 0.0) S = min(S, Sm);
+    }
     if (UBOLight.VSMPrevParams.x != 0.0 && (S < 0.0 || UBOLight.VSMPrevParams.y < 1.0))
     {
         const vec3  OffP = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMPrevParams.z * float(1 << Level));
@@ -320,7 +330,7 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
             {
                 const float Tl = UBOLight.VSMParams.y * float(1 << ls);
                 const vec3  Ls = (UBOLight.W2Light * vec4(World + Ng * (kVSMNormalOffset * Grazing * Tl), 1.0)).xyz;
-                D = UBOLight.VSMParams3.w == 0.0 ? VSMBlockerDistance(ls, Ls, 0u) : VSMBlockerDistance(ls, Ls, uint(UBOLight.VSMParams3.w));
+                D = UBOLight.VSMParams3.w <= 0.0 ? VSMBlockerDistance(ls, Ls, 0u) : VSMBlockerDistance(ls, Ls, uint(UBOLight.VSMParams3.w));      // (coarse movers: not in the blocker search)
                 if (D != -2.0) bNoPage = false;
             }
             else if (bNoPage && UBOLight.VSMPrevParams.x != 0.0)

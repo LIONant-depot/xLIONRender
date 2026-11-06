@@ -101,6 +101,11 @@ namespace xlionrender::shadows
             for (auto& L : m_Lights) L = {};
         }
         const setup& getSetup(void) const noexcept { return m_Setup; }
+        // The requests' resolution bias: the setup's, plus a dynamic one while the pages asked for overflow the pool (as the sun's dynamic resolution):
+        // a level coarser is a quarter of the pages. Bistro Game's 7 shadowed lamps asked 2206 pages of a 1024 slot pool: the pool thrashed, the
+        // characters' mover pages found no room
+        float ResolutionBias(void) const noexcept { return m_Setup.m_ResolutionBias + m_DynamicBias; }
+        float m_MaxDynamicBias = 2.0f;      // (0: off)
         void setBudget(int Budget) noexcept { m_Setup.m_Budget = Budget; }
 
         // The resolution bias of a light slot's requests: a light moving now or within moving_frames_v frames asks for pages a level coarser
@@ -330,6 +335,14 @@ namespace xlionrender::shadows
                 }
             }
 
+            // The dynamic bias: toward the levels that bring the requests (and the movers' pages) within 3/4 of the pool, quickly up, slowly down
+            if (m_MaxDynamicBias > 0.0f && bCache)
+            {
+                const float Need = float(m_Stats.m_Requested + m_Stats.m_RenderedMover + m_Stats.m_RejectedMover), Room = 0.75f * float(m_Slots.size());
+                const float Target = std::clamp(m_DynamicBias + 0.5f * std::log2(std::max(Need, 1.0f) / Room), 0.0f, m_MaxDynamicBias);
+                m_DynamicBias += (Target - m_DynamicBias) * (Target > m_DynamicBias ? 0.5f : 0.05f);
+            }
+
             for (const auto& S : m_Slots)
             {
                 if (!S.m_bUsed || S.m_bMover) continue;
@@ -533,6 +546,7 @@ namespace xlionrender::shadows
         std::vector<int>                            m_SlotOf;       // scene light -> light slot (-1: none)
         std::unordered_map<int, std::uint64_t>      m_Waiting;      // a wanted page not rendered yet: the frame it was first wanted
         std::uint64_t                               m_Frame = 0;
+        float                                       m_DynamicBias = 0.0f;
     };
 }
 
