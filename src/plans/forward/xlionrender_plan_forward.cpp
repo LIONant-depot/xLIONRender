@@ -4417,6 +4417,32 @@ namespace xlionrender
 
         const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
         m_LODProjScale = ProjScale;                             // (the main view's LOD pick: renderScenePass)
+
+        // A skinned mesh's LOD, this frame, for every pass (Tomas 2026-11-06: LODs by the area on the screen, not the distance): each submesh the
+        // coarsest LOD whose error projects under XLION_LOD_PIXELS (1) pixels at the draw's box (its nearest point) - the rigid groups' rule
+        // (renderScenePass), on its submeshes' list: the prepass, the scene pass, the masks and the shadow pages (the coarser of a page's and this)
+        // read it. (A skin's mesh is its entity's own: setting it here touches no other draw)
+        {
+            static const float s_LODPixels = [] { const char* p = xlionrender::Env("XLION_LOD_PIXELS"); return p ? float(std::atof(p)) : 1.0f; }();
+            m_SkinLODReport = {};
+            for( const auto& D : Scene.m_Draws )
+            {
+                const auto* pMesh = findMesh(D.m_Mesh);
+                if( pMesh == nullptr || !pMesh->m_bCluster || pMesh->m_Geom.m_Kind != geom_kind::SKIN || pMesh->m_Geom.m_LODSubmeshes.size() < 2 ) continue;
+                auto& G = const_cast<cluster_geom&>(pMesh->m_Geom);
+                const auto  B     = G.m_BBox.TransformCopy(D.m_L2W);
+                const float Dist  = (xmath::fvec3::Max(B.m_Min, xmath::fvec3::Min(Eye, B.m_Max)) - Eye).Length();
+                const float Scale = std::max({ (D.m_L2W * xmath::fvec3{ 1, 0, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length(), (D.m_L2W * xmath::fvec3{ 0, 1, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length()
+                                             , (D.m_L2W * xmath::fvec3{ 0, 0, 1 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length() });
+                const int   Finest = std::max(G.m_FinestLOD, G.m_DrawnLOD), nLODs = int(G.m_LODSubmeshes.size());
+                for( std::size_t s = 0; s < G.m_Submeshes.size() && s < G.m_LODSubmeshes[0].size(); ++s )
+                {
+                    const int Lod = std::clamp(std::max(Finest, s_LODPixels > 0 ? G.PickLOD(s, Dist, Scale, ProjScale, s_LODPixels) : 0), 0, nLODs - 1);
+                    G.m_Submeshes[s] = G.m_LODSubmeshes[std::size_t(Lod)][s];
+                    ++m_SkinLODReport.m_nSubmeshes[std::size_t(std::min(Lod, 3))];
+                }
+            }
+        }
         using clock = std::chrono::steady_clock;
         const auto Ms = [](clock::time_point A, clock::time_point B) { return std::chrono::duration<double, std::milli>(B - A).count(); };
         const auto T0 = clock::now();

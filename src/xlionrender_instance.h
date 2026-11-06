@@ -204,6 +204,8 @@ namespace xlionrender
             double                          m_RenderGpuMs  = 0;      // the sun's pages rendered (a ring late; 0: none rendered)
         };
                       const vsm_report&    getVSMReport( void ) const                                           noexcept { return m_VSMReport; }
+        struct skin_lod_report { int m_nSubmeshes[4] = {}; };     // the skinned draws' submeshes by their LOD this frame (0, 1, 2, 3+): Render
+                      const skin_lod_report& getSkinLODReport( void ) const                                     noexcept { return m_SkinLODReport; }
         // The local lights' pages (P1d): this frame's page stats; a ring late the request pass's counters (0 pixel-light pairs, 1 shaded by
         // their level, 2 by a coarser one, 3 by none, 5-9 per level)
         struct local_report { shadows::local_pages::stats m_Pages; std::array<std::uint32_t, 32> m_Counters{}; bool m_bCounters = false; };
@@ -831,7 +833,8 @@ namespace xlionrender
         xgpu::buffer*                           m_pGatherRefS = nullptr, *m_pGatherRefA = nullptr;     // the ground truth's buffers this frame (XLION_GI_REF)
         xgpu::buffer*                           m_pGatherClip   = nullptr;  // experiment X1: the clipmap the gather reads this frame (XLION_GI_CLIP)
         float                                   m_LODProjScale  = 0;        // the main view's pixels per unit at distance 1 (its LOD pick: renderScenePass)
-        struct { int m_nGroups[4] = {}; int m_nLODs = 0; float m_MinError[4] = { 1e30f, 1e30f, 1e30f, 1e30f }; } m_LODReport;                // the main view's LOD groups by their pick this frame (LOD 0, 1, 2, 3+)
+        struct { int m_nGroups[4] = {}; int m_nLODs = 0; float m_MinError[4] = { 1e30f, 1e30f, 1e30f, 1e30f }; } m_LODReport;
+        skin_lod_report                            m_SkinLODReport;                // the main view's LOD groups by their pick this frame (LOD 0, 1, 2, 3+)
         int                                     m_ShadowInstantTris = 300000;       // a scene with at most this many triangles: its sun shadows within the frame (setShadowInstantTris; XLION_SH_INSTANT_TRIS)
         float                                   m_ShadowPagesMs = 1.3f;     // the pages' share of the shadows' 2.0 ms slice (methodology 3: request pass, bounds, the locals' in the rest, and the pages' spread around their mean cost: 1.6 let 7 of 12.6k Bistro frames pass 2.0); 0: no frame budget
         std::array<shadows::vsm::snapshot, ring_frames_v> m_VSMSnap{};

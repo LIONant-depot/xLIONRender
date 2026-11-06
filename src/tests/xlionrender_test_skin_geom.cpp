@@ -78,6 +78,31 @@ int main()
     for (std::size_t i = 0; i < C.size(); ++i) nMoved += (C[i] == 0) != (B[i] == 0);
     CHECK(nMoved > nCovered / 10, "Changing the bone moved only %d texels", nMoved);
 
+    // A skin's LOD by its error on the screen (Render): a LOD 1 of half its clusters, error 0.05 - near (about 3 pixels) LOD 0, far (under a pixel) LOD 1
+    {
+        auto G = Skin.Geom(xlionrender::geom_kind::SKIN, &Bones, 1);
+        auto Half = G.m_Submeshes;
+        for (auto& S : Half) S.m_nClusters = std::max<std::uint32_t>(1, S.m_nClusters / 2);
+        G.m_LODSubmeshes = { G.m_Submeshes, Half };
+        G.m_LODErrors    = { std::vector<float>(G.m_Submeshes.size(), 0.0f), std::vector<float>(G.m_Submeshes.size(), 0.05f) };
+        G.m_LODIndexEnd.clear();                                // (no residency: every LOD resident)
+        xlionrender::mesh_id LODMesh;
+        CHECK(!Renderer.CreateClusterGeom(LODMesh, G), "skin geom with LODs");
+        const auto Lods = [&](float Z, int& n0, int& n1)
+        {
+            Scene.m_Draws = { { .m_Mesh = LODMesh, .m_L2W = xmath::fmat4::fromTranslation({ 0, 0, Z }), .m_Materials = { Material } } };
+            const bool bOk = App.RenderFrame(Scene, View, Camera);
+            n0 = Renderer.getSkinLODReport().m_nSubmeshes[0]; n1 = Renderer.getSkinLODReport().m_nSubmeshes[1];
+            return bOk;
+        };
+        int Near0, Near1, Far0, Far1;
+        CHECK(Lods(0.0f, Near0, Near1) && Lods(25.0f, Far0, Far1), "render the skin with LODs");
+        std::printf("skin LODs: near LOD 0 %d, LOD 1 %d; far LOD 0 %d, LOD 1 %d\n", Near0, Near1, Far0, Far1);
+        CHECK(Near0 > 0 && Near1 == 0, "near, the skin drew LOD 1 (%d submeshes) - its error is 3 pixels there", Near1);
+        CHECK(Far1 > 0 && Far0 == 0, "far, the skin drew LOD 0 (%d submeshes) - its error under a pixel there", Far0);
+        Renderer.DestroyMesh(LODMesh);
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");
