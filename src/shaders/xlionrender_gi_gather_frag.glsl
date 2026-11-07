@@ -67,6 +67,31 @@ float VoxLeanScale(in const vec4 v, in const uint Wv, in const uvec4 dU, in cons
 bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
 float g_ClipTrust = 0.0;       // (X1c: how much the last ClipLevel can be believed: its samples, how far from its edge)
 uint g_VoxBucket = 0u;      // (XLION_VOX_AO_BUCKET: the records' kind a read takes, 1: a contact's; the faces' keys + 64)
+// B1 (XLION_VOX_REACH=<margin m>, word 36; 0: off - b1_door_leak_design_2026-11-07.md): a corner the point cannot reach without crossing what the
+// screen shows weighs almost nothing, the others take its share (Godot SDFGI's probe occlusion, at read time against the depth buffer). The
+// segment from the point to the corner in the face's plane, lifted by the margin along the normal, at 3 points: a point the scene's depth
+// shows something in front of (by more than the margin) is hidden. ponytail: screen space only - an occluder off screen does not count
+mat4  g_ReachW2C = mat4(1.0);
+float g_ReachMargin = 0.0;
+float VoxReach(in const vec3 A, in const vec3 B)
+{
+    const vec3  Eye  = vec3(TF(25u), TF(26u), TF(27u));
+    const ivec2 Size = textureSize(GPreDepth, 0);
+    const mat4  C2W  = mat4(TF(0u), TF(1u), TF(2u), TF(3u), TF(4u), TF(5u), TF(6u), TF(7u), TF(8u), TF(9u), TF(10u), TF(11u), TF(12u), TF(13u), TF(14u), TF(15u));
+    float Seen = 0.0;
+    for (int k = 1; k <= 3; ++k)
+    {
+        const vec3 X = mix(A, B, float(k) / 3.0) - Eye;                         // (camera-centred)
+        const vec4 C = g_ReachW2C * vec4(X, 1.0);
+        if (C.w <= 0.0) { Seen += 1.0; continue; }
+        const vec2 uv = C.xy / C.w * 0.5 + 0.5;
+        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) { Seen += 1.0; continue; }
+        const ivec2 q = min(ivec2(uv * vec2(Size)), Size - 1);
+        const vec4  Ws = C2W * vec4(uv * 2.0 - 1.0, texelFetch(GPreDepth, q, 0).r, 1.0);
+        Seen += length(Ws.xyz / Ws.w) + g_ReachMargin >= length(X) ? 1.0 : 0.0;
+    }
+    return max(Seen / 3.0, 0.02);
+}
 vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 EyeL, in const float Cell0)
 {
     const float Cell = Cell0 * float(1 << L);
@@ -96,7 +121,13 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
                 const uint h = VoxHash(L, iv + o, Face), e = VoxEntryOf(h);
                 // (each corner its mean, trusted up to 32 samples: by raw count a corner with thousands of samples drowned one with dozens, the light outdoors over the floor indoors)
                 const uvec4 dU = GIClip[e + 2u];
-                if (uintBitsToFloat(dU.x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * VoxLeanScale(v, GIClip[e + 1u].w, dU, n, a) * cw; Den += cw; Raw += min(v.w, 256.0) * t; } }
+                float Reach = 1.0;
+                if (g_ReachMargin > 0.0 && L <= 1)      // (the fine levels: a coarse cell's corners are far - the leak is a fine level's)
+                {
+                    vec3 Cw = (vec3(iv + o) + 0.5) * Cell; Cw[a] = Pw[a];        // (the corner in the face's plane through the point)
+                    Reach = VoxReach(Pw + n * g_ReachMargin, Cw + n * g_ReachMargin);
+                }
+                if (uintBitsToFloat(dU.x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t * Reach; Num += v.rgb / v.w * VoxLeanScale(v, GIClip[e + 1u].w, dU, n, a) * cw; Den += cw; Raw += min(v.w, 256.0) * t; } }
                 continue;
             }
             const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(q.x) + uint(q.y) * uint(clip_dim_v) + uint(q.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;
@@ -115,6 +146,8 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
 // X1c's read: from the finest level, each as much as it can be believed, the rest from its parent: new cells and a level's edge fade in
 vec4 VoxReadLevels(in const vec3 Pcam, in const vec3 n)
 {
+    g_ReachMargin = uintBitsToFloat(GITable[push.TableBase + 36u]);
+    if (g_ReachMargin > 0.0) g_ReachW2C = inverse(mat4(TF(0u), TF(1u), TF(2u), TF(3u), TF(4u), TF(5u), TF(6u), TF(7u), TF(8u), TF(9u), TF(10u), TF(11u), TF(12u), TF(13u), TF(14u), TF(15u)));
     const vec3 EyeL = vec3(TF(22u), TF(23u), TF(24u)), Pw = Pcam + vec3(TF(25u), TF(26u), TF(27u));
     vec3 Sum = vec3(0.0), Last = vec3(0.0); float Left = 1.0; bool bAny = false;
     for (int L = 0; L < clip_levels_v && Left > 1e-3; ++L)

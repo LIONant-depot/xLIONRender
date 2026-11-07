@@ -103,6 +103,30 @@ int main()
         Renderer.DestroyMesh(LODMesh);
     }
 
+    // A static caster whose resident LOD changes (its buffers gain LOD 0: cluster_geom::Refresh) dirties its cached sun pages: pages drawn while only
+    // its coarse LOD was resident kept it - sunlit holes in a building's shadow, Bistro Game 2026-11-07
+    {
+        auto G = Rigid.Geom();
+        auto Half = G.m_Submeshes;
+        for (auto& S : Half) S.m_nClusters = std::max<std::uint32_t>(1, S.m_nClusters / 2);
+        G.m_LODSubmeshes = { G.m_Submeshes, Half };
+        G.m_LODErrors    = { std::vector<float>(G.m_Submeshes.size(), 0.0f), std::vector<float>(G.m_Submeshes.size(), 0.05f) };
+        G.m_LODIndexEnd.clear();
+        xlionrender::mesh_id Caster;
+        CHECK(!Renderer.CreateClusterGeom(Caster, G), "a static cluster caster with two LODs");
+        CHECK(Renderer.setMeshResidentLOD(Caster, 1), "its LOD 1 resident only (as loading coarse first)");
+        Scene.m_Draws = { { .m_Mesh = Caster, .m_L2W = xmath::fmat4::fromIdentity(), .m_Materials = { Material } } };
+        for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "settle %d", f);
+        int Before = 0;
+        for (int f = 0; f < 4; ++f) { CHECK(App.RenderFrame(Scene, View, Camera), "settled frame %d", f); Before += Renderer.getVSMReport().m_Pages.m_Dirtied; }
+        CHECK(Renderer.setMeshResidentLOD(Caster, 0), "LOD 0 arrives");
+        int After = 0;
+        for (int f = 0; f < 4; ++f) { CHECK(App.RenderFrame(Scene, View, Camera), "after LOD 0 frame %d", f); After += Renderer.getVSMReport().m_Pages.m_Dirtied; }
+        std::printf("residency: sun pages dirtied settled %d, after LOD 0 arrived %d\n", Before, After);
+        CHECK(Before == 0 && After > 0, "LOD 0 arriving did not dirty the caster's cached sun pages (settled %d, after %d)", Before, After);
+        Renderer.DestroyMesh(Caster);
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");

@@ -1493,7 +1493,10 @@ namespace xlionrender
             // Bistro, 64 pages a frame that never settled and 85 ms of CPU a frame. The pages are cached: the budget's cost is the main view's.)
             if( pMesh->m_bCluster && m_bBoxesOnly ) { m_DrawWorld[iDraw] = WorldOf(*pMesh, D); continue; }
             constexpr std::uint32_t BoxedBase = ~0u;
-            constexpr std::uint64_t BoxedHash = 0;
+            // (its shadow-relevant state besides the transform and materials: the geometry's resident finest LOD - cluster_geom::Refresh switches it when
+            // LOD 0 arrives or goes. Without it, pages drawn while only the coarse LODs were loaded kept them: holes in a building's shadow, sunlit
+            // rectangles in the street, Bistro Game 2026-11-07, Tomas)
+            const std::uint64_t BoxedHash = pMesh->m_bCluster ? std::uint64_t(pMesh->m_Geom.m_FinestLOD) + 1 : 0;
 
             const bool   bSkin = pMesh->m_bCluster && pMesh->m_Geom.m_Kind == geom_kind::SKIN;
             xmath::fbbox World;
@@ -3066,6 +3069,7 @@ namespace xlionrender
                     m_GatherTable[31] = s_bBinPdf ? 1u : 0u;
                     {   // (XLION_VOX_DIRS=<level>,<k>[,<roughness>]: a prototype, the reflections' light in a coarse level by k x k directions: words 32, 33, xlionrender_gi_gather_frag.glsl VoxDirsRead. The read knows one roughness, XLION_REFL_GRADE's)
                     { static const float s_BucketAO = [] { const char* p = xlionrender::Env("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }(); std::memcpy(&m_GatherTable[34], &s_BucketAO, 4); }      // (XLION_VOX_AO_BUCKET: the gather's read)
+                    { static const float s_Reach = [] { const char* p = xlionrender::Env("XLION_VOX_REACH"); return p ? float(std::atof(p)) : 0.0f; }(); std::memcpy(&m_GatherTable[36], &s_Reach, 4); }     // (B1: corners the point can't reach on screen weigh ~0; gi_gather_frag VoxReach)
                     { static const float s_Trust = [] { const char* p = xlionrender::Env("XLION_VOX_TRUST"); return p ? float(std::atof(p)) : 0.0f; }(); std::memcpy(&m_GatherTable[35], &s_Trust, 4); }      // (XLION_VOX_TRUST: the samples a level's record needs to be read alone, 256 when 0: xlionrender_gi_gather_frag.glsl ClipLevel)      // (XLION_VOX_AO_BUCKET: the gather's read)
                         static const std::array<float, 3> s_Dirs = [] { std::array<float, 3> D{ -1.0f, 8.0f, 0.3f }; if( const char* p = xlionrender::Env("XLION_VOX_DIRS") ) xlionrender::Scan(p, "%f,%f,%f", &D[0], &D[1], &D[2]); if( const char* g = xlionrender::Env("XLION_REFL_GRADE"); g && !xlionrender::Env("XLION_VOX_DIRS_BAND") ) D[2] = float(std::atof(g)); return D; }();      /* (XLION_VOX_DIRS_BAND: the read's roughness stays the third number, whatever is graded) */
                         static const bool s_bDirsFixed = xlionrender::Env("XLION_VOX_DIRS_FIXED") != nullptr;

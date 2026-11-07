@@ -235,6 +235,8 @@ namespace xlionrender
         // The pages' setup (tests: a small pool, a larger budget): starts them over. Its pool must fit the clipmap's part of the atlas
                       void                 configureVSM( const shadows::vsm::setup& Setup )                    noexcept { m_VSM.Init(Setup); }
         // Invariant 1 on this frame's table (tests): every entry names a VALID slot holding exactly that page
+                      // (tests: a cluster mesh's resident finest LOD set as cluster_geom::Refresh does when its buffers gain or lose LOD 0)
+                      bool                 setMeshResidentLOD( mesh_id Id, int k )                              noexcept { auto* p = const_cast<mesh_slot*>(findMesh(Id)); if( p == nullptr || !p->m_bCluster ) return false; p->m_Geom.m_FinestLOD = k; p->m_Geom.m_Submeshes = p->m_Geom.LODSubmeshes(k); return true; }
                       bool                 validateVSM ( void ) const                                           noexcept { std::vector<std::uint32_t> T; m_VSM.BuildTable(T); return m_VSM.Validate(T); }
         // The pages' CPU side, read only (tests: levels, texel size)
                       void                 setShadowInstantTris( int n )                                        noexcept { m_ShadowInstantTris = n; }     // (a small scene's sun shadows within the frame: at most n triangles; 0 never)
