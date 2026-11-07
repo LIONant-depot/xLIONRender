@@ -3247,6 +3247,10 @@ namespace xlionrender
                     // The gather's table (xlionrender_gi_gather_common.glsl): every visible rigid GI instance's clusters - their GI reference
                     // and GI buffer, the passes' list of buffers (GatherBuffers); the passes run after the G-buffer prepass, below
                     m_GatherTable.assign(40, 0u);
+                    // (XLION_VOX_PUBLISHED: word 37 the published read on, 38 the frame - the gather's VoxReadPublished, the resolve's stamp)
+                    static const bool s_bVoxPub = xlionrender::Env("XLION_VOX_PUBLISHED") != nullptr;
+                    { static const char* s_pPub = xlionrender::Env("XLION_VOX_PUBLISHED"); m_GatherTable[37] = s_pPub ? (s_pPub[0] == '2' ? 2u : 1u) : 0u; }      // (2, measurement: no level read)
+                    m_GatherTable[38] = (m_VoxPubFrame + 1u) & 0x7FFFFFFFu;      // (its own count of gathers: the device's frame index steps by every window's frames - the lists' parity broke)
                     static const bool s_bNoGatherRefl = xlionrender::Env("XLION_GI_NO_REFL") != nullptr;      // (measurement: the gather's reflection term off - the path traced view has none: read against it fairly)
                     m_GatherTable[29] = s_bNoGatherRefl ? 1u : 0u;
                     static const bool s_bBinPdf = xlionrender::Env("XLION_VOX_NO_BIN_PDF") == nullptr;
@@ -3632,12 +3636,56 @@ namespace xlionrender
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                 }
                 View.m_bAOPrev = bAO;
+                // The published light (XLION_VOX_PUBLISHED, gi_published_store_plan_2026-11-08.md): last frame's requests resolved, then this
+                // frame's lists, bits and statistics cleared for the gather - only in the voxels' mode (word 20 3), never with the ground truth
+                const bool bVoxPub = m_GatherTable.size() > 38 && m_GatherTable[37] != 0u && m_GatherTable[20] == 3u && m_pGatherClip && bMain && View.m_GIScreenWidth * View.m_GIScreenHeight >= 16384;      // (the main view only: one set of lists)
+                if( bVoxPub )
+                {
+                    constexpr int pub_head_v = 4, pub_bits_v = 16384, pub_cap_v = 1 << 19, pub_slots_v = 1 << 21;
+                    constexpr int pub_entries_v = pub_head_v + pub_bits_v + pub_slots_v + 2 * pub_cap_v;
+                    if( !m_VoxPub.m_Private )
+                    {
+                        std::vector<std::uint32_t> Z(std::size_t(pub_entries_v) * 4, 0u);
+                        (void)m_Device.Create(m_VoxPub, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = pub_entries_v, .m_pData = Z.data(), .m_pName = "GI: the published voxel light" });
+                        (void)m_Device.Create(m_VoxPubStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 4 * ring_frames_v, .m_pName = "GI: the published light's statistics" });
+                        (void)m_Device.Create(m_VoxPubTimes, { .m_Count = 2 });
+                        (void)m_Device.Create(m_VoxPubFrameB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v, .m_pName = "GI: the published light's frame" });
+                        std::printf("VOXPUB buffer %.1f MB\n", double(pub_entries_v) * 16.0 / (1024.0 * 1024.0)); std::fflush(stdout);
+                    }
+                    if( m_VoxPub.m_Private )
+                    {
+                        const std::uint32_t Frame = m_GatherTable[38], Prev = (Frame - 1u) & 1u;
+                        m_VoxPubFrame = Frame;
+                        static const bool s_bPubLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
+                        if( s_bPubLog )
+                        {
+                            const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+                            std::uint32_t St[4] = {}, H[16] = {};
+                            (void)m_VoxPubStats.MemoryMap(4 * Slot, 4, [&](void* p) { std::memcpy(H, p, sizeof(H)); std::memcpy(St, H + 8, sizeof(St)); });
+                            if( std::vector<std::uint64_t> Ns; m_VoxPubTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] ) { m_VoxPubMs += double(Ns[1] - Ns[0]) * 1e-6; ++m_VoxPubN; }
+                            if( m_VoxPubN >= 120 ) { std::printf("VOXPUB resolve %.3f ms; a frame: pixels published %u, fallen back %u, requests dropped %u\n", m_VoxPubMs / m_VoxPubN, St[0], St[1], St[2]); std::printf("VOXPUBHEAD counts %u %u frame %u parity %u (cpu frame %u)\n", H[0], H[4], H[12], H[13], Frame); std::fflush(stdout); m_VoxPubMs = 0; m_VoxPubN = 0; }
+                            Window.WriteTimestamp(m_VoxPubTimes, 0);
+                        }
+                        const std::uint32_t PPush[4] = { m_GatherTableBase, Frame, Prev, 0u };
+                        auto PB = std::array<xgpu::buffer*, 3>{ m_pGatherClip, &View.m_GIGatherTable, &m_VoxPub };
+                        Window.Dispatch(m_GIPublishCompute, PB, PPush, sizeof(PPush), pub_cap_v / 64);
+                        if( s_bPubLog ) Window.WriteTimestamp(m_VoxPubTimes, 1);
+                        const std::array<xgpu::buffer::copy, 3> Zc{ xgpu::buffer::copy{ 0, int(Prev), 1 }, xgpu::buffer::copy{ 0, 2, 1 }, xgpu::buffer::copy{ 0, pub_head_v, pub_bits_v } };
+                        Window.CopyBuffer(View.m_GIScreenZeros, m_VoxPub, std::span{ Zc });
+                        // (the gather's frame and parity: in the buffer itself, [3] - the table's word reached the gather a frame late or early: the
+                        // lists' parity never matched the resolve's, every request dropped)
+                        const int FSlot = int(m_Device.getFrameIndex() % ring_frames_v);
+                        (void)m_VoxPubFrameB.MemoryMap(FSlot, 1, [&](void* p) { const std::uint32_t F[4] = { Frame, Frame & 1u, 0u, 0u }; std::memcpy(p, F, sizeof(F)); });
+                        const xgpu::buffer::copy Fc{ FSlot, 3, 1 };
+                        Window.CopyBuffer(m_VoxPubFrameB, m_VoxPub, std::span{ &Fc, 1 });
+                    }
+                }
                 {
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
                     const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()), bAO ? (s_bSSGI ? 2u : 1u) : 0u };
-                    std::array<xgpu::buffer*, 11> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO, m_pGatherClip ? m_pGatherClip : &m_GIDummy
-                                                         , m_pGatherRefS ? m_pGatherRefS : &m_GIDummy, m_pGatherRefA ? m_pGatherRefA : &m_GIDummy };
+                    std::array<xgpu::buffer*, 12> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO, m_pGatherClip ? m_pGatherClip : &m_GIDummy
+                                                         , m_pGatherRefS ? m_pGatherRefS : &m_GIDummy, m_pGatherRefA ? m_pGatherRefA : &m_GIDummy, bVoxPub && m_VoxPub.m_Private ? &m_VoxPub : &m_GIDummy };
                     GCmd.setPipelineInstance(View.m_GIClassifyInstance, std::span{ Buffers });
                     GCmd.setPushConstants(Push);
                     GCmd.setBuffer(m_FullscreenVB);
@@ -3668,6 +3716,7 @@ namespace xlionrender
                     DPush.m_Mult = 1.0f;
                     { auto Bf = std::array<xgpu::buffer*, 4>{ &View.m_GIScreenFilter, &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AO }; Window.Dispatch(m_GIDenoiseCompute, Bf, std::span<const xgpu::texture* const>{}, std::span<const xgpu::texture* const>{}, &DPush, sizeof(DPush), GX, GY); }
                 }
+                if( bVoxPub && m_VoxPubStats.m_Private ) { const xgpu::buffer::copy Cs{ 0, 4 * int(m_Device.getFrameIndex() % ring_frames_v), 4 }; Window.CopyBuffer(m_VoxPub, m_VoxPubStats, std::span{ &Cs, 1 }); }
                 const xgpu::buffer::copy C{ 6, int(m_Device.getFrameIndex() % ring_frames_v), 1 };     // (its counters into this frame's slot, as the geometry read's)
                 Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });
             };

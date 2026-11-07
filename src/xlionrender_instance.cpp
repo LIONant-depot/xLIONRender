@@ -165,6 +165,9 @@ namespace xlionrender
         constexpr std::uint32_t s_GIDenoiseComp[] = {
             #include "xlionrender_gi_denoise_comp.h"
         };
+        constexpr std::uint32_t s_GIPublishComp[] = {
+            #include "xlionrender_gi_publish_comp.h"
+        };
         constexpr std::uint32_t s_ContactComp[] = {
             #include "xlionrender_contact_comp.h"
         };
@@ -713,6 +716,7 @@ namespace xlionrender
                     , ub{ .m_BindIndex = 21, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // experiment X1: the clipmap (XLION_GI_CLIP)
                     , ub{ .m_BindIndex = 22, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // the ground truth (XLION_GI_REF): the points
                     , ub{ .m_BindIndex = 23, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     //   and their means
+                    , ub{ .m_BindIndex = 24, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // the published voxel light (XLION_VOX_PUBLISHED)
                     };
                     auto ClassifyShaders = std::array<const xgpu::shader*, 2>{ &ClassifyFrag, &GatherVert };
                     auto GatherShaders   = std::array<const xgpu::shader*, 2>{ &GatherFrag, &GatherVert };
@@ -838,6 +842,8 @@ namespace xlionrender
             if( auto Err = Device.Create(m_ContactCompute, { .m_pShader = &m_ContactShader, .m_nBuffers = 1, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 112 }); Err ) return Err;
             if( auto Err = Device.Create(m_GIDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIDenoiseComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_GIDenoiseCompute, { .m_pShader = &m_GIDenoiseShader, .m_nBuffers = 4, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIPublishShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIPublishComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIPublishCompute, { .m_pShader = &m_GIPublishShader, .m_nBuffers = 3, .m_PushConstantsSize = 16 }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80 }); Err ) return Err;

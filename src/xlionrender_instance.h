@@ -479,6 +479,13 @@ namespace xlionrender
         xgpu::compute               m_ContactCompute;
         xgpu::shader                m_GIDenoiseShader;              // the voxels' GI read cleaned on the screen (XLION_GI_DENOISE)
         xgpu::compute               m_GIDenoiseCompute;
+        // The published voxel light (XLION_VOX_PUBLISHED, gi_published_store_plan_2026-11-08.md): its resolve, its buffer (counts, the
+        // requests' bits, an entry a slot, two request lists - xlionrender_vox_levels.glsl), its statistics read back (an entry a ring frame)
+        xgpu::shader                m_GIPublishShader;
+        xgpu::compute               m_GIPublishCompute;
+        xgpu::buffer                m_VoxPub, m_VoxPubStats, m_VoxPubFrameB;      // (FrameB: the frame a ring slot, copied into the buffer's [3] for the gather)
+        xgpu::timestamps            m_VoxPubTimes;
+        double                      m_VoxPubMs = 0; int m_VoxPubN = 0; std::uint32_t m_VoxPubFrame = 0;
         xgpu::texture               m_ContactTex;                   // R32_SFLOAT, sun_mask_w_v x sun_mask_h_v
         xgpu::timestamps            m_ContactTimes;
         bool                        m_bContactReady = false;
