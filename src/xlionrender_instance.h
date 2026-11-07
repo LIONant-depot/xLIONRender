@@ -823,6 +823,12 @@ namespace xlionrender
         static constexpr int                    mover_map_texels_v = 256;
         struct mover_map { float m_X0, m_Y0, m_Size, m_Z0, m_ZRange, m_AtlasX, m_AtlasY, m_Pad; };
         std::vector<mover_map>                  m_MoverMaps;        // this frame's (renderShadows), read by vsmTableBase
+        // (the lamps' likewise: a skinned mover and a shadowed lamp reaching it, a perspective tile of lamp_map_texels_v toward it in the two rows above the
+        // sun's maps; the shading reads them by the lamp's light slot - xlionrender_local_lights.glsl LocalLampMaps)
+        static constexpr int                    lamp_map_texels_v  = 128;
+        struct lamp_map { float m_Axis[3], m_R[3], m_U[3], m_TanHalf, m_A, m_B, m_Near, m_AtlasX, m_AtlasY; std::uint32_t m_Slot; };
+        std::vector<lamp_map>                   m_LampMaps;         // this frame's, sorted by light slot (localTableBase)
+        int                                     MoverMapRows( void ) const noexcept { return m_bMoverMaps ? mover_map_texels_v + 2 * lamp_map_texels_v : 0; }
         bool                                    m_bMoverMaps = xlionrender::Env("XLION_SH_MOVER_MAPS") != nullptr;     // (tests: set it, then configureVSM with a pool short of the atlas by mover_map_texels_v)
         static constexpr int                    skin_page_list_v  = 65536;  // list entries a frame
         std::unique_ptr<shadow_pairs>           m_pShadowPairs;             // null: not supported (drawIndirectCount)

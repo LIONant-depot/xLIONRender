@@ -805,7 +805,7 @@ namespace xlionrender
         // (2048 slots) Every page asked for rendered in its frame while the sun is still, as Unreal's virtual shadow maps do (the finest pages
         // near the camera came last, a frame or more late while moving - a sharp patch overtaking a blurred one, Tomas); a new epoch (the sun
         // moved: every page again) keeps the budget, the previous epoch bridging it
-        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = sunAtlasHeight() - (m_bMoverMaps ? mover_map_texels_v : 0), /* (the mover maps' row: the pool's bottom) */ .m_Window = 128, .m_PinnedRadius = ShadowSetup.m_SunPinnedRadius, .m_SteadyBudget = 128 });     // (128 pages a level side: Unreal's clipmap levels' 16k texels - with 32 the fine levels ended 4, 8, 16 m from the eye, the walls beyond on coarse levels whatever the bias, Tomas)     // (~4 ms at most: a cut after a rebuild cost 12)
+        m_VSM.Init({ .m_PoolTexels = sunAtlasWidth(), .m_PoolHeight = sunAtlasHeight() - MoverMapRows(), /* (the mover maps' row: the pool's bottom) */ .m_Window = 128, .m_PinnedRadius = ShadowSetup.m_SunPinnedRadius, .m_SteadyBudget = 128 });     // (128 pages a level side: Unreal's clipmap levels' 16k texels - with 32 the fine levels ended 4, 8, 16 m from the eye, the walls beyond on coarse levels whatever the bias, Tomas)     // (~4 ms at most: a cut after a rebuild cost 12)
         if( const char* p = xlionrender::Env("XLION_VSM_DEBUG") ) m_VSMDebugView = std::atoi(p);
         {
             using usage = xgpu::buffer::setup::usage;

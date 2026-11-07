@@ -818,6 +818,20 @@ namespace xlionrender
         beginCellFrame(Frame);
         if( m_LocalTableFrame == Frame ) return m_LocalTableBase;
         m_LocalPages.BuildTables(m_LocalTable);       // ([mover offset][static][mover]: xlionrender_local_lights.glsl LocalTexel)
+        {   // the lamps' maps of the skinned movers (LocalLampMaps): a light slot's first map and count, then the maps (sorted by slot)
+            std::stable_sort(m_LampMaps.begin(), m_LampMaps.end(), [](const lamp_map& a, const lamp_map& b) { return a.m_Slot < b.m_Slot; });
+            const std::size_t Hd = m_LocalTable.size();
+            m_LocalTable.push_back(std::uint32_t(max_local_lights_v));
+            m_LocalTable.resize(Hd + 1 + 2 * max_local_lights_v, 0u);
+            for( std::size_t k = 0; k < m_LampMaps.size(); ++k )
+            {
+                const auto s = m_LampMaps[k].m_Slot;
+                if( s >= std::uint32_t(max_local_lights_v) ) continue;
+                if( m_LocalTable[Hd + 2 + 2 * s] == 0 ) m_LocalTable[Hd + 1 + 2 * s] = std::uint32_t(k);
+                ++m_LocalTable[Hd + 2 + 2 * s];
+            }
+            for( const auto& M : m_LampMaps ) { const float* f = M.m_Axis; for( int k = 0; k < 15; ++k ) m_LocalTable.push_back(std::bit_cast<std::uint32_t>(f[k])); m_LocalTable.push_back(M.m_Slot); }
+        }
         const int n = std::max(int(m_LocalTable.size()), 1);
         m_LocalTable.resize(std::size_t(n), 0u);
         m_LocalTableBase = int(Frame % ring_frames_v) * m_CellStride + m_CellRingUsed;
@@ -1438,7 +1452,7 @@ namespace xlionrender
     // Before the scene pass, which samples the atlas.
     void instance::renderShadows( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
     {
-        m_MoverMaps.clear();      // (this frame's, if any: none read last frame's)
+        m_MoverMaps.clear(); m_LampMaps.clear();      // (this frame's, if any: none read last frame's)
         // Measurement only (XLION_GPU_TIMES): its CPU time by part - the pages' choice, the casters (light bounds, pairs), the recording -
         // SHADOWCPU, the largest of 120 frames (the sun turning added ~3.8 ms of GPU idle before the scene pass, 2026-10-30)
         static const bool s_bShCpu = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
@@ -1700,7 +1714,9 @@ namespace xlionrender
             }
             m_LocalPages.setBudget(m_ShadowUpdatesPerFrame);
             // (movers apart, as the sun's: a page keeps the static casters, dirtied by their changes only; the movers draw into mover pages each frame)
-            if( m_bShadowSplitMovers ) m_LocalPages.Update(Scene.m_LocalLights, SunStatic, m_bShadowCache, m_LocalRequests, m_Device.getFrameIndex(), SunMovers);
+            std::vector<xmath::fbbox> LampMovers;      // (the mover maps: the skinned movers have no lamp mover pages either)
+            if( m_bMoverMaps && Scene.m_Sun.m_bCastShadows ) { for( const auto& D : Draws ) if( D.m_bMover && !(D.m_pMesh->m_bCluster && D.m_pMesh->m_Geom.m_Kind == geom_kind::SKIN) ) LampMovers.push_back(D.m_World); }
+            if( m_bShadowSplitMovers ) m_LocalPages.Update(Scene.m_LocalLights, SunStatic, m_bShadowCache, m_LocalRequests, m_Device.getFrameIndex(), m_bMoverMaps && Scene.m_Sun.m_bCastShadows ? LampMovers : SunMovers);
             else                       m_LocalPages.Update(Scene.m_LocalLights, Changed, m_bShadowCache, m_LocalRequests, m_Device.getFrameIndex());
             m_LocalReport.m_Pages = m_LocalPages.m_Stats;
             static const bool s_bLocalLog = xlionrender::Env("XLION_LOCAL_LOG") != nullptr; static int s_LocalN = 0;      // (measurement: the local pages a frame, every 120 frames)
@@ -2109,6 +2125,7 @@ namespace xlionrender
             // The mover maps (XLION_SH_MOVER_MAPS): a skinned mover's tile - its light-space rect, square, a texel's margin; its depth range along the light
             m_MoverMaps.clear();
             std::vector<std::uint32_t> MapOfDraw(Draws.size(), ~0u);
+            std::vector<std::vector<std::uint32_t>> LampPagesOfDraw(Draws.size());      // (the lamps' maps of a skinned mover: their places in SkinPages)
             if( bMoverMaps )
             {
                 const int nMaps = sunAtlasWidth() / mover_map_texels_v;
@@ -2132,6 +2149,42 @@ namespace xlionrender
                     SkinPages.push_back({ W, { TM / AW, TM / AH, (TM + 2.0f * M.m_AtlasX) / AW - 1.0f, (TM + 2.0f * M.m_AtlasY) / AH - 1.0f }, {} });
                     m_MoverMaps.push_back(M);
                 }
+                // The lamps' maps: each shadowed lamp with a light slot whose sphere reaches a skinned mover, a perspective tile toward the mover's box
+                const int nLampTiles = 2 * (sunAtlasWidth() / lamp_map_texels_v);
+                const float TLm = float(lamp_map_texels_v);
+                for( std::uint32_t i = 0; i < Draws.size(); ++i )
+                {
+                    if( MapOfDraw[i] == ~0u ) continue;
+                    const auto& Bx = Draws[i].m_World;
+                    const xmath::fvec3 Cn = (Bx.m_Min + Bx.m_Max) * 0.5f;
+                    const float Rr = (Bx.m_Max - Bx.m_Min).Length() * 0.5f * 1.05f;
+                    for( std::size_t li = 0; li < Scene.m_LocalLights.size() && int(m_LampMaps.size()) < nLampTiles; ++li )
+                    {
+                        const auto& L = Scene.m_LocalLights[li];
+                        const int Slot = m_LocalPages.SlotOfLight(int(li));
+                        if( !L.m_bCastShadows || Slot < 0 || !shadows::Overlaps(Bx, L.m_Position, L.m_Radius) ) continue;
+                        const xmath::fvec3 ToC = Cn - L.m_Position;
+                        const float Dist = ToC.Length();
+                        if( Dist <= Rr + 0.05f ) continue;                      // (the lamp inside its box: no map - ponytail: its mover pages' shadow is gone there)
+                        const xmath::fvec3 Ax = ToC / Dist;
+                        const xmath::fvec3 Up = std::abs(Ax.m_Y) < 0.99f ? xmath::fvec3{ 0, 1, 0 } : xmath::fvec3{ 1, 0, 0 };
+                        const xmath::fvec3 Rt = Up.Cross(Ax).NormalizeCopy(), Uv = Ax.Cross(Rt);
+                        const float Tan = Rr / std::sqrt(Dist * Dist - Rr * Rr), Nr = Dist - Rr, Fr = Dist + Rr;
+                        const float A = Fr / (Fr - Nr), B = -Fr * Nr / (Fr - Nr);
+                        const int k = int(m_LampMaps.size()), PerRow = sunAtlasWidth() / lamp_map_texels_v;
+                        lamp_map LM{ { Ax.m_X, Ax.m_Y, Ax.m_Z }, { Rt.m_X, Rt.m_Y, Rt.m_Z }, { Uv.m_X, Uv.m_Y, Uv.m_Z }, Tan, A, B, Nr
+                                   , float((k % PerRow) * lamp_map_texels_v), float(sunAtlasHeight() - MoverMapRows() + (k / PerRow) * lamp_map_texels_v), std::uint32_t(Slot) };
+                        xmath::fmat4 W = xmath::fmat4::fromZero();
+                        const float lR = L.m_Position.Dot(Rt), lU = L.m_Position.Dot(Uv), lA = L.m_Position.Dot(Ax);
+                        W(0, 0) = Rt.m_X / Tan; W(0, 1) = Rt.m_Y / Tan; W(0, 2) = Rt.m_Z / Tan; W(0, 3) = -lR / Tan;
+                        W(1, 0) = Uv.m_X / Tan; W(1, 1) = Uv.m_Y / Tan; W(1, 2) = Uv.m_Z / Tan; W(1, 3) = -lU / Tan;
+                        W(2, 0) = Ax.m_X * A;   W(2, 1) = Ax.m_Y * A;   W(2, 2) = Ax.m_Z * A;   W(2, 3) = -lA * A + B;
+                        W(3, 0) = Ax.m_X;       W(3, 1) = Ax.m_Y;       W(3, 2) = Ax.m_Z;       W(3, 3) = -lA;
+                        LampPagesOfDraw[i].push_back(std::uint32_t(SkinPages.size()));
+                        SkinPages.push_back({ W, { TLm / AW, TLm / AH, (TLm + 2.0f * LM.m_AtlasX) / AW - 1.0f, (TLm + 2.0f * LM.m_AtlasY) / AH - 1.0f }, {} });
+                        m_LampMaps.push_back(LM);
+                    }
+                }
             }
             const std::uint32_t LocalBase = SunBase + std::uint32_t(SkinPages.size());
             std::vector<frustum> LocalFrustum;
@@ -2145,6 +2198,7 @@ namespace xlionrender
                 if( !IsSkin(i) ) continue;
                 skin_run Run{ i, std::uint32_t(SkinList.size()), 0 };
                 if( MapOfDraw[i] != ~0u ) { SkinList.push_back(SunBase + std::uint32_t(m_VSM.m_ToRender.size()) + MapOfDraw[i]); Run.m_Texel = m_MoverMaps[MapOfDraw[i]].m_Size / float(mover_map_texels_v); }
+                for( const auto p : LampPagesOfDraw[i] ) SkinList.push_back(SunBase + p);
                 for( std::uint32_t p = 0; p < m_VSM.m_ToRender.size() && MapOfDraw[i] == ~0u; ++p )
                 {
                     const auto& P = m_VSM.m_ToRender[p];
@@ -2157,7 +2211,7 @@ namespace xlionrender
                 Run.m_Count = std::uint32_t(SkinList.size()) - Run.m_First;
                 if( Run.m_Count ) SkinSun.push_back(Run);
                 Run = { i, std::uint32_t(SkinList.size()), 0 };
-                for( std::uint32_t p = 0; p < m_LocalPages.m_ToRender.size(); ++p )
+                for( std::uint32_t p = 0; p < m_LocalPages.m_ToRender.size() && MapOfDraw[i] == ~0u; ++p )      // (a mover with maps: none - its lamps' maps are in its sun run)
                 {
                     const auto& P = m_LocalPages.m_ToRender[p];
                     const auto& L = Scene.m_LocalLights[std::size_t(P.m_Light)];
@@ -2276,6 +2330,14 @@ namespace xlionrender
                 pSunPage = nullptr;
             }
             if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 1);
+            for( const auto& M : m_LampMaps )
+            {
+                Viewport(Cmd, int(M.m_AtlasX), int(M.m_AtlasY), lamp_map_texels_v);
+                Cmd.setPipelineInstance(m_ShadowClearInstance);
+                Cmd.setBuffer(m_FullscreenVB);
+                Cmd.setBuffer(m_FullscreenIB);
+                Cmd.Draw(3);
+            }
             for( const auto& M : m_MoverMaps )      // (the mover maps' tiles: cleared, then drawn with the skinned runs)
             {
                 Viewport(Cmd, int(M.m_AtlasX), int(M.m_AtlasY), mover_map_texels_v);

@@ -312,6 +312,50 @@ vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in c
     return PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att;
 }
 
+// The lamps' maps of the skinned movers (instance::m_LampMaps, the mover maps' prototype): after the local tables (LightCells at
+// ShadowParams.y: [W][static W][mover W]), [max slots][first, count a slot], then 16 uints a map - axis, right, up, tan half, A, B, near,
+// its tile's atlas x, y, slot. The light's maps whose tile holds the receiver: a 4 x 4 PCF, the darkest kept. 1: none
+const int kLampMapTexels = 128;     // (instance::lamp_map_texels_v)
+float LocalLampMaps(in const LocalLightData Ld, in const vec3 Receiver)
+{
+    if (Ld.Shadow.z <= 0.0 || UBOLight.ShadowParams.x <= 0.0) return 1.0;
+    const uint T0 = uint(UBOLight.ShadowParams.y), MW = LightCells[T0];
+    const uint H  = T0 + 1u + 2u * MW, nSlots = LightCells[H];
+    const uint Slot = uint(Ld.Shadow.x) / uint(6 * kLocalFaceEntries);
+    if (Slot >= nSlots) return 1.0;
+    const uint First = LightCells[H + 1u + 2u * Slot], Count = LightCells[H + 2u + 2u * Slot];
+    const uint Base  = H + 1u + 2u * nSlots;
+    float S = 1.0;
+    for (uint k = First; k < First + Count; ++k)
+    {
+        const uint  e  = Base + 16u * k;
+        const vec3  Ax = vec3(uintBitsToFloat(LightCells[e]), uintBitsToFloat(LightCells[e + 1u]), uintBitsToFloat(LightCells[e + 2u]));
+        const vec3  Rt = vec3(uintBitsToFloat(LightCells[e + 3u]), uintBitsToFloat(LightCells[e + 4u]), uintBitsToFloat(LightCells[e + 5u]));
+        const vec3  Up = vec3(uintBitsToFloat(LightCells[e + 6u]), uintBitsToFloat(LightCells[e + 7u]), uintBitsToFloat(LightCells[e + 8u]));
+        const float Tn = uintBitsToFloat(LightCells[e + 9u]), A = uintBitsToFloat(LightCells[e + 10u]), B = uintBitsToFloat(LightCells[e + 11u]), Nr = uintBitsToFloat(LightCells[e + 12u]);
+        const ivec2 At = ivec2(uintBitsToFloat(LightCells[e + 13u]), uintBitsToFloat(LightCells[e + 14u]));
+        const float d0 = dot(Receiver, Ax);
+        if (d0 <= Nr) continue;                                                      // (nearer the lamp than the mover)
+        const float TexelW = 2.0 * d0 * Tn / float(kLampMapTexels);
+        const vec3  P  = Receiver + g_LocalFaceN * (1.5 * TexelW);
+        const float d  = dot(P, Ax);
+        const vec2  UV = vec2(dot(P, Rt), dot(P, Up)) / (d * Tn);
+        const vec2  U  = (UV * 0.5 + 0.5) * float(kLampMapTexels) - 0.5;
+        if (any(lessThan(U, vec2(1.0))) || any(greaterThanEqual(U, vec2(float(kLampMapTexels) - 3.0)))) continue;
+        const float Ref  = A + B / d;
+        const float Bias = 2.0 * TexelW * (-B) / (d * d);
+        const ivec2 Lo = ivec2(floor(U)) - 1;
+        const vec2  f  = U - floor(U);
+        const vec4  Wx = vec4(1.0 - f.x, 1.0, 1.0, f.x), Wy = vec4(1.0 - f.y, 1.0, 1.0, f.y);
+        float Lit = 0.0;
+        for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+            Lit += Wx[x] * Wy[y] * (texelFetch(SamplerShadowMap, At + Lo + ivec2(x, y), 0).r < min(Ref, 1.0) - Bias ? 0.0 : 1.0);
+        S = min(S, Lit / 9.0);
+    }
+    return S;
+}
+
 // Its shadow at the surface (1 lit .. 0 shadowed)
 #ifdef XLION_TILE_PIXEL
 float TileContact(in const vec3 P, in const vec3 ToLight);      // (xlionrender_tile_pixel.glsl)
@@ -321,10 +365,12 @@ float LocalLightShadow(in const int i, in const vec3 N)
     const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];
 #ifdef XLION_TILE_PIXEL
     // A paged light's contact shadow (XLION_CONTACT; ShadowLevels[0].w its length): the tile pass has the depth to trace. ponytail: the raster path (skinned, special materials) goes without
-    const float St = LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+    float St = LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+    if (St > 0.0) St = min(St, LocalLampMaps(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz));
     return St > 0.0 && Ld.Shadow.z > 0.0 && UBOLight.ShadowLevels[0].w > 0.0 ? St * TileContact(In.wSpacePosition.xyz, Ld.PosRadius.xyz - In.wSpacePosition.xyz) : St;
 #else
-    return LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+    const float St = LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+    return St > 0.0 ? min(St, LocalLampMaps(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz)) : St;
 #endif
 }
 
