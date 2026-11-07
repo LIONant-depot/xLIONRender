@@ -3018,6 +3018,19 @@ namespace xlionrender::gi
             }
             Out.m_nMeshNodes = int(Out.m_Nodes.size());
             PackGPUTlas(Out);
+            if (std::getenv("XLION_BVH_STATS"))        // (measurement: the TLAS's share - BLAS flattening, pt_performance_whitepaper_notes_2026-11-07.md)
+            {
+                double Vol = 0; v3 Lo{ 1e30f, 1e30f, 1e30f }, Hi{ -1e30f, -1e30f, -1e30f };
+                for (const int i : m_TlasIds)
+                {
+                    const auto& I = m_Instances[std::size_t(i)];
+                    Vol += double(std::max(I.m_Hi.m_X - I.m_Lo.m_X, 0.01f)) * std::max(I.m_Hi.m_Y - I.m_Lo.m_Y, 0.01f) * std::max(I.m_Hi.m_Z - I.m_Lo.m_Z, 0.01f);
+                    Lo = { std::min(Lo.m_X, I.m_Lo.m_X), std::min(Lo.m_Y, I.m_Lo.m_Y), std::min(Lo.m_Z, I.m_Lo.m_Z) }; Hi = { std::max(Hi.m_X, I.m_Hi.m_X), std::max(Hi.m_Y, I.m_Hi.m_Y), std::max(Hi.m_Z, I.m_Hi.m_Z) };
+                }
+                const double W = double(Hi.m_X - Lo.m_X) * (Hi.m_Y - Lo.m_Y) * (Hi.m_Z - Lo.m_Z);
+                std::printf("BVHSTATS instances %zu, meshes %zu, mesh nodes %d, TLAS nodes %zu, tri4 rows %zu; instance boxes' volume %.2fx the world's\n", m_TlasIds.size(), Out.m_MeshRoots.size(), Out.m_nMeshNodes, Out.m_Nodes.size() - std::size_t(Out.m_nMeshNodes), Out.m_Tri4.size(), W > 0 ? Vol / W : 0.0);
+                std::fflush(stdout);
+            }
         }
         // G4c: the TLAS again (its nodes after the meshes', the instances' rows, its leaves): the instances moved, the meshes are the same
         // (false: one is not in Out, PackGPU)
