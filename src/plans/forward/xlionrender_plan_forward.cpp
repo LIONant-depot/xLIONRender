@@ -1548,7 +1548,6 @@ namespace xlionrender
             if( Pass - 1 - P.m_First >= static_frames_v ) SunStatic.push_back(P.m_World);                         // (a static caster went)
         }
         m_PrevCasters = std::move(Now);
-        m_FrameChanged = Changed;                           // the probes re-capture where casters changed
         for( auto Slot : m_CasterSlotsPrev )                                // persistent casters no longer drawn
         {
             auto& C = m_SlotCasters[Slot];
@@ -1560,6 +1559,10 @@ namespace xlionrender
             }
         }
         std::swap(m_CasterSlots, m_CasterSlotsPrev);
+        // The probes capture again where the static casters changed (a mover once it settles, a static one moved, new or gone), not each frame a mover moves -
+        // as Unreal's captures: Bistro Game's walking characters dirtied a probe every frame, a cube face of the whole level recorded each frame, 26 ms of the
+        // main thread's 31 (2026-11-07). After the gone casters above, which it missed
+        m_FrameChanged = m_bShadowSplitMovers ? SunStatic : Changed;
 
         const auto& Sun = Scene.m_Sun;
         // The sun: its virtual pages (a sun with a disc: the 3 coarser levels' pages asked for too - the contact-hardening's search and its

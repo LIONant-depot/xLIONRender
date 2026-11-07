@@ -105,24 +105,46 @@ int main()
     Dump("probe_without", NoProbe);
     Dump("probe_with", WithProbe);
 
-    // Static: no re-capture
+    // Static: no re-capture. (The scene's casters were new - movers for their first frames: once they settle the probe captures them again, once)
+    for (int f = 0; f < 10; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render settle");
+    const int Base = Renderer.getProbeCaptures();
+    CHECK(Base <= 2, "The new scene captured %d times (its first capture, then once as its casters settled)", Base);
     for (int f = 0; f < 5; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render static");
-    CHECK(Renderer.getProbeCaptures() == 1, "A static scene re-captured (%d)", Renderer.getProbeCaptures());
+    CHECK(Renderer.getProbeCaptures() == Base, "A static scene re-captured (%d)", Renderer.getProbeCaptures() - Base);
 
     // A box moving far outside the probe's box: no re-capture
     Scene.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = xmath::fmat4::fromTranslation({ 50, 1, 0 }) });
     CHECK(App.RenderFrame(Scene, View, Camera), "Render far box");
     Scene.m_Draws.back().m_L2W = xmath::fmat4::fromTranslation({ 51, 1, 0 });
-    for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render far box moved");
-    CHECK(Renderer.getProbeCaptures() == 1, "A change outside the probe's box re-captured (%d)", Renderer.getProbeCaptures());
+    for (int f = 0; f < 10; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render far box moved");
+    CHECK(Renderer.getProbeCaptures() == Base, "A change outside the probe's box re-captured (%d)", Renderer.getProbeCaptures() - Base);
 
     // The red box moves inside the box, 1 face per frame: the capture completes on the 6th frame
     Renderer.m_ProbeFacesPerFrame = 1;
     Scene.m_Draws[1].m_L2W = xmath::fmat4::fromTranslation({ 3.0f, 1.5f, 1.0f }) * xmath::fmat4::fromScale({ 1, 3, 4 });
     int nFrames = 0;
-    while (Renderer.getProbeCaptures() == 1 && nFrames < 20) { CHECK(App.RenderFrame(Scene, View, Camera), "Render re-capture"); ++nFrames; }
+    while (Renderer.getProbeCaptures() == Base && nFrames < 20) { CHECK(App.RenderFrame(Scene, View, Camera), "Render re-capture"); ++nFrames; }
     std::printf("re-capture at 1 face per frame took %d frames\n", nFrames);
     CHECK(nFrames == 6, "A capture at 1 face per frame took %d frames", nFrames);
+
+    // A box moving inside the probe's box every frame (a walking character): it is a mover, the probe captures once as it starts moving and
+    // once after it stops - not every frame (Bistro Game: the characters dirtied a probe each frame, a cube face of the level recorded each frame)
+    Renderer.m_ProbeFacesPerFrame = 6;
+    for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render settle before the walker");
+    {
+        const int Start = Renderer.getProbeCaptures();
+        for (int f = 0; f < 30; ++f)
+        {
+            Scene.m_Draws[1].m_L2W = xmath::fmat4::fromTranslation({ 3.0f, 1.5f, 1.0f + 0.02f * float(f) }) * xmath::fmat4::fromScale({ 1, 3, 4 });
+            CHECK(App.RenderFrame(Scene, View, Camera), "Render walker %d", f);
+        }
+        const int Moving = Renderer.getProbeCaptures() - Start;
+        for (int f = 0; f < 40; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render walker stopped %d", f);
+        const int Stopped = Renderer.getProbeCaptures() - Start - Moving;
+        std::printf("a box moving 30 frames in the probe's box: %d captures while moving, %d after it stopped\n", Moving, Stopped);
+        CHECK(Moving <= 1, "A mover re-captured the probe %d times in 30 frames", Moving);
+        CHECK(Stopped == 1, "The mover that stopped re-captured the probe %d times, not once", Stopped);
+    }
 
     // Light changes (all faces in one frame from here)
     Renderer.m_ProbeFacesPerFrame = 6;
