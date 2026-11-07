@@ -365,6 +365,23 @@ int main()
 {
     app App;
     CHECK(App.Init(), "Init");
+    {   // A render pass destroyed at run time goes through the device's death march: its destructor read the m_Device its DeathMarch had
+        // dropped - an access violation a few frames later (the editor's views rebuilt their passes when Play started, 2026-11-07)
+        for (int k = 0; k < 3; ++k)
+        {
+            xgpu::texture Tex;
+            CHECK(App.m_Device.Create(Tex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 64, .m_Height = 64, .m_isGamma = false, .m_pName = "test: pass target" }) == nullptr, "texture");
+            auto A = std::array{ xgpu::renderpass::attachment{ Tex } };
+            {   // (out of scope: its own destructor queues it - renderpass::DeathMarch, the path that crashed; the device's Destroy did not)
+            xgpu::renderpass Pass;
+            CHECK(App.m_Device.Create(Pass, { .m_Attachments = A }) == nullptr, "render pass");
+            { auto Cmd = App.m_Window.StartRenderPass(Pass); }
+            }
+            App.m_Device.Destroy(std::move(Tex));
+            for (int f = 0; f < 6; ++f) { while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break; { auto Cmd = App.m_Window.getCmdBuffer(); } App.m_Window.PageFlip(); }
+        }
+        std::printf("A render pass destroyed at run time, through the death march: ok\n");
+    }
     {   // The screen's samples follow the view's size (the voxels' rays read their header at the end: a view grown past the first one's size left
         // every ray without it - the store frozen, sunlit squares in Bistro Game, 2026-11-07)
         gpu_trace T;
