@@ -62,7 +62,13 @@ int GIIntersectTri4(int Row, int Inst, vec3 O, vec3 D, float TMax, out float Dis
         const vec3 Q = cross(Tv, E1);
         const float v = dot(D, Q) * inv;
         const float t = dot(E2, Q) * inv;
-        if (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 1e-5 && t < Dist) { Best = k; Dist = t; U = u; V = v; }
+        if (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 1e-5 && t < Dist)
+        {
+#ifdef GI_BVH_ALPHA
+            if (!GIAlphaOpaque(Inst, GIBvhTri4[Row].m_Tri[k], u, v)) continue;     // (a masked triangle's transparent texel: no hit, the walk goes on)
+#endif
+            Best = k; Dist = t; U = u; V = v;
+        }
     }
     return Best;
 }

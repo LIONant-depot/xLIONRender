@@ -22,7 +22,7 @@ layout(std430, set = 0, binding = 4) readonly  buffer data_b      { uint       G
 
 
 const uint  gi_none_v = 0xFFFFFFFFu;
-const uint  gi_inst_v = 49u;                 // gi::world::gpu_inst_v
+const uint  gi_inst_v = 50u;                 // gi::world::gpu_inst_v
 const float gi_pi_v   = 3.14159265;
 
 float GF(uint i) { return uintBitsToFloat(GD[i]); }
@@ -46,6 +46,28 @@ bool GISeeThroughBits(int Inst, int Tri)
 }
 #define GI_BVH_SEE_THROUGH
 bool GISeeThrough(int Inst, int Tri) { return GISeeThroughBits(Inst, Tri); }
+// A masked triangle's opacity at its hit (u, v: the hit's barycentrics; gi::world::SetSlotMask): word 49 - [nT][slot + 1 a triangle][the
+// slots' masks, 128^2 bits over the UV square, wrapped]. True: opaque (no mask, or its texel set). (foliage_gi_occlusion_plan_2026-11-07.md)
+const uint gi_mask_texels_v = 128u, gi_mask_words_v = gi_mask_texels_v * gi_mask_texels_v / 32u;
+bool GIAlphaOpaque(int Inst, int Tri, float u, float v)
+{
+    const uint R = InstRec(Inst);
+    if ((GD[R + 47u] & 256u) == 0u) return true;
+    const uint A = GD[R + 49u], nT = GD[A], s = GD[A + 1u + uint(Tri)];
+    if (s == 0u) return true;
+    const uint M = MeshOf(R), UVs = GD[M + 16u];
+    if (UVs == gi_none_v) return true;
+    const uint b = GD[M + 3u] + 3u * uint(Tri);
+    const uvec3 T = uvec3(GD[b], GD[b + 1u], GD[b + 2u]);
+    const vec2 Uv0 = vec2(uintBitsToFloat(GD[UVs + 2u * T.x]), uintBitsToFloat(GD[UVs + 2u * T.x + 1u]));
+    const vec2 Uv1 = vec2(uintBitsToFloat(GD[UVs + 2u * T.y]), uintBitsToFloat(GD[UVs + 2u * T.y + 1u]));
+    const vec2 Uv2 = vec2(uintBitsToFloat(GD[UVs + 2u * T.z]), uintBitsToFloat(GD[UVs + 2u * T.z + 1u]));
+    const vec2 Uv  = fract(Uv0 * (1.0 - u - v) + Uv1 * u + Uv2 * v);
+    const uvec2 q  = min(uvec2(Uv * float(gi_mask_texels_v)), uvec2(gi_mask_texels_v - 1u));
+    const uint  k  = q.y * gi_mask_texels_v + q.x;
+    return ((GD[A + 1u + nT + (s - 1u) * gi_mask_words_v + k / 32u] >> (k % 32u)) & 1u) != 0u;
+}
+#define GI_BVH_ALPHA
 #include "xlionrender_gi_bvh.glsl"
 int g_Shadows = 0, g_ReadEntries = 0, g_Probes = 0;      // (diagnostics, with g_GIBvhVisits: gi::world::gpu_result::m_Work)
 int g_Accepted = 0;                                      // (diagnostics: the read entries that contributed, in the result's word 67)

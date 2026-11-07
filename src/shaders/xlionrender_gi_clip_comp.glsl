@@ -13,7 +13,7 @@ layout(push_constant) uniform push_t { vec4 m_EyeCell; int m_First, m_Count, m_M
 #include "xlionrender_gi_pass_common.glsl"
 
 const int   clip_dim_v = 64, clip_levels_v = 4;
-const uint  gi_inst_clip_v = 49u;
+const uint  gi_inst_clip_v = 50u;
 const float clip_light_scale_v = 8192.0, clip_weight_scale_v = 8192.0;
 
 float CF(uint i) { return uintBitsToFloat(GD[i]); }

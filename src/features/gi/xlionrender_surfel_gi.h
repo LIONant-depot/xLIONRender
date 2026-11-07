@@ -2454,6 +2454,20 @@ namespace xlionrender::gi
         // An instance's transparent material slots (SlotSeeThrough[slot]: its material has alpha). The GI leaves them out, as the references
         // do (Lumen, DDGI, Wicked: translucent surfaces neither block nor bounce): rays pass through their triangles, their surfels go dark
         // (validity 0: the reads skip them) - a window lets the sky in, a glass pane does not bounce its own color
+        // A masked material slot's opacity (alpha-tested foliage: foliage_gi_occlusion_plan_2026-11-07.md): mask_texels_v^2 bits over its UV
+        // square [0, 1)^2 (wrapped), a set bit opaque. The rays' triangle test reads it at the hit's UV: a transparent texel is no hit, the walk
+        // goes on (shaders/xlionrender_gi_pass_common.glsl GIAlphaOpaque). Empty bits: the slot is opaque again. Needs the mesh's UVs
+        static constexpr int mask_texels_v = 128;
+        static constexpr std::size_t mask_words_v = std::size_t(mask_texels_v) * mask_texels_v / 32;
+        void SetSlotMask(int Id, std::uint32_t Slot, std::vector<std::uint32_t> Bits) noexcept
+        {
+            auto& I = m_Instances[std::size_t(Id)];
+            if (!Bits.empty() && Bits.size() != mask_words_v) return;
+            ++I.m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial - its array has room for every slot's mask)
+            if (I.m_SlotMask.size() <= Slot) I.m_SlotMask.resize(Slot + 1);
+            I.m_SlotMask[Slot] = std::move(Bits);
+            AffectNear(I.m_Lo, I.m_Hi, Id);
+        }
         void SetSeeThrough(int Id, const std::vector<bool>& SlotSeeThrough) noexcept
         {
             ++m_Instances[std::size_t(Id)].m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial)
@@ -3084,9 +3098,9 @@ namespace xlionrender::gi
         //             (5, 7, 8, 10..13: PackGPUSetup)
         //   lights:   sun direction 3, sun color 3, sky 3, sky oct 48, then per point position 3, color 3, radius
         // ponytail: the whole scene every call (G3 keeps it resident and uploads changes)
-        static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 49, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 24;
-        static constexpr int gpu_mat_arrays_v = 6;                                                      // GPUMaterial's arrays and their record words
-        static constexpr std::uint32_t gpu_mat_words_v[gpu_mat_arrays_v] = { 11, 12, 13, 14, 45, 48 };
+        static constexpr std::uint32_t gpu_mesh_v = 26, gpu_inst_v = 50, gpu_none_v = 0xFFFFFFFFu, gpu_header_v = 16, gpu_est_v = 24;
+        static constexpr int gpu_mat_arrays_v = 7;                                                      // GPUMaterial's arrays and their record words
+        static constexpr std::uint32_t gpu_mat_words_v[gpu_mat_arrays_v] = { 11, 12, 13, 14, 45, 48, 49 };
         static constexpr int gpu_lanes_v = 8, gpu_group_v = 64;    // the pass: invocations per item, per group (a dispatch: GPUGroups)
         static constexpr int GPUGroups(std::size_t nItems) noexcept { return int((nItems * gpu_lanes_v + gpu_group_v - 1) / gpu_group_v); }
         struct gpu_item { int m_Inst = 0, m_Surf = 0, m_Level = 0, m_Rays = 0; float m_Off1 = 0, m_Off2 = 0; int m_Shift = 0, m_Pad = 0; };
@@ -3266,12 +3280,31 @@ namespace xlionrender::gi
             const auto B = [&](std::vector<std::uint32_t>& Out, const std::vector<std::uint8_t>& In, std::size_t n) { Out.assign((n + 31) / 32, 0u); std::uint32_t* o = Out.data(); const std::uint8_t* p = In.data(); for (std::size_t k = 0; k < In.size() && k < n; ++k) if (p[k]) o[k / 32] |= 1u << (k % 32); };
             V(A[0], I.m_TriAlbedo, nT); V(A[1], I.m_SurfAlbedo, nF); V(A[2], I.m_SurfEmission, nF);
             B(A[3], I.m_SeeThrough, nT); B(A[4], I.m_SurfSeeThrough, nF);
+            {   // 49: the opacity masks - [nT][per triangle its slot + 1 when masked, else 0][every slot's mask_words_v] (its size the mesh's: changed in place)
+                const auto& Ms = *I.m_pMesh;
+                std::uint32_t nSlots = 0;
+                for (const auto s : Ms.m_TriMaterial) nSlots = std::max<std::uint32_t>(nSlots, std::uint32_t(s) + 1u);
+                const bool bAny = std::any_of(I.m_SlotMask.begin(), I.m_SlotMask.end(), [](const auto& m) { return !m.empty(); });
+                if (Ms.m_UV.size() == Ms.m_Pos.size() && !Ms.m_Pos.empty() && nSlots > 0 && bAny)
+                {
+                    A[6].assign(1 + nT + std::size_t(nSlots) * mask_words_v, 0u);
+                    A[6][0] = std::uint32_t(nT);
+                    for (std::size_t t = 0; t < nT; ++t)
+                    {
+                        const std::uint32_t s = t < Ms.m_TriMaterial.size() ? Ms.m_TriMaterial[t] : 0u;
+                        if (s < I.m_SlotMask.size() && !I.m_SlotMask[s].empty()) A[6][1 + t] = s + 1;
+                    }
+                    for (std::uint32_t s = 0; s < nSlots && s < I.m_SlotMask.size(); ++s)
+                        if (!I.m_SlotMask[s].empty()) std::copy(I.m_SlotMask[s].begin(), I.m_SlotMask[s].end(), A[6].begin() + 1 + nT + std::size_t(s) * mask_words_v);
+                }
+            }
             A[5].assign(4 * nT, 0u); for (std::size_t k = 0; k < I.m_TriSpec.size() && k < nT; ++k) std::memcpy(A[5].data() + 4 * k, I.m_TriSpec[k].data(), 16);
             for (auto& a : A) if (a.empty()) a.push_back(0u);
             return (I.m_TriAlbedo.empty() ? 0u : 1u) | (I.m_SurfAlbedo.empty() ? 0u : 2u) | (I.m_SurfEmission.empty() ? 0u : 4u) | (I.m_SeeThrough.empty() ? 0u : 8u) | (I.m_SurfSeeThrough.empty() ? 0u : 16u)
                  | (I.m_EmitB.empty() ? 0u : 32u)      // (32: it has links: its rays' hits leave the emission out, the links bring it)
                  | (I.m_bProvisional ? 64u : 0u)       // (64: 7a, not captured yet: its hits bring nothing)
-                 | (I.m_TriSpec.empty() ? 0u : 128u);  // (128: its triangles' specular, word 48: reflections' secondary hits)
+                 | (I.m_TriSpec.empty() ? 0u : 128u)
+                 | (A[6].size() > 1 ? 256u : 0u);      // (256: masked triangles - their opacity masks, word 49)  // (128: its triangles' specular, word 48: reflections' secondary hits)
         }
         std::uint32_t MatGen(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_MatGen; }
         const xmath::fmat4& InstanceL2W(int Id) const noexcept { return m_Instances[std::size_t(Id)].m_L2W; }            // (gpu_trace: the links' local rebuild)
@@ -4631,6 +4664,7 @@ namespace xlionrender::gi
             std::size_t             m_EmitResolveWork = 0;            // (tests) candidates examined by AccumulateTriangleEmission: at most 12 a small emissive triangle, 64 a sample of a large one
             bool                    m_bTriEmission = false;           // every batch of the triangles' emission is in: m_SurfEmission is made from m_SurfEmitPower (ResolveSurfEmission)
             std::vector<std::uint8_t> m_SeeThrough, m_SurfSeeThrough;   // per triangle, per fine surfel: transparent (SetSeeThrough; empty: none)
+            std::vector<std::vector<std::uint32_t>> m_SlotMask;         // per material slot: its opacity mask (mask_texels_v^2 bits; empty: opaque) - SetSlotMask
             std::vector<std::uint32_t> m_LinkFirst;              // per fine surfel + 1: its emitter links (PumpLinks)
             std::vector<emit_link>  m_Links;
             std::vector<int>        m_EmitSurfs;                // the fine surfels that emit (EmittersChanged)

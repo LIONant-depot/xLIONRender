@@ -187,6 +187,56 @@ namespace
         for (std::size_t i = 0; i < std::size(Pieces); ++i) W.Add(M[i], xmath::fmat4::fromTranslation(Pieces[i].m_Pos), Pieces[i].m_Color);
     }
 
+    // Alpha-tested rays (world::SetSlotMask, foliage_gi_occlusion_plan_2026-11-07.md): a 2 m floor, a 1 m card above it, under a white sky
+    // (the floor's light is the sky its rays see). The floor's light under the card (its mean): no card, the card opaque (no mask), its mask all transparent, its mask all opaque, its
+    // mask's half (x < 0.5 of its UV) transparent. Returns the means, in that order (the GPU-owned world, after the updates)
+    std::array<double, 5> AlphaMaskRun(app& App)
+    {
+        std::array<double, 5> Out{};
+        for (int Case = 0; Case < 5; ++Case)
+        {
+            std::vector<surfel_mesh> M(2);
+            AddQuad(M[0], { -1, 0, -1 }, { 0, 0, 2 }, { 2, 0, 0 }, 0.125f);
+            AddQuad(M[1], { -0.5f, 0.6f, -0.5f }, { 1, 0, 0 }, { 0, 0, 1 }, 0.125f);      // (facing down: the light's side is its back - the rays block on either)
+            for (const auto& P : M[1].m_Pos) M[1].m_UV.push_back({ P.m_X + 0.5f, P.m_Z + 0.5f });
+            M[1].m_TriMaterial.assign(M[1].m_Tris.size(), 0u);
+            for (auto& m : M) { m.Bake(0.15f, 0.75f); m.BuildReadGrid(); }
+            world W;
+            W.m_Setup.m_bGPUTrace = W.m_Setup.m_bGPUOwned = true;
+            const int Floor = W.Add(M[0], xmath::fmat4::fromIdentity(), { 0.75f, 0.75f, 0.75f });
+            if (Case != 0) W.Add(M[1], xmath::fmat4::fromIdentity(), { 0.75f, 0.75f, 0.75f });
+            if (Case >= 2)
+            {
+                std::vector<std::uint32_t> Bits(world::mask_words_v, Case == 3 ? 0xFFFFFFFFu : 0u);
+                if (Case == 4) for (int y = 0; y < world::mask_texels_v; ++y) for (int x = world::mask_texels_v / 2; x < world::mask_texels_v; ++x) { const int k = y * world::mask_texels_v + x; Bits[std::size_t(k / 32)] |= 1u << (k % 32); }
+                W.SetSlotMask(1, 0, std::move(Bits));
+            }
+            lights L;
+            L.m_Sky = { 1.0f, 1.0f, 1.0f };      // (the sky: the floor's indirect light, the card blocks part of it - the rays' visibility, not a shadow ray)
+            gpu_trace T;
+            if (!T.Init(App.m_Device, ShadersOf(App.m_Device))) { Out[std::size_t(Case)] = -1.0; continue; }
+            for (int u = 0; u < 16; ++u)
+            {
+                Drain(App, T, W);
+                while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+                const std::uint64_t Frame = App.m_Device.getFrameIndex();
+                T.Collect(W, Frame);
+                (void)W.Update(L, v3{ 0, 0.3f, -1.5f }, 1 << 30, 300 + u);
+                T.Submit(App.m_Window, W, L, Frame, 1000.0f, v3{ 0, 0.3f, -1.5f });
+                { auto Cmd = App.m_Window.getCmdBuffer(); }
+                App.m_Window.PageFlip();
+            }
+            Sync(App, T, W);
+            const auto& E = W.InstanceLight(Floor);
+            const auto& Lv = M[0].m_Levels[0].size() == E.size() ? M[0].m_Levels[0] : M[0].m_Levels[1];
+            double Sum = 0; int n = 0;
+            for (std::size_t s = 0; s < E.size() && s < Lv.size(); ++s)      // (the half under the card's x < 0 side: its mask's transparent half in case 4)
+                if (std::abs(Lv[s].m_Center.m_X + 0.25f) < 0.2f && std::abs(Lv[s].m_Center.m_Z) < 0.3f) { Sum += E[s].m_X + E[s].m_Y + E[s].m_Z; ++n; }
+            Out[std::size_t(Case)] = n ? Sum / n : -1.0;
+        }
+        return Out;
+    }
+
     struct result { int m_Surfels = 0, m_Mismatch = 0; double m_Worst = 0, m_UpdateMs = 0, m_TraceMs = 0; int m_Packs = 0, m_Relevels = 0; double m_ShownWorst = -1, m_MomentWorst = -1, m_InitMs = 0; std::size_t m_CpuBytes = 0, m_OwnedBytes = 0; };
 
     // Updates of the CPU world against the GPU world's (it commits a batch one update later: one update more). bEvents: on both at the
@@ -321,6 +371,14 @@ int main()
             CHECK(std::size_t(T.RefSamples()->getEntryCount()) >= 8 * (n + 1), "the screen's samples hold %d words, %zu pixels and the header need %zu", T.RefSamples()->getEntryCount(), n, 8 * (n + 1));
         }
         std::printf("GPU trace, the screen's samples grow with the view: ok\n");
+    }
+    {   // Alpha-tested rays: a masked card's transparent texels let the light through, its opaque ones block, as an unmasked card does
+        const auto A = AlphaMaskRun(App);
+        std::printf("GPU trace, alpha-tested rays - the floor's light under the card: no card %.4f, opaque card %.4f, mask transparent %.4f, mask opaque %.4f, mask's transparent half %.4f\n", A[0], A[1], A[2], A[3], A[4]);
+        CHECK(A[0] > 0 && A[1] < 0.9 * A[0], "the opaque card does not shadow the floor (%.4f against %.4f)", A[1], A[0]);
+        CHECK(std::abs(A[2] - A[0]) < 0.01 * A[0], "a transparent mask still blocks (%.4f against no card %.4f)", A[2], A[0]);
+        CHECK(std::abs(A[3] - A[1]) < 0.01 * A[0], "an opaque mask differs from the opaque card (%.4f against %.4f)", A[3], A[1]);
+        CHECK(A[4] > A[1] + 0.3 * (A[0] - A[1]), "under the mask's transparent half the floor stays as dark as under the opaque card (%.4f; opaque %.4f, no card %.4f)", A[4], A[1], A[0]);
     }
     for (const int Case : { 0, 1, 2 })
     {

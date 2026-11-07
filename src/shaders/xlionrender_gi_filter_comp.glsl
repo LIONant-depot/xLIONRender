@@ -20,7 +20,7 @@ layout(std430, set = 0, binding = 9)          buffer target_b  { float GITarget[
 
 layout(push_constant) uniform push_t { int m_Mode, m_N, m_Src, m_Base; float m_Saturation; int m_Pad0, m_Pad1, m_Pad2; } Push;
 
-const uint gi_inst_v = 49u;          // gi::world::gpu_inst_v
+const uint gi_inst_v = 50u;          // gi::world::gpu_inst_v
 const uint gi_none_v = 0xFFFFFFFFu;
 
 // gi::PackRGB9E5, step for step (the same bits)
