@@ -1567,6 +1567,8 @@ namespace xlionrender
         m_VSMSoftLevels = Sun.m_SourceAngle > 0 ? 3 : 0;
         m_VSM.m_ToRender.clear();
         static const bool s_bNoPairs = xlionrender::Env("XLION_SH_NO_PAIRS") != nullptr;      // (measurement: every page's casters by the CPU path)
+        static const bool s_bNoShadowCache = xlionrender::Env("XLION_SH_NO_CACHE") != nullptr;      // (measurement: every shadow page rendered again each frame)
+        if( s_bNoShadowCache ) m_bShadowCache = false;
         bool bPairs = m_pShadowPairs && m_bShadowGPUPairs && !s_bNoPairs;
         if( m_pShadowPairs )
         {
@@ -4518,7 +4520,11 @@ namespace xlionrender
             Window.Dispatch(m_ContactCompute, Buffers, Textures, Images, &Fill, sizeof(Fill), (sun_mask_w_v + 7) / 8, (sun_mask_h_v + 7) / 8);
         }
         // the geometries' residency (cluster_geom::Refresh): a geometry whose buffers dropped or regained LOD 0 draws what they hold
-        for( auto& M : m_Meshes ) if( M.m_bAlive && M.m_bCluster ) (void)M.m_Geom.Refresh();
+        {
+            static const bool s_bResLog = xlionrender::Env("XLION_RESIDENCY_LOG") != nullptr;     // (measurement: a geometry's resident finest LOD changing)
+            for( auto& M : m_Meshes ) if( M.m_bAlive && M.m_bCluster && M.m_Geom.Refresh() && s_bResLog )
+                std::printf("RESIDENCY frame %llu: a geometry of %zu clusters now draws from LOD %d (of %zu)\n", (unsigned long long)m_Device.getFrameIndex(), M.m_Geom.m_Clusters.size(), M.m_Geom.m_FinestLOD, M.m_Geom.m_LODSubmeshes.size()), std::fflush(stdout);
+        }
         // Measurement only (XLION_GPU_TIMES): the whole Render on the GPU (its start, after the GI and the captures, after the tone map, its end)
         static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
         static std::unordered_map<const void*, xgpu::timestamps> s_TS;      // ponytail: per renderer, never erased (a measurement hook)
