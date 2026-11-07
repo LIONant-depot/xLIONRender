@@ -2463,9 +2463,14 @@ namespace xlionrender::gi
         {
             auto& I = m_Instances[std::size_t(Id)];
             if (!Bits.empty() && Bits.size() != mask_words_v) return;
-            ++I.m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial - its array has room for every slot's mask)
+            const auto AnyMask = [&] { return std::any_of(I.m_SlotMask.begin(), I.m_SlotMask.end(), [](const auto& m) { return !m.empty(); }); };
+            const bool bHad = AnyMask();
+            ++I.m_MatGen;      // (G4c: the GPU's copy updated in place: GPUMaterial - its array has room for every slot's mask once it has one)
             if (I.m_SlotMask.size() <= Slot) I.m_SlotMask.resize(Slot + 1);
             I.m_SlotMask[Slot] = std::move(Bits);
+            // the first mask (or the last one gone) changes word 49's size: the in place update would write past its room (it overwrote the
+            // GI data after it - the Bistro Game's lit image went black, 2026-11-07): the GPU's copy packed again
+            if (AnyMask() != bHad) ++m_GPUGen;
             AffectNear(I.m_Lo, I.m_Hi, Id);
         }
         void SetSeeThrough(int Id, const std::vector<bool>& SlotSeeThrough) noexcept

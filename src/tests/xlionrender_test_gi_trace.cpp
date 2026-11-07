@@ -190,10 +190,12 @@ namespace
     // Alpha-tested rays (world::SetSlotMask, foliage_gi_occlusion_plan_2026-11-07.md): a 2 m floor, a 1 m card above it, under a white sky
     // (the floor's light is the sky its rays see). The floor's light under the card (its mean): no card, the card opaque (no mask), its mask all transparent, its mask all opaque, its
     // mask's half (x < 0.5 of its UV) transparent. Returns the means, in that order (the GPU-owned world, after the updates)
-    std::array<double, 5> AlphaMaskRun(app& App)
+    // (case 5: case 4's mask set late, after the GPU's copy was packed - the editor's captures arrive so: the first mask changes the
+    // instance's record size, packed again; in place it wrote past its room, 2026-11-07)
+    std::array<double, 6> AlphaMaskRun(app& App)
     {
-        std::array<double, 5> Out{};
-        for (int Case = 0; Case < 5; ++Case)
+        std::array<double, 6> Out{};
+        for (int Case = 0; Case < 6; ++Case)
         {
             std::vector<surfel_mesh> M(2);
             AddQuad(M[0], { -1, 0, -1 }, { 0, 0, 2 }, { 2, 0, 0 }, 0.125f);
@@ -205,18 +207,20 @@ namespace
             W.m_Setup.m_bGPUTrace = W.m_Setup.m_bGPUOwned = true;
             const int Floor = W.Add(M[0], xmath::fmat4::fromIdentity(), { 0.75f, 0.75f, 0.75f });
             if (Case != 0) W.Add(M[1], xmath::fmat4::fromIdentity(), { 0.75f, 0.75f, 0.75f });
-            if (Case >= 2)
+            const auto Mask = [&]
             {
                 std::vector<std::uint32_t> Bits(world::mask_words_v, Case == 3 ? 0xFFFFFFFFu : 0u);
-                if (Case == 4) for (int y = 0; y < world::mask_texels_v; ++y) for (int x = world::mask_texels_v / 2; x < world::mask_texels_v; ++x) { const int k = y * world::mask_texels_v + x; Bits[std::size_t(k / 32)] |= 1u << (k % 32); }
+                if (Case >= 4) for (int y = 0; y < world::mask_texels_v; ++y) for (int x = world::mask_texels_v / 2; x < world::mask_texels_v; ++x) { const int k = y * world::mask_texels_v + x; Bits[std::size_t(k / 32)] |= 1u << (k % 32); }
                 W.SetSlotMask(1, 0, std::move(Bits));
-            }
+            };
+            if (Case >= 2 && Case <= 4) Mask();
             lights L;
             L.m_Sky = { 1.0f, 1.0f, 1.0f };      // (the sky: the floor's indirect light, the card blocks part of it - the rays' visibility, not a shadow ray)
             gpu_trace T;
             if (!T.Init(App.m_Device, ShadersOf(App.m_Device))) { Out[std::size_t(Case)] = -1.0; continue; }
-            for (int u = 0; u < 16; ++u)
+            for (int u = 0; u < (Case == 5 ? 48 : 16); ++u)
             {
+                if (Case == 5 && u == 4) Mask();
                 Drain(App, T, W);
                 while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
                 const std::uint64_t Frame = App.m_Device.getFrameIndex();
@@ -374,10 +378,11 @@ int main()
     }
     {   // Alpha-tested rays: a masked card's transparent texels let the light through, its opaque ones block, as an unmasked card does
         const auto A = AlphaMaskRun(App);
-        std::printf("GPU trace, alpha-tested rays - the floor's light under the card: no card %.4f, opaque card %.4f, mask transparent %.4f, mask opaque %.4f, mask's transparent half %.4f\n", A[0], A[1], A[2], A[3], A[4]);
+        std::printf("GPU trace, alpha-tested rays - the floor's light under the card: no card %.4f, opaque card %.4f, mask transparent %.4f, mask opaque %.4f, mask's transparent half %.4f, set late %.4f\n", A[0], A[1], A[2], A[3], A[4], A[5]);
         CHECK(A[0] > 0 && A[1] < 0.9 * A[0], "the opaque card does not shadow the floor (%.4f against %.4f)", A[1], A[0]);
         CHECK(std::abs(A[2] - A[0]) < 0.01 * A[0], "a transparent mask still blocks (%.4f against no card %.4f)", A[2], A[0]);
         CHECK(std::abs(A[3] - A[1]) < 0.01 * A[0], "an opaque mask differs from the opaque card (%.4f against %.4f)", A[3], A[1]);
+        CHECK(std::abs(A[5] - A[4]) < 0.02 * A[0], "a mask set after the GPU's copy was packed differs from one set before (%.4f against %.4f)", A[5], A[4]);
         CHECK(A[4] > A[1] + 0.3 * (A[0] - A[1]), "under the mask's transparent half the floor stays as dark as under the opaque card (%.4f; opaque %.4f, no card %.4f)", A[4], A[1], A[0]);
     }
     for (const int Case : { 0, 1, 2 })
