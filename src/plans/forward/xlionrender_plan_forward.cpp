@@ -275,7 +275,8 @@ namespace xlionrender
                 std::erase_if(m_GICaptures, [&](const gi_capture_job& J) { return J.m_GIId == Id && !J.m_bRecorded; });
                 // the masked slots' opacity masks (alpha-tested rays): from the cache, or a capture queued once a material (after the erase above: it removed them)
                 std::erase_if(m_GIMaskWaiting, [&](const gi_mask_wait& M) { return M.m_GIId == Id; });
-                for( std::size_t k = 0; k < D.m_Materials.size(); ++k )
+                static const bool s_bNoGIMasks = xlionrender::Env("XLION_GI_NO_MASKS") != nullptr;     // (measurement: no mask captures)
+                for( std::size_t k = 0; k < (s_bNoGIMasks ? 0 : D.m_Materials.size()); ++k )
                 {
                     const auto* pMat = findMaterial(D.m_Materials[k]);
                     if( pMat == nullptr || MaterialVisibilityOf(pMat->m_State).m_Opacity != material_visibility::opacity::MASKED || Mesh.m_UV.size() != Mesh.m_Pos.size() ) continue;
