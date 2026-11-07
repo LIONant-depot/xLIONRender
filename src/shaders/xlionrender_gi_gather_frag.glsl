@@ -333,7 +333,7 @@ void main()
             const uint Rw = GITable[push.TableBase + 28u], Ri = uint(P.y) * Rw + uint(P.x);
             const vec3 Eyw = vec3(TF(25u), TF(26u), TF(27u));
             const float Ah = push.AO != 0u ? GatherAO(P, W, H, Dist) : 1.0;
-            GIRefSample[2u * Ri] = vec4(S.P + Eyw, 1.0);
+            GIRefSample[2u * Ri] = vec4(S.P + Eyw, Ref == gi_probes_v ? 0.0 : 1.0);      // (a skinned surface - XLION_SKIN_VOX's entry - reads the store, no ray starts from it: a mover's points fed the shared store)
             GIRefSample[2u * Ri + 1u] = vec4(N, Ah);      // (w: this reader's AO - XLION_VOX_AO_BUCKET sorts its rays' samples by it)
             GIRefSample[2u * W * H] = vec4(TF(22u), TF(23u), TF(24u), TF(21u));
             g_ClipFloat = true;
