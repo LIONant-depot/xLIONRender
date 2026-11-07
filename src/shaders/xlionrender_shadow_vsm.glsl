@@ -83,6 +83,8 @@ bool VSMMoverBase(in const int Level, in const ivec2 Page, in const uint MoverBa
 
 // One level of an epoch (Lv: its level's window and depth centre, Texel0: its level 0 texel, TableBase: its table, MoverBase: the
 // movers' table + 1, 0: none): 1 lit .. 0 shadowed, or -1 when a tap's page is not there
+const bool kVSMWideBand = true;     // (the level band's fine level in one 5 x 5 filter, ShadowVSMLevel; false: five ShadowVSMAt calls)
+float g_VSMWide = 0.0;               // (> 0: ShadowVSMLevel's next calls are the band's fine level at this blend)
 bool g_VSMSmallTap = false;     // (ShadowVSMDisc's taps: the 2 x 2 bilinear - 8 taps of the 4 x 4 were 5.7 of Bistro's 11.4 ms scene pass)
 float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, in const vec4 Lv, in const float Texel0, in const uint TableBase, in const uint MoverBase)
 {
@@ -95,10 +97,53 @@ float ShadowVSMLevel(in const int Level, in const vec3 L, in const vec2 Slope, i
     const vec2  f     = U - floor(U);
     const vec2  SlopeT = Slope * Texel / (2.0 * Half);                                // the receiver plane's depth a texel along x, y
     const float MaxB   = kVSMMaxSlopeBias * Texel / (2.0 * Half);
+    const float Row = UBOLight.VSMParams2.z;                                           // slots per row of the pool
+    if (kVSMWideBand && g_VSMWide > 0.0)
+    {
+        // The level band's fine level (ShadowVSMPages): its 4 x 4 and the mean of four copies moved +-t/2 texels on the light's x and y,
+        // mixed by t - one 5 x 5 filter with those weights (the 4 x 4's per axis: clamp(2 - |x|, 0, 1) at x texels from the centre), the
+        // pages looked up once (were five ShadowVSMAt calls, 80 taps and five page walks; the copies' slope bias now from the centre)
+        const float t = g_VSMWide, dl = 0.5 * t;
+        const ivec2 L5 = ivec2(floor(U - dl)) - 1;
+        const ivec2 QLo = ivec2(floor(vec2(L5) / float(kVSMPageTexels))), QHi = ivec2(floor(vec2(L5 + 4) / float(kVSMPageTexels)));
+        if (!VSMInWindow(Lv, QLo) || !VSMInWindow(Lv, QHi)) return -1.0;
+        ivec2 B5[4];
+        for (int j = 0; j < 4; ++j)
+        {
+            const ivec2 P = ivec2((j & 1) != 0 ? QHi.x : QLo.x, (j & 2) != 0 ? QHi.y : QLo.y);
+            const uint  E = VSMEntry(Level, P, TableBase);
+            if (E == 0u) return -1.0;
+            B5[j] = ivec2(int(E - 1u) % int(Row), int(E - 1u) / int(Row)) * kVSMPageTexels - P * kVSMPageTexels;
+        }
+        vec2 W0[5], WA[5];
+        for (int k = 0; k < 5; ++k)
+        {
+            const vec2 x = vec2(L5 + k) - U;
+            W0[k] = clamp(2.0 - abs(x), 0.0, 1.0);
+            WA[k] = 0.5 * (clamp(2.0 - abs(x - dl), 0.0, 1.0) + clamp(2.0 - abs(x + dl), 0.0, 1.0));
+        }
+        const ivec2 Border = QHi * kVSMPageTexels;
+        float Lw = 0.0;
+        for (int y = 0; y < 5; ++y)
+        for (int x = 0; x < 5; ++x)
+        {
+            const float w = (1.0 - t) * W0[x].x * W0[y].y + t * WA[x].x * WA[y].y;
+            if (w <= 0.0) continue;
+            const ivec2 T = L5 + ivec2(x, y);
+            const int   j = (T.x >= Border.x && QHi.x != QLo.x ? 1 : 0) + (T.y >= Border.y && QHi.y != QLo.y ? 2 : 0);
+            float d = texelFetch(SamplerShadowMap, B5[j] + T, 0).r;
+            if (MoverBase != 0u)
+            {
+                ivec2 MB;
+                if (VSMMoverBase(Level, ivec2((j & 1) != 0 ? QHi.x : QLo.x, (j & 2) != 0 ? QHi.y : QLo.y), MoverBase, MB)) d = min(d, texelFetch(SamplerShadowMap, MB + T, 0).r);
+            }
+            Lw += w * ((d < Depth - Bias - min(2.0 * max(0.0, dot(SlopeT, vec2(T) - U)), MaxB)) ? 0.0 : 1.0);
+        }
+        return Lw / 9.0;
+    }
     const ivec2 PLo   = ivec2(floor(vec2(Lo) / float(kVSMPageTexels))), PHi = ivec2(floor(vec2(Lo + 3) / float(kVSMPageTexels)));
     if (!VSMInWindow(Lv, PLo) || !VSMInWindow(Lv, PHi)) return -1.0;
 
-    const float Row = UBOLight.VSMParams2.z;                                           // slots per row of the pool
     if (g_VSMSmallTap)          // (a disc's tap: the 2 x 2 bilinear, one gather - the disc's spread is the filter; inside one page, else the 4 x 4)
     {
         const ivec2 L1 = Lo + 1, Q = ivec2(floor(vec2(L1) / float(kVSMPageTexels))), Q1 = ivec2(floor(vec2(L1 + 1) / float(kVSMPageTexels)));
@@ -358,7 +403,10 @@ float ShadowVSMPages(in const vec3 World, in const vec3 Ng)
     const float t  = Lf - float(L0);
     for (int Level = L0; Level < nLevels; ++Level)
     {
+        const bool bWide = kVSMWideBand && Pen <= 0.0 && t > 0.0 && Level == L0 && Level + 1 < nLevels;      // (the band's fine level, widened in one filter)
+        g_VSMWide = bWide ? t : 0.0;
         float S = Pen > 0.0 ? ShadowVSMDisc(Level, World, Ng, Slope, SlopeP, Grazing, Pen) : ShadowVSMAt(Level, World, Ng, Slope, SlopeP, Grazing);
+        g_VSMWide = 0.0;
         if (S < 0.0) continue;
         if (t > 0.0 && Level == L0 && Level + 1 < nLevels)
         {
@@ -368,6 +416,7 @@ float ShadowVSMPages(in const vec3 World, in const vec3 Ng)
             // the coarse one's, and the mix between them is between two equally soft images
             const float S1 = Pen > 0.0 ? ShadowVSMDisc(Level + 1, World, Ng, Slope, SlopeP, Grazing, Pen) : ShadowVSMAt(Level + 1, World, Ng, Slope, SlopeP, Grazing);
             if (S1 >= 0.0 && Pen > 0.0) S = mix(S, S1, t);
+            else if (S1 >= 0.0 && bWide) S = mix(S, S1, t);
             else if (S1 >= 0.0)
             {
                 const vec3  Ax = vec3(UBOLight.W2Light[0][0], UBOLight.W2Light[1][0], UBOLight.W2Light[2][0]);
