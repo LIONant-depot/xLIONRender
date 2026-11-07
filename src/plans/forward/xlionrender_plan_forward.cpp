@@ -1566,7 +1566,8 @@ namespace xlionrender
         // wide penumbrae read them)
         m_VSMSoftLevels = Sun.m_SourceAngle > 0 ? 3 : 0;
         m_VSM.m_ToRender.clear();
-        bool bPairs = m_pShadowPairs && m_bShadowGPUPairs;
+        static const bool s_bNoPairs = xlionrender::Env("XLION_SH_NO_PAIRS") != nullptr;      // (measurement: every page's casters by the CPU path)
+        bool bPairs = m_pShadowPairs && m_bShadowGPUPairs && !s_bNoPairs;
         if( m_pShadowPairs )
         {
             m_pShadowPairs->Begin(m_Device.getFrameIndex());
