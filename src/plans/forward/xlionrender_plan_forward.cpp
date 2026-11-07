@@ -3726,6 +3726,7 @@ namespace xlionrender
             };
             const auto TilePass = [&]
             {
+                int nTileDraws = 0;
                 View.m_TileInstances.resize(m_TileGraphs.size());
                 std::optional<xgpu::cmd_buffer> C;
                 for( std::size_t g = 0; g < m_TileGraphs.size(); ++g )
@@ -3759,7 +3760,10 @@ namespace xlionrender
                     C->setBuffer(m_FullscreenVB);
                     C->setBuffer(m_FullscreenIB);
                     C->Draw(3);
+                    ++nTileDraws;
                 }
+                static const bool s_bTileLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static int s_TileN = 0;     // (measurement: the full-screen draws a frame - one a graph)
+                if( s_bTileLog && ++s_TileN % 600 == 0 ) { std::printf("TILEPASS %d full-screen draws (graphs) of %zu\n", nTileDraws, m_TileGraphs.size()); std::fflush(stdout); }
             };
             const auto PrepassCulled = [&]( int Pass )
             {

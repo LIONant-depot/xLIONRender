@@ -437,6 +437,24 @@ float VSMMoverMaps(in const vec3 World, in const vec3 Ng)
     return S;
 }
 
+// Whether a point is in a mover map's rect grown by Margin (light space): its shadow there can change each frame (the sun mask's reuse refuses it)
+bool VSMNearMoverMap(in const vec3 World, in const float Margin)
+{
+    const uint W  = uint(UBOLight.VSMParams2.x);
+    const uint TU = (uint(UBOLight.VSMParams.z) * W * W + 1u) / 2u;
+    const uint B  = uint(UBOLight.VSMParams.w) + 3u * TU;
+    const uint n  = LightCells[B];
+    const vec2 L  = (UBOLight.W2Light * vec4(World, 1.0)).xy;
+    for (uint k = 0u; k < n && k < 32u; ++k)
+    {
+        const uint  e  = B + 1u + 8u * k;
+        const vec2  Lo = vec2(uintBitsToFloat(LightCells[e]), uintBitsToFloat(LightCells[e + 1u])) - Margin;
+        const float Sz = uintBitsToFloat(LightCells[e + 2u]) + 2.0 * Margin;
+        if (all(greaterThanEqual(L, Lo)) && all(lessThan(L, Lo + Sz))) return true;
+    }
+    return false;
+}
+
 // The sun's shadow from its pages, and its skinned movers' maps
 float ShadowVSM(in const vec3 World, in const vec3 Ng)
 {

@@ -107,6 +107,7 @@ bool SunMaskReuse(in const vec3 P, in const vec3 Ng, in const ivec2 Size, out fl
 {
     S = 1.0;
     if (MaskPush.Params.x == 0u) return false;
+    if (VSMNearMoverMap(P + UBOLight.CameraPos.xyz, 0.25)) return false;      // (a skinned mover's map moves every frame: no reuse in its rect, a quarter metre around for last frame's)
     const vec4 C = MaskPush.Reproject * vec4(P, 1.0);
     if (C.w <= 1e-6) return false;
     const vec2 N = C.xy / C.w;
