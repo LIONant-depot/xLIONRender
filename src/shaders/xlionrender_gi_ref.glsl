@@ -18,6 +18,7 @@ layout(set = 1, binding = 0) uniform sampler2D SceneHDR;      // (XLION_VOX_SEEN
 #endif
 layout(std430, set = 0, binding = 6)          buffer accum_u_b { uvec4 GIRefAccumU[]; };    // (the same memory: a direction bin's fixed point sums, added atomically)
 layout(push_constant) uniform push_t { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push;
+#define XLION_GI_ALPHA_RAYS      // (the masked triangles' opacity: foliage_gi_occlusion_plan_2026-11-07.md)
 #include "xlionrender_gi_pass_common.glsl"
 
 uint RHash(uint x) { x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16; return x; }

@@ -577,7 +577,13 @@ namespace xlionrender
             xgpu::buffer                m_Data;
             std::uint64_t               m_Frame = 0;
             bool                        m_bRecorded = false;
+            int                         m_MaskSlot = -1;        // >= 0: a masked material slot's opacity mask (gi::world::mask_texels_v^2 UV points; the mesh not read)
         };
+        // The masked materials' opacity masks for the GI's rays (foliage_gi_occlusion_plan_2026-11-07.md): captured once a material (its key: index,
+        // generation), then given to every GI instance and slot that uses it (SetSlotMask); the ones waiting for a capture
+        std::unordered_map<std::uint64_t, std::vector<std::uint32_t>>  m_GIMaskCache;
+        struct gi_mask_wait { int m_GIId; std::uint32_t m_Slot; std::uint64_t m_Key; };
+        std::vector<gi_mask_wait>   m_GIMaskWaiting;
         xgpu::device::error*        buildMeshGI( mesh_slot& M, std::span<const xmath::fvec3> TriColors ) noexcept;
         xgpu::device::error*        createMeshGI( mesh_slot& M, std::span<const std::uint32_t> Data ) noexcept;      // the GPU buffer of PackMeshGI's data     // M.m_GIBuffer from M.m_pGI (+ its triangles' colors)
         static constexpr int        gi_capture_passes_v = 4;       // albedo, emission, F0's color, roughness + metallic (the last two: reflections' secondary hits)

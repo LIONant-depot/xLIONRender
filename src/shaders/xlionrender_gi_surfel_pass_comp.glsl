@@ -81,6 +81,7 @@ layout(std430, set = 0, binding = 5) readonly  buffer items_b     { GIItem     G
 layout(std430, set = 0, binding = 6) writeonly buffer results_b   { GIResult   GIResults[]; };
 layout(std430, set = 0, binding = 7) readonly  buffer count_b     { uint       GICount[]; };    // the items there are (G4c: the expand's count; at most m_nItems)
 layout(push_constant) uniform push_t { int m_nItems, m_TlasRoot, m_PrimOffset, m_First; } Push;     // (m_First: this dispatch's first item, a slice of the batch)
+#define XLION_GI_ALPHA_RAYS      // (the masked triangles' opacity: foliage_gi_occlusion_plan_2026-11-07.md)
 #include "xlionrender_gi_pass_common.glsl"
 
 // A work item's rays are spread over gi_lanes_v invocations (a cluster of its subgroup): lane l traces rays l, l + 8, ... and the

@@ -10,7 +10,8 @@
 
 int g_GIBvhTlasRoot   = 0;
 int g_GIBvhPrimOffset = 0;
-bool g_GIBvhAnyHit = false;        // the first hit before TMax ends the walk (a shadow ray: gi::world::Occluded), not the nearest
+bool g_GIBvhAnyHit = false;
+bool g_GIBvhInstMasked = false;     // (GI_BVH_ALPHA: the instance being walked has masked triangles - read once as the walk enters it, not per candidate)        // the first hit before TMax ends the walk (a shadow ray: gi::world::Occluded), not the nearest
 bool g_GIBvhSeeThrough = false;     // the casts leave the see-through triangles out (GISeeThrough(world instance, triangle), the includer's when it
                                     // defines GI_BVH_SEE_THROUGH); the shadow rays do not, as gi::world::Occluded
 #ifndef GI_BVH_SEE_THROUGH
@@ -65,7 +66,7 @@ int GIIntersectTri4(int Row, int Inst, vec3 O, vec3 D, float TMax, out float Dis
         if (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 1e-5 && t < Dist)
         {
 #ifdef GI_BVH_ALPHA
-            if (!GIAlphaOpaque(Inst, GIBvhTri4[Row].m_Tri[k], u, v)) continue;     // (a masked triangle's transparent texel: no hit, the walk goes on)
+            if (g_GIBvhInstMasked && !GIAlphaOpaque(Inst, GIBvhTri4[Row].m_Tri[k], u, v)) continue;     // (a masked triangle's transparent texel: no hit, the walk goes on)
 #endif
             Best = k; Dist = t; U = u; V = v;
         }
@@ -102,6 +103,9 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
             Inv = GISafeInverse(Rd);
             Near = ivec3(Inv.x < 0.0 ? 1 : 0, Inv.y < 0.0 ? 3 : 2, Inv.z < 0.0 ? 5 : 4);
             Inst = GIBvhInstances[p].m_Info.y;
+#ifdef GI_BVH_ALPHA
+            g_GIBvhInstMasked = GIInstMasked(Inst);
+#endif
             Base = n;
             Code[n] = GIBvhInstances[p].m_Info.x; ++n;
         }
@@ -134,6 +138,9 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
 #else
 void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
 {
+#ifdef GI_BVH_ALPHA
+    g_GIBvhInstMasked = GIInstMasked(Inst);
+#endif
     const vec3  Inv  = GISafeInverse(D);
     const ivec3 Near = ivec3(Inv.x < 0.0 ? 1 : 0, Inv.y < 0.0 ? 3 : 2, Inv.z < 0.0 ? 5 : 4);
     int   Code[gi_bvh_stack_v];

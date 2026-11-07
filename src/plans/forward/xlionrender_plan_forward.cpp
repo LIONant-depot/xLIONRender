@@ -273,6 +273,18 @@ namespace xlionrender
                 const_cast<mesh_slot*>(pM)->m_bTriColors = false;              // the SURFACE_COLOR view's table: made again from the new capture
                 // a capture still waiting for this instance is of materials it no longer has (one in flight does not publish: processGICapture)
                 std::erase_if(m_GICaptures, [&](const gi_capture_job& J) { return J.m_GIId == Id && !J.m_bRecorded; });
+                // the masked slots' opacity masks (alpha-tested rays): from the cache, or a capture queued once a material (after the erase above: it removed them)
+                std::erase_if(m_GIMaskWaiting, [&](const gi_mask_wait& M) { return M.m_GIId == Id; });
+                for( std::size_t k = 0; k < D.m_Materials.size(); ++k )
+                {
+                    const auto* pMat = findMaterial(D.m_Materials[k]);
+                    if( pMat == nullptr || MaterialVisibilityOf(pMat->m_State).m_Opacity != material_visibility::opacity::MASKED || Mesh.m_UV.size() != Mesh.m_Pos.size() ) continue;
+                    const std::uint64_t Key = (std::uint64_t(D.m_Materials[k].m_Index) << 32) | D.m_Materials[k].m_Generation;
+                    if( const auto It = m_GIMaskCache.find(Key); It != m_GIMaskCache.end() ) { W.SetSlotMask(Id, std::uint32_t(k), It->second); continue; }
+                    const bool bQueued = std::ranges::any_of(m_GIMaskWaiting, [&](const gi_mask_wait& M) { return M.m_Key == Key; });
+                    m_GIMaskWaiting.push_back({ Id, std::uint32_t(k), Key });
+                    if( !bQueued ) m_GICaptures.push_back({ .m_GIId = Id, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u, .m_Section = Section, .m_MaskSlot = int(k) });
+                }
                 if( bCapture && !Mesh.m_SurfelMaterial.empty() )      // its surfels' and its triangles' colors: captured from its materials (processGICapture; a section: its own)
                 {
                     m_GICaptures.push_back({ .m_GIId = Id, .m_Mesh = D.m_Mesh, .m_Materials = D.m_Materials, .m_Slot = i < m_DrawSlot.size() ? m_DrawSlot[i] : 0u, .m_Section = Section });
@@ -4348,7 +4360,14 @@ namespace xlionrender
                 TriN.push_back(F.Length() > 1e-12f ? F.NormalizeCopy() : G.m_Nrm[T[0]]);
             }
         }
-        const auto& Mats  = J.m_bTriangles ? TriMats : G.m_SurfelMaterial;
+        std::vector<gi::surfel_mesh::surfel_material> MaskMats;      // (a mask job: the UV square's grid, its slot)
+        if( J.m_MaskSlot >= 0 )
+        {
+            constexpr int T = gi::world::mask_texels_v;
+            MaskMats.resize(std::size_t(T) * T);
+            for( int y = 0; y < T; ++y ) for( int x = 0; x < T; ++x ) MaskMats[std::size_t(y) * T + x] = { (float(x) + 0.5f) / T, (float(y) + 0.5f) / T, 0.25f / T, std::uint32_t(J.m_MaskSlot) };
+        }
+        const auto& Mats  = J.m_MaskSlot >= 0 ? MaskMats : J.m_bTriangles ? TriMats : G.m_SurfelMaterial;
         const int   n     = int(Mats.size());
 
         if( !J.m_bRecorded )
@@ -4364,7 +4383,7 @@ namespace xlionrender
             {
                 const auto& S = Mats[J.m_Order[i]];
                 Data[2 * i]     = xmath::fvec4(S.m_U, S.m_V, S.m_UVRadius, 0);
-                Data[2 * i + 1] = xmath::fvec4(J.m_bTriangles ? TriN[J.m_Order[i]] : L0[J.m_Order[i]].m_Normal, 0);
+                Data[2 * i + 1] = xmath::fvec4(J.m_MaskSlot >= 0 ? gi::v3{ 0, 0, 1 } : J.m_bTriangles ? TriN[J.m_Order[i]] : L0[J.m_Order[i]].m_Normal, 0);
             }
             if( m_Device.Create(J.m_Data, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = 2 * n, .m_pData = Data.data() }) )
             { m_GICaptures.pop_front(); return; }
@@ -4437,6 +4456,25 @@ namespace xlionrender
             const auto Half = details::HalfToFloat;
             const auto* P = reinterpret_cast<const std::uint16_t*>(Raw.data());
             const auto Texel = [&](int x, int y) { const auto* t = P + 4 * (std::size_t(y) * W + x); return xmath::fvec3(Half(t[0]), Half(t[1]), Half(t[2])); };
+            if( J.m_MaskSlot >= 0 )
+            {
+                std::vector<std::uint32_t> Bits(gi::world::mask_words_v, 0u);
+                int nOpaque = 0;
+                for( int i = 0; i < n; ++i )
+                {
+                    const int x0 = 2 * (i % (W / 2)), y0 = 2 * (i / (W / 2));
+                    const auto A = [&](int x, int y) { return Half(P[4 * (std::size_t(y) * W + x) + 3]); };
+                    if( (A(x0, y0) + A(x0 + 1, y0) + A(x0, y0 + 1) + A(x0 + 1, y0 + 1)) * 0.25f > 0.5f ) { const int k = J.m_Order[i]; Bits[std::size_t(k / 32)] |= 1u << (k % 32); ++nOpaque; }
+                }
+                static const bool s_bMaskLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
+                if( s_bMaskLog ) { std::printf("GIMASK slot %d: %.1f%% opaque\n", J.m_MaskSlot, 100.0 * nOpaque / std::max(n, 1)); std::fflush(stdout); }
+                const std::uint64_t Key = (std::uint64_t(J.m_Materials[std::size_t(J.m_MaskSlot)].m_Index) << 32) | J.m_Materials[std::size_t(J.m_MaskSlot)].m_Generation;
+                for( const auto& M : m_GIMaskWaiting ) if( M.m_Key == Key ) m_pGIWorld->SetSlotMask(M.m_GIId, M.m_Slot, Bits);
+                std::erase_if(m_GIMaskWaiting, [&](const gi_mask_wait& M) { return M.m_Key == Key; });
+                m_GIMaskCache[Key] = std::move(Bits);
+                m_GICaptures.pop_front();
+                return;
+            }
             std::vector<xmath::fvec3> Albedo(n), Emission(n);
             std::vector<std::array<float, 4>> Specular(n);       // (F0's color, roughness: reflections' secondary hits)
             for( int i = 0; i < n; ++i )

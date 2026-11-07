@@ -67,7 +67,12 @@ bool GIAlphaOpaque(int Inst, int Tri, float u, float v)
     const uint  k  = q.y * gi_mask_texels_v + q.x;
     return ((GD[A + 1u + nT + (s - 1u) * gi_mask_words_v + k / 32u] >> (k % 32u)) & 1u) != 0u;
 }
+bool GIInstMasked(int Inst) { return (GD[InstRec(Inst) + 47u] & 256u) != 0u; }
+// (the alpha test costs registers in every ray loop that has it - the sharp reflections' list 3.0 -> 7.8 ms with it compiled in and no mask set:
+// only the shaders that ask for it, XLION_GI_ALPHA_RAYS before this file)
+#ifdef XLION_GI_ALPHA_RAYS
 #define GI_BVH_ALPHA
+#endif
 #include "xlionrender_gi_bvh.glsl"
 int g_Shadows = 0, g_ReadEntries = 0, g_Probes = 0;      // (diagnostics, with g_GIBvhVisits: gi::world::gpu_result::m_Work)
 int g_Accepted = 0;                                      // (diagnostics: the read entries that contributed, in the result's word 67)
