@@ -3903,6 +3903,8 @@ namespace xlionrender
                     material_slot* pFirst = nullptr;
                     for( auto& M : m_Materials ) if( M.m_bAlive && M.m_TileGraph == int(g) && TileMat(&M) ) { pFirst = &M; break; }
                     if( !pFirst ) continue;
+                    static const int s_TileSkip = [] { const char* p = xlionrender::Env("XLION_TILE_SKIP_GRAPH"); return p ? std::atoi(p) : -1; }();      // (measurement, A5 step 0: a graph's draw left out - its pixels unshaded)
+                    if( int(g) == s_TileSkip ) continue;
                     auto& G = m_TileGraphs[g];
                     if( !G.m_Pipeline.m_Private )
                     {
