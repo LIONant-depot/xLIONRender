@@ -372,6 +372,13 @@ void SurfelGIScreen(in const vec3 Ng, in const float Dist)
 bool g_bGIFaceD = false;
 vec3 g_GIFaceD  = vec3(0.0);
 float g_CapRoughness = 1.0, g_CapF0 = 0.04;     // (the material's, for the capture's specular passes: GIPixelGI's caller sets them)
+// XLION_TILE_ABLATE (measurement, A5 step 0: where the tile pass's time goes): bits in the tile push's graph word's high half - 1 no GI and
+// environment read, 2 no local lights, 4 no sun shadow lookup (lit)
+#ifdef XLION_TILE_PIXEL
+#define TILE_ABLATE(b) (((g_Tile.m_Graph >> 16u) & (b)) != 0u)
+#else
+#define TILE_ABLATE(b) false
+#endif
 void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in const vec3 inAlbedo, in const float inMetalic, in const vec3 inEmissiveColor)
 {
 #ifndef XLION_NO_GI_PIXEL
@@ -471,9 +478,11 @@ vec3 PBRLighting
 	vec3	ambient				= ambientDiffuse + ambientSpec;
 #ifndef XLION_LDR_OUTPUT
 	g_CapRoughness = inRoughness; g_CapF0 = inF0;
+	if (!TILE_ABLATE(1u)) {
 	GIPixelGI(inNormal, N, V, inAlbedo, inMetalic, inEmissiveColor);
 	ambient *= g_ScreenAO;
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, UBOLight.EnvParams.z > 1.5 ? fract(UBOLight.EnvParams.z) : max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO * g_ScreenAO);   // the sky probe
+	}
 #endif
 
 	// Early culls: Compute minimal for combined check (cheap ops, low divergence risk).
@@ -493,7 +502,7 @@ vec3 PBRLighting
 	// it, unless a debug view shows the pages; the footprint's derivatives stay outside the branch)
 	VSMFootprint(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
 	const bool bSunFacing = saturate(dot(N, normalize(UBOLight.wSpaceLightPos.xyz))) >= 1e-4 || UBOLight.VSMParams2.w >= 2.0;
-	float Shadow = UBOLight.wSpaceLightPos.w == 0.0 ? (bSunFacing ? SunShadowMasked(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, FaceN) : 0.0) : 1.0;
+	float Shadow = TILE_ABLATE(4u) ? 1.0 : UBOLight.wSpaceLightPos.w == 0.0 ? (bSunFacing ? SunShadowMasked(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz, FaceN) : 0.0) : 1.0;
 #endif
 	// xLIONRender: W == 0 is a directional light (XYZ = direction towards the light, no falloff); W > 0 a point
 	// light with that falloff radius. (The original treated W == 0 as a zero-radius point light: always black.)
@@ -513,7 +522,7 @@ vec3 PBRLighting
 	}
 	float	NdotL				= saturate(dot(N, L));
 #ifndef XLION_LDR_OUTPUT
-	const vec3 Local = LocalLights(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic);
+	const vec3 Local = TILE_ABLATE(2u) ? vec3(0.0) : LocalLights(N, V, NdotV, inAlbedo, F0, max(inRoughness, MIN_ROUGHNESS), inMetalic);
 #else
 	const vec3 Local = vec3(0.0);
 #endif

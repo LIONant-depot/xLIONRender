@@ -3926,7 +3926,8 @@ namespace xlionrender
                     C->setTextureTable(pFirst->m_Table);      // (bindless: the heaps' set)
                     C->setDynamicUBO(m_LightUBO, 1);
                     C->setDynamicUBO(m_StaticGeomUBO, 0);
-                    struct { xmath::fmat4 m_C2W; std::uint32_t m_Graph, m_Pad[3]; } Push{ W2C.Inverse(), std::uint32_t(g), {} };
+                    static const std::uint32_t s_TileAblate = [] { const char* p = xlionrender::Env("XLION_TILE_ABLATE"); return p ? std::uint32_t(std::atoi(p)) & 0xFFFFu : 0u; }();      // (measurement, A5 step 0: mb_standard_pbr.frag TILE_ABLATE)
+                    struct { xmath::fmat4 m_C2W; std::uint32_t m_Graph, m_Pad[3]; } Push{ W2C.Inverse(), std::uint32_t(g) | (s_TileAblate << 16), {} };
                     C->setPushConstants(Push);
                     C->setBuffer(m_FullscreenVB);
                     C->setBuffer(m_FullscreenIB);
