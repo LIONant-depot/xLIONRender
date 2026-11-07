@@ -2186,6 +2186,29 @@ namespace xlionrender
         auto Cmd = Window.StartRenderPass(m_ShadowPass);
 
             // The sun's virtual pages: each in its slot of the atlas, cleared, its casters (light-space rect test)
+            // (XLION_SH_SPLIT, measurement - G0 of gpu_driven_plan_2026-11-07.md: the shadow pass by part, GPU ms, mean of 120 frames: the sun's pages
+            // (clears + the CPU path), its skinned draws, its pairs; the lamps' likewise; the pages by kind)
+            static const bool s_bShSplit = xlionrender::Env("XLION_SH_SPLIT") != nullptr;
+            static xgpu::timestamps s_ShTS; static bool s_bShTS = false;
+            if( s_bShSplit && !s_bShTS ) s_bShTS = m_Device.Create(s_ShTS, { .m_Count = 7 }) == nullptr;
+            const bool bShTS = s_bShSplit && s_bShTS;
+            if( bShTS )
+            {
+                static std::vector<std::uint64_t> s_Ns; static double s_Sum[6] = {}; static int s_N = 0, s_Pages[4] = {};
+                if( s_ShTS.getResults(s_Ns) && s_Ns.size() >= 7 && s_Ns[6] >= s_Ns[0] )
+                {
+                    for( int k = 0; k < 6; ++k ) s_Sum[k] += s_Ns[k + 1] >= s_Ns[k] ? double(s_Ns[k + 1] - s_Ns[k]) * 1e-6 : 0.0;
+                    for( const auto& P : m_VSM.m_ToRender ) ++s_Pages[P.m_bMover ? 1 : 0];
+                    for( const auto& P : m_LocalPages.m_ToRender ) ++s_Pages[P.m_bMover ? 3 : 2];
+                    if( ++s_N == 120 )
+                    {
+                        std::printf("SHSPLIT mean of 120 frames, GPU ms: sun pages (clears + CPU path) %.3f, sun skinned %.3f, sun pairs %.3f, lamp pages %.3f, lamp skinned %.3f, lamp pairs %.3f; pages a frame: sun static %.1f mover %.1f, lamp static %.1f mover %.1f\n"
+                                   , s_Sum[0] / s_N, s_Sum[1] / s_N, s_Sum[2] / s_N, s_Sum[3] / s_N, s_Sum[4] / s_N, s_Sum[5] / s_N, s_Pages[0] / double(s_N), s_Pages[1] / double(s_N), s_Pages[2] / double(s_N), s_Pages[3] / double(s_N));
+                        std::fflush(stdout); s_N = 0; for( auto& v : s_Sum ) v = 0; for( auto& v : s_Pages ) v = 0;
+                    }
+                }
+                Cmd.WriteTimestamp(s_ShTS, 0);
+            }
             if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 0);
             m_ShadowDrawStats.m_PageClears += int(m_VSM.m_ToRender.size());      // (a viewport, a scissor and a clear draw each)
             m_ShadowDrawStats.m_CpuCasters  = int(AllCasters.size());
@@ -2214,12 +2237,14 @@ namespace xlionrender
                 DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return !(bSkinPages && IsSkin(i)) && Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); }, PageLOD(P.m_Key.m_Level));
                 pSunPage = nullptr;
             }
+            if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 1);
             if( bSkinPages && !m_VSM.m_ToRender.empty() )        // (the skinned casters into all their sun pages at once: one viewport over the sun's atlas)
             {
                 Cmd.setViewport(0.0f, 0.0f, float(sunAtlasWidth()), float(sunAtlasHeight()));
                 Cmd.setScissor(0, 0, sunAtlasWidth(), sunAtlasHeight());
                 DrawSkinPages(Cmd, SkinSun);
             }
+            if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 2);
             if( !m_VSM.m_ToRender.empty() && bPairs )      // the pairs: a draw a geometry, one viewport over the sun's atlas (each instance into its page)
             {
                 const int AW = sunAtlasWidth(), AH = sunAtlasHeight();
@@ -2228,6 +2253,7 @@ namespace xlionrender
                 DrawPairs(Cmd, false);
             }
             if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 1);
+            if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 3);
 
         // The local lights' pages (features/shadows/xlionrender_shadow_local_pages.h): each in its slot of the atlas's local part, cleared,
         // the casters its light's sphere reaches (once a light) in the page's frustum
@@ -2251,18 +2277,21 @@ namespace xlionrender
             const frustum Page = frustum::FromW2C(P.m_W2C);
             DrawCasters(Cmd, P.m_W2C, C, [&](std::uint32_t i) { return !(bSkinPages && IsSkin(i)) && (!m_bShadowSplitMovers || P.m_bWithMovers || Draws[i].m_bMover == P.m_bMover) && (!m_bShadowFaceCull || Page.Overlaps(Draws[i].m_World, false)); });
         }
+        if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 4);
         if( bSkinPages && !m_LocalPages.m_ToRender.empty() )        // (the skinned casters into all their local pages at once: one viewport over the local part)
         {
             Cmd.setViewport(float(LocalX), 0.0f, float(LocalW), float(LocalH));
             Cmd.setScissor(LocalX, 0, LocalW, LocalH);
             DrawSkinPages(Cmd, SkinLocal);
         }
+        if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 5);
         if( !m_LocalPages.m_ToRender.empty() && bPairs )      // the pairs' local runs: one viewport over the local part (each instance into its page)
         {
             Cmd.setViewport(float(LocalX), 0.0f, float(LocalW), float(LocalH));
             Cmd.setScissor(LocalX, 0, LocalW, LocalH);
             DrawPairs(Cmd, true);
         }
+        if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 6);
     }
 
     //------------------------------------------------------------------------------------------------
