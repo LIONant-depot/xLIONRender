@@ -37,6 +37,12 @@ endforeach()
 
 # The new renderer (xlionrender::instance, see documentation/xlion_renderer_research.md): an INTERFACE library like
 # xGPU - every binary that links it compiles its own copy (instances are per binary, there are no globals). Its
+# XLIONRENDER_SHADER_DEBUG: the shaders with their source (glslc -g) - Nsight's shader profiler then shows GLSL lines, not SPIR-V's
+option(XLIONRENDER_SHADER_DEBUG "xLIONRender shaders with debug info (profiling)" OFF)
+set(XLIONRENDER_GLSLC_FLAGS)
+if(XLIONRENDER_SHADER_DEBUG)
+  set(XLIONRENDER_GLSLC_FLAGS -g)
+endif()
 # shaders include the shared library in src/shaders, hence -I.
 set(XLIONRENDER_LIB_SHADERS)
 foreach(STAGE_PAIR "vert:xlionrender_forward_vert" "frag:xlionrender_forward_standard_frag" "vert:xlionrender_fullscreen_vert"
@@ -48,7 +54,7 @@ foreach(STAGE_PAIR "vert:xlionrender_forward_vert" "frag:xlionrender_forward_sta
   file(GLOB XLIONRENDER_SHADER_LIBRARY CONFIGURE_DEPENDS "${XLIONRENDER_SHADER_DIR}/*")
   add_custom_command(
     OUTPUT ${SHADER_OUT}
-    COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=${STAGE} --target-env=vulkan1.2 -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
+    COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=${STAGE} --target-env=vulkan1.2 ${XLIONRENDER_GLSLC_FLAGS} -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
     DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
     COMMENT "Compiling xLIONRender ${STAGE} shader ${NAME}"
   )
@@ -61,7 +67,7 @@ foreach(NAME xlionrender_forward_standard_frag xlionrender_geom_standard_frag xl
   file(GLOB XLIONRENDER_SHADER_LIBRARY CONFIGURE_DEPENDS "${XLIONRENDER_SHADER_DIR}/*")
   add_custom_command(
     OUTPUT ${SHADER_OUT}
-    COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=frag --target-env=vulkan1.2 -DXLION_GBUFFER_OUTPUT -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
+    COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=frag --target-env=vulkan1.2 ${XLIONRENDER_GLSLC_FLAGS} -DXLION_GBUFFER_OUTPUT -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/${NAME}.glsl" -mfmt=num -o ${SHADER_OUT}
     DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
     COMMENT "Compiling xLIONRender G-buffer variant ${NAME}"
   )
@@ -72,7 +78,7 @@ set(SHADER_OUT "${CMAKE_BINARY_DIR}/sprv_shaders_h/xlionrender_gi_surfel_pass_co
 file(GLOB XLIONRENDER_SHADER_LIBRARY CONFIGURE_DEPENDS "${XLIONRENDER_SHADER_DIR}/*")
 add_custom_command(
   OUTPUT ${SHADER_OUT}
-  COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=comp --target-env=vulkan1.2 -DGI_NO_CLUSTERED -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/xlionrender_gi_surfel_pass_comp.glsl" -mfmt=num -o ${SHADER_OUT}
+  COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=comp --target-env=vulkan1.2 ${XLIONRENDER_GLSLC_FLAGS} -DGI_NO_CLUSTERED -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/xlionrender_gi_surfel_pass_comp.glsl" -mfmt=num -o ${SHADER_OUT}
   DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
   COMMENT "Compiling xLIONRender compute shader xlionrender_gi_surfel_pass_comp (no clustered subgroups)"
 )
@@ -81,7 +87,7 @@ list(APPEND XLIONRENDER_LIB_SHADERS ${SHADER_OUT})
 set(SHADER_OUT "${CMAKE_BINARY_DIR}/sprv_shaders_h/xlionrender_gi_gather_frag_heat.h")
 add_custom_command(
   OUTPUT ${SHADER_OUT}
-  COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=frag --target-env=vulkan1.2 -DXLION_HEAT -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/xlionrender_gi_gather_frag.glsl" -mfmt=num -o ${SHADER_OUT}
+  COMMAND ${XLIONRENDER_GLSLC} -fshader-stage=frag --target-env=vulkan1.2 ${XLIONRENDER_GLSLC_FLAGS} -DXLION_HEAT -I "${XLIONRENDER_SHADER_DIR}" "${XLIONRENDER_SHADER_DIR}/xlionrender_gi_gather_frag.glsl" -mfmt=num -o ${SHADER_OUT}
   DEPENDS ${XLIONRENDER_SHADER_LIBRARY}
   COMMENT "Compiling xLIONRender fragment shader xlionrender_gi_gather_frag (timed: XLION_HEAT)"
 )
