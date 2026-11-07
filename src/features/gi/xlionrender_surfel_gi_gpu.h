@@ -975,6 +975,8 @@ namespace xlionrender::gi
             Push.m_First |= s_DirsBits;
             static const bool s_bCoherent = xlionrender::Env("XLION_VOX_COHERENT") != nullptr;
             if (s_bCoherent) Push.m_First |= 8;
+            static const bool s_bNoSunShadow = xlionrender::Env("XLION_VOX_NO_SUN_SHADOW") != nullptr;      // (measurement: the hits' sun shadow ray left out)
+            if (s_bNoSunShadow) Push.m_First |= 32768;
             static const double s_HitCachedAfter = [] { const char* p = xlionrender::Env("XLION_VOX_HIT_CACHED"); return p ? std::atof(p) : 0.0; }();      // (seconds after the first rays: a warm cache first)
             static const auto s_HitT0 = std::chrono::steady_clock::now();
             if (s_HitCachedAfter > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - s_HitT0).count() > s_HitCachedAfter) Push.m_First |= 16;
