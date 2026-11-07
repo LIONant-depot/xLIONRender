@@ -1523,6 +1523,7 @@ namespace xlionrender
         if( bRecords ) UniformBinds.push_back(VertexSSBO(12)); // the draws' records (GPU culling)
         if( bPairsCut ) UniformBinds.push_back(VertexSSBO(13)); // the pairs' pages
         UniformBinds.push_back(FragmentSSBO(14));               // the denoised screen tail (light_mode::SCREEN)
+        if( m_pBuildTile ) UniformBinds.push_back(FragmentSSBO(15));      // the tile pass: A5.0's light funnel counters (XLION_TILE_ABLATE bit 8)
         const auto Binds = std::span{ UniformBinds };
         xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_pBuildTile ? m_FullscreenVD : bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                    , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)

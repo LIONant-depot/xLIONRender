@@ -3896,6 +3896,31 @@ namespace xlionrender
             const auto TilePass = [&]
             {
                 int nTileDraws = 0;
+                // A5.0's light funnel (XLION_TILE_ABLATE bit 8, measurement): the counters zeroed before the pass, copied into a ring after it;
+                // a TILECOUNT line every 120 frames (xlionrender_local_lights.glsl LOCAL_COUNT)
+                static const bool s_bTileCount = [] { const char* p = xlionrender::Env("XLION_TILE_ABLATE"); return p && (std::atoi(p) & 8) != 0; }();
+                if( s_bTileCount && bMain && !m_TileCount.m_Private )
+                {
+                    const std::uint32_t Z[16] = {};
+                    (void)m_Device.Create(m_TileCount, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 4, .m_pData = const_cast<std::uint32_t*>(Z), .m_pName = "Tile pass: the light funnel's counters" });
+                    (void)m_Device.Create(m_TileCountStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 4 * ring_frames_v, .m_pName = "Tile pass: the light funnel a frame" });
+                }
+                if( m_TileCount.m_Private && bMain )
+                {
+                    const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+                    std::uint32_t C[16] = {};
+                    (void)m_TileCountStats.MemoryMap(4 * Slot, 4, [&](void* p) { std::memcpy(C, p, sizeof(C)); });
+                    if( C[0] ) { for( int k = 0; k < 9; ++k ) m_TileCountSum[k] += C[k]; ++m_TileCountN; }
+                    if( m_TileCountN == 120 )
+                    {
+                        const double* S = m_TileCountSum; const double px = S[0] / 120.0;
+                        std::printf("TILECOUNT a frame: %.0f pixels lit by locals (%.0f in a cell); a pixel: %.2f candidates, %.2f in range, %.2f in range and cone, %.2f lit side (shadow entered), %.2f fully shadowed, %.2f contributing; outside the cells %.1f lights walked\n",
+                            px, S[1] / 120.0, S[2] / S[0], S[3] / S[0], S[4] / S[0], S[5] / S[0], S[6] / S[0], S[7] / S[0], S[8] / 120.0);
+                        std::fflush(stdout); for( auto& v : m_TileCountSum ) v = 0; m_TileCountN = 0;
+                    }
+                    const xgpu::buffer::copy Zc{ 0, 0, 4 };
+                    Window.CopyBuffer(View.m_GIScreenZeros, m_TileCount, std::span{ &Zc, 1 });
+                }
                 View.m_TileInstances.resize(m_TileGraphs.size());
                 std::optional<xgpu::cmd_buffer> C;
                 for( std::size_t g = 0; g < m_TileGraphs.size(); ++g )
@@ -3921,7 +3946,8 @@ namespace xlionrender
                         if( m_Device.Create(Inst, { .m_PipeLine = G.m_Pipeline, .m_SamplersBindings = Bindings }) ) continue;
                     }
                     if( !C ) C.emplace(Window.StartRenderPass(View.m_TilePass));
-                    std::array<xgpu::buffer*, 10> Buffers{ &m_GIDummy, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &View.m_GIScreenBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+                    std::array<xgpu::buffer*, 11> Buffers{ &m_GIDummy, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &View.m_GIScreenBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer()
+                                                         , m_TileCount.m_Private ? &m_TileCount : &m_GIDummy };
                     C->setPipelineInstance(Inst, std::span{ Buffers });
                     C->setTextureTable(pFirst->m_Table);      // (bindless: the heaps' set)
                     C->setDynamicUBO(m_LightUBO, 1);
@@ -3934,6 +3960,7 @@ namespace xlionrender
                     C->Draw(3);
                     ++nTileDraws;
                 }
+                if( m_TileCount.m_Private && bMain && C ) { C.reset(); const xgpu::buffer::copy Cc{ 0, 4 * int(m_Device.getFrameIndex() % ring_frames_v), 4 }; Window.CopyBuffer(m_TileCount, m_TileCountStats, std::span{ &Cc, 1 }); }
                 static const bool s_bTileLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static int s_TileN = 0;     // (measurement: the full-screen draws a frame - one a graph)
                 if( s_bTileLog && ++s_TileN % 600 == 0 ) { std::printf("TILEPASS %d full-screen draws (graphs) of %zu\n", nTileDraws, m_TileGraphs.size()); std::fflush(stdout); }
             };

@@ -35,6 +35,15 @@ void PBRDirectDemod(in const vec3 N, in const vec3 V, in const float NdotV, in c
 
 layout(std430, set = 1, binding = 3) readonly buffer LocalLightBuffer { LocalLightData LocalLightList[]; };
 layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint LightCells[]; };
+#ifdef XLION_TILE_PIXEL
+// A5.0's light funnel (XLION_TILE_ABLATE bit 8, measurement; instance: the tile pipelines' binding 15): [0] pixels shaded, [1] in a cell,
+// [2] candidates visited, [3] in range, [4] in range and cone, [5] lit side (the unshadowed term not 0: shadow entered), [6] shadow fully
+// 0, [7] contributing (shadow > 0), [8] lights a pixel outside the cells walks
+layout(std430, set = 1, binding = 15) buffer TileCountBuffer { uint TileCount[]; };
+#define LOCAL_COUNT(k) { if (((g_Tile.m_Graph >> 16u) & 8u) != 0u) atomicAdd(TileCount[k], 1u); }
+#else
+#define LOCAL_COUNT(k) {}
+#endif
 #ifndef XLION_TAIL_SCREEN
 // The denoised screen tail (instance: the tail pass and the denoiser, xlionrender_tail_denoise_comp.glsl): a record a half-size texel - x:
 // the diffuse's rg, y: its b and the specular's r, z: the specular's gb (halves, demodulated), w: the surface's view depth (clip w; half,
@@ -304,11 +313,13 @@ vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in c
     const float Dist    = length(ToLight);
     const float s       = Dist / Ld.PosRadius.w;
     if (s >= 1.0 || Dist < 1e-6) return vec3(0.0);
+    LOCAL_COUNT(3u)
     float Att = LightDistanceFalloff(s, 1.0);
     const vec3 L = ToLight / Dist;
     if (Ld.DirCosOuter.w > -1.5) Att *= LightSpotCone(dot(-L, Ld.DirCosOuter.xyz), Ld.DirCosOuter.w, Ld.Color.w);
     else if (Ld.DirCosOuter.w < -2.5) Att = LocalEmitterAtt(Ld, L, Dist, s);
     if (Att * LocalAttScale(Ld) < 1e-4) return vec3(0.0);
+    LOCAL_COUNT(4u)
     return PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att;
 }
 
@@ -377,9 +388,13 @@ float LocalLightShadow(in const int i, in const vec3 N)
 // One light's contribution at the surface (0 outside its radius)
 vec3 LocalLight(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
 {
+    LOCAL_COUNT(2u)
     const vec3 Direct = LocalLightUnshadowed(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
     if (all(equal(Direct, vec3(0.0)))) return vec3(0.0);                       // (facing away: no shadow lookups)
-    return Direct * LocalLightShadow(i, N);
+    LOCAL_COUNT(5u)
+    const float Sh = LocalLightShadow(i, N);
+    if (Sh <= 0.0) LOCAL_COUNT(6u) else LOCAL_COUNT(7u)
+    return Direct * Sh;
 }
 
 // The cell holding a world position: the finest level whose window holds it (-1: none)
@@ -574,9 +589,13 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     if (UBOLight.LocalCount.x < 0.5) return Sum;                       // (no lights: no cells either)
     const int Mode = int(UBOLight.LocalCount.y);
     const int Cell = Mode == 0 ? -1 : LocalLightCell(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
+    LOCAL_COUNT(0u)
     if (Cell < 0)
     {
         const int Count = int(UBOLight.LocalCount.x);
+#ifdef XLION_TILE_PIXEL
+        if (((g_Tile.m_Graph >> 16u) & 8u) != 0u) atomicAdd(TileCount[8], uint(Count));
+#endif
         for (int i = 0; i < Count; ++i) Sum += LocalLight(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
         return Sum;
     }
@@ -586,6 +605,7 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     const uint EntryBase = Base + uint(2 * kCellLevels * kLevelCells);
     const uint First     = LightCells[Base + 2u * uint(Cell)], Count = Header & 0xFFFFFFu, Head = Header >> 24;
     const uint nExact = Mode == 1 ? Count : Head;
+    LOCAL_COUNT(1u)
     bool bInlineTail = Mode == 2;
 #ifndef XLION_TAIL_SCREEN
     if (Mode == 3 && Count > Head)

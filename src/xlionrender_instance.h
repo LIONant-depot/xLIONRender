@@ -466,6 +466,9 @@ namespace xlionrender
         // The material tile pass (XLION_TILE; SetMaterialTile): a graph's tile variant and its full-screen pipeline, made from a material of the graph
         struct tile_graph { xgpu::shader m_Frag; xgpu::pipeline m_Pipeline; };
         std::vector<tile_graph>     m_TileGraphs;
+        xgpu::buffer                m_TileCount, m_TileCountStats;      // (XLION_TILE_ABLATE bit 8: the light funnel's counters, a ring for the TILECOUNT line)
+        double                      m_TileCountSum[9] = {};
+        int                         m_TileCountN = 0;
         xgpu::shader                m_TileVert;
         const tile_graph*           m_pBuildTile = nullptr;         // (buildMaterialPipeline: that pipeline)
         xgpu::shader                m_NoiseLagsShader;              // XLION_NOISE_LAGS (xlionrender_noise_lags_comp.glsl): the noise by lag, at the real frame rate
