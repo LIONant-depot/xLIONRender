@@ -6,6 +6,9 @@
 // the local mean; no vertex read: no vertices here), into the same buffer the scene pass upsamples, with the same temporal reuse
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
+#ifdef XLION_HEAT
+#extension GL_ARB_shader_clock : require
+#endif
 #include "xlionrender_surfel_gi.glsl"
 #include "xlionrender_gi_gather_common.glsl"
 
@@ -46,6 +49,9 @@ layout(std430, set = 1, binding = 23) readonly buffer GIRefAccumBuffer { vec4 GI
 // (XLION_VOX_PUBLISHED: binding 24 the published light - xlionrender_vox_levels.glsl)
 layout(std430, set = 1, binding = 24) buffer PubBuffer { uvec4 Pub[]; };
 layout(std430, set = 1, binding = 24) buffer PubBufferU { uint PubU[]; };
+#ifdef XLION_HEAT
+layout(std430, set = 1, binding = 25) buffer HeatBuffer { uint Heat[]; };     // XLION_HEAT: this pass's clock a pixel (xlionrender_heat_comp.glsl), after a 4-uint header
+#endif
 #define VOX_READ_SCREEN
 #define VOX_PUBLISHED_BUFFER
 #include "xlionrender_vox_levels.glsl"
@@ -213,6 +219,13 @@ vec3 ScreenNormal(in const uint w)
 
 void main()
 {
+#ifdef XLION_HEAT
+    const uint HeatT0 = clock2x32ARB().x;          // (the subgroup's clock: its lanes' cost together, stalls included)
+    {   // (the header's [2] subgroups, [3] their pixels: how full the passes' subgroups are - helpers left out)
+        const uint nLanes = subgroupBallotBitCount(subgroupBallot(!gl_HelperInvocation));
+        if (subgroupElect()) { atomicAdd(Heat[2], 1u); atomicAdd(Heat[3], nLanes); }
+    }
+#endif
     const ivec2 P = ivec2(gl_FragCoord.xy);
     const gather_sample S = GatherSample(P);
 
@@ -386,6 +399,9 @@ void main()
                     (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFFu) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u) | (bE && bWeak ? 3u << 28 : 0u));     // (age 3, never a fresh one's: weak - a hole in the surfels' coverage, the Cornell cube's dashes)
     }
     if (bIn && !(bKeep && push.AO != 0u)) GIScreen[screen_header_v + uint(P.y) * W + uint(P.x)] = Out;
+#ifdef XLION_HEAT
+    if (bIn) Heat[4u + uint(P.y) * W + uint(P.x)] = max(clock2x32ARB().x - HeatT0, 1u);
+#endif
 
     const uvec4 Mine = bIn ? uvec4(Kind == 0u ? 1u : 0u, Kind == 1u ? 1u : 0u, Kind == 2u ? 1u : 0u, Kind == 3u ? 1u : 0u) : uvec4(0u);
     const uvec4 Sum  = subgroupAdd(Mine);

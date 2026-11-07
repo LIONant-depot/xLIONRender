@@ -168,6 +168,12 @@ namespace xlionrender
         constexpr std::uint32_t s_GIPublishComp[] = {
             #include "xlionrender_gi_publish_comp.h"
         };
+        constexpr std::uint32_t s_GIGatherFragHeat[] = {
+            #include "xlionrender_gi_gather_frag_heat.h"
+        };
+        constexpr std::uint32_t s_HeatComp[] = {
+            #include "xlionrender_heat_comp.h"
+        };
         constexpr std::uint32_t s_ContactComp[] = {
             #include "xlionrender_contact_comp.h"
         };
@@ -702,7 +708,7 @@ namespace xlionrender
                     xgpu::shader GatherVert, ClassifyFrag, GatherFrag;
                     if( auto Err = Device.Create(GatherVert,   { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GIGatherVert) }); Err ) return Err;
                     if( auto Err = Device.Create(ClassifyFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIClassifyFrag) }); Err ) return Err;
-                    if( auto Err = Device.Create(GatherFrag,   { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIGatherFrag) }); Err ) return Err;
+                    if( auto Err = Device.Create(GatherFrag,   { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xlionrender::Env("XLION_HEAT") ? SPIRV(s_GIGatherFragHeat) : SPIRV(s_GIGatherFrag) }); Err ) return Err;
                     using ub = xgpu::pipeline::uniform_binds;
                     auto GatherBinds = std::array
                     { ub{ .m_BindIndex = 1,  .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
@@ -717,6 +723,7 @@ namespace xlionrender
                     , ub{ .m_BindIndex = 22, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // the ground truth (XLION_GI_REF): the points
                     , ub{ .m_BindIndex = 23, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     //   and their means
                     , ub{ .m_BindIndex = 24, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // the published voxel light (XLION_VOX_PUBLISHED)
+                    , ub{ .m_BindIndex = 25, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // XLION_HEAT: the clock a pixel (render_view::m_HeatBuffer)
                     };
                     auto ClassifyShaders = std::array<const xgpu::shader*, 2>{ &ClassifyFrag, &GatherVert };
                     auto GatherShaders   = std::array<const xgpu::shader*, 2>{ &GatherFrag, &GatherVert };
@@ -844,6 +851,8 @@ namespace xlionrender
             if( auto Err = Device.Create(m_GIDenoiseCompute, { .m_pShader = &m_GIDenoiseShader, .m_nBuffers = 4, .m_PushConstantsSize = 32 }); Err ) return Err;
             if( auto Err = Device.Create(m_GIPublishShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIPublishComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_GIPublishCompute, { .m_pShader = &m_GIPublishShader, .m_nBuffers = 3, .m_PushConstantsSize = 16 }); Err ) return Err;
+            if( auto Err = Device.Create(m_HeatShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_HeatComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_HeatCompute, { .m_pShader = &m_HeatShader, .m_nBuffers = 1, .m_nImages = 1, .m_PushConstantsSize = 16 }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80 }); Err ) return Err;
@@ -1922,6 +1931,11 @@ namespace xlionrender
 
     void instance::destroyGIScreenTargets( render_view& View ) noexcept
     {
+        // (XLION_HEAT's: sized as these)
+        if( View.m_HeatToneMap.m_Private ) m_Device.Destroy(std::move(View.m_HeatToneMap));
+        if( View.m_HeatTex.m_Private ) m_Device.Destroy(std::move(View.m_HeatTex));
+        if( View.m_HeatBuffer.m_Private ) ReleaseBuffer(View.m_HeatBuffer);
+        if( View.m_HeatStats.m_Private ) ReleaseBuffer(View.m_HeatStats);
         if( View.m_GIScreenPass.m_Private )   m_Device.Destroy(std::move(View.m_GIScreenPass));
         if( View.m_GIScreenColor.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenColor));
         if( View.m_GIScreenDepth.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenDepth));

@@ -53,6 +53,13 @@ namespace xlionrender
         bool                    m_bTAAHistory = false;
         xmath::fmat4            m_TAAPrevW2C{};         // without the jitter
         xmath::fvec3            m_TAAPrevEye{};
+        // XLION_HEAT (measurement): the GI gather's clock a pixel (4-uint header, then the gather's grid), its colours (xlionrender_heat_comp.glsl),
+        // the header a ring slot for the HEAT line, the tone mapper over m_HDR with the colours in the bloom's slot; made the first time it is on
+        xgpu::buffer            m_HeatBuffer, m_HeatStats;
+        xgpu::texture           m_HeatTex;
+        xgpu::pipeline_instance m_HeatToneMap;
+        double                  m_HeatSum = 0.0, m_HeatN = 0.0, m_HeatLanes = 0.0, m_HeatGroups = 0.0;
+        int                     m_HeatFrames = 0;
         xgpu::pipeline_instance m_BlitInstance;         // samples m_Output, for instance::Blit
         // The selection's outline (instance::renderOutline), made the first time something is selected: the mask (R: covered, G: in plain sight) with a
         // depth of its own, its pass, the casters' pipelines with the mask's fragment (they sample m_Depth), and the composite over m_Output (it samples m_Mask)

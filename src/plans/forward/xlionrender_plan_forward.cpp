@@ -3680,12 +3680,29 @@ namespace xlionrender
                         Window.CopyBuffer(m_VoxPubFrameB, m_VoxPub, std::span{ &Fc, 1 });
                     }
                 }
+                // XLION_HEAT (measurement, 2026-11-08): the gather's clock a pixel, shown as colours over a grey image (xlionrender_heat_comp.glsl), a HEAT
+                // line with its mean every 120 frames; its buffers made the first time (the gather built timed: instance.cpp)
+                static const bool s_bHeat = xlionrender::Env("XLION_HEAT") != nullptr;
+                const int HeatW = View.m_GIScreenWidth, HeatH = View.m_GIScreenHeight;
+                if( s_bHeat && !View.m_HeatBuffer.m_Private )
+                {
+                    const std::vector<std::uint32_t> Z(4 + std::size_t(HeatW) * HeatH + 3, 0u);
+                    bool bOk = !m_Device.Create(View.m_HeatBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Z.size() / 4), .m_pData = const_cast<std::uint32_t*>(Z.data()), .m_pName = "Heat: the gather's clock a pixel" })
+                            && !m_Device.Create(View.m_HeatStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v, .m_pName = "Heat: the header a frame" })
+                            && !m_Device.Create(View.m_HeatTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = HeatW, .m_Height = HeatH, .m_isGamma = false, .m_bStorage = true, .m_pName = "Heat: colours" });
+                    if( bOk ) { auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_HDR }, xgpu::pipeline_instance::sampler_binding{ View.m_HeatTex }, xgpu::pipeline_instance::sampler_binding{ View.m_ExposureTex } };
+                                bOk = !m_Device.Create(View.m_HeatToneMap, { .m_PipeLine = m_ToneMapPipeline, .m_SamplersBindings = Bindings }); }
+                    if( !bOk ) std::printf("HEAT: its buffers could not be made\n");
+                }
+                const bool bHeat = s_bHeat && View.m_HeatToneMap.m_Private;
+                if( bHeat ) { const xgpu::buffer::copy Hc{ 0, 0, 1 }; Window.CopyBuffer(View.m_GIScreenZeros, View.m_HeatBuffer, std::span{ &Hc, 1 }); }
                 {
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
                     const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()), bAO ? (s_bSSGI ? 2u : 1u) : 0u };
-                    std::array<xgpu::buffer*, 12> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO, m_pGatherClip ? m_pGatherClip : &m_GIDummy
-                                                         , m_pGatherRefS ? m_pGatherRefS : &m_GIDummy, m_pGatherRefA ? m_pGatherRefA : &m_GIDummy, bVoxPub && m_VoxPub.m_Private ? &m_VoxPub : &m_GIDummy };
+                    std::array<xgpu::buffer*, 13> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO, m_pGatherClip ? m_pGatherClip : &m_GIDummy
+                                                         , m_pGatherRefS ? m_pGatherRefS : &m_GIDummy, m_pGatherRefA ? m_pGatherRefA : &m_GIDummy, bVoxPub && m_VoxPub.m_Private ? &m_VoxPub : &m_GIDummy
+                                                         , bHeat ? &View.m_HeatBuffer : &m_GIDummy };
                     GCmd.setPipelineInstance(View.m_GIClassifyInstance, std::span{ Buffers });
                     GCmd.setPushConstants(Push);
                     GCmd.setBuffer(m_FullscreenVB);
@@ -3702,6 +3719,20 @@ namespace xlionrender
                         GCmd.Draw(3);
                     }
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 3);
+                }
+                if( bHeat )
+                {
+                    const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+                    std::uint32_t Hd[4] = {};
+                    (void)View.m_HeatStats.MemoryMap(Slot, 1, [&](void* p) { std::memcpy(Hd, p, sizeof(Hd)); });      // (ring_frames_v frames ago's)
+                    if( Hd[1] ) { View.m_HeatSum += double(Hd[0]) * 256.0 / Hd[1]; View.m_HeatN += Hd[1]; }
+                    if( Hd[2] ) { View.m_HeatLanes += double(Hd[3]) / Hd[2]; View.m_HeatGroups += Hd[2]; }
+                    if( ++View.m_HeatFrames == 120 ) { std::printf("HEAT gather: mean %.0f cycles a pixel (its subgroup's), %.0f pixels a frame; %.0f subgroups a frame, %.1f pixels each\n", View.m_HeatSum / 120.0, View.m_HeatN / 120.0, View.m_HeatGroups / 120.0, View.m_HeatLanes / 120.0); std::fflush(stdout); View.m_HeatSum = View.m_HeatN = View.m_HeatLanes = View.m_HeatGroups = 0.0; View.m_HeatFrames = 0; }
+                    const std::uint32_t HPush[4] = { std::uint32_t(HeatW), std::uint32_t(HeatH), 0u, 0u };
+                    auto HB = std::array<xgpu::buffer*, 1>{ &View.m_HeatBuffer }; const xgpu::texture* HI[] = { &View.m_HeatTex };
+                    Window.Dispatch(m_HeatCompute, HB, std::span<const xgpu::texture* const>{}, HI, HPush, sizeof(HPush), (HeatW + 7) / 8, (HeatH + 7) / 8);
+                    const xgpu::buffer::copy Hc{ 0, Slot, 1 };
+                    Window.CopyBuffer(View.m_HeatBuffer, View.m_HeatStats, std::span{ &Hc, 1 });
                 }
                 // The voxels' read cleaned on the screen (XLION_GI_DENOISE="<strides as cells> <largest stride>"; two passes, the second on the first)
                 static const std::array<float, 2> s_Denoise = [] { std::array<float, 2> A{ 0.0f, 32.0f }; if( const char* p = xlionrender::Env("XLION_GI_DENOISE") ) (void)xlionrender::Scan(p, "%f %f", &A[0], &A[1]); return A; }();
@@ -4938,8 +4969,9 @@ namespace xlionrender
                 }
             }
             auto Cmd = Window.StartRenderPass(View.m_OutputPass);
-            Cmd.setPipelineInstance(*pToneMap);
-            Cmd.setPushConstants(details::push_tonemap{ { View.m_Exposure, Bloom, bAuto ? 1.0f : 0.0f, 0 }, View.m_Background });
+            const bool bHeatView = View.m_HeatToneMap.m_Private != nullptr;       // (XLION_HEAT: the gather's clock over a grey image)
+            Cmd.setPipelineInstance(bHeatView ? View.m_HeatToneMap : *pToneMap);
+            Cmd.setPushConstants(details::push_tonemap{ { View.m_Exposure, Bloom, bAuto ? 1.0f : 0.0f, bHeatView ? 1.0f : 0.0f }, View.m_Background });
             Cmd.setBuffer(m_FullscreenVB);
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
