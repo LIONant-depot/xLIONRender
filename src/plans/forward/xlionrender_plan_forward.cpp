@@ -3207,7 +3207,7 @@ namespace xlionrender
                 const int  Rate      = s_TemporalEnv > 0 ? s_TemporalEnv : Scene.m_GI.m_TemporalRate;
                 const std::uint32_t RateLog2 = Rate >= 4 ? 2u : Rate >= 2 ? 1u : 0u;
                 const int  CSlot = int(m_Device.getFrameIndex() % ring_frames_v);
-                (void)View.m_GIScreenCounters.MemoryMapFrameRegion(CSlot, 1, [&](void* p)         // (this slot's frame is done: its counters)
+                (void)View.m_GIScreenCounters.MemoryMap(CSlot, 1, [&](void* p)         // (this slot's frame is done: its counters)
                 {
                     const auto* pC = static_cast<const std::uint32_t*>(p);
                     m_GIStats.m_nScreenFresh = int(pC[0]); m_GIStats.m_nScreenReprojected = int(pC[1]); m_GIStats.m_nScreenRejected = int(pC[2]); m_GIStats.m_nScreenAged = int(pC[3]);
