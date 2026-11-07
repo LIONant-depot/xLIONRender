@@ -9,7 +9,11 @@ const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
 const float vox_layers_v = 4.0;            // (xlionrender_gi_ref_comp.glsl)
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
 uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
-uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
+// A record's three uvec4 by role (gi_store_read_sector_plan_2026-11-08.md): X0 and X1 what a read takes (a face: its value; its tag, leans), X2 the
+// writer's. An even slot X0 X1 X2, an odd one X2 X0 X1: X0, X1 one 32-byte sector for every record (they are 48 bytes). VoxEntryOf: X0; X1 = X0 + 1;
+// VoxX2Of. Every kind: the tag X1.x, its last write's time X2.w, the direction bins' marker 1.0 X1.y
+uint VoxEntryOf(in const uint h) { const uint s = h % vox_slots_v; return 3u * s + (s & 1u); }
+uint VoxX2Of(in const uint e) { return (e % 3u) == 0u ? e + 2u : e - 1u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
 const bool vox_lean_v = true;
 // (A15, the lean moments the store keeps - xlionrender_gi_ref.glsl VoxStore: the light's slope across the normals that fed a face, by component, at this reader's normal; a ratio, clamped)
@@ -18,7 +22,7 @@ float VoxLeanScale(in const vec4 v, in const uint Wv, in const uvec4 dU, in cons
     if (!vox_lean_v) return 1.0;
     const int  u = (a + 1) % 3, w = (a + 2) % 3;
     const float El2 = unpackHalf2x16(Wv).y, Lm = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w;
-    const vec2 EL = unpackHalf2x16(dU.z & ~1u), El = unpackHalf2x16(dU.w);
+    const vec2 EL = unpackHalf2x16(dU.y & ~1u), El = unpackHalf2x16(dU.z);
     if (Lm <= 1e-4 || v.w < 8.0) return 1.0;
     const float Var = max(0.5 * (El2 - dot(El, El)), 0.01);      // (the leans' spread, one number for both: the spare words hold six)
     const vec2  S = (EL - Lm * El) / Var;
@@ -82,7 +86,7 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
             {
                 const uint h = VoxHash(L, iv + o, Face), e = VoxEntryOf(h);
                 // (each corner its mean, trusted up to 32 samples: by raw count a corner with thousands of samples drowned one with dozens, the light outdoors over the floor indoors)
-                const uvec4 dU = GIClip[e + 2u];
+                const uvec4 dU = GIClip[e + 1u];
                 float Reach = 1.0;
 #ifdef VOX_READ_SCREEN
                 if (g_ReachMargin > 0.0 && L <= 1)      // (the fine levels: a coarse cell's corners are far - the leak is a fine level's)
@@ -91,7 +95,7 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
                     Reach = VoxReach(Pw + n * g_ReachMargin, Cw + n * g_ReachMargin);
                 }
 #endif
-                if (uintBitsToFloat(dU.x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t * Reach; Num += v.rgb / v.w * VoxLeanScale(v, GIClip[e + 1u].w, dU, n, a) * cw; Den += cw; Raw += min(v.w, 256.0) * t; } }
+                if (uintBitsToFloat(dU.x) == VoxTagOf(h)) { const vec4 v = uintBitsToFloat(GIClip[e]); if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t * Reach; Num += v.rgb / v.w * VoxLeanScale(v, dU.w, dU, n, a) * cw; Den += cw; Raw += min(v.w, 256.0) * t; } }
                 continue;
             }
             const uint  e = (uint(L) * uint(clip_dim_v * clip_dim_v * clip_dim_v) + uint(q.x) + uint(q.y) * uint(clip_dim_v) + uint(q.z) * uint(clip_dim_v * clip_dim_v)) * 6u + Face;

@@ -80,19 +80,19 @@ void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const v
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     // Atomic: lanes sharing a bin read, added and wrote over each other: samples lost, a bin's sum and its sky from different lanes. Its halving in a pass of its own (VoxMain, -4), one owner.
     // Entry e and e + 1: rgb by bin_scale_v, count; z of e + 2: 1, a bin
-    const uint TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 2u].x;
+    const uint TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 1u].x;
     if (Cur != TagU)
     {
-        if (Cur != 0u && abs(Now - GIRefAccum[e + 2u].y) < 120.0) return;
-        if (atomicCompSwap(GIRefAccumU[e + 2u].x, Cur, TagU) != Cur) return;
-        GIRefAccumU[e] = uvec4(0u); GIRefAccumU[e + 1u] = uvec4(0u); GIRefAccumU[e + 2u].z = floatBitsToUint(1.0);
+        if (Cur != 0u && abs(Now - GIRefAccum[VoxX2Of(e)].w) < 120.0) return;
+        if (atomicCompSwap(GIRefAccumU[e + 1u].x, Cur, TagU) != Cur) return;
+        GIRefAccumU[e] = uvec4(0u); GIRefAccumU[VoxX2Of(e)] = uvec4(0u); GIRefAccumU[e + 1u].yzw = uvec3(floatBitsToUint(1.0), 0u, 0u);
     }
     // (XLION_VOX_NO_BIN_PDF to turn it off, m_First's bit 2: a bin's mean over its directions, not by the cosine the rays came with: self normalized by 1 / pdf, clamped at a cosine of 0.1. The count in sixteenths; off, 16 a ray)
     const uint  w16 = (Push.m_First & 4) != 0 ? uint(16.0 / max(dot(N, g_VoxRayD), 0.1) + 0.5) : 16u;
     const uvec3 q = uvec3(clamp(Sample, vec3(0.0), vec3(4000.0)) * 16.0 * float(w16));
     atomicAdd(GIRefAccumU[e].x, q.x); atomicAdd(GIRefAccumU[e].y, q.y); atomicAdd(GIRefAccumU[e].z, q.z); atomicAdd(GIRefAccumU[e].w, w16);
-    if (g_VoxMissed) { atomicAdd(GIRefAccumU[e + 1u].x, q.x); atomicAdd(GIRefAccumU[e + 1u].y, q.y); atomicAdd(GIRefAccumU[e + 1u].z, q.z); atomicAdd(GIRefAccumU[e + 1u].w, w16); }
-    GIRefAccumU[e + 2u].y = floatBitsToUint(Now);
+    if (g_VoxMissed) { const uint e2 = VoxX2Of(e); atomicAdd(GIRefAccumU[e2].x, q.x); atomicAdd(GIRefAccumU[e2].y, q.y); atomicAdd(GIRefAccumU[e2].z, q.z); atomicAdd(GIRefAccumU[e + 1u].z, w16); }
+    GIRefAccumU[VoxX2Of(e)].w = floatBitsToUint(Now);
 }
 // XLION_VOX_DIRS=<level>,<k> (m_First's bit 11; bits 12, 13: the level; bit 14: k 16, else 8): a prototype. Reflections' light in a coarse level, k x k directions a face (reflection_store_design_2026-11-06.md), the same rays
 void VoxDirsAdd(in const vec3 Pw, in const vec3 N, in const float Cell0, in const vec3 Sample)
@@ -107,17 +107,17 @@ void VoxDirsAdd(in const vec3 Pw, in const vec3 N, in const float Cell0, in cons
     const uint  i = min(uint((x + y + 1.0) * 0.5 * float(k)), k - 1u), j = min(uint((x - y + 1.0) * 0.5 * float(k)), k - 1u);
     const uint  h = VoxHash(L, q, 1000u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 256u + i * k + j), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
-    const uint  TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 2u].x;
+    const uint  TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 1u].x;
     if (Cur != TagU)
     {
-        if (Cur != 0u && abs(Now - GIRefAccum[e + 2u].y) < 120.0) return;
-        if (atomicCompSwap(GIRefAccumU[e + 2u].x, Cur, TagU) != Cur) return;
-        GIRefAccumU[e] = uvec4(0u); GIRefAccumU[e + 1u] = uvec4(0u); GIRefAccumU[e + 2u].z = floatBitsToUint(1.0);
+        if (Cur != 0u && abs(Now - GIRefAccum[VoxX2Of(e)].w) < 120.0) return;
+        if (atomicCompSwap(GIRefAccumU[e + 1u].x, Cur, TagU) != Cur) return;
+        GIRefAccumU[e] = uvec4(0u); GIRefAccumU[VoxX2Of(e)] = uvec4(0u); GIRefAccumU[e + 1u].yzw = uvec3(floatBitsToUint(1.0), 0u, 0u);
     }
     const uint  w16 = uint(16.0 / max(dot(N, g_VoxRayD), 0.1) + 0.5);
     const uvec3 c = uvec3(clamp(Sample, vec3(0.0), vec3(4000.0)) * 16.0 * float(w16));
     atomicAdd(GIRefAccumU[e].x, c.x); atomicAdd(GIRefAccumU[e].y, c.y); atomicAdd(GIRefAccumU[e].z, c.z); atomicAdd(GIRefAccumU[e].w, w16);
-    GIRefAccumU[e + 2u].y = floatBitsToUint(Now);
+    GIRefAccumU[VoxX2Of(e)].w = floatBitsToUint(Now);
 }
 uint g_VoxStoreKind = 0u;      // (XLION_VOX_AO_BUCKET: 1 a contact's records - the faces' keys + 64; the direction bins stay shared)
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
@@ -131,13 +131,15 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
     const uint  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)) + 64u * g_VoxStoreKind), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
-    vec4 v = GIRefAccum[e], m = GIRefAccum[e + 1u];
-    const vec4 d = GIRefAccum[e + 2u];
-    const uvec4 dU = GIRefAccumU[e + 2u];
+    vec4 v = GIRefAccum[e];
+    const uvec4 dU = GIRefAccumU[e + 1u];
+    const vec4 W2 = GIRefAccum[VoxX2Of(e)];
+    vec4 m = vec4(W2.xyz, 0.0);
+    const vec2 d = vec2(uintBitsToFloat(dU.x), W2.w);       // (the tag, the time)
     // (the lean moments, A15: running means of the luminance against the normal's two other components and of those components - the read fits the light's slope
     // across the normals that fed this face, so a sphere's bottom isn't read as its side. Halves in the spare words: e+1.w (variance, mean l.l), e+2.z (L.lu, L.lv; low bit
     // set: never the direction bins' 1.0 marker), e+2.w (lu, lv))
-    vec2 Pv = unpackHalf2x16(GIRefAccumU[e + 1u].w), PL = unpackHalf2x16(dU.z & ~1u), Pl = unpackHalf2x16(dU.w);
+    vec2 Pv = unpackHalf2x16(dU.w), PL = unpackHalf2x16(dU.y & ~1u), Pl = unpackHalf2x16(dU.z);
     if (d.x != Tag)
     {
         // someone else's: taken only if nobody has fed it for 2 seconds or so: a face in use keeps its slot and its history (a face that finds no room waits)
@@ -164,8 +166,8 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const float Al = max(1.0 / v.w, 1.0 / 256.0);
     Pv.y += (dot(Ln, Ln) - Pv.y) * Al; PL += (clamp(Ls, 0.0, 60000.0) * Ln - PL) * Al; Pl += (Ln - Pl) * Al;
     GIRefAccum[e] = v;
-    GIRefAccumU[e + 1u] = uvec4(floatBitsToUint(m.rgb), packHalf2x16(vec2(min(m.w, 60000.0), Pv.y)));
-    GIRefAccumU[e + 2u] = uvec4(floatBitsToUint(Tag), floatBitsToUint(Now), packHalf2x16(PL) | 1u, packHalf2x16(Pl));
+    GIRefAccumU[e + 1u] = uvec4(floatBitsToUint(Tag), packHalf2x16(PL) | 1u, packHalf2x16(Pl), packHalf2x16(vec2(min(m.w, 60000.0), Pv.y)));
+    GIRefAccumU[VoxX2Of(e)] = uvec4(floatBitsToUint(m.rgb), floatBitsToUint(Now));
 }
 // The emitters' light by light sampling at a budget: EmitterIrradianceAt, but over a few of the table picked at random, not all of it per ray (Bistro's table: 3 ms a frame at any
 // number of rays). The pick's weight scaled up by the table over the few. As noisy as it needs; a face averages it
@@ -237,7 +239,7 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
     vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;
     const uint  h = VoxHash(L, ivec3(floor(gv + 0.5)), 36u + uint(2 * a + (N[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
-    const vec4  d = GIRefAccum[e + 2u];
+    const vec2  d = vec2(GIRefAccum[e + 1u].x, GIRefAccum[VoxX2Of(e)].w);
     const bool  bMine = d.x == Tag;
     vec4 c = bMine ? GIRefAccum[e] : vec4(0.0);
     if ((Push.m_First & 1) == 0 && c.w >= 1.0 && ((Push.m_First & 16) != 0 || Rnd() >= 0.125)) return c.rgb / c.w;      // (m_First's bit 4, XLION_VOX_HIT_CACHED, measurement: a hit with a kept direct never casts its shadow rays again: the best case of hits reading a cache)
@@ -245,7 +247,7 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
     if (!bMine && d.x != 0.0 && abs(Now - d.y) < 120.0) return E;
     c += vec4(E, 1.0);
     if (c.w >= ((Push.m_First & 1) != 0 ? 4.0 : 32.0)) c *= 0.5;
-    GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(0.0); GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
+    GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(Tag, 0.0, 0.0, 0.0); GIRefAccum[VoxX2Of(e)] = vec4(0.0, 0.0, 0.0, Now);
     return E;
 }
 // A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
@@ -282,7 +284,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
             const int  a  = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2;
             const uint h  = VoxHash(Ls, Os + ivec3(floor(gs + 0.5)), 42u + uint(2 * a + (Nh[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
             const vec4 c  = GIRefAccum[e];
-            if (GIRefAccum[e + 2u].x == VoxTagOf(h) && c.w >= 1.0) { g_HasSeen = true; g_SeenSample = c.rgb / c.w * gi_pi_v; }
+            if (GIRefAccum[e + 1u].x == VoxTagOf(h) && c.w >= 1.0) { g_HasSeen = true; g_SeenSample = c.rgb / c.w * gi_pi_v; }
         }
     }
 #endif
@@ -317,12 +319,12 @@ void VoxMain()
         const int  a  = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2;
         const uint h  = VoxHash(Ls, Os + ivec3(floor(gs + 0.5)), 42u + uint(2 * a + (Nk[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
         const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
-        const vec4 d = GIRefAccum[e + 2u];
+        const vec2 d = vec2(GIRefAccum[e + 1u].x, GIRefAccum[VoxX2Of(e)].w);
         vec4 c = d.x == Tag ? GIRefAccum[e] : vec4(0.0);
         if (d.x != Tag && d.x != 0.0 && abs(Now - d.y) < 120.0) return;
         c += vec4(min(Lit, vec3(4000.0)), 1.0);
         if (c.w >= 64.0) c *= 0.5;
-        GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(0.0); GIRefAccum[e + 2u] = vec4(Tag, Now, 0.0, 0.0);
+        GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(Tag, 0.0, 0.0, 0.0); GIRefAccum[VoxX2Of(e)] = vec4(0.0, 0.0, 0.0, Now);
         return;
     }
     if (Push.m_Bounces == -6) { if (gl_GlobalInvocationID.x == 0u) ConnHeader = uvec4(0u); for (uint k = 0u; k < 16u; ++k) { const uint i = gl_GlobalInvocationID.x * 16u + k; if (i < uint(Conn.length())) Conn[i] = vec4(0.0); } return; }
@@ -333,12 +335,13 @@ void VoxMain()
         {
             const uint i = gl_GlobalInvocationID.x * 16u + k;
             if (int(i) >= Push.m_Count) return;
-            const uint e = (uint(Push.m_First) + i) * 3u;
-            if (GIRefAccum[e + 2u].z != 1.0) continue;
+            const uint s0 = uint(Push.m_First) + i, e = 3u * s0 + (s0 & 1u);
+            if (GIRefAccum[e + 1u].y != 1.0) continue;
             const uvec4 c = GIRefAccumU[e];
             if (c.w < uint(Push.m_Epoch) * 16u) continue;
             const float s = 8.0 * float(Push.m_Epoch) / float(c.w);
-            GIRefAccumU[e] = uvec4(vec4(c) * s); GIRefAccumU[e + 1u] = uvec4(vec4(GIRefAccumU[e + 1u]) * s);
+            const uint e2 = VoxX2Of(e);
+            GIRefAccumU[e] = uvec4(vec4(c) * s); GIRefAccumU[e2].xyz = uvec3(vec3(GIRefAccumU[e2].xyz) * s); GIRefAccumU[e + 1u].z = uint(float(GIRefAccumU[e + 1u].z) * s);
         }
         return;
     }

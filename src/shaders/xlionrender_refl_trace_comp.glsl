@@ -317,7 +317,7 @@ void main()
                 const float sd = abs(D[u_]) + abs(D[v_]) + max(D[a_] * sg, 0.0) + 1e-6, x = D[u_] / sd, y = D[v_] / sd;
                 const uint  di = min(uint((x + y + 1.0) * 0.5 * float(k)), k - 1u), dj = min(uint((x - y + 1.0) * 0.5 * float(k)), k - 1u);
                 const uint  hh = VoxHash(L_, ivec3(floor(q)), 1000u + Face * 256u + di * k + dj), e = VoxEntryOf(hh);
-                const bool  bOurs = GIRefAccum[e + 2u].x == VoxTagOf(hh);
+                const bool  bOurs = GIRefAccum[e + 1u].x == VoxTagOf(hh);
                 const uvec4 c = bOurs ? VoxBins[e] : uvec4(0u);
                 const float wq = float(c.w) / 16.0, Tr = clamp(wq / 64.0, 0.0, 1.0);
                 if (wq > 0.0) Sum += Tr * (vec3(c.xyz) / 256.0) / wq;

@@ -17,15 +17,19 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in co
 }
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
 uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
-uint VoxEntryOf(in const uint h) { return (h % vox_slots_v) * 3u; }
+// A record's three uvec4 by role (gi_store_read_sector_plan_2026-11-08.md): X0 and X1 what a read takes (a face: its value; its tag, leans), X2 the
+// writer's. An even slot X0 X1 X2, an odd one X2 X0 X1: X0, X1 one 32-byte sector for every record (they are 48 bytes). VoxEntryOf: X0; X1 = X0 + 1;
+// VoxX2Of. Every kind: the tag X1.x, its last write's time X2.w, the direction bins' marker 1.0 X1.y
+uint VoxEntryOf(in const uint h) { const uint s = h % vox_slots_v; return 3u * s + (s & 1u); }
+uint VoxX2Of(in const uint e) { return (e % 3u) == 0u ? e + 2u : e - 1u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
-vec4 VoxFace(in const int L, in const ivec3 q, in const uint Face) { const uint h = VoxHash(L, q, Face), e = VoxEntryOf(h); return GIRefAccum[e + 2u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0); }
+vec4 VoxFace(in const int L, in const ivec3 q, in const uint Face) { const uint h = VoxHash(L, q, Face), e = VoxEntryOf(h); return GIRefAccum[e + 1u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0); }
 // (A15, the lean moments: xlionrender_gi_gather_frag.glsl VoxLeanScale's copy - the hits' read too)
 float VoxLean(in const uint e, in const vec4 v, in const vec3 n, in const int a)
 {
     const int  u = (a + 1) % 3, w = (a + 2) % 3;
     const float El2 = unpackHalf2x16(floatBitsToUint(GIRefAccum[e + 1u].w)).y, Lm = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w;
-    const uvec2 dU = floatBitsToUint(GIRefAccum[e + 2u].zw);
+    const uvec2 dU = floatBitsToUint(GIRefAccum[e + 1u].yz);
     const vec2 EL = unpackHalf2x16(dU.x & ~1u), El = unpackHalf2x16(dU.y);
     if (Lm <= 1e-4 || v.w < 8.0) return 1.0;
     const float Var = max(0.5 * (El2 - dot(El, El)), 0.01);
@@ -49,7 +53,7 @@ vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const f
                 const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
                 const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
                 const uint  h = VoxHash(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
-                const vec4  v = GIRefAccum[e + 2u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0);
+                const vec4  v = GIRefAccum[e + 1u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0);
                 if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * VoxLean(e, v, n, a) * cw; Den += cw; }     // (as the read: each corner its mean, trusted up to 32 samples)
             }
             if (Den > 1e-3) { Sum += Num / Den * wa; SumW += wa; }
