@@ -375,7 +375,9 @@ int main()
             {   // (out of scope: its own destructor queues it - renderpass::DeathMarch, the path that crashed; the device's Destroy did not)
             xgpu::renderpass Pass;
             CHECK(App.m_Device.Create(Pass, { .m_Attachments = A }) == nullptr, "render pass");
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;      // (a pass records inside a frame: Debug asserted, 2026-11-08)
             { auto Cmd = App.m_Window.StartRenderPass(Pass); }
+            App.m_Window.PageFlip();
             }
             App.m_Device.Destroy(std::move(Tex));
             for (int f = 0; f < 6; ++f) { while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break; { auto Cmd = App.m_Window.getCmdBuffer(); } App.m_Window.PageFlip(); }
@@ -762,6 +764,7 @@ int main()
             const std::size_t nItems = T.LinkItemCount(), Budget = 128, nRelights0 = T.Relights(), nItems0 = T.RelitItems();
             T.SetRelightBudgetMs(1e-6f);
             T.SetRelightLatencyFloor(false);
+            T.SetRelightTimingForTests(1.0, 8.0);       // (a unit 1 ms, a frame's latency 8: the floor buys 8 units a frame - pinned, the measured ones made it flaky)
             L.m_Points[0].m_Position = LampAt;
             std::size_t nMost = 0, nFrames = 0;
             const auto Frames = [&](int nMax, std::size_t& Most) -> std::size_t
@@ -814,6 +817,7 @@ int main()
             L.m_Points[0].m_Position = LampAt;
             (void)Frames(40, nMostLat);
             T.SetRelightBudgetMs(1.0f);
+            T.SetRelightTimingForTests(0.0, 0.0);
             std::printf("with the latency floor: %zu frames (at most %zu items a frame) against %zu\n", nFramesLat, nMostLat, nFrames);
             CHECK(nFramesLat > 0 && nFramesLat < nFrames, "the latency floor does not shorten the round (%zu frames against %zu)", nFramesLat, nFrames);
             std::printf("the light moved back, %zu of %zu items relit a frame: %zu slices over %zu frames, at most %zu items a frame (%zu in all), the light %.2f%% off the original\n", Budget, nItems, T.Relights() - nRelights0, nFrames, nMost, T.RelitItems() - nItems0, 100.0 * D2 / std::max(S2, 1e-9));

@@ -528,6 +528,9 @@ namespace xlionrender::gi
             (void)m_SunMapB.MemoryMapFrameRegion(0, int(D.size()), [&](void* p) { std::memcpy(p, D.data(), sizeof(D)); });
         }
         void        SetRelightLatencyFloor(bool b) noexcept { m_bRelightLatencyFloor = b; }     // (tests: the budget alone, no latency floor)
+        // (tests: the relight's cost pinned, not measured - a small scene's measured latency was about one unit's cost some runs, the latency
+        // floor's check then saw no difference: flaky, 2026-11-08; MsUnit <= 0 measures again)
+        void        SetRelightTimingForTests(double MsUnit, double LatencyMs) noexcept { m_bRelightTimingPinned = MsUnit > 0; if (m_bRelightTimingPinned) { m_RelightMsUnit = MsUnit; m_RelightLatencyMs = LatencyMs; } }
         bool        isRelighting() const noexcept { return m_RelightOwed > 0 || !m_bLinkDirValid; }      // a round of the relight owed (its GPU time on top of the steady GI)
         // Experiment D in a renderer (XLION_GI_LINKS): after Settle frames of the ray solver (the reads' validity and moments), the links of
         // every level-0 surfel are built, PerFrame surfels a frame; two frames after the last slice they are solved, one iteration a frame.
@@ -687,7 +690,8 @@ namespace xlionrender::gi
                     if (m_RelightTS.getResults(m_RelightNs) && m_RelightNs.size() >= 2 && m_RelightNs[1] > m_RelightNs[0])
                     {
                         const double Ms = double(m_RelightNs[1] - m_RelightNs[0]) * 1e-6;
-                        if (m_RelightTimedItems > 0) m_RelightMsUnit = Ms / double(m_RelightTimedItems) * double(relight_unit_v);
+                        if (m_bRelightTimingPinned) {}
+                        else if (m_RelightTimedItems > 0) m_RelightMsUnit = Ms / double(m_RelightTimedItems) * double(relight_unit_v);
                         else if (m_bRelightTimedFrame) m_RelightLatencyMs = m_RelightLatencyMs > 0 ? 0.8 * m_RelightLatencyMs + 0.2 * Ms : Ms;
                         m_RelightTimedItems = 0; m_bRelightTimedFrame = false;
                     }
@@ -1444,6 +1448,7 @@ namespace xlionrender::gi
         double                              m_RelightLatencyMs = 0;  // a budgeted frame's relight, GPU ms (a running mean): its floor whatever its size
         bool                                m_bRelightTimedFrame = false;
         bool                                m_bRelightLatencyFloor = true;
+        bool                                m_bRelightTimingPinned = false;     // (tests: SetRelightTimingForTests)
         const xgpu::texture*                m_pSunMap = nullptr;     // (SetSunMap)
         bool                                m_bSunMapHold = false;
         xgpu::texture                       m_SunMapDummy;
