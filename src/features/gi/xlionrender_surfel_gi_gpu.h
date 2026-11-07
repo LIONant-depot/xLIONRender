@@ -910,10 +910,15 @@ namespace xlionrender::gi
             return true;
         }
         // The GI's ground truth (XLION_GI_REF, xlionrender_gi_ref_comp.glsl): PerFrame paths a frame over the pixels the gather wrote
+        // The screen's samples (the gather writes them, the reference's and the voxels' rays start from them) for nPixels and their header: they grow
+        // with the view. (Made once at the first view's size, a larger one - the editor's window maximized after the level opened - wrote its header
+        // past the end; every voxel ray read no header and returned at once, the store frozen with what the first frames saw of a half-loaded level:
+        // sunlit squares in Bistro Game's shaded street, Tomas 2026-11-07)
+        bool FitScreen(std::size_t nPixels) noexcept { return FitLocal(m_RefSampleB, 32, nPixels + 1) && FitLocal(m_RefAccumB, 32, nPixels); }
         bool RefStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int Bounces, std::uint32_t LightsKey) noexcept
         {
             if (!m_bRef || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
-            if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels))) return false;
+            if (!FitScreen(nPixels)) return false;
             if (LightsKey != m_RefLightsKey) { m_RefLightsKey = LightsKey; ++m_RefEpoch; }      // (the lights changed: every pixel starts over)
             const struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), int(m_RefNext % nPixels), PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, Bounces, m_RefEpoch };
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_RefAccumB };
@@ -939,7 +944,7 @@ namespace xlionrender::gi
             const int Keep = KeepMax;
             if (!m_bVox || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
             const std::size_t nEntries = std::size_t(vox_slots_v) * 3;
-            if ((!m_RefSampleB.m_Private && !FitLocal(m_RefSampleB, 32, nPixels + 1)) || (!m_RefAccumB.m_Private && !FitLocal(m_RefAccumB, 32, nPixels)) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
+            if (!FitScreen(nPixels) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
             // (XLION_VOX_RELIGHT=<connections a frame>, a prototype: rays keep what they found, 200000 of them; that many are relit each frame, no traversal; its buffer a token otherwise)
             static const int s_Relight = [] { const char* p = xlionrender::Env("XLION_VOX_RELIGHT"); return p ? std::atoi(p) : 0; }();
             if (!m_ConnB.m_Private && !FitLocal(m_ConnB, 16, s_Relight > 0 ? 1 + 200000 * 7 : 8)) return false;

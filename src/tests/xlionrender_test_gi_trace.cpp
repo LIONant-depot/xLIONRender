@@ -311,6 +311,17 @@ int main()
 {
     app App;
     CHECK(App.Init(), "Init");
+    {   // The screen's samples follow the view's size (the voxels' rays read their header at the end: a view grown past the first one's size left
+        // every ray without it - the store frozen, sunlit squares in Bistro Game, 2026-11-07)
+        gpu_trace T;
+        CHECK(T.Init(App.m_Device, ShadersOf(App.m_Device)), "gpu_trace::Init");
+        for (const std::size_t n : { std::size_t(640 * 360), std::size_t(1920 * 1080), std::size_t(320 * 180) })
+        {
+            CHECK(T.FitScreen(n) && T.RefSamples() != nullptr, "FitScreen(%zu)", n);
+            CHECK(std::size_t(T.RefSamples()->getEntryCount()) >= 8 * (n + 1), "the screen's samples hold %d words, %zu pixels and the header need %zu", T.RefSamples()->getEntryCount(), n, 8 * (n + 1));
+        }
+        std::printf("GPU trace, the screen's samples grow with the view: ok\n");
+    }
     for (const int Case : { 0, 1, 2 })
     {
         const bool bPanel = Case > 0;
