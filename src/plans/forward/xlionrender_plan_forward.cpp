@@ -2753,9 +2753,21 @@ namespace xlionrender
                 P2.m_Frame = View.m_TailFrame;     // (the sharp ones are not reconstructed: a new ray each frame, TAA averages them; one fixed ray a pixel was static sparkle on Bistro's glass. Same cost, noise over 8 .020 to .028 %)
                 auto T2 = std::array<const xgpu::texture*, 6>{ &View.m_SharpGColor, &View.m_SharpGDepth, &m_EnvAtlas, Textures[3], Textures[4], &View.m_SharpGMotion };
                 P2.m_Frame = (P2.m_Frame & ~1u) | (m_ReflSharpRuns++ & 1u);      // (the list's parity: alternates each run, gaps or not)
+                static const bool s_bSharpSplit = xlionrender::Env("XLION_GPU_TIMES") != nullptr;      // (measurement: the sharp pass's classification and its list's rays apart - SHARPSPLIT)
+                static xgpu::timestamps s_SharpTS; static bool s_bSharpTS = false;
+                if( s_bSharpSplit && !s_bSharpTS ) s_bSharpTS = m_Device.Create(s_SharpTS, { .m_Count = 3 }) == nullptr;
+                if( s_bSharpSplit && s_bSharpTS )
+                {
+                    static std::vector<std::uint64_t> s_Ns; static double s_A = 0, s_B = 0; static int s_N = 0;
+                    if( s_SharpTS.getResults(s_Ns) && s_Ns.size() >= 3 && s_Ns[2] >= s_Ns[1] && s_Ns[1] >= s_Ns[0] ) { s_A += (s_Ns[1] - s_Ns[0]) * 1e-6; s_B += (s_Ns[2] - s_Ns[1]) * 1e-6;
+                        if( ++s_N == 120 ) { std::printf("SHARPSPLIT classification (full size) %.3f, the list's rays %.3f ms\n", s_A / s_N, s_B / s_N); std::fflush(stdout); s_A = s_B = 0; s_N = 0; } }
+                    Window.WriteTimestamp(s_SharpTS, 0);
+                }
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
+                if( s_bSharpSplit && s_bSharpTS ) Window.WriteTimestamp(s_SharpTS, 1);
                 P2.m_Full[0] = -P2.m_Full[0];      // (the list: 64 a group, every lane busy)
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), 262144 / 64, 1);
+                if( s_bSharpSplit && s_bSharpTS ) Window.WriteTimestamp(s_SharpTS, 2);
             }
             Window.WriteTimestamp(m_ReflTimes, 1);
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
