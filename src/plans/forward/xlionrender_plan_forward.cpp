@@ -1677,7 +1677,7 @@ namespace xlionrender
                                , m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_RenderedPinned, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine, int(m_VSM.HasPrevious()), m_VSM.m_Stats.m_DynamicBias), std::fflush(stdout);
             }
             { static const bool s_bT = xlionrender::Env("XLION_GPU_TIMES") != nullptr;      // (measurement: the sun's shadow detail reaching the renderer)
-              if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d\n", Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine), std::fflush(stdout); }
+              if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL sun dir %.3f %.3f %.3f, distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d\n", Sun.m_Direction.m_X, Sun.m_Direction.m_Y, Sun.m_Direction.m_Z, Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine), std::fflush(stdout); }
             m_VSMLevelBand = std::clamp(Sun.m_ShadowLevelBlend, 0.01f, 0.95f);
             ShCpu.Lap();
             // The frame's pages by their measured cost: what fits the pages' share of the shadows' slice (XLION_SH_PAGES_MS overrides; 0 off)
@@ -2639,8 +2639,9 @@ namespace xlionrender
                     }
                 }
                 constexpr float ssr_max_rough_v = 0.5f;
+                const auto SSRSteps = [&] { static const int s = [] { const char* p = xlionrender::Env("XLION_SSR_STEPS"); return p ? std::atoi(p) : 0; }(); return s > 0 ? s : m_SSRSteps; };      // (measurement: the screen trace's steps)
                 const struct { std::uint32_t m_Slot, m_bKeepTraced, m_Frame, m_Steps; float m_MaxDist, m_Thickness, m_MaxRough, m_Pad; } SPush
-                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(m_SSRSteps, 1)), m_SSRMaxDist, m_SSRThickness, ssr_max_rough_v, 0.0f };
+                    { std::uint32_t(Slot), 0u, bReconstruct || Scene.m_bReflectionJitter ? View.m_TailFrame : 0u, std::uint32_t(std::max(SSRSteps(), 1)), m_SSRMaxDist, m_SSRThickness, ssr_max_rough_v, 0.0f };
                 auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
                 auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };      // (m_HDRPrev: m_HDR itself is cleared by the prepass)
                 Window.WriteTimestamp(m_ReflSSRTimes, 0);
@@ -2719,7 +2720,8 @@ namespace xlionrender
             const std::uint32_t HalfKeys = std::uint32_t(W * H);
             const bool bHits = m_ReflTraceBench == 0 && Scene.m_ReflectionTextureMaxRoughness > 0 && createHitTargets() == nullptr;
             // (the voxels on: they are the hits' indirect light; the surfels hold nothing then)
-            xgpu::buffer* pVox = m_bVoxOn && m_pGITrace ? m_pGITrace->VoxBuffer() : nullptr;
+            static const bool s_bReflNoVox = xlionrender::Env("XLION_REFL_NO_VOX") != nullptr;      // (measurement: the reflections without the voxels' light at their hits - compute_overlap_plan_2026-11-07.md option b)
+            xgpu::buffer* pVox = m_bVoxOn && m_pGITrace && !s_bReflNoVox ? m_pGITrace->VoxBuffer() : nullptr;
             const std::array<float, 3> VoxAt = pVox ? m_pGITrace->VoxAnchor() : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
             struct { std::uint32_t m_Mode, m_Slot; int m_TlasRoot, m_PrimOffset; float m_Eye[3]; std::uint32_t m_Frame; float m_EnvIntensity, m_MaxRough, m_bPlanar, m_SharpMax; float m_Plane[4]; int m_Full[4]; float m_Tex[4]; float m_Vox[4]; float m_SharpSeen, m_FlatR, m_FlatG, m_FlatB; } Push
                 { std::uint32_t(m_ReflTraceBench), std::uint32_t(Slot), BvhR.m_TlasRoot, BvhR.m_PrimOffset, { E.m_X, E.m_Y, E.m_Z }, Scene.m_bReflectionJitter || Scene.m_bReflectionReconstruct ? View.m_TailFrame : 0u, m_bEnvOn ? m_EnvIntensity : 0.0f, MaxRough, bPlanar ? 1.0f : 0.0f, bSharp ? m_ReflSharpMax : 0.0f
