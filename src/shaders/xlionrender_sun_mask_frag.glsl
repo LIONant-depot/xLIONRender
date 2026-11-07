@@ -114,6 +114,7 @@ bool SunMaskReuse(in const vec3 P, in const vec3 Ng, in const ivec2 Size, out fl
     if (any(greaterThan(abs(N), vec2(1.0)))) return false;
     const ivec2 q     = clamp(ivec2(floor((N * 0.5 + 0.5) * vec2(Size))), ivec2(0), Size - 1);
     const uint  m     = texelFetch(SamplerSunMask, q, 0).r;
+    if ((m >> 16u) != 0u && (m >> 16u) != 0xFFFFu) return false;      // (a shadow edge - partly lit - evaluated again: the jitter moves q to a neighbour each frame, its value copied pixel to pixel flickered there, Tomas 2026-11-07)
     const float dPrev = length(P + MaskPush.Delta.xyz), dNow = length(P);
     if (abs(unpackHalf2x16(m & 0xFFFFu).x - dPrev) > kSunMaskTolerance * dPrev || abs(dPrev - dNow) > 0.02 * dNow) return false;
     if (MaskPush.Params.x < 3u && !VSMReachCheck(P + UBOLight.CameraPos.xyz, Ng, false)) return false;
