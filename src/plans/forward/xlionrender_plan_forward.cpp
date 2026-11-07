@@ -2192,6 +2192,20 @@ namespace xlionrender
                 Cmd.setBuffer(m_FullscreenIB);
                 Cmd.Draw(3);
                 pSunPage = &P;
+                // (XLION_VSM_PAGE_LOG, measurement: each static sun page drawn - its key, the casters it kept, and the large casters it left out as movers:
+                // the sunlit page-sized holes, Tomas 2026-11-07)
+                static const bool s_bPageLog = xlionrender::Env("XLION_VSM_PAGE_LOG") != nullptr;
+                if( s_bPageLog && !P.m_bMover )
+                {
+                    int nKept = 0, nBigMover = 0;
+                    for( const auto i : AllCasters )
+                    {
+                        if( !shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size) ) continue;
+                        if( Draws[i].m_bMover ) { const auto E = Draws[i].m_World.m_Max - Draws[i].m_World.m_Min; nBigMover += (E.m_X + E.m_Y + E.m_Z) > 20.0f; }
+                        else nKept += !(bSkinPages && IsSkin(i));
+                    }
+                    std::printf("VSMPAGE frame %llu: L%d (%d,%d) kept %d casters, left out %d large movers\n", (unsigned long long)m_Device.getFrameIndex(), P.m_Key.m_Level, P.m_Key.m_X, P.m_Key.m_Y, nKept, nBigMover);
+                }
                 DrawCasters(Cmd, P.m_W2C, AllCasters, [&](std::uint32_t i) { return !(bSkinPages && IsSkin(i)) && Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size); }, PageLOD(P.m_Key.m_Level));
                 pSunPage = nullptr;
             }
