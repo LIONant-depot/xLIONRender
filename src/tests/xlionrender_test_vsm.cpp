@@ -842,6 +842,59 @@ int main()
         Scene.m_Sun.m_ShadowTileSize = 4.0f;
     }
 
+    // The mover maps (instance::m_bMoverMaps, G1c prototype): a skinned mover's sun shadow from a map of its own matches its shadow from the mover
+    // pages - the same floor texels in shadow, a few at the edge apart (the maps' texel and filter are not the pages')
+    {
+        cluster_buffers SkinB;
+        xgpu::buffer    Bones;
+        xlionrender::mesh_id SkinBox;
+        CHECK(MakeSkinBuffers(Device, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), 0.5f, SkinB)
+           && !Device.Create(Bones, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = 1 }), "skin box");
+        const xmath::fmat4 Identity = xmath::fmat4::fromIdentity();
+        (void)Bones.MemoryMap(0, 1, [&](void* p) { std::memcpy(p, &Identity, sizeof(Identity)); });
+        CHECK(!Renderer.CreateClusterGeom(SkinBox, SkinB.Geom(xlionrender::geom_kind::SKIN, &Bones, 1)), "skin box geom");
+        xgpu::texture White;
+        xlionrender::material_id SkinMaterial;
+        {
+            const std::uint32_t Texel = 0xffffffffu;
+            const auto Mips  = std::array{ xgpu::texture::setup::mip_size{ sizeof(Texel) } };
+            const auto Slots = std::array<xgpu::texture*, 2>{ nullptr, &White };
+            CHECK(!Device.Create(White, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips
+                                        , .m_AllFacesData = { reinterpret_cast<const std::byte*>(&Texel), sizeof(Texel) }, .m_isGamma = false })
+               && !Renderer.CreateDefaultMaterial(SkinMaterial, Slots), "the skin box's material");
+        }
+        xlionrender::scene M;
+        M.m_Draws.push_back({ .m_Mesh = Box, .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.55f, 0 }) * xmath::fmat4::fromScale({ 40.0f, 0.1f, 40.0f }) });
+        M.m_Draws.push_back({ .m_Mesh = SkinBox, .m_L2W = xmath::fmat4::fromTranslation({ 0.0f, 0.6f, 0.0f }) * xmath::fmat4::fromScale({ 1.0f, 2.0f, 1.0f }), .m_Materials = { SkinMaterial }, .m_Instance = 77 });
+        M.m_Sun     = { .m_Direction = { 0.5f, -1.0f, 0.3f }, .m_Intensity = 3, .m_ShadowTileSize = 4.0f };
+        M.m_Ambient = { 0, 0, 0 };
+        xgpu::tools::view C;
+        C.setFov(xmath::radian{ 1.1f });
+        C.setViewport({ 0, 0, size_v, size_v });
+        C.LookAt(xmath::fvec3{ -0.5f, 5.0f, -3.0f }, xmath::fvec3{ -0.5f, 0, 0.0f });
+        const auto Shot = [&](bool bMaps, bool bSun, std::vector<float>& Out)
+        {
+            Renderer.setMoverMaps(bMaps);
+            M.m_Sun.m_bCastShadows = bSun;
+            for (int i = 0; i < 12; ++i) if (!App.RenderFrame(M, View, C)) return false;
+            return ReadHDR(Device, View, Out);
+        };
+        std::vector<float> U, Pages, Maps;
+        CHECK(Shot(false, false, U) && Shot(false, true, Pages) && Shot(false, true, Pages) && Shot(true, true, Maps), "mover maps: render");      // (the pages twice: the coarse mover pages after the sun came on need the requests' round trip and their own)
+        Renderer.setMoverMaps(false);
+        int nPages = 0, nMaps = 0, nApart = 0;
+        for (std::size_t i = 0; i + 3 < U.size(); i += 4)
+        {
+            if (U[i] < 0.05f) continue;                                         // (the floor lit by the sun: the box's own faces and the sky out)
+            const bool a = Pages[i] < 0.5f * U[i], b = Maps[i] < 0.5f * U[i];
+            nPages += a; nMaps += b; nApart += a != b;
+        }
+        std::printf("mover maps: floor texels shadowed by the skinned box - mover pages %d, its map %d, apart %d\n", nPages, nMaps, nApart);
+        CHECK(nPages > 100, "the skinned box casts no shadow through the mover pages (%d texels)", nPages);
+        CHECK(nApart * 10 <= nPages, "the mover map's shadow differs from the pages' in %d of %d texels", nApart, nPages);
+        Renderer.DestroyMesh(SkinBox);
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");

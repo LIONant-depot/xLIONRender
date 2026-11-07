@@ -799,6 +799,9 @@ namespace xlionrender
             m_VSMTable.insert(m_VSMTable.end(), More.begin(), More.end());
             m_VSM.BuildMoverTable(More);
             m_VSMTable.insert(m_VSMTable.end(), More.begin(), More.end());
+            // the mover maps (XLION_SH_MOVER_MAPS): their count, then 8 floats each (xlionrender_shadow_vsm.glsl VSMMoverMaps)
+            m_VSMTable.push_back(std::uint32_t(m_MoverMaps.size()));
+            for( const auto& M : m_MoverMaps ) { const float* f = &M.m_X0; for( int k = 0; k < 8; ++k ) m_VSMTable.push_back(std::bit_cast<std::uint32_t>(f[k])); }
         }
         const int n = int(m_VSMTable.size());
         m_VSMTableBase = int(Frame % ring_frames_v) * m_CellStride + m_CellRingUsed;
@@ -1281,6 +1284,9 @@ namespace xlionrender
     // re-captured, m_ProbeFacesPerFrame faces per frame (never captured first, then the nearest): each face a scene pass from the
     // probe's center; with its 6 faces done, the faces -> the octahedral source -> the pyramid and the prefilter into its slot.
     // A change during a capture lets it finish and captures again (a continuous change never starves it), except a moved probe.
+    // The reflections' screen trace (scene::m_bReflectionScreen; XLION_REFL_SCREEN=1 turns it on where the scene has no setting for it - a Level, 2026-11-07)
+    static bool ReflectionScreen( const scene& Scene ) noexcept { static const bool s_bOn = xlionrender::Env("XLION_REFL_SCREEN") != nullptr; return Scene.m_bReflectionScreen || s_bOn; }
+
     void instance::updateProbes( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept
     {
         if( !m_bProbeAtlasReady ) { auto Cmd = Window.StartRenderPass(m_ProbeAtlasClearPass); m_bProbeAtlasReady = true; }   // bound by every lit pipeline
@@ -1432,6 +1438,7 @@ namespace xlionrender
     // Before the scene pass, which samples the atlas.
     void instance::renderShadows( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
     {
+        m_MoverMaps.clear();      // (this frame's, if any: none read last frame's)
         // Measurement only (XLION_GPU_TIMES): its CPU time by part - the pages' choice, the casters (light bounds, pairs), the recording -
         // SHADOWCPU, the largest of 120 frames (the sun turning added ~3.8 ms of GPU idle before the scene pass, 2026-10-30)
         static const bool s_bShCpu = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
@@ -1659,7 +1666,9 @@ namespace xlionrender
             m_VSM.SetFrameBudget(!bInstant && PagesMs > 0 ? std::clamp(int(PagesMs / std::max(m_VSMPageMs, 1e-3)), 8, 1024) : 0);
             static const bool s_bMoverSameLevel = xlionrender::Env("XLION_VSM_MOVER_SAME_LEVEL") != nullptr;     // (measurement: the movers at the pages' own level)
             m_VSM.m_bMoversCoarse = m_bShadowMoversCoarse && !s_bMoverSameLevel;
-            m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), SunMovers);
+            std::vector<xmath::fbbox> VSMMovers;      // (the mover maps: the skinned movers have no sun mover pages)
+            if( m_bMoverMaps ) { for( const auto& D : Draws ) if( D.m_bMover && !(D.m_pMesh->m_bCluster && D.m_pMesh->m_Geom.m_Kind == geom_kind::SKIN) ) VSMMovers.push_back(D.m_World); }
+            m_VSM.Update(Sun.m_Direction, Level0Texel, Eye, m_bShadowSplitMovers ? SunStatic : Changed, m_bShadowCache, m_VSMRequests, m_Device.getFrameIndex(), m_bMoverMaps ? VSMMovers : SunMovers);
             m_VSMReport.m_Pages = m_VSM.m_Stats;
             ShCpu.Lap();
             if( s_bShCpu )      // (measurement: vsm::Update by part, the largest of 120 frames - SHADOWCPU's line)
@@ -1708,7 +1717,8 @@ namespace xlionrender
         m_nShadowTilesRendered = static_cast<int>(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
         m_VSMRenderTimed[m_Device.getFrameIndex() % ring_frames_v] = !m_VSM.m_ToRender.empty();
         m_VSMRenderPages[m_Device.getFrameIndex() % ring_frames_v] = int(m_VSM.m_ToRender.size());
-        if( m_nShadowTilesRendered == 0 ) return;
+        const bool bMoverMaps = m_bMoverMaps && Scene.m_Sun.m_bCastShadows && std::ranges::any_of(Draws, [](const draw_caster& D) { return D.m_pMesh->m_bCluster && D.m_pMesh->m_Geom.m_Kind == geom_kind::SKIN; });     // (the skinned movers' sun maps: drawn every frame)
+        if( m_nShadowTilesRendered == 0 && !bMoverMaps ) { m_MoverMaps.clear(); return; }
 
         ShCpu.Lap();
         // The casters culled in light space (only when a page renders): their light-space boxes, kept from frame to frame - a draw's again when
@@ -2096,6 +2106,33 @@ namespace xlionrender
             const float LW = float(LocalW), LH = float(LocalH), TL = float(shadows::local_pages::page_texels_v);
             const std::uint32_t SunBase = std::uint32_t(SkinSlot * skin_pages_v);      // (the list holds the pages' places in the whole buffer: the frame's region first)
             for( const auto& P : m_VSM.m_ToRender ) SkinPages.push_back({ P.m_W2C, { T / AW, T / AH, (T + 2.0f * float(P.m_AtlasX)) / AW - 1.0f, (T + 2.0f * float(P.m_AtlasY)) / AH - 1.0f }, {} });
+            // The mover maps (XLION_SH_MOVER_MAPS): a skinned mover's tile - its light-space rect, square, a texel's margin; its depth range along the light
+            m_MoverMaps.clear();
+            std::vector<std::uint32_t> MapOfDraw(Draws.size(), ~0u);
+            if( bMoverMaps )
+            {
+                const int nMaps = sunAtlasWidth() / mover_map_texels_v;
+                const float TM = float(mover_map_texels_v);
+                for( std::uint32_t i = 0; i < Draws.size() && int(m_MoverMaps.size()) < nMaps; ++i )
+                {
+                    if( !IsSkin(i) ) continue;
+                    const auto B = m_VSM.Bounds(Draws[i].m_World);
+                    const float Ext = std::max(B.m_Max[0] - B.m_Min[0], B.m_Max[1] - B.m_Min[1]);
+                    const float S   = Ext * (TM + 8.0f) / TM + 1e-3f;                     // (4 texels each side: the filter's reach)
+                    const float Cx  = 0.5f * (B.m_Min[0] + B.m_Max[0]), Cy = 0.5f * (B.m_Min[1] + B.m_Max[1]);
+                    mover_map M{ Cx - 0.5f * S, Cy - 0.5f * S, S, B.m_Min[2] - 0.05f, B.m_Max[2] - B.m_Min[2] + 0.1f, float(int(m_MoverMaps.size()) * mover_map_texels_v), float(sunAtlasHeight() - mover_map_texels_v), 0 };
+                    xmath::fmat4 W = xmath::fmat4::fromZero();
+                    const float SX = 2.0f / M.m_Size, SZ = 1.0f / M.m_ZRange;
+                    const auto& X = m_VSM.m_X; const auto& Y = m_VSM.m_Y; const auto& Z = m_VSM.m_Z;
+                    W(0, 0) = X.m_X * SX; W(0, 1) = X.m_Y * SX; W(0, 2) = X.m_Z * SX; W(0, 3) = -M.m_X0 * SX - 1.0f;
+                    W(1, 0) = Y.m_X * SX; W(1, 1) = Y.m_Y * SX; W(1, 2) = Y.m_Z * SX; W(1, 3) = -M.m_Y0 * SX - 1.0f;
+                    W(2, 0) = Z.m_X * SZ; W(2, 1) = Z.m_Y * SZ; W(2, 2) = Z.m_Z * SZ; W(2, 3) = -M.m_Z0 * SZ;
+                    W(3, 3) = 1.0f;
+                    MapOfDraw[i] = std::uint32_t(m_MoverMaps.size());
+                    SkinPages.push_back({ W, { TM / AW, TM / AH, (TM + 2.0f * M.m_AtlasX) / AW - 1.0f, (TM + 2.0f * M.m_AtlasY) / AH - 1.0f }, {} });
+                    m_MoverMaps.push_back(M);
+                }
+            }
             const std::uint32_t LocalBase = SunBase + std::uint32_t(SkinPages.size());
             std::vector<frustum> LocalFrustum;
             for( const auto& P : m_LocalPages.m_ToRender )
@@ -2107,7 +2144,8 @@ namespace xlionrender
             {
                 if( !IsSkin(i) ) continue;
                 skin_run Run{ i, std::uint32_t(SkinList.size()), 0 };
-                for( std::uint32_t p = 0; p < m_VSM.m_ToRender.size(); ++p )
+                if( MapOfDraw[i] != ~0u ) { SkinList.push_back(SunBase + std::uint32_t(m_VSM.m_ToRender.size()) + MapOfDraw[i]); Run.m_Texel = m_MoverMaps[MapOfDraw[i]].m_Size / float(mover_map_texels_v); }
+                for( std::uint32_t p = 0; p < m_VSM.m_ToRender.size() && MapOfDraw[i] == ~0u; ++p )
                 {
                     const auto& P = m_VSM.m_ToRender[p];
                     if( Draws[i].m_bMover == P.m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size) )
@@ -2238,7 +2276,15 @@ namespace xlionrender
                 pSunPage = nullptr;
             }
             if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 1);
-            if( bSkinPages && !m_VSM.m_ToRender.empty() )        // (the skinned casters into all their sun pages at once: one viewport over the sun's atlas)
+            for( const auto& M : m_MoverMaps )      // (the mover maps' tiles: cleared, then drawn with the skinned runs)
+            {
+                Viewport(Cmd, int(M.m_AtlasX), int(M.m_AtlasY), mover_map_texels_v);
+                Cmd.setPipelineInstance(m_ShadowClearInstance);
+                Cmd.setBuffer(m_FullscreenVB);
+                Cmd.setBuffer(m_FullscreenIB);
+                Cmd.Draw(3);
+            }
+            if( bSkinPages && (!m_VSM.m_ToRender.empty() || !m_MoverMaps.empty()) )        // (the skinned casters into all their sun pages at once: one viewport over the sun's atlas)
             {
                 Cmd.setViewport(0.0f, 0.0f, float(sunAtlasWidth()), float(sunAtlasHeight()));
                 Cmd.setScissor(0, 0, sunAtlasWidth(), sunAtlasHeight());
@@ -2484,7 +2530,7 @@ namespace xlionrender
         static const int  s_GradeRough = [] { const char* p = xlionrender::Env("XLION_REFL_GRADE"); return p ? int(std::atof(p) * 1000.0 + 0.5) : 0; }();
         static const bool s_bGrading = xlionrender::Env("XLION_REFL_GRADE") != nullptr && !s_bGradeRays;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
         const bool bTraced = !s_bGrading && !Scene.m_bDebugReflectionPathTraced && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
-        const bool bScreen = Scene.m_bReflectionScreen && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection && xlionrender::Env("XLION_REFL_PT") == nullptr;      // (its colors are last frame's image: in the debug view, reflections of reflections)
+        const bool bScreen = ReflectionScreen(Scene) && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection && xlionrender::Env("XLION_REFL_PT") == nullptr;      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
         static const bool s_bReflPT = xlionrender::Env("XLION_REFL_PT") != nullptr;      // (A12: the reflections' ground truth, real materials)
         static const bool s_bNoRecon = xlionrender::Env("XLION_REFL_NO_RECON") != nullptr;      // (measurement: the records as traced, no reconstruction)
@@ -3444,7 +3490,7 @@ namespace xlionrender
 
             if( pPre ) Window.WriteTimestamp(*pPre, 3);
             // The screen tail (light_mode::SCREEN): the thin G-buffer, the tail pass and the denoiser, before the scene pass reads them
-            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || Scene.m_bReflectionScreen) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
+            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || ReflectionScreen(Scene)) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
             else if( bMain ) m_TailReport.m_bOn = false;
             if( pPre ) Window.WriteTimestamp(*pPre, 4);
 
@@ -4646,7 +4692,7 @@ namespace xlionrender
             const bool  bAuto = s_EnvAuto >= 0 ? s_EnvAuto == 1 : Scene.m_Post.m_bAutoExposure;
             // (last frame's lit image for the next frame's screen reads: the prepass clears m_HDR - they had read black)
             static const bool s_bSSGIPrev = xlionrender::Env("XLION_SSGI") != nullptr || xlionrender::Env("XLION_VOX_SEEN") != nullptr;      // (and the voxels' lit feed)
-            if( s_bSSGIPrev || Scene.m_bReflectionScreen )
+            if( s_bSSGIPrev || ReflectionScreen(Scene) )
             {
                 if( !View.m_HDRPrev.m_Private ) (void)m_Device.Create(View.m_HDRPrev, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: last frame's HDR" });
                 if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true; }

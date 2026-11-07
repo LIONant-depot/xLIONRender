@@ -17,6 +17,7 @@ const float kVSMNormalOffset = 1.5;
 const float kVSMDepthBias    = 1.0;
 const float kVSMDepthRange   = 4.0;
 const float kVSMLevelBand    = 0.1;     // the share of a level (in its footprint's log2) that cross-fades into the next (0.4 made the seam longer, not softer: Tomas - the two levels' filters must match, ShadowVSM)
+const int   kVSMMoverMapTexels = 256;     // (instance::mover_map_texels_v)
 const float kVSMMaxSlopeBias = 8.0;     // texels of depth: the receiver plane's bias at most (Unreal clamps it too: flickering lit pixels)     // vsm::depth_range_v: a level's depth half range, in its window's extents
 
 // The pages' debug views (VSMParams2.w): 2 the level per pixel (a colour a level, page borders darker), 3 the footprint against the
@@ -296,7 +297,7 @@ void VSMFootprint(in const vec3 World)
     g_VSMFoot = max(min(max(length(dFdx(L.xy)), length(dFdy(L.xy))), 2.0 * length(V) * max(length(dFdx(D)), length(dFdy(D)))), 1e-9);
 }
 
-float ShadowVSM(in const vec3 World, in const vec3 Ng)
+float ShadowVSMPages(in const vec3 World, in const vec3 Ng)
 {
     const vec3  L = (UBOLight.W2Light * vec4(World, 1.0)).xyz;
     const float Foot = g_VSMFoot;
@@ -398,6 +399,49 @@ float ShadowVSM(in const vec3 World, in const vec3 Ng)
     }
     if (Mode >= 2) g_VSMDebug = vec3(1, 0, 0);
     return 1.0;
+}
+
+// The mover maps (XLION_SH_MOVER_MAPS, G1c prototype: gpu_driven_plan_2026-11-07.md): a skinned mover's sun shadow from an orthographic map of its own
+// (a tile of the sun's atlas), not mover pages. The list follows the three page tables in LightCells: its count, then 8 floats a map - x0, y0,
+// size (light space), z0, z range, the tile's atlas x, y. Each map whose rect holds the point, a 4 x 4 PCF; the darkest kept. 1: none of them
+float VSMMoverMaps(in const vec3 World, in const vec3 Ng)
+{
+    const uint W  = uint(UBOLight.VSMParams2.x);
+    const uint TU = (uint(UBOLight.VSMParams.z) * W * W + 1u) / 2u;
+    const uint B  = uint(UBOLight.VSMParams.w) + 3u * TU;
+    const uint n  = LightCells[B];
+    float S = 1.0;
+    for (uint k = 0u; k < n && k < 32u; ++k)
+    {
+        const uint  e  = B + 1u + 8u * k;
+        const float X0 = uintBitsToFloat(LightCells[e]), Y0 = uintBitsToFloat(LightCells[e + 1u]), Sz = uintBitsToFloat(LightCells[e + 2u]);
+        const float Z0 = uintBitsToFloat(LightCells[e + 3u]), Zr = uintBitsToFloat(LightCells[e + 4u]);
+        const ivec2 At = ivec2(uintBitsToFloat(LightCells[e + 5u]), uintBitsToFloat(LightCells[e + 6u]));
+        const float T  = float(kVSMMoverMapTexels);
+        const float Texel = Sz / T;
+        const vec3  L  = (UBOLight.W2Light * vec4(World + Ng * (kVSMNormalOffset * Texel), 1.0)).xyz;
+        const vec2  U  = (L.xy - vec2(X0, Y0)) / Texel - 0.5;
+        if (any(lessThan(U, vec2(1.0))) || any(greaterThanEqual(U, vec2(T - 3.0)))) continue;      // (outside its rect, the filter's 4 x 4 inside)
+        const float Depth = (L.z - Z0) / Zr;
+        if (Depth <= 0.0) continue;                                                     // (nearer the light than all of it)
+        const float Bias = 2.0 * Texel / Zr;
+        const ivec2 Lo = ivec2(floor(U)) - 1;
+        const vec2  f  = U - floor(U);
+        const vec4  Wx = vec4(1.0 - f.x, 1.0, 1.0, f.x), Wy = vec4(1.0 - f.y, 1.0, 1.0, f.y);
+        float Lit = 0.0;
+        for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+            Lit += Wx[x] * Wy[y] * (texelFetch(SamplerShadowMap, At + Lo + ivec2(x, y), 0).r < min(Depth, 1.0) - Bias ? 0.0 : 1.0);
+        S = min(S, Lit / 9.0);
+    }
+    return S;
+}
+
+// The sun's shadow from its pages, and its skinned movers' maps
+float ShadowVSM(in const vec3 World, in const vec3 Ng)
+{
+    const float S = ShadowVSMPages(World, Ng);
+    return S <= 0.0 ? S : min(S, VSMMoverMaps(World, Ng));
 }
 
 // The sun's shadow (VSMParams.x 0: the sun casts none)

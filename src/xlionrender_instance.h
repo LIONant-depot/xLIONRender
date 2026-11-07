@@ -236,6 +236,7 @@ namespace xlionrender
                       void                 configureVSM( const shadows::vsm::setup& Setup )                    noexcept { m_VSM.Init(Setup); }
         // Invariant 1 on this frame's table (tests): every entry names a VALID slot holding exactly that page
                       // (tests: a cluster mesh's resident finest LOD set as cluster_geom::Refresh does when its buffers gain or lose LOD 0)
+                      void                 setMoverMaps( bool b )                                               noexcept { m_bMoverMaps = b; }     // (tests: the skinned movers' sun maps, G1c - with a pool short of the atlas: configureVSM)
                       bool                 setMeshResidentLOD( mesh_id Id, int k )                              noexcept { auto* p = const_cast<mesh_slot*>(findMesh(Id)); if( p == nullptr || !p->m_bCluster ) return false; p->m_Geom.m_FinestLOD = k; p->m_Geom.m_Submeshes = p->m_Geom.LODSubmeshes(k); return true; }
                       bool                 validateVSM ( void ) const                                           noexcept { std::vector<std::uint32_t> T; m_VSM.BuildTable(T); return m_VSM.Validate(T); }
         // The pages' CPU side, read only (tests: levels, texel size)
@@ -817,6 +818,12 @@ namespace xlionrender
         xgpu::buffer                            m_SkinPagesBuffer;          // (its pages: world -> clip, the atlas fold - a frame's region of the ring)
         xgpu::buffer                            m_SkinPagesList;            // (its page lists: a skinned draw's pages, contiguous)
         static constexpr int                    skin_pages_v      = 4096;   // pages a frame
+        // (XLION_SH_MOVER_MAPS, G1c prototype - gpu_driven_plan_2026-11-07.md: a skinned mover's sun shadow from a map of its own, one orthographic
+        // tile of mover_map_texels_v at the sun pool's bottom, not from mover pages; the shading reads the list after the page tables)
+        static constexpr int                    mover_map_texels_v = 256;
+        struct mover_map { float m_X0, m_Y0, m_Size, m_Z0, m_ZRange, m_AtlasX, m_AtlasY, m_Pad; };
+        std::vector<mover_map>                  m_MoverMaps;        // this frame's (renderShadows), read by vsmTableBase
+        bool                                    m_bMoverMaps = xlionrender::Env("XLION_SH_MOVER_MAPS") != nullptr;     // (tests: set it, then configureVSM with a pool short of the atlas by mover_map_texels_v)
         static constexpr int                    skin_page_list_v  = 65536;  // list entries a frame
         std::unique_ptr<shadow_pairs>           m_pShadowPairs;             // null: not supported (drawIndirectCount)
         pairs_report                            m_PairsReport;
