@@ -41,11 +41,14 @@ layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint Lig
 // 0, [7] contributing (shadow > 0), [8] lights a pixel outside the cells walks
 layout(std430, set = 1, binding = 15) buffer TileCountBuffer { uint TileCount[]; };
 #define LOCAL_COUNT(k) { if (((g_Tile.m_Graph >> 16u) & 8u) != 0u) atomicAdd(TileCount[k], 1u); }
+// (XLION_TILE_ABLATE, measurement: 16 no contact-hardening blocker search, 32 no local contact trace, 64 no lamp maps, 128 no local pages' shadow)
+#define LOCAL_ABLATE(b) (((g_Tile.m_Graph >> 16u) & (b)) != 0u)
 // A5.3: the lights each 8 x 8 screen tile can see (xlionrender_light_tiles_comp.glsl; instance: the tile pipelines' binding 16; [1] 0: none
 // this frame - the cells)
 layout(std430, set = 1, binding = 16) readonly buffer LightTileBuffer { uint LightTiles[]; };
 #else
 #define LOCAL_COUNT(k) {}
+#define LOCAL_ABLATE(b) false
 #endif
 #ifndef XLION_TAIL_SCREEN
 // The denoised screen tail (instance: the tail pass and the denoiser, xlionrender_tail_denoise_comp.glsl): a record a half-size texel - x:
@@ -260,7 +263,7 @@ float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const v
     F.A = Radius / (Radius - F.Near); F.B = -Radius * F.Near / (Radius - F.Near);     // shadows::FaceW2C's depth
 
     float Lf = float(Level);
-    if (Ld.Shadow.y > 0.0 && g_LocalTaps != 0)
+    if (Ld.Shadow.y > 0.0 && g_LocalTaps != 0 && !LOCAL_ABLATE(16u))
     {
         const int Top = min(Level + kLocalSoftLevels, kLocalLevels - 1);
         for (int ls = Top; ls >= Level; ls -= 2)                                   // (the coarsest, then finer: a thin caster lost in a coarse level)
@@ -379,9 +382,9 @@ float LocalLightShadow(in const int i, in const vec3 N)
     const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];
 #ifdef XLION_TILE_PIXEL
     // A paged light's contact shadow (XLION_CONTACT; ShadowLevels[0].w its length): the tile pass has the depth to trace. ponytail: the raster path (skinned, special materials) goes without
-    float St = LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
-    if (St > 0.0) St = min(St, LocalLampMaps(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz));
-    return St > 0.0 && Ld.Shadow.z > 0.0 && UBOLight.ShadowLevels[0].w > 0.0 ? St * TileContact(In.wSpacePosition.xyz, Ld.PosRadius.xyz - In.wSpacePosition.xyz) : St;
+    float St = LOCAL_ABLATE(128u) ? 1.0 : LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+    if (St > 0.0 && !LOCAL_ABLATE(64u)) St = min(St, LocalLampMaps(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz));
+    return St > 0.0 && Ld.Shadow.z > 0.0 && UBOLight.ShadowLevels[0].w > 0.0 && !LOCAL_ABLATE(32u) ? St * TileContact(In.wSpacePosition.xyz, Ld.PosRadius.xyz - In.wSpacePosition.xyz) : St;
 #else
     const float St = LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
     return St > 0.0 ? min(St, LocalLampMaps(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz)) : St;
