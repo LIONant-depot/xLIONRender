@@ -30,27 +30,27 @@ namespace xlionrender::gi
         bool Init(xgpu::device& Device, const shaders& S) noexcept
         {
             m_pDevice = &Device;
-            const auto Make = [&](xgpu::shader& Sh, xgpu::compute& C, std::span<const std::uint32_t> W, int nBuffers, int Push, int nTextures = 0)
+            const auto Make = [&](const char* pName, xgpu::shader& Sh, xgpu::compute& C, std::span<const std::uint32_t> W, int nBuffers, int Push, int nTextures = 0)
             {
                 const auto Raw = xgpu::shader::setup::raw_data{ std::span{ reinterpret_cast<const std::int32_t*>(W.data()), W.size() } };
-                return !Device.Create(Sh, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw }) && !Device.Create(C, { .m_pShader = &Sh, .m_nBuffers = nBuffers, .m_nTextures = nTextures, .m_PushConstantsSize = std::size_t(Push), .m_pName = "surfel_gi_gpu: C" });
+                return !Device.Create(Sh, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw }) && !Device.Create(C, { .m_pShader = &Sh, .m_nBuffers = nBuffers, .m_nTextures = nTextures, .m_PushConstantsSize = std::size_t(Push), .m_pName = pName });
             };
             // (the links' sun shadow map until the renderer gives one: a texel, never read - SunInfo.x 0)
             const std::uint8_t Texel[4] = { 255, 255, 255, 255 };
             const auto Mips = std::array{ xgpu::texture::setup::mip_size{ 4 } };      // (without its mip sizes nothing is uploaded: the image stays undefined - a validation error each use)
             if (Device.Create(m_SunMapDummy, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = 1, .m_Height = 1, .m_MipSizes = Mips, .m_AllFacesData = { reinterpret_cast<const std::byte*>(Texel), 4 }, .m_isGamma = false, .m_pName = "GI: sun map dummy" })) return false;
-            return Make(m_Shader[0], m_Pass, S.m_Pass, 8, 16) && Make(m_Shader[1], m_Scatter, S.m_Scatter, 2, 16) && Make(m_Shader[2], m_Commit, S.m_Commit, 5, 16)
-                && Make(m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make(m_Shader[4], m_Filter, S.m_Filter, 10, 32) && Make(m_Shader[5], m_Expand, S.m_Expand, 4, 32)
-                && Make(m_Shader[6], m_Means, S.m_Means, 2, 16) && Make(m_Shader[7], m_Cube, S.m_Cube, 2, 16) && Make(m_Shader[8], m_Migrate, S.m_Migrate, 3, 16)
-                && Make(m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 })
+            return Make("gi: pass", m_Shader[0], m_Pass, S.m_Pass, 8, 16) && Make("gi: scatter", m_Shader[1], m_Scatter, S.m_Scatter, 2, 16) && Make("gi: commit", m_Shader[2], m_Commit, S.m_Commit, 5, 16)
+                && Make("gi: ops", m_Shader[3], m_OpsC, S.m_Ops, 2, 16) && Make("gi: filter", m_Shader[4], m_Filter, S.m_Filter, 10, 32) && Make("gi: expand", m_Shader[5], m_Expand, S.m_Expand, 4, 32)
+                && Make("gi: means", m_Shader[6], m_Means, S.m_Means, 2, 16) && Make("gi: cube", m_Shader[7], m_Cube, S.m_Cube, 2, 16) && Make("gi: migrate", m_Shader[8], m_Migrate, S.m_Migrate, 3, 16)
+                && Make("gi: readback", m_Shader[9], m_ReadBackC, S.m_ReadBack, 2, 16) && !Device.Create(m_Times, { .m_Count = 2 })
                 && ((m_bRelightTS = Device.Create(m_RelightTS, { .m_Count = 2 }) == nullptr) || true)
-                && (S.m_Links.empty() || (m_bLinks = Make(m_Shader[10], m_LinksC, S.m_Links, 16, 32, 1)) || true)
-                && (S.m_Solve.empty() || (m_bSolve = Make(m_Shader[11], m_SolveC, S.m_Solve, 7, 16)) || true)
-                && (S.m_Ghosts.empty() || (m_bGhosts = Make(m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true)
-                && (S.m_Probes.empty() || (m_bProbes = Make(m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true)
-                && (S.m_Clip.empty() || (m_bClip = Make(m_Shader[14], m_ClipC, S.m_Clip, 8, 48)) || true)
-                && (S.m_Ref.empty() || (m_bRef = Make(m_Shader[15], m_RefC, S.m_Ref, 7, 32)) || true)
-                && (S.m_Vox.empty() || (m_bVox = Make(m_Shader[16], m_VoxC, S.m_Vox, 8, 32, 1)) || true);
+                && (S.m_Links.empty() || (m_bLinks = Make("gi: links", m_Shader[10], m_LinksC, S.m_Links, 16, 32, 1)) || true)
+                && (S.m_Solve.empty() || (m_bSolve = Make("gi: solve", m_Shader[11], m_SolveC, S.m_Solve, 7, 16)) || true)
+                && (S.m_Ghosts.empty() || (m_bGhosts = Make("gi: ghosts", m_Shader[12], m_GhostsC, S.m_Ghosts, 2, 16)) || true)
+                && (S.m_Probes.empty() || (m_bProbes = Make("gi: probes", m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true)
+                && (S.m_Clip.empty() || (m_bClip = Make("gi: clip", m_Shader[14], m_ClipC, S.m_Clip, 8, 48)) || true)
+                && (S.m_Ref.empty() || (m_bRef = Make("gi: ref", m_Shader[15], m_RefC, S.m_Ref, 7, 32)) || true)
+                && (S.m_Vox.empty() || (m_bVox = Make("gi: vox", m_Shader[16], m_VoxC, S.m_Vox, 8, 32, 1)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
