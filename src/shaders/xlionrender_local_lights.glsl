@@ -41,6 +41,9 @@ layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint Lig
 // 0, [7] contributing (shadow > 0), [8] lights a pixel outside the cells walks
 layout(std430, set = 1, binding = 15) buffer TileCountBuffer { uint TileCount[]; };
 #define LOCAL_COUNT(k) { if (((g_Tile.m_Graph >> 16u) & 8u) != 0u) atomicAdd(TileCount[k], 1u); }
+// A5.3: the lights each 8 x 8 screen tile can see (xlionrender_light_tiles_comp.glsl; instance: the tile pipelines' binding 16; [1] 0: none
+// this frame - the cells)
+layout(std430, set = 1, binding = 16) readonly buffer LightTileBuffer { uint LightTiles[]; };
 #else
 #define LOCAL_COUNT(k) {}
 #endif
@@ -588,6 +591,20 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     vec3 Sum = vec3(0.0);
     if (UBOLight.LocalCount.x < 0.5) return Sum;                       // (no lights: no cells either)
     const int Mode = int(UBOLight.LocalCount.y);
+#ifdef XLION_TILE_PIXEL
+    // the screen tile's list (an exact cull: every light reaching one of its pixels; the same nonzero terms in the cells' order)
+    if (Mode <= 1 && LightTiles[1] != 0u)
+    {
+        const ivec2 Px = ivec2(gl_FragCoord.xy);
+        const uint  t  = 16u + 16u * (uint(Px.y >> 3) * LightTiles[0] + uint(Px.x >> 3)), n = LightTiles[t];
+        if (n != 0xFFFFu)
+        {
+            LOCAL_COUNT(0u) LOCAL_COUNT(1u)
+            for (uint k = 0u; k < n; ++k) Sum += LocalLight(int((LightTiles[t + 1u + (k >> 1)] >> ((k & 1u) * 16u)) & 0xFFFFu), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
+            return Sum;
+        }
+    }
+#endif
     const int Cell = Mode == 0 ? -1 : LocalLightCell(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
     LOCAL_COUNT(0u)
     if (Cell < 0)

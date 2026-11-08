@@ -3896,6 +3896,29 @@ namespace xlionrender
             const auto TilePass = [&]
             {
                 int nTileDraws = 0;
+                // A5.3 (XLION_LIGHT_TILES=0: off): the local lights each 8 x 8 tile can see, from the prepass's depth - the tile pass reads them
+                // instead of its world cell's list (xlionrender_light_tiles_comp.glsl); the lights' count and base, the mode: this render's block
+                static const bool s_bLightTiles = [] { const char* p = xlionrender::Env("XLION_LIGHT_TILES"); return !(p && p[0] == '0'); }();
+                const int  nLocal = pLight ? int(pLight->m_LocalCount.m_X) : 0;
+                bool bLightTiles = s_bLightTiles && pLight && nLocal > 0 && nLocal < 65536 && pLight->m_LocalCount.m_Y < 1.5f;
+                if( bLightTiles )
+                {
+                    const int TX = (View.m_Width + 7) / 8, TY = (View.m_Height + 7) / 8, nUints = 16 + 16 * TX * TY;
+                    if( View.m_LightTiles.m_Private && int(View.m_LightTiles.getEntryCount()) != nUints ) m_Device.Destroy(std::move(View.m_LightTiles));
+                    if( !View.m_LightTiles.m_Private )
+                    {
+                        const std::vector<std::uint32_t> Z(std::size_t(nUints), 0u);
+                        (void)m_Device.Create(View.m_LightTiles, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 4, .m_EntryCount = nUints, .m_pData = const_cast<std::uint32_t*>(Z.data()), .m_pName = "Lights: the screen tiles' lists" });
+                    }
+                    bLightTiles = View.m_LightTiles.m_Private != nullptr;
+                    if( bLightTiles )
+                    {
+                        struct { xmath::fmat4 m_C2W; std::uint32_t m_W, m_H, m_LightBase, m_nLights; } LPush{ W2C.Inverse(), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(pLight->m_LocalBase.m_X), std::uint32_t(nLocal) };
+                        auto LB = std::array<xgpu::buffer*, 2>{ &m_LightRing, &View.m_LightTiles };
+                        const xgpu::texture* LT[] = { &View.m_Depth };
+                        Window.Dispatch(m_LightTilesCompute, LB, LT, std::span<const xgpu::texture* const>{}, &LPush, sizeof(LPush), TX, TY);
+                    }
+                }
                 // A5.0's light funnel (XLION_TILE_ABLATE bit 8, measurement): the counters zeroed before the pass, copied into a ring after it;
                 // a TILECOUNT line every 120 frames (xlionrender_local_lights.glsl LOCAL_COUNT)
                 static const bool s_bTileCount = [] { const char* p = xlionrender::Env("XLION_TILE_ABLATE"); return p && (std::atoi(p) & 8) != 0; }();
@@ -3946,8 +3969,8 @@ namespace xlionrender
                         if( m_Device.Create(Inst, { .m_PipeLine = G.m_Pipeline, .m_SamplersBindings = Bindings }) ) continue;
                     }
                     if( !C ) C.emplace(Window.StartRenderPass(View.m_TilePass));
-                    std::array<xgpu::buffer*, 11> Buffers{ &m_GIDummy, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &View.m_GIScreenBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer()
-                                                         , m_TileCount.m_Private ? &m_TileCount : &m_GIDummy };
+                    std::array<xgpu::buffer*, 12> Buffers{ &m_GIDummy, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &View.m_GIScreenBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer()
+                                                         , m_TileCount.m_Private ? &m_TileCount : &m_GIDummy, bLightTiles ? &View.m_LightTiles : &m_GIDummy };
                     C->setPipelineInstance(Inst, std::span{ Buffers });
                     C->setTextureTable(pFirst->m_Table);      // (bindless: the heaps' set)
                     C->setDynamicUBO(m_LightUBO, 1);

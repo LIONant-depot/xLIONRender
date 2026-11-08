@@ -174,6 +174,9 @@ namespace xlionrender
         constexpr std::uint32_t s_HeatComp[] = {
             #include "xlionrender_heat_comp.h"
         };
+        constexpr std::uint32_t s_LightTilesComp[] = {
+            #include "xlionrender_light_tiles_comp.h"
+        };
         constexpr std::uint32_t s_ContactComp[] = {
             #include "xlionrender_contact_comp.h"
         };
@@ -853,6 +856,8 @@ namespace xlionrender
             if( auto Err = Device.Create(m_GIPublishCompute, { .m_pShader = &m_GIPublishShader, .m_nBuffers = 3, .m_PushConstantsSize = 16 }); Err ) return Err;
             if( auto Err = Device.Create(m_HeatShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_HeatComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_HeatCompute, { .m_pShader = &m_HeatShader, .m_nBuffers = 1, .m_nImages = 1, .m_PushConstantsSize = 16 }); Err ) return Err;
+            if( auto Err = Device.Create(m_LightTilesShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LightTilesComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_LightTilesCompute, { .m_pShader = &m_LightTilesShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 80 }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80 }); Err ) return Err;
@@ -1524,6 +1529,7 @@ namespace xlionrender
         if( bPairsCut ) UniformBinds.push_back(VertexSSBO(13)); // the pairs' pages
         UniformBinds.push_back(FragmentSSBO(14));               // the denoised screen tail (light_mode::SCREEN)
         if( m_pBuildTile ) UniformBinds.push_back(FragmentSSBO(15));      // the tile pass: A5.0's light funnel counters (XLION_TILE_ABLATE bit 8)
+        if( m_pBuildTile ) UniformBinds.push_back(FragmentSSBO(16));      //   and A5.3's screen tiles' light lists (render_view::m_LightTiles)
         const auto Binds = std::span{ UniformBinds };
         xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_pBuildTile ? m_FullscreenVD : bSkin ? m_SkinGeomVD : m_StaticGeomVD, .m_Shaders = Shaders
                                    , .m_PushConstantsSize = bSkin ? sizeof(details::push_skin_geom) : sizeof(details::push_static_geom)
@@ -2068,6 +2074,7 @@ namespace xlionrender
         if( View.m_TilePass.m_Private ) m_Device.Destroy(std::move(View.m_TilePass));
         for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1, &View.m_TileColor } ) if( p->m_Private ) m_Device.Destroy(std::move(*p));
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
+        if( View.m_LightTiles.m_Private ) ReleaseBuffer(View.m_LightTiles);
         for( auto& T : View.m_Bloom ) if( T.m_Private ) m_Device.Destroy(std::move(T));
         for( auto& I : View.m_ToneMapTAA ) if( I.m_Private ) m_Device.Destroy(std::move(I));
         for( auto& T : View.m_TAA ) if( T.m_Private ) m_Device.Destroy(std::move(T));

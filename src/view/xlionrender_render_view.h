@@ -56,6 +56,7 @@ namespace xlionrender
         // XLION_HEAT (measurement): the GI gather's clock a pixel (4-uint header, then the gather's grid), its colours (xlionrender_heat_comp.glsl),
         // the header a ring slot for the HEAT line, the tone mapper over m_HDR with the colours in the bloom's slot; made the first time it is on
         xgpu::buffer            m_HeatBuffer, m_HeatStats;
+        xgpu::buffer            m_LightTiles;           // A5.3: each 8 x 8 tile's local lights (xlionrender_light_tiles_comp.glsl), made the first time
         xgpu::texture           m_HeatTex;
         xgpu::pipeline_instance m_HeatToneMap;
         double                  m_HeatSum = 0.0, m_HeatN = 0.0, m_HeatLanes = 0.0, m_HeatGroups = 0.0;

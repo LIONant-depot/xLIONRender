@@ -488,6 +488,8 @@ namespace xlionrender
         xgpu::compute               m_GIPublishCompute;
         xgpu::shader                m_HeatShader;           // XLION_HEAT (render_view::m_HeatBuffer): the gather's clock as colours
         xgpu::compute               m_HeatCompute;
+        xgpu::shader                m_LightTilesShader;     // A5.3: the screen tiles' light lists (xlionrender_light_tiles_comp.glsl, render_view::m_LightTiles)
+        xgpu::compute               m_LightTilesCompute;
         xgpu::buffer                m_VoxPub, m_VoxPubStats, m_VoxPubFrameB;      // (FrameB: the frame a ring slot, copied into the buffer's [3] for the gather)
         xgpu::timestamps            m_VoxPubTimes;
         double                      m_VoxPubMs = 0; int m_VoxPubN = 0; std::uint32_t m_VoxPubFrame = 0;
