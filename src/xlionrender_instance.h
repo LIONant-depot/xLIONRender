@@ -176,7 +176,7 @@ namespace xlionrender
                       void                 Blit         ( xgpu::cmd_buffer& CmdBuffer, render_view& View )      noexcept;
 
         // The editor's click (gpu_pick_plan_2026-11-09.md): what View's last G-buffer prepass drew at pixel (X, Y) - its draw's
-        // scene::draw::m_UserID; ~0: nothing there (the sky, a pixel outside, no prepass). Reads the id target back (synchronous: a click)
+        // scene::draw::m_UserID; ~0: nothing there (the sky, a pixel outside, no prepass). Reads its one texel of the id target back (synchronous: a click)
         [[nodiscard]] std::uint64_t        PickPixel    ( render_view& View, int X, int Y )                     noexcept;
 
         // Shadows: false re-renders every shadow tile every frame (the reference the caching is tested against)
