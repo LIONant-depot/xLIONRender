@@ -511,9 +511,27 @@ namespace xlionrender
                 float THit;
                 if (xeditor_tools::picking::RayOBBIntersect(Origin, Dir, Center, T.m_Rotation, Half.AbsCopy(), THit) && THit < MaxT)
                     Hit.Consider(Ent.m_Value, THit);
+                else if (THit = InsideExit(Origin, Dir, Center, T.m_Rotation, Half.AbsCopy()); THit > 0.0f && THit < MaxT)
+                    Hit.Consider(Ent.m_Value, THit);        // (the eye inside its box - a street, a room: picked where its box ends, so what is in front of it wins)
             });
 
             return Hit.isValid() ? Hit.m_Id : xecs::component::entity::invalid_entity_v;
+        }
+
+        // The ray's exit distance from a box it starts inside (0: it starts outside). RayOBBIntersect refuses a ray from inside: a Level whose
+        // one mesh is the whole street (Bistro) picked nothing at all, the eye always inside its bounds (Tomas, 2026-11-08)
+        static float InsideExit(const xmath::fvec3& Origin, const xmath::fvec3& Dir, const xmath::fvec3& Center, const xmath::fquat& Rotation, const xmath::fvec3& Half) noexcept
+        {
+            const xmath::fquat InvR = Rotation.InverseCopy();
+            const xmath::fvec3 O = InvR.RotateVector(Origin - Center), D = InvR.RotateVector(Dir);
+            const float Oa[3]{ O.m_X, O.m_Y, O.m_Z }, Da[3]{ D.m_X, D.m_Y, D.m_Z }, Ha[3]{ Half.m_X, Half.m_Y, Half.m_Z };
+            float TExit = std::numeric_limits<float>::max();
+            for (int i = 0; i < 3; ++i)
+            {
+                if (Oa[i] < -Ha[i] || Oa[i] > Ha[i]) return 0.0f;
+                if (std::fabs(Da[i]) > 1.0e-12f) TExit = std::min(TExit, ((Da[i] > 0.0f ? Ha[i] : -Ha[i]) - Oa[i]) / Da[i]);
+            }
+            return TExit == std::numeric_limits<float>::max() ? 0.0f : TExit;
         }
     };
 }
