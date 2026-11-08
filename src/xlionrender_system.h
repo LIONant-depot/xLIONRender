@@ -340,6 +340,7 @@ namespace xlionrender
         }
 
         void BlitScene(xgpu::cmd_buffer& CmdBuffer) noexcept { if (m_pScene) m_pScene->Blit(CmdBuffer); }
+        std::uint64_t PickPixel(int X, int Y) noexcept { return m_pScene ? m_pScene->PickPixel(X, Y) : ~0ull; }      // (the G-buffer prepass's id: xRenderEditor::PickPixel)
 
         // Old files' material data (a MeshMaterial, the Mesh's deprecated Materials list): the Meshes the last RenderScene found with it, and one
         // of them converted into its Mesh's own slots (UpgradeOldMaterials: false while its materials load, or when it has none)

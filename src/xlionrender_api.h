@@ -53,7 +53,7 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 13;               // 13: view_options::m_bPathTraced (the path traced ground truth on a Level); 12: view_options::m_bNoGPUCull / m_bNoGPUOcclusion / m_bFreezeCull (GPU cluster culling), DescribeScene's GPUCull lines; 11: OldMaterials, UpgradeOldMaterials (old files' MeshMaterial into the Mesh's slots); 10: NotDrawnBoxes and view_options::m_bBoxesOnly / m_FrameBudgetMs (huge meshes: drawn as their boxes, or as many clusters as a frame budget allows); 9: GITraceMs and view_options::m_GITraceAllowanceMs (the host's shared GI allowance); 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
+        static constexpr std::uint32_t kVersion = 14;               // 14: PickPixel (the G-buffer prepass's id under the mouse); 13: view_options::m_bPathTraced (the path traced ground truth on a Level); 12: view_options::m_bNoGPUCull / m_bNoGPUOcclusion / m_bFreezeCull (GPU cluster culling), DescribeScene's GPUCull lines; 11: OldMaterials, UpgradeOldMaterials (old files' MeshMaterial into the Mesh's slots); 10: NotDrawnBoxes and view_options::m_bBoxesOnly / m_FrameBudgetMs (huge meshes: drawn as their boxes, or as many clusters as a frame budget allows); 9: GITraceMs and view_options::m_GITraceAllowanceMs (the host's shared GI allowance); 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
@@ -96,6 +96,10 @@ namespace xlionrender
         // true when it did (the host then removes the MeshMaterial and marks the entity changed), false while its materials load. Version 11.
         virtual int           OldMaterials(const void* pWorld, std::uint64_t* pOut, int MaxEntities) noexcept = 0;
         virtual bool          UpgradeOldMaterials(const void* pWorld, std::uint64_t EntityValue) noexcept = 0;
+        // What the world's last RenderScene drew at pixel (X, Y) of its W x H view, from the G-buffer prepass's id target: the entity (raw
+        // m_Value), or invalid_entity_v - nothing there (the sky), or no prepass. Exact per pixel (a merged street, a skinned character); a
+        // light, a text, a gizmo draw no id: the host's ray Pick for those. Synchronous (a click). Version 14.
+        virtual std::uint64_t PickPixel(const void* pWorld, int X, int Y) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";

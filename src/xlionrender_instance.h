@@ -175,6 +175,10 @@ namespace xlionrender
         // ImGui render callback. Not ImGui::Image: the xGPU ImGui shader gamma encodes textures again.
                       void                 Blit         ( xgpu::cmd_buffer& CmdBuffer, render_view& View )      noexcept;
 
+        // The editor's click (gpu_pick_plan_2026-11-09.md): what View's last G-buffer prepass drew at pixel (X, Y) - its draw's
+        // scene::draw::m_UserID; ~0: nothing there (the sky, a pixel outside, no prepass). Reads the id target back (synchronous: a click)
+        [[nodiscard]] std::uint64_t        PickPixel    ( render_view& View, int X, int Y )                     noexcept;
+
         // Shadows: false re-renders every shadow tile every frame (the reference the caching is tested against)
         bool                                       m_bShadowCache = true;
         // At most this many local light shadow pages render per frame besides the pinned ones (the others wait, a dirty one stays stale)
@@ -651,6 +655,7 @@ namespace xlionrender
         int                         m_ParamRingUsed         = 0;        // vec4s of this frame's MaterialParams ring region already written
         int                         m_nSlotsWritten         = 0;        // persistent slots written this frame (getSlotsWritten)
         std::vector<std::uint32_t>  m_DrawSlot;             // per scene draw: its slot this frame (instance_slots::none_v: not drawn)
+        std::vector<std::uint64_t>  m_SlotUser;             // per instance slot: the m_UserID of the draw that last had it (PickPixel)
         std::vector<std::uint8_t>   m_DrawChanged;          // per scene draw: its persistent slot is new or changed this render
         std::array<int, 8>          m_ChangeWhy{};          // (measurement, VSMEVENT: why casters changed this frame - slot moved, new, mesh, materials, gone, settled, hashed settled, hashed new)
 

@@ -145,6 +145,8 @@ namespace xlionrender
                     Put(Slot, D.m_L2W, D.m_L2W, D.m_Material, D.m_EntityParams);       // (a transient slot: no motion of its own)
                 }
                 m_DrawSlot[i] = Slot;
+                if( Slot >= m_SlotUser.size() ) m_SlotUser.resize(std::size_t(Slot) + 1, ~0ull);
+                m_SlotUser[Slot] = D.m_UserID;
             }
             m_nSlotsWritten += m_InstanceSlots.Flush(region_v - m_RingUsed, Put);     // what does not fit this frame stays pending (several renders per frame)
         }); });

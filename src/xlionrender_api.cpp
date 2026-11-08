@@ -132,6 +132,11 @@ namespace xlionrender
                 if (pOut && MaxEntities > 0) std::copy_n(V.begin(), std::min<std::size_t>(V.size(), static_cast<std::size_t>(MaxEntities)), pOut);
                 return static_cast<int>(V.size());
             }
+            std::uint64_t PickPixel(const void* pWorld, int X, int Y) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                return pSystem ? pSystem->PickPixel(X, Y) : ~0ull;
+            }
             bool          UpgradeOldMaterials(const void* pWorld, std::uint64_t EntityValue) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);
