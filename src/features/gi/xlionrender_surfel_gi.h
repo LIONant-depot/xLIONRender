@@ -3131,7 +3131,7 @@ namespace xlionrender::gi
             float   m_UnsupportedAt[3], m_Pad;
             int     m_Work[4];                  // (diagnostics) the GPU's work for it: BVH nodes popped, shadow rays, read list entries, read hash probes
         };
-        void PackGPUSurfels(std::vector<std::uint32_t>& D, const lights& L) const noexcept
+        void PackGPUSurfels(std::vector<std::uint32_t>& D, const lights& L, bool bReads = true) const noexcept      // bReads false: no read table, lists, neighbors or origins (the surfel GI off: gpu_trace::SurfelsOff)
         {
             // (whole blocks through raw pointers: the Debug build's checked push_back per word took 290 ms for Police's 11.6M words)
             D.assign(gpu_header_v, 0);
@@ -3171,12 +3171,12 @@ namespace xlionrender::gi
                     H[5 + 2 * Lv] = std::uint32_t(At); H[6 + 2 * Lv] = std::uint32_t(Lev.size());
                 }
                 H[9]  = Words(M.m_ParentOf.data(), M.m_ParentOf.size());
-                H[10] = Words(M.m_PackedReadTable.data(), 4 * M.m_PackedReadTable.size());     // (the packed lists: PackReadGrid)
-                H[11] = std::uint32_t(M.m_PackedReadTable.size());
-                H[12] = Words(M.m_PackedReadList.data(), M.m_PackedReadList.size());
+                H[10] = Words(M.m_PackedReadTable.data(), bReads ? 4 * M.m_PackedReadTable.size() : 0);     // (the packed lists: PackReadGrid)
+                H[11] = bReads ? std::uint32_t(M.m_PackedReadTable.size()) : 0u;                                  // (0: no lists - the reads' mean)
+                H[12] = Words(M.m_PackedReadList.data(), bReads ? M.m_PackedReadList.size() : 0);
                 H[13] = F(M.m_ReadCell);
-                H[14] = M.m_OriginFirst.empty() ? gpu_none_v : Words(M.m_OriginFirst.data(), M.m_OriginFirst.size());
-                H[15] = Words(M.m_OriginVert.data(), M.m_OriginVert.size());     // (per origin a vertex of H[1] / H[2], or the surfel's own: GIOrigin)
+                H[14] = M.m_OriginFirst.empty() || !bReads ? gpu_none_v : Words(M.m_OriginFirst.data(), M.m_OriginFirst.size());
+                H[15] = Words(M.m_OriginVert.data(), bReads ? M.m_OriginVert.size() : 0);     // (per origin a vertex of H[1] / H[2], or the surfel's own: GIOrigin)
                 // the hits' texturing (reflections: shaders/xlionrender_refl_hits_comp.glsl): per vertex its UV (2 floats), then per triangle
                 // its material slot (none: the mesh has no UVs)
                 if (M.m_UV.size() == M.m_Pos.size() && !M.m_Pos.empty())
@@ -3190,7 +3190,7 @@ namespace xlionrender::gi
                 for (int Lv = 0; Lv < 2; ++Lv)
                 {
                     const auto& Nb = M.m_Neighbors[Lv];
-                    if (Nb.m_First.size() != M.m_Levels[Lv].size() + 1) { H[18 + 3 * Lv] = H[19 + 3 * Lv] = H[20 + 3 * Lv] = gpu_none_v; continue; }
+                    if (!bReads || Nb.m_First.size() != M.m_Levels[Lv].size() + 1) { H[18 + 3 * Lv] = H[19 + 3 * Lv] = H[20 + 3 * Lv] = gpu_none_v; continue; }
                     H[18 + 3 * Lv] = Words(Nb.m_First.data(), Nb.m_First.size());
                     H[19 + 3 * Lv] = Words(Nb.m_Index.data(), Nb.m_Index.size());
                     H[20 + 3 * Lv] = Words(Nb.m_Weight.data(), Nb.m_Weight.size());

@@ -135,8 +135,7 @@ namespace xlionrender::gi
                 if (++m_nCpuTrace % 200 == 0) { std::printf("GICPU ops %.2f refresh %.2f ranges %.2f ms, staged words %zu, run words %zu, run jobs %zu\n", m_CpuTrace[0] / 200, m_CpuTrace[1] / 200, m_CpuTrace[2] / 200, m_Stage.size() / 2, m_RunStage.size(), m_RunJobs.size()); std::fflush(stdout); m_CpuTrace = {}; }
             }
             bool bSlice = false;
-            static const bool s_bNoSurfels = xlionrender::Env("XLION_GI_NO_SURFELS") != nullptr;     // disables surfel GI; voxel GI unaffected (it runs separately in VoxStep)
-            if (s_bNoSurfels) return false;
+            if (SurfelsOff()) return false;          // (the voxel GI unaffected: it runs separately in VoxStep)
             if (m_LinkState == 2 && m_LinkSolves > 0) return false;      // experiment D: the links own the light (no more slices: they would overwrite it)
             if (m_NextRange >= m_Ranges.size())
             {
@@ -1049,6 +1048,10 @@ namespace xlionrender::gi
         static inline const double s_QuietAfterRays = [] { const char* p = xlionrender::Env("XLION_VOX_QUIET_AFTER"); return p ? std::atof(p) : 50.0e6; }();
         bool                 VoxQuiet(void) const noexcept { static const bool s_bNoQuiet = xlionrender::Env("XLION_VOX_NO_QUIET") != nullptr; if (s_bNoQuiet || m_VoxRaysSince < s_QuietAfterRays) return false; return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
         // XLION_GI_VOX=<level 0's cell> [<ms a frame> [<samples a face keeps>]]
+        // The surfel GI off (XLION_GI_NO_SURFELS, not "0"; Tomas 2026-11-08: dropped - with the voxel GI nothing visible read it, ~0.7 ms and
+        // ~300 MB): no surfel slices, links or shown light, and the meshes' read structures not packed (the BVH, the meshes, the materials and
+        // the emitters stay: the voxel rays' and the reflections' hits). Its GI mode stays available: XLION_GI_NO_SURFELS=0
+        static bool SurfelsOff(void) noexcept { static const bool s_b = [] { const char* p = xlionrender::Env("XLION_GI_NO_SURFELS"); return p != nullptr && p[0] != '0'; }(); return s_b; }
         static const std::array<float, 3>& VoxConfig(void) noexcept { static const std::array<float, 3> s_A = [] { std::array<float, 3> A{ 0.0f, 1.0f, 16384.0f }; if (const char* p = xlionrender::Env("XLION_GI_VOX")) (void)xlionrender::Scan(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }(); return s_A; }
         std::array<float, 3> VoxAnchor(void) const noexcept { return m_VoxAnchor; }
         xgpu::buffer*        VoxBuffer(void) noexcept { return m_ClipB[0].m_Private ? &m_ClipB[0] : nullptr; }
@@ -1152,8 +1155,9 @@ namespace xlionrender::gi
             std::vector<std::uint32_t> Old = std::move(m_Data);
             W.PackGPU(m_Scene);
             PLap(0);
-            W.PackGPUSurfels(m_Data, L);
+            W.PackGPUSurfels(m_Data, L, !SurfelsOff());
             PLap(1);
+            if (xlionrender::Env("XLION_GEOM_SIZES")) std::printf("GIPACKED %.1f MB (the surfels' read structures %s)\n", double(m_Data.size()) * 4.0 / (1024.0 * 1024.0), SurfelsOff() ? "left out" : "in"), std::fflush(stdout);     // (measurement)
             std::vector<std::uint32_t> Owners;
             for (int i = 0; i < W.InstanceCount(); ++i)
             {
