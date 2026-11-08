@@ -46,12 +46,18 @@ bool World(ivec2 p, out vec3 P)
     return true;
 }
 
-float AxisFootprint(ivec2 p, ivec2 Step, vec3 P)
+// The workgroup's 8 x 8 pixels and one more around, their world points read once for the group (w 0: none - the sky, off the view):
+// each pixel rebuilt 5 of them (the sun's request pass does the same: xlionrender_vsm_request_comp.glsl s_L)
+shared vec4 s_P[10 * 10];
+float AxisFootprint(ivec2 l, ivec2 Step, vec3 P)
 {
-    vec3 A, B;
-    const bool bA = World(p + Step, A), bB = World(p - Step, B);
-    return min(bA ? length(A - P) : 1e30, bB ? length(P - B) : 1e30);
+    const vec4 A = s_P[(l.y + Step.y) * 10 + l.x + Step.x], B = s_P[(l.y - Step.y) * 10 + l.x - Step.x];
+    return min(A.w != 0.0 ? length(A.xyz - P) : 1e30, B.w != 0.0 ? length(P - B.xyz) : 1e30);
 }
+// The lights that can reach the group: the group's points' box against each light's sphere, once (a pixel tested every light)
+shared uint s_Lights[kMaxLights];
+shared uint s_nLights;
+shared int  s_Box[6];       // (the box in centimetres around the eye: atomic min / max)
 
 // A face's basis (shadows::FaceBasis) and its axis for a point light's direction D (shadows::CubeFaceAxis order)
 void FaceOf(vec3 D, out int Face, out vec3 Axis)
@@ -75,18 +81,45 @@ uint Entry(uint i) { return (Cells[uint(F[Push.m_Frame].P0.z) + 1u + (i >> 1)] >
 void main()
 {
     if (gl_LocalInvocationIndex < kCounters) s_Count[gl_LocalInvocationIndex] = 0u;
+    if (gl_LocalInvocationIndex < 6u) s_Box[gl_LocalInvocationIndex] = gl_LocalInvocationIndex < 3u ? 0x7FFFFFFF : -0x7FFFFFFF;
+    if (gl_LocalInvocationIndex == 0u) s_nLights = 0u;
     barrier();
-
-    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-    vec3 P;
-    if (World(p, P))
+    for (uint t = gl_LocalInvocationIndex; t < 100u; t += 64u)
     {
-        const float fx = AxisFootprint(p, ivec2(1, 0), P), fy = AxisFootprint(p, ivec2(0, 1), P);
-        const float Foot = max(fx < 1e29 ? fx : 0.0, fy < 1e29 ? fy : 0.0);
+        vec3 Pt;
+        const bool bt = World(ivec2(gl_WorkGroupID.xy) * 8 - 1 + ivec2(int(t) % 10, int(t) / 10), Pt);
+        s_P[t] = vec4(Pt, bt ? 1.0 : 0.0);
+    }
+    barrier();
+    const ivec2 l = ivec2(gl_LocalInvocationID.xy) + 1;
+    const vec4  Pl = s_P[l.y * 10 + l.x];
+    const vec3  P = Pl.xyz;
+    if (Pl.w != 0.0)
+    {
+        const vec3 Pc = P - F[Push.m_Frame].Eye.xyz;
+        for (int k = 0; k < 3; ++k) { atomicMin(s_Box[k], int(floor(Pc[k] * 100.0))); atomicMax(s_Box[3 + k], int(ceil(Pc[k] * 100.0))); }
+    }
+    barrier();
+    {
         const int nLights = int(F[Push.m_Frame].P0.x);
-        for (int li = 0; li < nLights; ++li)
+        if (int(gl_LocalInvocationIndex) < nLights && s_Box[0] <= s_Box[3])
         {
-            const light_t Lt = F[Push.m_Frame].Lights[li];
+            const vec4 Ls = F[Push.m_Frame].Lights[gl_LocalInvocationIndex].PosRadius;
+            const vec3 C  = Ls.xyz - F[Push.m_Frame].Eye.xyz;
+            const vec3 Lo = vec3(s_Box[0], s_Box[1], s_Box[2]) * 0.01, Hi = vec3(s_Box[3], s_Box[4], s_Box[5]) * 0.01;
+            const vec3 Q  = clamp(C, Lo, Hi) - C;
+            if (dot(Q, Q) < Ls.w * Ls.w) s_Lights[atomicAdd(s_nLights, 1u)] = gl_LocalInvocationIndex;
+        }
+    }
+    barrier();
+    if (Pl.w != 0.0)
+    {
+        const float fx = AxisFootprint(l, ivec2(1, 0), P), fy = AxisFootprint(l, ivec2(0, 1), P);
+        const float Foot = max(fx < 1e29 ? fx : 0.0, fy < 1e29 ? fy : 0.0);
+        const int nLights = int(s_nLights);
+        for (int lk = 0; lk < nLights; ++lk)
+        {
+            const light_t Lt = F[Push.m_Frame].Lights[s_Lights[lk]];
             const vec3  D    = P - Lt.PosRadius.xyz;
             const float Dist = length(D);
             if (Dist >= Lt.PosRadius.w || Dist < 1e-6) continue;
