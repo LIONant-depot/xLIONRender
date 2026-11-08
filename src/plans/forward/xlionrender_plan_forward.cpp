@@ -157,7 +157,7 @@ namespace xlionrender
         const int ParamBase = int(Frame % ring_frames_v) * param_ring_v;
         std::vector<xgpu::buffer::copy> Blocks;
         std::size_t nDone = 0;
-        (void)m_MaterialParamsRing.MemoryMap(ParamBase, param_ring_v, [&](void* pMemory)
+        (void)m_MaterialParamsRing.MemoryMapFrameRegion(ParamBase, param_ring_v, [&](void* pMemory)
         {
             for( ; nDone < m_ParamPending.size(); ++nDone )         // (after what this frame's earlier renders wrote: their copies have not run yet)
             {
@@ -1023,7 +1023,7 @@ namespace xlionrender
         const int nLights = nScene + nEm;
         const int LightBase = int(Frame % ring_frames_v) * light_region_v + m_LightRingUsed;
         if( nLights > 0 )
-            (void)m_LightRing.MemoryMap(LightBase, nLights, [&](void* pMemory)
+            (void)m_LightRing.MemoryMapFrameRegion(LightBase, nLights, [&](void* pMemory)
             {
                 auto* pOut = static_cast<details::local_light_data*>(pMemory);
                 for( int k = 0; k < nEm; ++k )      // (an emitter: DirCosOuter w -3, its normal; Shadow w its area, no pages)
@@ -1057,7 +1057,7 @@ namespace xlionrender
         const int nProbes   = std::min(int(m_ProbeOrder.size()), light_region_v - m_LightRingUsed);
         const int ProbeBase = int(Frame % ring_frames_v) * light_region_v + m_LightRingUsed;
         if( nProbes > 0 )
-            (void)m_LightRing.MemoryMap(ProbeBase, nProbes, [&](void* pMemory)
+            (void)m_LightRing.MemoryMapFrameRegion(ProbeBase, nProbes, [&](void* pMemory)
             {
                 auto* pOut = static_cast<details::probe_data*>(pMemory);
                 for( int k = 0; k < nProbes; ++k )
@@ -2677,7 +2677,7 @@ namespace xlionrender
                 });
             }
             std::uint32_t Got[8] = {};
-            (void)m_ReflStats.MemoryMap(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
+            (void)m_ReflStats.MemoryMapFrameRegion(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
             if( Got[0] ) { m_bReflSharpSeen = (Got[7] >> 31) != 0u; Got[7] &= 0x7FFFFFFFu; }
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 5 && Ns[0] != ~0ull && Ns[4] > Ns[0] )
             {
@@ -2866,7 +2866,7 @@ namespace xlionrender
         {
             if( m_HitBinKeysAt.size() < ring_frames_v ) m_HitBinKeysAt.resize(ring_frames_v);
             const auto& Was = m_HitBinKeysAt[std::size_t(Slot)];
-            (void)m_HitCounts.MemoryMap(std::size_t(Slot) * hit_max_bins_v, hit_max_bins_v, [&](void* p)
+            (void)m_HitCounts.MemoryMapFrameRegion(std::size_t(Slot) * hit_max_bins_v, hit_max_bins_v, [&](void* p)
             {
                 const auto* C = static_cast<const std::uint32_t*>(p);
                 for( std::size_t b = 0; b < Was.size(); ++b )
@@ -3159,7 +3159,7 @@ namespace xlionrender
                 m_ClusterPlanKey.assign(Scene.m_Draws.size(), 0);
                 m_BudgetStats.m_nClusters = m_BudgetStats.m_nDrawn = 0;
                 m_BudgetStats.m_Allowance = std::uint64_t(m_IndexAllowance);
-                if( bPlan ) planClusters(Scene, Eye, Frustum);
+                if( bPlan ) { XPROFILE_SCOPE("Scene: plan clusters"); planClusters(Scene, Eye, Frustum); }
             }
 
             static const bool s_bNoPrepass = xlionrender::Env("XLION_NO_PREPASS") != nullptr;
@@ -3222,7 +3222,7 @@ namespace xlionrender
                 const int  Rate      = s_TemporalEnv > 0 ? s_TemporalEnv : Scene.m_GI.m_TemporalRate;
                 const std::uint32_t RateLog2 = Rate >= 4 ? 2u : Rate >= 2 ? 1u : 0u;
                 const int  CSlot = int(m_Device.getFrameIndex() % ring_frames_v);
-                (void)View.m_GIScreenCounters.MemoryMap(CSlot, 1, [&](void* p)         // (this slot's frame is done: its counters)
+                (void)View.m_GIScreenCounters.MemoryMapFrameRegion(CSlot, 1, [&](void* p)         // (this slot's frame is done: its counters)
                 {
                     const auto* pC = static_cast<const std::uint32_t*>(p);
                     m_GIStats.m_nScreenFresh = int(pC[0]); m_GIStats.m_nScreenReprojected = int(pC[1]); m_GIStats.m_nScreenRejected = int(pC[2]); m_GIStats.m_nScreenAged = int(pC[3]);
@@ -3610,7 +3610,7 @@ namespace xlionrender
 
             if( pPre ) Window.WriteTimestamp(*pPre, 3);
             // The screen tail (light_mode::SCREEN): the thin G-buffer, the tail pass and the denoiser, before the scene pass reads them
-            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || ReflectionScreen(Scene)) ) renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan);     // (reflections: its G-buffer)
+            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || ReflectionScreen(Scene)) ) { XPROFILE_SCOPE("Scene: tail and reflections"); renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan); }     // (reflections: its G-buffer)
             else if( bMain ) m_TailReport.m_bOn = false;
             if( pPre ) Window.WriteTimestamp(*pPre, 4);
 
@@ -3618,6 +3618,7 @@ namespace xlionrender
             // buffer as its depth), then a full-screen pass a GI buffer tested EQUAL - into the buffer the scene pass upsamples
             const auto GatherGI = [&]
             {
+                XPROFILE_SCOPE("Scene: gather GI");
                 // Measurement only (XLION_GPU_TIMES): its start, the classification's end, its end - SCREENSPLIT as the geometry read's (the
                 // tools wait for its "GI read")
                 static const bool s_bGatherSplit = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
@@ -3702,7 +3703,7 @@ namespace xlionrender
                         // (the gather's frame and parity: in the buffer itself, [3] - the table's word reached the gather a frame late or early: the
                         // lists' parity never matched the resolve's, every request dropped)
                         const int FSlot = int(m_Device.getFrameIndex() % ring_frames_v);
-                        (void)m_VoxPubFrameB.MemoryMap(FSlot, 1, [&](void* p) { const std::uint32_t F[4] = { Frame, Frame & 1u, 0u, 0u }; std::memcpy(p, F, sizeof(F)); });
+                        (void)m_VoxPubFrameB.MemoryMapFrameRegion(FSlot, 1, [&](void* p) { const std::uint32_t F[4] = { Frame, Frame & 1u, 0u, 0u }; std::memcpy(p, F, sizeof(F)); });
                         const xgpu::buffer::copy Fc{ FSlot, 3, 1 };
                         Window.CopyBuffer(m_VoxPubFrameB, m_VoxPub, std::span{ &Fc, 1 });
                     }
@@ -3810,6 +3811,7 @@ namespace xlionrender
             }
             const auto SunMask = [&]
             {
+                XPROFILE_SCOPE("Scene: sun mask");
                 m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;     // (the scene's block: other passes took entries since - the pass binds the latest)
                 {
                     auto MCmd = Window.StartRenderPass(View.m_SunMaskPass);
@@ -3899,6 +3901,7 @@ namespace xlionrender
             const bool bContact = s_Contact[0] > 0.0f && bGPre && bScreen && pLight && m_ContactTex.m_Private && View.m_Width <= sun_mask_w_v && View.m_Height <= sun_mask_h_v && Scene.m_Sun.m_bCastShadows;
             const auto ContactPass = [&]
             {
+                XPROFILE_SCOPE("Scene: contact");
                 static const bool s_bTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                 static double s_Sum = 0.0; static int s_n = 0;
                 if( std::vector<std::uint64_t> Ns; s_bTimes && m_ContactTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
@@ -3922,6 +3925,7 @@ namespace xlionrender
             };
             const auto TilePass = [&]
             {
+                XPROFILE_SCOPE("Scene: tile pass");
                 int nTileDraws = 0;
                 // A5.3 (XLION_LIGHT_TILES=0: off): the local lights each 8 x 8 tile can see, from the prepass's depth - the tile pass reads them
                 // instead of its world cell's list (xlionrender_light_tiles_comp.glsl); the lights' count and base, the mode: this render's block
@@ -4016,6 +4020,7 @@ namespace xlionrender
             };
             const auto PrepassCulled = [&]( int Pass )
             {
+                XPROFILE_SCOPE("Scene: prepass culled");
                 for( std::size_t r = 0; r < m_CullRuns.size(); ++r )
                 {
                     const auto& R = m_CullRuns[r];
@@ -4116,6 +4121,7 @@ namespace xlionrender
                 // instance (the material compiler's XLION_GPRE_OUT) -, then 2: the scene pass starts)
                 for( int Mode = bGPre ? 1 : 0; Mode <= (bGPre ? 2 : 0); ++Mode )
                 {
+                    XPROFILE_SCOPE("Scene: draws (a mode)");
                 if( Mode == 2 && bOcclude )        // (GPU occlusion with the G-buffer: its Hi-Z from the G-buffer's depth, pass 2's prepass into it too)
                 {
                     CmdPass.reset();
