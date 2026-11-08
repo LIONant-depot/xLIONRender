@@ -1738,12 +1738,69 @@ namespace xlionrender::gi
         {
             m_Lo = { 1e30f, 1e30f, 1e30f }; m_Hi = { -1e30f, -1e30f, -1e30f };
             for (const auto& P : m_Pos) { m_Lo = v3::Min(m_Lo, P); m_Hi = v3::Max(m_Hi, P); }
-            m_Bvh.Build(int(m_Tris.size()), [&](int t, v3& Lo, v3& Hi)
+            // Early split clipping: the largest triangles' boxes halved (the triangle clipped to each half) while over 4x the mean box area, at
+            // most XLION_BVH_SPLIT (0.3; 0 off) x the triangles' count more references; a triangle in several leaves, its id and edges the same
+            // (the hit is the same: no dedupe). Bistro Game moving, 2026-11-09: sharp reflection rays 3.04 -> 2.40 ms, frame 17.55 -> 17.0 ms,
+            // the rays' nodes and Tri4 rows +7 % (~13 MB); a floor of 1x: 2.20 ms but +27 % (~46 MB) - xLION_Docs/wide_blas_design_2026-11-09.md
+            struct ref { v3 m_Lo, m_Hi; int m_Tri; };
+            std::vector<ref> Refs(m_Tris.size());
+            for (std::size_t i = 0; i < m_Tris.size(); ++i)
             {
-                const auto& T = m_Tris[t];
-                Lo = v3::Min(v3::Min(m_Pos[T[0]], m_Pos[T[1]]), m_Pos[T[2]]);
-                Hi = v3::Max(v3::Max(m_Pos[T[0]], m_Pos[T[1]]), m_Pos[T[2]]);
-            });
+                const auto& T = m_Tris[i];
+                Refs[i] = { v3::Min(v3::Min(m_Pos[T[0]], m_Pos[T[1]]), m_Pos[T[2]]), v3::Max(v3::Max(m_Pos[T[0]], m_Pos[T[1]]), m_Pos[T[2]]), int(i) };
+            }
+            static const float s_Split = [] { const char* p = xlionrender::Env("XLION_BVH_SPLIT"); return p ? float(std::atof(p)) : 0.3f; }();
+            if (s_Split > 0.0f && !Refs.empty())
+            {
+                const auto Area = [](const ref& R) { const v3 d = R.m_Hi - R.m_Lo; return d[0] * d[1] + d[1] * d[2] + d[2] * d[0]; };
+                // the triangle clipped to the box [Lo, Hi]: its polygon's bounds (Sutherland-Hodgman against the 6 planes)
+                const auto Clip = [&](int Tri, const v3& Lo, const v3& Hi, ref& Out) -> bool
+                {
+                    v3 P[16], Q[16]; int n = 3, m;
+                    for (int k = 0; k < 3; ++k) P[k] = m_Pos[m_Tris[std::size_t(Tri)][k]];
+                    for (int a = 0; a < 3 && n; ++a) for (int s = 0; s < 2 && n; ++s)
+                    {
+                        const float Pl = s ? Hi[a] : Lo[a];
+                        const auto In = [&](const v3& V) { return s ? V[a] <= Pl : V[a] >= Pl; };
+                        m = 0;
+                        for (int k = 0; k < n; ++k)
+                        {
+                            const v3& A = P[k]; const v3& B = P[(k + 1) % n];
+                            const bool ia = In(A), ib = In(B);
+                            if (ia) Q[m++] = A;
+                            if (ia != ib && m < 16) { const float u = (Pl - A[a]) / (B[a] - A[a]); v3 X = A + (B - A) * u; X[a] = Pl; Q[m++] = X; }
+                        }
+                        n = std::min(m, 15); for (int k = 0; k < n; ++k) P[k] = Q[k];
+                    }
+                    if (n == 0) return false;
+                    Out.m_Lo = Out.m_Hi = P[0];
+                    for (int k = 1; k < n; ++k) { Out.m_Lo = v3::Min(Out.m_Lo, P[k]); Out.m_Hi = v3::Max(Out.m_Hi, P[k]); }
+                    Out.m_Lo = v3::Max(Out.m_Lo, Lo); Out.m_Hi = v3::Min(Out.m_Hi, Hi); Out.m_Tri = Tri;
+                    return true;
+                };
+                const std::size_t Budget = Refs.size() + std::size_t(s_Split * float(Refs.size()));
+                double Mean = 0; for (const auto& R : Refs) Mean += Area(R); Mean /= double(Refs.size());
+                const auto Less = [&](int x, int y) { return Area(Refs[std::size_t(x)]) < Area(Refs[std::size_t(y)]); };
+                std::vector<int> Heap(Refs.size()); for (std::size_t i = 0; i < Heap.size(); ++i) Heap[i] = int(i);
+                std::make_heap(Heap.begin(), Heap.end(), Less);
+                while (Refs.size() < Budget && !Heap.empty())
+                {
+                    std::pop_heap(Heap.begin(), Heap.end(), Less);
+                    const int i = Heap.back(); Heap.pop_back();
+                    const ref R = Refs[std::size_t(i)];
+                    if (Area(R) < 4.0 * Mean) break;                                   // (the rest are small: their boxes fit them)
+                    const v3 d = R.m_Hi - R.m_Lo;
+                    const int a = d[0] > d[1] ? (d[0] > d[2] ? 0 : 2) : (d[1] > d[2] ? 1 : 2);
+                    v3 HiL = R.m_Hi, LoR = R.m_Lo; HiL[a] = LoR[a] = 0.5f * (R.m_Lo[a] + R.m_Hi[a]);
+                    ref L, Rr;
+                    const bool bL = Clip(R.m_Tri, R.m_Lo, HiL, L), bR = Clip(R.m_Tri, LoR, R.m_Hi, Rr);
+                    if (!bL || !bR) continue;                                          // (the plane missed it: keep the box, no more splits of it)
+                    Refs[std::size_t(i)] = L; Heap.push_back(i); std::push_heap(Heap.begin(), Heap.end(), Less);
+                    Refs.push_back(Rr); Heap.push_back(int(Refs.size() - 1)); std::push_heap(Heap.begin(), Heap.end(), Less);
+                }
+            }
+            m_Bvh.Build(int(Refs.size()), [&](int r, v3& Lo, v3& Hi) { Lo = Refs[std::size_t(r)].m_Lo; Hi = Refs[std::size_t(r)].m_Hi; });
+            for (auto& P : m_Bvh.m_Prims) P = Refs[std::size_t(P)].m_Tri;            // (the leaves' primitives: triangles again)
             m_Tri4.assign(m_Bvh.m_Leaves.size(), tri4{});
             for (std::size_t l = 0; l < m_Tri4.size(); ++l)
             {
