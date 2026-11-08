@@ -692,6 +692,9 @@ namespace xlionrender
         float                       m_GISliceMs = 2.0f;
         xgpu::timestamps            m_VoxTS;                        // experiment X1c: the voxels' rays, by their ms
         bool                        m_bVoxTS = false, m_bVoxTSTried = false, m_bVoxOn = false;
+        bool                        m_bAsyncVoxThisFrame = false;
+        std::function<void()>       m_DeferredVox;
+        void                        runDeferredVox( xgpu::window& Window ) noexcept;      // the voxel rays, recorded after the GI gather on the second queue (XLION_ASYNC=0: in place)
         double                      m_VoxRays = 16384.0;
         xmath::fvec3                m_VoxFwd{ 0.0f, 0.0f, 0.0f };
         std::chrono::steady_clock::time_point m_VoxTurned{};

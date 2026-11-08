@@ -3334,9 +3334,21 @@ namespace xlionrender
                                 static const bool s_bVoxLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                                 if( s_bVoxLog && m_Device.getFrameIndex() % 120 == 0 ) { std::printf("VOXRAYS %.2f ms, %.0f rays, budget %.2f\n", Ms, m_VoxRays, Budget); std::fflush(stdout); }
                             }
-                            if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
-                            m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, m_Device.getFrameIndex(), int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
-                            if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
+                            // The rays only write the voxel store, which nothing reads between here and the GI gather but the reflections and the
+                            // gather themselves: so they run after the gather, on xGPU's second queue beside the rest of the frame (sun mask, tile pass,
+                            // forward, post: ~6.5 ms of graphics on Bistro Game; the frame map 2026-11-08); the next frame waits for them before
+                            // anything of its own. This frame's gather and reflections read the store as the last frame's rays left it. XLION_ASYNC=0:
+                            // here, in the frame (the default: XLION_ASYNC=1 turns the second queue on)
+                            const auto Rays = [this, &Window, &View, &Scene, Eye, Vox = Vox, Frame = m_Device.getFrameIndex()]()
+                            {
+                                if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
+                                m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, Frame, int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
+                                if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
+                            };
+                            // (off by default: 2026-11-08, Bistro Game moving at a fixed 10,000 rays, async 17.84/17.80 ms against 17.40/18.12 in the frame -
+                            // no gain: on the second queue the rays took 5-7 ms instead of 2; and the rays' budget, measured on that queue, cut them to 2048)
+                            static const bool s_bAsync = [] { const char* p = xlionrender::Env("XLION_ASYNC"); return p && p[0] == '1'; }();
+                            if( s_bAsync ) m_DeferredVox = Rays; else Rays();
                         }
                         if( s_Vox[0] > 0.0f && !m_pGatherRefS && m_bVoxOn && m_pGITrace && m_pGITrace->RefSamples() && m_pGITrace->VoxBuffer() )     // (the ground truth above stays: the voxels overwrote it, a black or voxel image in its place)
                         {
@@ -4113,7 +4125,7 @@ namespace xlionrender
                     CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
                     PrepassCulled(1);
                 }
-                if( Mode == 2 ) { CmdPass.reset(); if( pSplit ) Window.WriteTimestamp(*pSplit, 4); if( bScreen ) GatherGI(); if( bSunMask ) SunMask(); if( bContact ) ContactPass(); if( pSplit ) Window.WriteTimestamp(*pSplit, 5); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
+                if( Mode == 2 ) { CmdPass.reset(); if( pSplit ) Window.WriteTimestamp(*pSplit, 4); if( bScreen ) GatherGI(); runDeferredVox(Window); if( bSunMask ) SunMask(); if( bContact ) ContactPass(); if( pSplit ) Window.WriteTimestamp(*pSplit, 5); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
@@ -4784,10 +4796,26 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    // the deferred voxel rays (m_DeferredVox): after the GI gather, on the second queue when there is one
+    void instance::runDeferredVox( xgpu::window& Window ) noexcept
+    {
+        if( !m_DeferredVox ) return;
+        auto Rays = std::move(m_DeferredVox); m_DeferredVox = {};
+        const bool bAsync = Window.BeginAsyncCompute();
+        Rays();
+        if( bAsync ) { Window.EndAsyncCompute(); m_bAsyncVoxThisFrame = true; }
+    }
+
     void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& CameraIn, const overlay_fn& Overlay ) noexcept
     {
         assert(m_bReady && View.m_Width > 0);
         m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
+        if( View.m_HDRPrevPendingW )            // (last frame's image for the screen reads, its copy held back while the async rays read the older one)
+        {
+            if( View.m_HDRPrevPendingW == View.m_Width && View.m_HDRPrevPendingH == View.m_Height && View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true; }
+            View.m_HDRPrevPendingW = View.m_HDRPrevPendingH = 0;
+        }
+        m_bAsyncVoxThisFrame = false;
         if( m_SunMaskTex.m_Private && !m_bSunMaskCleared ) { (void)Window.StartRenderPass(m_SunMaskClear); m_bSunMaskCleared = true; }      // (slot 11 sampled from the first draw)
         static const bool s_bNoBudget = xlionrender::Env("XLION_NO_FRAME_BUDGET") != nullptr;    // measurement only (GI review): every cluster drawn, whatever the host's budget
         if( s_bNoBudget ) m_FrameBudgetMs = 0;
@@ -4961,10 +4989,13 @@ namespace xlionrender
             const bool  bAuto = s_EnvAuto >= 0 ? s_EnvAuto == 1 : Scene.m_Post.m_bAutoExposure;
             // (last frame's lit image for the next frame's screen reads: the prepass clears m_HDR - they had read black)
             static const bool s_bSSGIPrev = xlionrender::Env("XLION_SSGI") != nullptr || xlionrender::Env("XLION_VOX_SEEN") != nullptr;      // (and the voxels' lit feed)
+            runDeferredVox(Window);      // (not run yet - no gather this frame: here, in the frame)
             if( s_bSSGIPrev || ReflectionScreen(Scene) )
             {
                 if( !View.m_HDRPrev.m_Private ) (void)m_Device.Create(View.m_HDRPrev, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: last frame's HDR" });
-                if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true; }
+                // (the async rays may still read m_HDRPrev: the copy at the next Render's start, before anything reads it)
+                if( View.m_HDRPrev.m_Private && m_bAsyncVoxThisFrame ) { View.m_HDRPrevPendingW = View.m_Width; View.m_HDRPrevPendingH = View.m_Height; }
+                else if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true; }
             }
             static const float s_EnvExposure = [] { const char* p = xlionrender::Env("XLION_EXPOSURE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: a fixed exposure with auto exposure off - graded lit images)
             if( s_EnvExposure > 0.0f ) View.m_Exposure = s_EnvExposure;
