@@ -384,6 +384,22 @@ int main()
         }
         std::printf("A render pass destroyed at run time, through the death march: ok\n");
     }
+    {   // xGPU retires an object on its frames' completion, not on a count of flips (the editor's crash inside the driver after Play/Stop,
+        // 2026-11-08: several windows' flips freed objects a frame still read): destroyed while its frame records, it lives past that frame's
+        // submission and goes once that frame is done - and it goes (no leak)
+        xgpu::buffer B;
+        CHECK(App.m_Device.Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 4, .m_pName = "test: retired" }) == nullptr, "buffer");
+        const std::weak_ptr W = B.m_Private;
+        while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+        { auto Cmd = App.m_Window.getCmdBuffer(); }
+        App.m_Device.Destroy(std::move(B));
+        App.m_Window.PageFlip();
+        CHECK(!W.expired(), "a buffer retired while its frame recorded was freed at that frame's submission");
+        int nFrames = 0;
+        for (; nFrames < 12 && !W.expired(); ++nFrames) { while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break; { auto Cmd = App.m_Window.getCmdBuffer(); } App.m_Window.PageFlip(); }
+        CHECK(W.expired(), "a retired buffer was never freed (%d frames)", nFrames);
+        std::printf("A retired buffer: kept past its frame's submission, freed %d frames later: ok\n", nFrames);
+    }
     {   // The screen's samples follow the view's size (the voxels' rays read their header at the end: a view grown past the first one's size left
         // every ray without it - the store frozen, sunlit squares in Bistro Game, 2026-11-07)
         gpu_trace T;
