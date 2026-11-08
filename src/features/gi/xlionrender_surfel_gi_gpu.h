@@ -12,6 +12,8 @@
 // surfel on the CPU. Before each slice the world's changes go up: its estimator changes as ops (world::TakeGPUOps, _ops_comp), the
 // links' emitted light that changed, the means, the setup and the lights (_scatter_comp). The shown light is made on the GPU (Show,
 // _filter_comp), straight into the renderer's ring. ReadBack fills the world's arrays from the GPU's light (its tests, its dump)
+#include <bit>
+#include <cmath>
 #include "../../xlionrender_env.h"
 #include "xlionrender_surfel_gi.h"
 #include <chrono>
@@ -951,6 +953,39 @@ namespace xlionrender::gi
             if (!FitScreen(nPixels) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
             // (XLION_VOX_RELIGHT=<connections a frame>, a prototype: rays keep what they found, 200000 of them; that many are relit each frame, no traversal; its buffer a token otherwise)
             static const int s_Relight = [] { const char* p = xlionrender::Env("XLION_VOX_RELIGHT"); return p ? std::atoi(p) : 0; }();
+            // (measurement, XLION_VOX_BRICKS=<frames>: the connections' token is the brick bitmaps instead - host-visible, marked by every face the
+            // rays write (xlionrender_gi_ref.glsl VoxBrickMark); after that many frames their counts printed, VOXBRICKS, by linear counting)
+            static const int s_Bricks = [] { const char* p = xlionrender::Env("XLION_VOX_BRICKS"); return p ? std::atoi(p) : 0; }();
+            constexpr std::size_t brick_words_v = 4 + 3 * 65536;
+            if (s_Bricks > 0 && s_Relight == 0)
+            {
+                if (!m_ConnB.m_Private || std::size_t(m_ConnB.getEntryCount()) < brick_words_v)
+                {
+                    std::vector<std::uint32_t> W(brick_words_v, 0u); W[3] = 0x42524B53u;
+                    if (m_pDevice->Create(m_ConnB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4
+                                                   , .m_EntryCount = int(brick_words_v), .m_pData = W.data(), .m_pName = "GI: vox brick bitmaps" })) return false;
+                    m_BrickFrames = 0;
+                    std::printf("VOXBRICKS on: the bitmaps made, the report after %d steps\n", s_Bricks); std::fflush(stdout);
+                }
+                if (++m_BrickFrames == s_Bricks)
+                {
+                    std::uint32_t* p = nullptr;
+                    if (auto* pErr = m_ConnB.getMappedVirtualMemory(p); pErr || !p) { std::printf("VOXBRICKS: the bitmaps could not be mapped\n"); std::fflush(stdout); }
+                    else
+                    {
+                        double n[3];
+                        for (int r = 0; r < 3; ++r)
+                        {
+                            std::size_t Set = 0;
+                            for (std::size_t w = 0; w < 65536; ++w) Set += std::size_t(std::popcount(p[4 + r * 65536 + w]));
+                            const double M = double(1u << 21);
+                            n[r] = -M * std::log(std::max(1.0 - double(Set) / M, 1e-9));      // (linear counting: distinct keys from the bits set)
+                        }
+                        std::printf("VOXBRICKS after %d frames: %.0f cells, %.0f 2x2x2 bricks (%.1f %% full), %.0f 4x4x4 bricks (%.1f %% full)\n", s_Bricks, n[0], n[1], 100.0 * n[0] / std::max(n[1] * 8.0, 1.0), n[2], 100.0 * n[0] / std::max(n[2] * 64.0, 1.0));
+                        std::fflush(stdout);
+                    }
+                }
+            }
             if (!m_ConnB.m_Private && !FitLocal(m_ConnB, 16, s_Relight > 0 ? 1 + 200000 * 7 : 8)) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0], &m_ConnB };
             m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z };
@@ -1407,6 +1442,7 @@ namespace xlionrender::gi
         static constexpr std::uint32_t      vox_slots_v = 1u << 21;     // (xlionrender_gi_ref_comp.glsl, _gather_frag.glsl)
         std::size_t                         m_VoxCleared = 0;
         xgpu::buffer                        m_ConnB;
+        int                                 m_BrickFrames = 0;      // (XLION_VOX_BRICKS)
         std::uint32_t                       m_VoxLightsKey = 0;
         std::chrono::steady_clock::time_point m_VoxLightsMoved{};
         bool                                m_bRef = false;

@@ -14,6 +14,7 @@ layout(std430, set = 0, binding = 6)          buffer accum_b   { vec4 GIRefAccum
 #ifdef GI_VOX_ONLY
 // (XLION_VOX_RELIGHT, a prototype: rays' connections kept, 7 entries each: the point (w 1) and its normal; the ray; the hit (w: 1 a surface, 0 the sky, -1 a back face), its normal, albedo and emission. Relighting reads the light at a known hit, no traversal)
 layout(std430, set = 0, binding = 7)          buffer conn_b    { uvec4 ConnHeader; vec4 Conn[]; };
+layout(std430, set = 0, binding = 7)          buffer conn_u_b  { uint ConnU[]; };      // (the same memory: XLION_VOX_BRICKS's bitmaps, its word 3 the mark)
 layout(set = 1, binding = 0) uniform sampler2D SceneHDR;      // (XLION_VOX_SEEN: last frame's lit image, what the surfaces were seen as: every light, shadow and texture on screen)
 #endif
 layout(std430, set = 0, binding = 6)          buffer accum_u_b { uvec4 GIRefAccumU[]; };    // (the same memory: a direction bin's fixed point sums, added atomically)
@@ -120,6 +121,19 @@ void VoxDirsAdd(in const vec3 Pw, in const vec3 N, in const float Cell0, in cons
     GIRefAccumU[VoxX2Of(e)].w = floatBitsToUint(Now);
 }
 uint g_VoxStoreKind = 0u;      // (XLION_VOX_AO_BUCKET: 1 a contact's records - the faces' keys + 64; the direction bins stay shared)
+#ifdef GI_VOX_ONLY
+// (measurement, XLION_VOX_BRICKS - gi_store_bricks_plan_2026-11-08.md: each face a store writes marks a bit of three 2^21-bit maps, by the
+// hash of its cell, of its 2 x 2 x 2 brick, of its 4 x 4 x 4 brick: distinct cells and bricks, so how full bricks would be)
+const uint vox_brick_mark_v = 0x42524B53u;
+void VoxBrickMark(in const int L, in const ivec3 q, in const uint Face)
+{
+    const uint R = 1u << 21;
+    const uint h0 = VoxHash(L, q, Face) % R, h1 = VoxHash(L, q >> 1, Face + 16u) % R, h2 = VoxHash(L, q >> 2, Face + 32u) % R;
+    atomicOr(ConnU[4u + (h0 >> 5)], 1u << (h0 & 31u));
+    atomicOr(ConnU[4u + 65536u + (h1 >> 5)], 1u << (h1 & 31u));
+    atomicOr(ConnU[4u + 131072u + (h2 >> 5)], 1u << (h2 & 31u));
+}
+#endif
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
     VoxStoreDir(L, Org, g, N, Sample);
@@ -131,6 +145,9 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
     const uint  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)) + 64u * g_VoxStoreKind), e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
+#ifdef GI_VOX_ONLY
+    if (ConnU[3] == vox_brick_mark_v) VoxBrickMark(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)) + 64u * g_VoxStoreKind);
+#endif
     vec4 v = GIRefAccum[e];
     const uvec4 dU = GIRefAccumU[e + 1u];
     const vec4 W2 = GIRefAccum[VoxX2Of(e)];
