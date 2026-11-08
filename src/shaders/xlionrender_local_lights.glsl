@@ -41,11 +41,14 @@ layout(std430, set = 1, binding = 4) readonly buffer LightCellBuffer  { uint Lig
 // 0, [7] contributing (shadow > 0), [8] lights a pixel outside the cells walks
 layout(std430, set = 1, binding = 15) buffer TileCountBuffer { uint TileCount[]; };
 #define LOCAL_COUNT(k) { if (((g_Tile.m_Graph >> 16u) & 8u) != 0u) atomicAdd(TileCount[k], 1u); }
+// (XLION_TILE_ABLATE, measurement: 16 no contact-hardening blocker search, 32 no local contact trace, 64 no lamp maps, 128 no local shadows)
+#define LOCAL_ABLATE(b) (((g_Tile.m_Graph >> 16u) & (b)) != 0u)
 // A5.3: the lights each 8 x 8 screen tile can see (xlionrender_light_tiles_comp.glsl; instance: the tile pipelines' binding 16; [1] 0: none
 // this frame - the cells)
 layout(std430, set = 1, binding = 16) readonly buffer LightTileBuffer { uint LightTiles[]; };
 #else
 #define LOCAL_COUNT(k) {}
+#define LOCAL_ABLATE(b) false
 #endif
 #ifndef XLION_TAIL_SCREEN
 // The denoised screen tail (instance: the tail pass and the denoiser, xlionrender_tail_denoise_comp.glsl): a record a half-size texel - x:
@@ -260,7 +263,7 @@ float LocalShadow(in const LocalLightData Ld, in const vec3 Receiver, in const v
     F.A = Radius / (Radius - F.Near); F.B = -Radius * F.Near / (Radius - F.Near);     // shadows::FaceW2C's depth
 
     float Lf = float(Level);
-    if (Ld.Shadow.y > 0.0 && g_LocalTaps != 0)
+    if (Ld.Shadow.y > 0.0 && g_LocalTaps != 0 && !LOCAL_ABLATE(16u))
     {
         const int Top = min(Level + kLocalSoftLevels, kLocalLevels - 1);
         for (int ls = Top; ls >= Level; ls -= 2)                                   // (the coarsest, then finer: a thin caster lost in a coarse level)
@@ -309,9 +312,8 @@ float LocalEmitterAtt(in const LocalLightData Ld, in const vec3 L, in const floa
 float LocalAttScale(in const LocalLightData Ld) { return Ld.DirCosOuter.w < -2.5 ? dot(Ld.Color.rgb, vec3(0.2126, 0.7152, 0.0722)) : 1.0; }
 
 // One light's contribution at the surface without its shadow (0 outside its radius)
-vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
+vec3 LocalLightUnshadowedLd(in const LocalLightData Ld, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
 {
-    const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];
     const vec3  ToLight = Ld.PosRadius.xyz - In.wSpacePosition.xyz;            // both camera-centered
     const float Dist    = length(ToLight);
     const float s       = Dist / Ld.PosRadius.w;
@@ -323,7 +325,12 @@ vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in c
     else if (Ld.DirCosOuter.w < -2.5) Att = LocalEmitterAtt(Ld, L, Dist, s);
     if (Att * LocalAttScale(Ld) < 1e-4) return vec3(0.0);
     LOCAL_COUNT(4u)
+    if (LOCAL_ABLATE(512u)) return Albedo * (saturate(dot(N, L)) * 0.3183099) * Ld.Color.rgb * Att;      // (measurement: Lambert, no BRDF)
     return PBRDirect(N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic, L) * Ld.Color.rgb * Att;
+}
+vec3 LocalLightUnshadowed(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
+{
+    return LocalLightUnshadowedLd(LocalLightList[int(UBOLight.LocalBase.x) + i], N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
 }
 
 // The lamps' maps of the skinned movers (instance::m_LampMaps, the mover maps' prototype): after the local tables (LightCells at
@@ -374,28 +381,29 @@ float LocalLampMaps(in const LocalLightData Ld, in const vec3 Receiver)
 #ifdef XLION_TILE_PIXEL
 float TileContact(in const vec3 P, in const vec3 ToLight);      // (xlionrender_tile_pixel.glsl)
 #endif
-float LocalLightShadow(in const int i, in const vec3 N)
+float LocalLightShadowLd(in const LocalLightData Ld, in const vec3 N)
 {
-    const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];
 #ifdef XLION_TILE_PIXEL
     // A paged light's contact shadow (XLION_CONTACT; ShadowLevels[0].w its length): the tile pass has the depth to trace. ponytail: the raster path (skinned, special materials) goes without
-    float St = LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
-    if (St > 0.0) St = min(St, LocalLampMaps(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz));
-    return St > 0.0 && Ld.Shadow.z > 0.0 && UBOLight.ShadowLevels[0].w > 0.0 ? St * TileContact(In.wSpacePosition.xyz, Ld.PosRadius.xyz - In.wSpacePosition.xyz) : St;
+    float St = LOCAL_ABLATE(128u) ? 1.0 : LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
+    if (St > 0.0 && !LOCAL_ABLATE(64u)) St = min(St, LocalLampMaps(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz));
+    return St > 0.0 && Ld.Shadow.z > 0.0 && UBOLight.ShadowLevels[0].w > 0.0 && !LOCAL_ABLATE(32u) ? St * TileContact(In.wSpacePosition.xyz, Ld.PosRadius.xyz - In.wSpacePosition.xyz) : St;
 #else
     const float St = LocalShadow(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz, N);
     return St > 0.0 ? min(St, LocalLampMaps(Ld, In.wSpacePosition.xyz - Ld.PosRadius.xyz)) : St;
 #endif
 }
+float LocalLightShadow(in const int i, in const vec3 N) { return LocalLightShadowLd(LocalLightList[int(UBOLight.LocalBase.x) + i], N); }
 
 // One light's contribution at the surface (0 outside its radius)
 vec3 LocalLight(in const int i, in const vec3 N, in const vec3 V, in const float NdotV, in const vec3 Albedo, in const vec3 F0, in const float PerceptualRoughness, in const float Metallic)
 {
     LOCAL_COUNT(2u)
-    const vec3 Direct = LocalLightUnshadowed(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
+    const LocalLightData Ld = LocalLightList[int(UBOLight.LocalBase.x) + i];     // (read once: its light and its shadow)
+    const vec3 Direct = LocalLightUnshadowedLd(Ld, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
     if (all(equal(Direct, vec3(0.0)))) return vec3(0.0);                       // (facing away: no shadow lookups)
     LOCAL_COUNT(5u)
-    const float Sh = LocalLightShadow(i, N);
+    const float Sh = LocalLightShadowLd(Ld, N);
     if (Sh <= 0.0) LOCAL_COUNT(6u) else LOCAL_COUNT(7u)
     return Direct * Sh;
 }
@@ -600,7 +608,13 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         if (n != 0xFFFFu)
         {
             LOCAL_COUNT(0u) LOCAL_COUNT(1u)
-            for (uint k = 0u; k < n; ++k) Sum += LocalLight(int((LightTiles[t + 1u + (k >> 1)] >> ((k & 1u) * 16u)) & 0xFFFFu), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
+            // (the first 8 ids in one go, before any light: the list's loads not waited for one light at a time)
+            const uvec4 W8 = uvec4(LightTiles[t + 1u], LightTiles[t + 2u], LightTiles[t + 3u], LightTiles[t + 4u]);
+            for (uint k = 0u; k < n; ++k)
+            {
+                const uint Wk = k < 8u ? W8[k >> 1] : LightTiles[t + 1u + (k >> 1)];
+                Sum += LocalLight(int((Wk >> ((k & 1u) * 16u)) & 0xFFFFu), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
+            }
             return Sum;
         }
     }
