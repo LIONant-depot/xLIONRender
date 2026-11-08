@@ -19,7 +19,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 struct frame_t { mat4 C2W; mat4 Reproject; vec4 Params; };          // (xlionrender_tail_denoise_comp.glsl's: C2W to the camera-centred world)
 layout(std430, set = 0, binding = 5) readonly buffer frame_b   { frame_t F[]; };
-layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 8 per ring slot: rays, hits, visits, the planar texels, their roughness x 100
+layout(std430, set = 0, binding = 6)          buffer stats_b   { uint    Stats[]; };      // 12 per ring slot: rays, hits, visits, the planar texels, their roughness x 100, ..., [8] the TLAS's visits, [9] the Tri4 leaves
 layout(std430, set = 0, binding = 7)          buffer records_b { uvec4   Records[]; };    // the view's records: the tail's W x H, then these
 layout(std430, set = 0, binding = 8) readonly buffer mips_b    { uvec2   PlanarMips[]; }; // the planar view's pyramid (xlionrender_refl_planar_mips_comp.glsl)
 struct planar_t { mat4 C2W; vec4 Info; uvec4 Level[8]; uvec4 nBoxes; vec4 Box[128]; };      // (Box: the unrepresented drawn things' world boxes, lo / hi: instance::refl_boxes_v)                                  // the planar view's clip -> its eye's centred world; x: the half view's pixels a unit at distance 1, y: the pyramid's levels; per level: its base, w, h
@@ -66,7 +66,7 @@ layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_Pr
 #include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
-shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured, s_SharpSeen;
+shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured, s_SharpSeen, s_TlasVisits, s_Leaves;
 shared uvec2 s_Pair[64];       // (the full-size dispatch: two pixels a record)
 shared uint  s_Listed[64];     // (a listed texel: the first dispatch keeps its half of the pair - its history - for the list's)
 
@@ -220,7 +220,7 @@ vec4 PlanarAt(vec2 uv, float Lod)
 
 void main()
 {
-    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; s_SharpSeen = 0u; }
+    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; s_SharpSeen = 0u; s_TlasVisits = 0u; s_Leaves = 0u; }
     s_Listed[gl_LocalInvocationIndex] = 0u;
     barrier();
     const bool  bList = Push.m_Full.x < 0;
@@ -382,7 +382,7 @@ void main()
                 }
                 if (bExact) g_ShadowBySDF = true;
                 atomicAdd(s_Rays, 1u);
-                atomicAdd(s_Visits, uint(g_GIBvhVisits));
+                atomicAdd(s_Visits, uint(g_GIBvhVisits)); atomicAdd(s_TlasVisits, uint(g_GIBvhTlasVisits)); atomicAdd(s_Leaves, uint(g_GIBvhLeaves));
                 if (Push.m_Mode == 0u)
                 {
                     vec3 Lr; uint Class; float Dist = 0.0;
@@ -568,13 +568,15 @@ void main()
     }
     if (gl_LocalInvocationIndex == 0u)
     {
-        if (s_Rays != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 0u], s_Rays);
-        if (s_Hits != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 1u], s_Hits);
-        if (s_Visits != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 2u], s_Visits);
-        if (s_Planar != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 3u], s_Planar);
-        if (s_PlanarRough != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 4u], s_PlanarRough);
-        if (s_Incomplete != 0u) atomicAdd(Stats[Push.m_Slot * 8u + 5u], s_Incomplete);
-        if (s_Textured != 0u) atomicAdd(Stats[Push.m_Slot * 8u + (bFull ? 7u : 6u)], s_Textured);
-        if (s_SharpSeen != 0u) atomicOr(Stats[Push.m_Slot * 8u + 7u], 0x80000000u);     // (an empty group none: 94000 groups' adds on 7 addresses)     // (the textured hits: the half size's, the full size's)
+        if (s_Rays != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 0u], s_Rays);
+        if (s_Hits != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 1u], s_Hits);
+        if (s_Visits != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 2u], s_Visits);
+        if (s_Planar != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 3u], s_Planar);
+        if (s_PlanarRough != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 4u], s_PlanarRough);
+        if (s_Incomplete != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 5u], s_Incomplete);
+        if (s_Textured != 0u) atomicAdd(Stats[Push.m_Slot * 12u + (bFull ? 7u : 6u)], s_Textured);
+        if (s_TlasVisits != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 8u], s_TlasVisits);
+        if (s_Leaves != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 9u], s_Leaves);
+        if (s_SharpSeen != 0u) atomicOr(Stats[Push.m_Slot * 12u + 7u], 0x80000000u);     // (an empty group none: 94000 groups' adds on 7 addresses)     // (the textured hits: the half size's, the full size's)
     }
 }

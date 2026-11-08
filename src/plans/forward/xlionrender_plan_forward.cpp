@@ -2678,15 +2678,15 @@ namespace xlionrender
                     std::memcpy(pB, &C2W, 64); std::memcpy(pB + 64, &Identity, 64); std::memcpy(pB + 128, &Params, 16);
                 });
             }
-            std::uint32_t Got[8] = {};
-            (void)m_ReflStats.MemoryMapFrameRegion(Slot * 8, 8, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
+            std::uint32_t Got[12] = {};
+            (void)m_ReflStats.MemoryMapFrameRegion(Slot * 12, 12, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
             if( Got[0] ) { m_bReflSharpSeen = (Got[7] >> 31) != 0u; Got[7] &= 0x7FFFFFFFu; }
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 5 && Ns[0] != ~0ull && Ns[4] > Ns[0] )
             {
                 m_ReflSum[0] += double(Ns[4] - Ns[0]) * 1e-6;
                 m_ReflSum[1] += Got[0]; m_ReflSum[2] += Got[1]; m_ReflSum[3] += Got[2]; m_ReflPlanarSum += Got[3]; m_ReflIncompleteSum += Got[5]; if( Got[3] ) m_ReflPlanarRough = double(Got[4]) * 0.01 / double(Got[3]);
                 for( int k = 0; k < 4; ++k ) m_ReflSplit[k] += Ns[k + 1] >= Ns[k] ? double(Ns[k + 1] - Ns[k]) * 1e-6 : 0.0;
-                m_ReflTextured += Got[6]; m_ReflTexturedFull += Got[7];
+                m_ReflTextured += Got[6]; m_ReflTexturedFull += Got[7]; m_ReflTlasSum += Got[8]; m_ReflLeafSum += Got[9];
                 if( Ns.size() >= 7 && Ns[5] >= Ns[2] && Ns[6] >= Ns[5] && Ns[3] >= Ns[6] ) { m_ReflHitSplit[0] += double(Ns[5] - Ns[2]) * 1e-6; m_ReflHitSplit[1] += double(Ns[6] - Ns[5]) * 1e-6; m_ReflHitSplit[2] += double(Ns[3] - Ns[6]) * 1e-6; }
                 if( ++m_ReflSumN == 120 )
                 {
@@ -2698,6 +2698,8 @@ namespace xlionrender
                         , m_bPlanarOn ? "on" : m_PlanarWhy == 4 ? "off: no floor under the eye" : m_PlanarWhy == 5 ? "off: oblique" : m_PlanarWhy == 2 ? "off: view" : "off", m_PlanarPlane.m_X, m_PlanarPlane.m_Y, m_PlanarPlane.m_Z, m_PlanarPlane.m_W);
                     if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("REFLSPLIT sharp trace %.3f, trace %.3f, hits' shading %.3f, reconstruction %.3f ms; %.0f hits textured a frame (%.0f at full size; bins %.3f, draws %.3f, relight %.3f)\n", m_ReflSplit[0] / n, m_ReflSplit[1] / n, m_ReflSplit[2] / n, m_ReflSplit[3] / n, m_ReflTextured / n + m_ReflTexturedFull / n, m_ReflTexturedFull / n, m_ReflHitSplit[0] / n, m_ReflHitSplit[1] / n, m_ReflHitSplit[2] / n);
                     std::fflush(stdout);
+                    if( m_ReflTraceBench > 0 || s_bTimes ) std::printf("BVHSPLIT a ray: %.1f visits - the TLAS's %.1f, the meshes' nodes %.1f, Tri4 leaves %.1f\n", m_ReflReport.m_VisitsPerRay, m_ReflTlasSum / std::max(m_ReflSum[1], 1.0), m_ReflReport.m_VisitsPerRay - (m_ReflTlasSum + m_ReflLeafSum) / std::max(m_ReflSum[1], 1.0), m_ReflLeafSum / std::max(m_ReflSum[1], 1.0));
+                    m_ReflTlasSum = 0; m_ReflLeafSum = 0;
                     m_ReflSumN = 0; m_ReflPlanarSum = 0; m_ReflIncompleteSum = 0; for( auto& v : m_ReflSum ) v = 0; for( auto& v : m_ReflSplit ) v = 0; m_ReflTextured = 0; m_ReflTexturedFull = 0; for( auto& v : m_ReflHitSplit ) v = 0;
                     if( m_bReflTraceCycle ) m_ReflTraceBench = m_ReflTraceBench % 3 + 1;      // (XLION_REFL_BENCH=9: the three modes in turn)
                 }

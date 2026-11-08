@@ -557,6 +557,7 @@ namespace xlionrender
         std::chrono::steady_clock::time_point m_SunMoved{};
         xgpu::buffer                m_ReflPTAccum;          // XLION_REFL_PT: the ground truth's sums (refl_trace_comp.glsl), made when first used
         xgpu::timestamps            m_ReflTimes;
+        double                      m_ReflTlasSum = 0, m_ReflLeafSum = 0;     // (measurement, BVHSPLIT: the TLAS's visits and the Tri4 leaves, summed)
         double                      m_ReflSplit[4] = {}, m_ReflTextured = 0, m_ReflTexturedFull = 0, m_ReflHitSplit[3] = {};     // (the hits' shading: bins, draws, relight)            // (measurement) the sharp trace, the trace, the hits' shading, the reconstruction: ms summed over the report's frames
         refl_report                 m_ReflReport;
         double                      m_ReflSum[4] = {};              // (the report's running sums: ms, rays, hits, visits)

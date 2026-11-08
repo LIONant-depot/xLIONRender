@@ -20,6 +20,7 @@ bool GISeeThrough(int Inst, int Tri) { return false; }
 
 const int gi_bvh_stack_v = 128;       // (measured on Bistro, hit or miss, 1M rays: 32 entries 38 ms, 64 28.6, 128 21.4, and no stored distances 19.6: the deepest is 27. Under 128 the driver reports 168 registers against 128, and bigger code: XGPU_PIPELINE_STATS)
 int g_GIBvhVisits = 0;              // (diagnostics) the nodes and leaves the walks popped
+int g_GIBvhTlasVisits = 0, g_GIBvhLeaves = 0;      // (diagnostics, wide_blas_design_2026-11-09.md: of those, the TLAS's nodes and leaves; the meshes' Tri4 leaves)
 
 // Which of a node's 4 children the ray enters before TMax (a bit each), and where (TNear): bvh::Box4
 vec4 GIBytes(uint w) { return vec4(uvec4(w, w >> 8, w >> 16, w >> 24) & uvec4(255u)); }
@@ -113,9 +114,11 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
         --n;
         const int c = Code[n];
         ++g_GIBvhVisits;
+        if (Base < 0) ++g_GIBvhTlasVisits;
         if (c < 0)
         {
             if (Base < 0) { Next = GIBvhTlasLeaves[2 * (~c)]; End = Next + GIBvhTlasLeaves[2 * (~c) + 1]; continue; }
+            ++g_GIBvhLeaves;
             float d, u, v;
             const int k = GIIntersectTri4(~c, Inst, Ro, Rd, H.m_T, d, u, v);
             if (k >= 0) { H.m_T = d; H.m_U = u; H.m_V = v; H.m_Inst = Inst; H.m_Tri = GIBvhTri4[~c].m_Tri[k]; if (g_GIBvhAnyHit) return H; }
@@ -153,6 +156,7 @@ void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
         ++g_GIBvhVisits;
         if (c < 0)
         {
+            ++g_GIBvhLeaves;
             float d, u, v;
             const int k = GIIntersectTri4(~c, Inst, O, D, H.m_T, d, u, v);
             if (k >= 0) { H.m_T = d; H.m_U = u; H.m_V = v; H.m_Inst = Inst; H.m_Tri = GIBvhTri4[~c].m_Tri[k]; if (g_GIBvhAnyHit) return; }
@@ -185,7 +189,7 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
     {
         --n;
         const int c = Code[n];
-        ++g_GIBvhVisits;
+        ++g_GIBvhVisits; ++g_GIBvhTlasVisits;
         if (c < 0)
         {
             const int First = GIBvhTlasLeaves[2 * (~c)], Count = GIBvhTlasLeaves[2 * (~c) + 1];
