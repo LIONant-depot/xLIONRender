@@ -117,6 +117,9 @@ namespace xlionrender
         constexpr std::uint32_t s_TailScreenFrag[] = {
             #include "xlionrender_tail_screen_frag.h"
         };
+        constexpr std::uint32_t s_TailFromSharpFrag[] = {
+            #include "xlionrender_tail_from_sharp_frag.h"
+        };
         constexpr std::uint32_t s_SunMaskFrag[] = {
             #include "xlionrender_sun_mask_frag.h"
         };
@@ -624,6 +627,23 @@ namespace xlionrender
                 Setup.m_DepthStencil.m_bDepthWriteEnable = false;
                 if( auto Err = Device.Create(m_TailPipeline, Setup); Err ) return Err;
             }
+            // the half-size thin G-buffer from the full-size one (shaders/xlionrender_tail_from_sharp_frag.glsl): a full-screen pass into the
+            // half-size G-buffer pass, its depth written (always passes); its instances bind a view's full-size targets: createSharpTargets
+            {
+                xgpu::shader Frag, FullVert;
+                if( auto Err = Device.Create(Frag,     { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_TailFromSharpFrag) }); Err ) return Err;
+                if( auto Err = Device.Create(FullVert, { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
+                auto Shaders3 = std::array<const xgpu::shader*, 2>{ &Frag, &FullVert };
+                const xgpu::pipeline::sampler Point{ .m_bDisableAnisotropy = true, .m_AddressMode = { xgpu::texture::address_mode::CLAMP, xgpu::texture::address_mode::CLAMP, xgpu::texture::address_mode::CLAMP }
+                                                   , .m_MipmapMag = xgpu::pipeline::sampler::mipmap_sampler::NEAREST, .m_MipmapMin = xgpu::pipeline::sampler::mipmap_sampler::NEAREST, .m_MipmapMode = xgpu::pipeline::sampler::mipmap_mode::NEAREST };
+                auto Samplers3 = std::array{ Point, Point, Point };
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders3, .m_Samplers = Samplers3 };
+                Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_bDepthTestEnable  = true;
+                Setup.m_DepthStencil.m_bDepthWriteEnable = true;
+                Setup.m_DepthStencil.m_DepthCompare      = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
+                if( auto Err = Device.Create(m_TailFromSharpPipeline, Setup); Err ) return Err;
+            }
             // the sun's shadow mask (shaders/xlionrender_sun_mask_frag.glsl; XLION_SUN_MASK): a full-screen pass over the G-buffer prepass in
             // the materials' layout - the shadow atlas in slot 0, the prepass's depth, normal and ids in 1-3; the lighting block, the lights
             // and their cells (the page table). Its instances bind a view's prepass: createGPreTargets
@@ -650,7 +670,7 @@ namespace xlionrender
                 const std::size_t nSlots = std::size_t(sunAtlasWidth() / shadows::vsm::page_texels_v) * std::size_t(sunAtlasHeight() / shadows::vsm::page_texels_v);
                 const std::vector<std::uint32_t> Zeros(2 * nSlots, 0u);      // (the bounds, then the frame each slot rendered)      // (least depth 0: nothing proven until rendered)
                 if( auto Err = Device.Create(m_VSMBoundsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_VSMBoundsComp) }); Err ) return Err;
-                if( auto Err = Device.Create(m_VSMBoundsCompute, { .m_pShader = &m_VSMBoundsShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+                if( auto Err = Device.Create(m_VSMBoundsCompute, { .m_pShader = &m_VSMBoundsShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 32, .m_pName = "instance: m_VSMBoundsCompute" }); Err ) return Err;
                 if( auto Err = Device.Create(m_VSMBounds, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Zeros.size()), .m_pData = const_cast<std::uint32_t*>(Zeros.data()), .m_pName = "Shadows: VSM page depth bounds" }); Err ) return Err;
                 if( auto Err = Device.Create(m_VSMBoundsList, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * sizeof(std::int32_t), .m_EntryCount = ring_frames_v * int(nSlots), .m_pName = "Shadows: VSM pages to bound" }); Err ) return Err;
             }
@@ -827,7 +847,7 @@ namespace xlionrender
             const int nReq = (nMax + 31) / 32 + 32 + 2 * nMax;      // bits, counters, depth ranges - any level count renderShadows may grow to
             std::vector<std::uint32_t> Zeros(std::size_t(nReq), 0u);
             if( auto Err = Device.Create(m_VSMRequestShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_VSMRequestComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_VSMRequest, { .m_pShader = &m_VSMRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_VSMRequest, { .m_pShader = &m_VSMRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32, .m_pName = "instance: m_VSMRequest" }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMFrames,  { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(details::vsm_frame), .m_EntryCount = ring_frames_v, .m_pName = "Shadows: VSM frames" }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMReq,     { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data(), .m_pName = "Shadows: VSM requests" }); Err ) return Err;
             if( auto Err = Device.Create(m_VSMZeros,   { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = nReq, .m_pData = Zeros.data(), .m_pName = "Shadows: VSM zeros" }); Err ) return Err;
@@ -837,41 +857,41 @@ namespace xlionrender
             // the local lights' pages: their request pass (its frame a ring slot each, its bits and counters)
             const int nLocal = localBitUints() + 32;
             if( auto Err = Device.Create(m_LocalRequestShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LocalRequestComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_LocalRequest, { .m_pShader = &m_LocalRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_LocalRequest, { .m_pShader = &m_LocalRequestShader, .m_nBuffers = 3, .m_nTextures = 1, .m_PushConstantsSize = 32, .m_pName = "instance: m_LocalRequest" }); Err ) return Err;
             if( auto Err = Device.Create(m_LightCellsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LightCellsComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_LightCellsCompute, { .m_pShader = &m_LightCellsShader, .m_nBuffers = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_LightCellsCompute, { .m_pShader = &m_LightCellsShader, .m_nBuffers = 1, .m_PushConstantsSize = 32, .m_pName = "instance: m_LightCellsCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_LightCellsTimes, { .m_Count = 2 }); Err ) return Err;
             // the screen tail's denoiser (shaders/xlionrender_tail_denoise_comp.glsl): its frame a ring slot each (3 mat4 + a vec4)
             if( auto Err = Device.Create(m_TailDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TailDenoiseComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32, .m_pName = "instance: m_TailDenoise" }); Err ) return Err;
             if( auto Err = Device.Create(m_PostShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_PostComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32, .m_pName = "instance: m_PostCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ContactComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_NoiseLagsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_NoiseLagsComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_NoiseLagsCompute, { .m_pShader = &m_NoiseLagsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 16 }); Err ) return Err;
-            if( auto Err = Device.Create(m_ContactCompute, { .m_pShader = &m_ContactShader, .m_nBuffers = 1, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 112 }); Err ) return Err;
+            if( auto Err = Device.Create(m_NoiseLagsCompute, { .m_pShader = &m_NoiseLagsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 16, .m_pName = "instance: m_NoiseLagsCompute" }); Err ) return Err;
+            if( auto Err = Device.Create(m_ContactCompute, { .m_pShader = &m_ContactShader, .m_nBuffers = 1, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 112, .m_pName = "instance: m_ContactCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_GIDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIDenoiseComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_GIDenoiseCompute, { .m_pShader = &m_GIDenoiseShader, .m_nBuffers = 4, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIDenoiseCompute, { .m_pShader = &m_GIDenoiseShader, .m_nBuffers = 4, .m_PushConstantsSize = 32, .m_pName = "instance: m_GIDenoiseCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_GIPublishShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIPublishComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_GIPublishCompute, { .m_pShader = &m_GIPublishShader, .m_nBuffers = 3, .m_PushConstantsSize = 16 }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIPublishCompute, { .m_pShader = &m_GIPublishShader, .m_nBuffers = 3, .m_PushConstantsSize = 16, .m_pName = "instance: m_GIPublishCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_HeatShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_HeatComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_HeatCompute, { .m_pShader = &m_HeatShader, .m_nBuffers = 1, .m_nImages = 1, .m_PushConstantsSize = 16 }); Err ) return Err;
+            if( auto Err = Device.Create(m_HeatCompute, { .m_pShader = &m_HeatShader, .m_nBuffers = 1, .m_nImages = 1, .m_PushConstantsSize = 16, .m_pName = "instance: m_HeatCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_LightTilesShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LightTilesComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_LightTilesCompute, { .m_pShader = &m_LightTilesShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 80 }); Err ) return Err;
+            if( auto Err = Device.Create(m_LightTilesCompute, { .m_pShader = &m_LightTilesShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 80, .m_pName = "instance: m_LightTilesCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80 }); Err ) return Err;
+            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80, .m_pName = "instance: m_TAACompute" }); Err ) return Err;
             // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;
             // the G-buffer's depth and normal
             if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_AOCompute, { .m_pShader = &m_AOShader, .m_nBuffers = 5, .m_nTextures = 4, .m_PushConstantsSize = sizeof(details::push_ao) }); Err ) return Err;
+            if( auto Err = Device.Create(m_AOCompute, { .m_pShader = &m_AOShader, .m_nBuffers = 5, .m_nTextures = 4, .m_PushConstantsSize = sizeof(details::push_ao), .m_pName = "instance: m_AOCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_TailFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 2 * 64 + 16, .m_EntryCount = ring_frames_v, .m_pName = "Frame: tail frames" }); Err ) return Err;
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 16, .m_nTextures = 6, .m_PushConstantsSize = 128 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 16, .m_nTextures = 6, .m_PushConstantsSize = 128, .m_pName = "instance: m_ReflTrace" }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdfShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_WorldSdfComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_WorldSdf, { .m_pShader = &m_WorldSdfShader, .m_nBuffers = 7, .m_PushConstantsSize = 40 }); Err ) return Err;
+            if( auto Err = Device.Create(m_WorldSdf, { .m_pShader = &m_WorldSdfShader, .m_nBuffers = 7, .m_PushConstantsSize = 40, .m_pName = "instance: m_WorldSdf" }); Err ) return Err;
             if( xlionrender::Env("XLION_SDF") )
             {
                 const std::vector<float> Zero(4 + 4 * 128 * 128 * 128, 0.0f);
@@ -880,15 +900,15 @@ namespace xlionrender
                 if( auto Err = Device.Create(m_WorldSdfSurfB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = int(ZeroS.size() / 2), .m_pData = const_cast<std::uint32_t*>(ZeroS.data()), .m_pName = "World SDF: surfaces" }); Err ) return Err;
             }
             if( auto Err = Device.Create(m_ReflDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflDenoiseComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflDenoise, { .m_pShader = &m_ReflDenoiseShader, .m_nBuffers = 4, .m_nTextures = 3, .m_PushConstantsSize = 16 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflDenoise, { .m_pShader = &m_ReflDenoiseShader, .m_nBuffers = 4, .m_nTextures = 3, .m_PushConstantsSize = 16, .m_pName = "instance: m_ReflDenoise" }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflSSRShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflSSRComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflSSR, { .m_pShader = &m_ReflSSRShader, .m_nBuffers = 2, .m_nTextures = 3, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflSSR, { .m_pShader = &m_ReflSSRShader, .m_nBuffers = 2, .m_nTextures = 3, .m_PushConstantsSize = 32, .m_pName = "instance: m_ReflSSR" }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflSSRTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflHitsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflHitsComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflHits, { .m_pShader = &m_ReflHitsShader, .m_nBuffers = 12, .m_nTextures = 1, .m_PushConstantsSize = 52 }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflHits, { .m_pShader = &m_ReflHitsShader, .m_nBuffers = 12, .m_nTextures = 1, .m_PushConstantsSize = 52, .m_pName = "instance: m_ReflHits" }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflFrames, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 64 + 16, .m_EntryCount = ring_frames_v, .m_pName = "Frame: reflection frames" }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMipsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflPlanarMipsComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_PlanarMips, { .m_pShader = &m_PlanarMipsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 32 }); Err ) return Err;
+            if( auto Err = Device.Create(m_PlanarMips, { .m_pShader = &m_PlanarMipsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 32, .m_pName = "instance: m_PlanarMips" }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarParams, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 64 + 16 + 8 * 16 + 16 + 2 * 16 * refl_boxes_v, .m_EntryCount = ring_frames_v, .m_pName = "Frame: planar reflection parameters" }); Err ) return Err;
             if( auto Err = Device.Create(m_PlanarMipsBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = 1, .m_pData = Zeros.data(), .m_pName = "Render target: planar reflection mips" }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 8 * ring_frames_v, .m_pData = Zeros.data(), .m_pName = "Debug: reflection stats" }); Err ) return Err;
@@ -2033,7 +2053,7 @@ namespace xlionrender
         const int nNeed = 2 * View.m_TailWidth * View.m_TailHeight + ((View.m_Width + 1) & ~1) * View.m_Height / 2;
         if( View.m_SharpGPass.m_Private && View.m_SharpWidth == View.m_Width && View.m_SharpHeight == View.m_Height && View.m_TailResult.getEntryCount() >= nNeed ) return nullptr;
         const auto Kill = [&](auto& Obj) { if( Obj.m_Private ) m_Device.Destroy(std::move(Obj)); Obj.m_Private.reset(); };
-        Kill(View.m_SharpGPass); Kill(View.m_SharpGColor); Kill(View.m_SharpGMotion); Kill(View.m_SharpGDepth);
+        Kill(View.m_SharpGPass); Kill(View.m_SharpGColor); Kill(View.m_SharpGMotion); Kill(View.m_SharpGDepth); Kill(View.m_TailFromSharp);
         using fmt = xgpu::texture::format;
         const int W = View.m_Width, H = View.m_Height;
         if( auto Err = m_Device.Create(View.m_SharpGColor,  { .m_Format = fmt::A2B10G10R10_UNORM, .m_Width = W, .m_Height = H, .m_isGamma = false, .m_pName = "Render target: sharp colour" }); Err ) return Err;
@@ -2050,13 +2070,18 @@ namespace xlionrender
         if( auto Err = m_Device.Create(View.m_TailResult, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = nRecords, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()), .m_pName = "Render target: tail records" }); Err ) return Err;
         View.m_bTailPrev = false;
         View.m_SharpWidth = W; View.m_SharpHeight = H;
+        {
+            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_SharpGColor }, xgpu::pipeline_instance::sampler_binding{ View.m_SharpGMotion }
+                                      , xgpu::pipeline_instance::sampler_binding{ View.m_SharpGDepth } };
+            if( auto Err = m_Device.Create(View.m_TailFromSharp, { .m_PipeLine = m_TailFromSharpPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+        }
         return nullptr;
     }
 
     void instance::destroyTailTargets( render_view& View ) noexcept
     {
         const auto Kill = [&](auto& Obj) { if( Obj.m_Private ) m_Device.Destroy(std::move(Obj)); Obj.m_Private.reset(); };
-        Kill(View.m_SharpGPass); Kill(View.m_SharpGColor); Kill(View.m_SharpGMotion); Kill(View.m_SharpGDepth);
+        Kill(View.m_SharpGPass); Kill(View.m_SharpGColor); Kill(View.m_SharpGMotion); Kill(View.m_SharpGDepth); Kill(View.m_TailFromSharp);
         View.m_SharpWidth = View.m_SharpHeight = 0;
         Kill(View.m_TailInstance); Kill(View.m_TailGPass); Kill(View.m_TailGColor); Kill(View.m_TailGDepth); Kill(View.m_TailGMotion);
         Kill(View.m_TailPass); Kill(View.m_TailDiffuse); Kill(View.m_TailSpecular); Kill(View.m_TailResult); Kill(View.m_TailTemporal); Kill(View.m_ReflTemporal); Kill(View.m_ReflHistory);

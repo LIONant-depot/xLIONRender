@@ -2556,8 +2556,25 @@ namespace xlionrender
             }
             m_TailReport.m_nGBufferDraws = nDraws; m_TailReport.m_nNoVariant = nNoVariant;
         };
-        DrawGBuffer(View.m_TailGPass);
-        if( bSharp ) DrawGBuffer(View.m_SharpGPass);
+        // the half-size G-buffer: taken from the full-size one when that one is drawn (one scene draw, not two: 11,270 draws a frame on Bistro
+        // Game, 2026-11-08); XLION_TAIL_DRAW=1 draws it again (comparison)
+        static const bool s_bTailDraw = xlionrender::Env("XLION_TAIL_DRAW") != nullptr;
+        if( bSharp && !s_bTailDraw && View.m_TailFromSharp.m_Private )
+        {
+            DrawGBuffer(View.m_SharpGPass);
+            auto Cmd = Window.StartRenderPass(View.m_TailGPass);
+            Cmd.setViewport(0.0f, 0.0f, float(W), float(H));
+            Cmd.setScissor(0, 0, W, H);
+            Cmd.setPipelineInstance(View.m_TailFromSharp);
+            Cmd.setBuffer(m_FullscreenVB);
+            Cmd.setBuffer(m_FullscreenIB);
+            Cmd.Draw(3);
+        }
+        else
+        {
+            DrawGBuffer(View.m_TailGPass);
+            if( bSharp ) DrawGBuffer(View.m_SharpGPass);
+        }
         Window.WriteTimestamp(m_TailTimes, 1);
         if( bLights )
         {

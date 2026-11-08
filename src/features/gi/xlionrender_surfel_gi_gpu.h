@@ -33,7 +33,7 @@ namespace xlionrender::gi
             const auto Make = [&](xgpu::shader& Sh, xgpu::compute& C, std::span<const std::uint32_t> W, int nBuffers, int Push, int nTextures = 0)
             {
                 const auto Raw = xgpu::shader::setup::raw_data{ std::span{ reinterpret_cast<const std::int32_t*>(W.data()), W.size() } };
-                return !Device.Create(Sh, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw }) && !Device.Create(C, { .m_pShader = &Sh, .m_nBuffers = nBuffers, .m_nTextures = nTextures, .m_PushConstantsSize = std::size_t(Push) });
+                return !Device.Create(Sh, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw }) && !Device.Create(C, { .m_pShader = &Sh, .m_nBuffers = nBuffers, .m_nTextures = nTextures, .m_PushConstantsSize = std::size_t(Push), .m_pName = "surfel_gi_gpu: C" });
             };
             // (the links' sun shadow map until the renderer gives one: a texel, never read - SunInfo.x 0)
             const std::uint8_t Texel[4] = { 255, 255, 255, 255 };

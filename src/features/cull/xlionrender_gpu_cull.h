@@ -43,9 +43,9 @@ namespace xlionrender
             auto* pZeros = const_cast<std::uint32_t*>(Zeros.data());
             return Device.hasDrawIndirectCount()
                 && !Device.Create(m_Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw(CullSPIRV) })
-                && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 7, .m_PushConstantsSize = 32 })
+                && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 7, .m_PushConstantsSize = 32, .m_pName = "gpu_cull: m_Compute" })
                 && !Device.Create(m_HiZShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw(HiZSPIRV) })
-                && !Device.Create(m_HiZCompute, { .m_pShader = &m_HiZShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 32 })
+                && !Device.Create(m_HiZCompute, { .m_pShader = &m_HiZShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 32, .m_pName = "gpu_cull: m_HiZCompute" })
                 && !Device.Create(m_HiZCounter, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 1, .m_pData = pZeros, .m_pName = "Culling: HiZ counter" })
                 && !Device.Create(m_Times, { .m_Count = 4 })
                 && !Device.Create(m_Candidates, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(candidate), .m_EntryCount = ring_frames_v * max_candidates_v, .m_pName = "Culling: candidates" })

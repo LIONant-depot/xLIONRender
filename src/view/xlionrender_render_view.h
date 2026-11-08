@@ -114,6 +114,7 @@ namespace xlionrender
         // drawn again), their rays a pixel each; their records after the tail's and the reflections' half-size ones, 2 pixels a record
         xgpu::texture           m_SharpGColor, m_SharpGMotion, m_SharpGDepth;
         xgpu::renderpass        m_SharpGPass;
+        xgpu::pipeline_instance m_TailFromSharp;        // the half-size G-buffer taken from the full-size one (xlionrender_tail_from_sharp_frag.glsl)
         int                     m_SharpWidth = 0, m_SharpHeight = 0;
         xgpu::texture           m_TailGMotion;          // last frame's screen position (ndc xy), clip w, 1 (0: no motion: the camera's reprojection)
         xgpu::renderpass        m_TailGPass;

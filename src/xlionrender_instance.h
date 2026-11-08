@@ -457,6 +457,7 @@ namespace xlionrender
         xgpu::device::error*        createSharpTargets ( render_view& View )                                    noexcept;     // (the records grow by the full-size region)
         void                        destroyTailTargets ( render_view& View )                                    noexcept;
         void                        renderTail         ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept;
+        xgpu::pipeline              m_TailFromSharpPipeline;        // the half-size thin G-buffer from the full-size one (no second scene draw)
         xgpu::pipeline              m_ForwardGBPipeline, m_StaticGeomGBPipeline, m_TailPipeline;     // the built-in materials' G-buffer variants; the tail pass
         xgpu::pipeline_instance     m_ForwardGBInstance, m_StaticGeomGBInstance;
         xgpu::shader                m_TailDenoiseShader;

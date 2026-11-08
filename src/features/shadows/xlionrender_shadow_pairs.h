@@ -51,7 +51,7 @@ namespace xlionrender
             auto* pZeros = const_cast<std::uint32_t*>(Zeros.data());
             return Device.hasDrawIndirectCount()
                 && !Device.Create(m_Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ reinterpret_cast<const std::int32_t*>(SPIRV.data()), SPIRV.size() } } })
-                && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 6, .m_PushConstantsSize = 32 })
+                && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 6, .m_PushConstantsSize = 32, .m_pName = "shadow_pairs: m_Compute" })
                 && !Device.Create(m_Candidates, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(candidate), .m_EntryCount = ring_frames_v * max_candidates_v, .m_pName = "Shadows: pair candidates" })
                 && !Device.Create(m_Matrices, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = ring_frames_v * max_draws_v, .m_pName = "Shadows: pair matrices" })
                 && !Device.Create(m_Pages, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(page), .m_EntryCount = ring_frames_v * max_pages_v, .m_pName = "Shadows: pair pages" })
