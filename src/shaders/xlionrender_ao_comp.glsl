@@ -145,6 +145,7 @@ void main()
                  uintBitsToFloat(uvec4(GITable[T + 12u], GITable[T + 13u], GITable[T + 14u], GITable[T + 15u])));
     const ivec2 Q = FullTexel(p);
     const float z = texelFetch(GPreDepth, Q, 0).r;
+    const bool bGi = (Push.Mode & 4u) != 0u;      // (XLION_SSGI off: its two planes neither read nor written - nothing reads them; the filter's 16 taps: a third of the loads)
     const uint NP = Push.W * Push.H;      // (the buffers: AO, distance at i; the screen GI's rg at N + i, b at 2N + i)
     if ((Push.Mode & 3u) == 0u)
     {
@@ -153,7 +154,7 @@ void main()
         const float Dist = length(P);
         vec3 Gi;
         AORaw[i] = vec2(RawAO(p, Q, z, RayAt(Q, z), Dist, Gi), Dist);
-        AORaw[NP + i] = Gi.rg; AORaw[2u * NP + i] = vec2(Gi.b, 0.0);
+        if (bGi) { AORaw[NP + i] = Gi.rg; AORaw[2u * NP + i] = vec2(Gi.b, 0.0); }
         return;
     }
 
@@ -171,10 +172,13 @@ void main()
         if (A.y <= 0.0) continue;
         const float w = max(0.0, 1.0 - abs(A.y - Dist) / (0.03 * Dist + 0.01));
         S += A.x * w; Wt += w;
-        G += vec3(AORaw[NP + j], AORaw[2u * NP + j].x) * w;
+        if (bGi) G += vec3(AORaw[NP + j], AORaw[2u * NP + j].x) * w;
     }
-    G = Wt > 1e-4 ? G / Wt : vec3(AORaw[NP + i], AORaw[2u * NP + i].x);
-    AOOut[NP + i] = G.rg; AOOut[2u * NP + i] = vec2(G.b, 0.0);
+    if (bGi)
+    {
+        G = Wt > 1e-4 ? G / Wt : vec3(AORaw[NP + i], AORaw[2u * NP + i].x);
+        AOOut[NP + i] = G.rg; AOOut[2u * NP + i] = vec2(G.b, 0.0);
+    }
     float AO = Wt > 1e-4 ? S / Wt : C.x;
 
     // Temporal: last frame's where this point was, the same surface (its distance, 1 %)
