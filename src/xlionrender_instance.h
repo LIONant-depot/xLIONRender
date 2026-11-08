@@ -177,7 +177,7 @@ namespace xlionrender
 
         // The editor's click (gpu_pick_plan_2026-11-09.md): what View's last G-buffer prepass drew at pixel (X, Y) - its draw's
         // scene::draw::m_UserID; ~0: nothing there (the sky, a pixel outside, no prepass). Reads its one texel of the id target back (synchronous: a click)
-        [[nodiscard]] std::uint64_t        PickPixel    ( render_view& View, int X, int Y )                     noexcept;
+        [[nodiscard]] std::uint64_t        PickPixel    ( render_view& View, int X, int Y, float* pDistance = nullptr ) noexcept;     // (pDistance: the surface's distance to the eye)
 
         // Shadows: false re-renders every shadow tile every frame (the reference the caching is tested against)
         bool                                       m_bShadowCache = true;

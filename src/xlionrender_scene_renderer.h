@@ -583,7 +583,7 @@ namespace xlionrender
             m_Renderer.Render(Window, m_Scene, m_View, Camera, [&](xgpu::cmd_buffer& CmdBuffer) { if (pOverlay) pOverlay(CmdBuffer, pUser); });
         }
 
-        std::uint64_t PickPixel(int X, int Y) noexcept { return m_Renderer.PickPixel(m_View, X, Y); }
+        std::uint64_t PickPixel(int X, int Y, float* pDistance = nullptr) noexcept { return m_Renderer.PickPixel(m_View, X, Y, pDistance); }
 
         void Blit(xgpu::cmd_buffer& CmdBuffer) noexcept
         {

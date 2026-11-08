@@ -340,7 +340,7 @@ namespace xlionrender
         }
 
         void BlitScene(xgpu::cmd_buffer& CmdBuffer) noexcept { if (m_pScene) m_pScene->Blit(CmdBuffer); }
-        std::uint64_t PickPixel(int X, int Y) noexcept { return m_pScene ? m_pScene->PickPixel(X, Y) : ~0ull; }      // (the G-buffer prepass's id: xRenderEditor::PickPixel)
+        std::uint64_t PickPixel(int X, int Y, float* pDistance = nullptr) noexcept { if (pDistance) *pDistance = 0.0f; return m_pScene ? m_pScene->PickPixel(X, Y, pDistance) : ~0ull; }      // (the G-buffer prepass's id: xRenderEditor::PickPixel)
 
         // Old files' material data (a MeshMaterial, the Mesh's deprecated Materials list): the Meshes the last RenderScene found with it, and one
         // of them converted into its Mesh's own slots (UpgradeOldMaterials: false while its materials load, or when it has none)
@@ -433,7 +433,8 @@ namespace xlionrender
             return bFound;
         }
 
-        std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max(), view View = view::SCENE, const roles* pRoles = nullptr) noexcept
+        // bMeshes false: what draws no id into the G-buffer only (primitives, texts, lamps) - the click's second pick, in front of PickPixel's surface
+        std::uint64_t Pick(const xmath::fvec3& Origin, const xmath::fvec3& Dir, float MaxT = std::numeric_limits<float>::max(), view View = view::SCENE, const roles* pRoles = nullptr, bool bMeshes = true) noexcept
         {
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
@@ -499,7 +500,7 @@ namespace xlionrender
             MeshQuery.m_Must.AddFromComponents<xlioncore::transform, mesh>();
             LeaveOut(MeshQuery, View);
             auto MS = Search(MeshQuery);
-            Foreach(MS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const mesh& M, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+            if (bMeshes) Foreach(MS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const mesh& M, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
             {
                 if (NotPickable(Ent.m_Value) || M.m_Geom.empty()) return;
                 auto* pGeom = static_cast<xgeom_static::xgpu::geom*>(xlioncore::resources::GetResource(geom_static_type_guid_v.m_Value, M.m_Geom.m_Instance.m_Value));
@@ -515,6 +516,25 @@ namespace xlionrender
                 else if (THit = InsideExit(Origin, Dir, Center, T.m_Rotation, Half.AbsCopy()); THit > 0.0f && THit < MaxT)
                     Hit.Consider(Ent.m_Value, THit);        // (the eye inside its box - a street, a room: picked where its box ends, so what is in front of it wins)
             });
+
+            // The lamps (a point, a spot): a 0.25 m sphere at the light - they draw nothing into the G-buffer, so only this picks them (Tomas,
+            // 2026-11-08: the street lamps of Bistro Game could not be clicked). The sun has no place to click
+            const auto LampPick = [&]<typename T_LIGHT>() noexcept
+            {
+                xecs::query::instance LampQuery;
+                LampQuery.m_Must.AddFromComponents<xlioncore::transform, T_LIGHT>();
+                LeaveOut(LampQuery, View);
+                auto LS = Search(LampQuery);
+                Foreach(LS, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const T_LIGHT&, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+                {
+                    if (NotPickable(Ent.m_Value)) return;
+                    const auto T = xlioncore::WorldOf(Local, pParent, pRender, xlioncore::FixedInterpolateOf(getGameMgr()));
+                    float THit;
+                    if (xeditor_tools::picking::RaySphereIntersect(Origin, Dir, T.m_Position, 0.25f, THit) && THit < MaxT) Hit.Consider(Ent.m_Value, THit);
+                });
+            };
+            LampPick.template operator()<light_point>();
+            LampPick.template operator()<light_spot>();
 
             return Hit.isValid() ? Hit.m_Id : xecs::component::entity::invalid_entity_v;
         }

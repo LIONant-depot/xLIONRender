@@ -5,8 +5,9 @@
 
 namespace xlionrender
 {
-    std::uint64_t instance::PickPixel( render_view& View, int X, int Y ) noexcept
+    std::uint64_t instance::PickPixel( render_view& View, int X, int Y, float* pDistance ) noexcept
     {
+        if( pDistance ) *pDistance = 0.0f;
         if( !View.m_GPreId.m_Private || X < 0 || Y < 0 || X >= View.m_Width || Y >= View.m_Height ) return ~0ull;
         std::vector<std::byte> Px;
         int W = 0, H = 0;
@@ -14,6 +15,7 @@ namespace xlionrender
         float Id[4];
         std::memcpy(Id, Px.data(), sizeof(Id));      // (R32G32B32A32: x the slot + 1)
         if( !(Id[0] >= 1.0f) ) return ~0ull;
+        if( pDistance ) *pDistance = Id[2];      // (z: the surface's distance to the eye)
         const std::size_t Slot = std::size_t(Id[0]) - 1;
         return Slot < m_SlotUser.size() ? m_SlotUser[Slot] : ~0ull;
     }
