@@ -629,8 +629,8 @@ namespace xlionrender
                 while( std::size_t(Region) < Need && Region < (1 << 22) ) Region <<= 1;
                 xgpu::buffer Light, Moments;
                 const auto Usage = m_bGIRingsLocal ? xgpu::buffer::setup::usage::GPU_READ : xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ;
-                if( !m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * Region, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * Region * 4) })
-                 && !m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * Region * gi::moment_texels_v, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * Region * gi::moment_texels_v) }) )
+                if( !m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * Region, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * Region * 4), .m_pName = "GI: light ring" })
+                 && !m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * Region * gi::moment_texels_v, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * Region * gi::moment_texels_v), .m_pName = "GI: moment ring" }) )
                 {
                     // (xgpu::buffer has no move: the handles swapped; the old ones' destructors queue them in the device's deferred destroy)
                     m_GILightRing.m_Private.swap(Light.m_Private); m_GIMomentRing.m_Private.swap(Moments.m_Private);
@@ -667,8 +667,8 @@ namespace xlionrender
             {
                 const auto Usage = bGPU ? xgpu::buffer::setup::usage::GPU_READ : xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ;
                 xgpu::buffer Light, Moments;
-                if( !m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * m_GIRegion, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * m_GIRegion * 4) })
-                 && !m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * m_GIRegion * gi::moment_texels_v, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * m_GIRegion * gi::moment_texels_v) }) )
+                if( !m_Device.Create(Light, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * m_GIRegion, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * m_GIRegion * 4), .m_pName = "GI: light ring" })
+                 && !m_Device.Create(Moments, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = Usage, .m_EntryByteSize = 4, .m_EntryCount = ring_frames_v * m_GIRegion * gi::moment_texels_v, .m_pData = Zeros(Usage, std::size_t(ring_frames_v) * m_GIRegion * gi::moment_texels_v), .m_pName = "GI: moment ring" }) )
                 {
                     m_GILightOther.m_Private.swap(Light.m_Private); m_GIMomentOther.m_Private.swap(Moments.m_Private);
                     m_GIOtherRegion = m_GIRegion;
@@ -1117,7 +1117,7 @@ namespace xlionrender
                 const int Need = int(m_LightCells.m_Data.size() + m_CellInput.size()), Size = ((Need + Need / 4) + 65535) / 65536 * 65536;
                 const std::vector<std::uint32_t> Zeros(std::size_t(Size), 0u);
                 m_Device.Destroy(std::move(m_CellScratch));
-                m_CellScratchUints = m_Device.Create(m_CellScratch, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = Size, .m_pData = const_cast<std::uint32_t*>(Zeros.data()) }) == nullptr ? Size : 0;
+                m_CellScratchUints = m_Device.Create(m_CellScratch, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = Size, .m_pData = const_cast<std::uint32_t*>(Zeros.data()), .m_pName = "Lights: cell scratch" }) == nullptr ? Size : 0;
                 bGPU = m_CellScratchUints > 0;
                 m_CellScratchKey = 0;
             }
@@ -2066,7 +2066,7 @@ namespace xlionrender
             if( !m_bGISunMapTried )
             {
                 m_bGISunMapTried = true;
-                m_bGISunMapMade = !m_Device.Create(m_GISunMap, { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = gi_sun_map_v, .m_Height = gi_sun_map_v, .m_isGamma = false });
+                m_bGISunMapMade = !m_Device.Create(m_GISunMap, { .m_Format = xgpu::texture::format::DEPTH_U16, .m_Width = gi_sun_map_v, .m_Height = gi_sun_map_v, .m_isGamma = false, .m_pName = "GI: sun shadow map" });
                 if( m_bGISunMapMade )
                 {
                     auto Attachments = std::array{ xgpu::renderpass::attachment{ m_GISunMap } };
@@ -2936,7 +2936,7 @@ namespace xlionrender
         {
             if( m_HitTables.m_Private ) { xgpu::buffer Old; Old.m_Private.swap(m_HitTables.m_Private); }     // (its destructor queues the deferred destroy)
             m_HitTableCap = std::max<std::uint32_t>(std::uint32_t(T.size() * 3 / 2), 1u << 16);
-            if( m_Device.Create(m_HitTables, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = int(4 * m_HitTableCap), .m_EntryCount = ring_frames_v }) ) { m_HitTableCap = 0; return; }
+            if( m_Device.Create(m_HitTables, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = int(4 * m_HitTableCap), .m_EntryCount = ring_frames_v, .m_pName = "Probes: hit tables" }) ) { m_HitTableCap = 0; return; }
         }
         (void)m_HitTables.MemoryMapFrameRegion(Slot, 1, [&](void* p) { std::memcpy(p, T.data(), T.size() * 4); });
 
@@ -3073,6 +3073,20 @@ namespace xlionrender
             std::memcpy(pB, &C2WM, 64); std::memcpy(pB + 64, Info, 16); std::memcpy(pB + 80, Levels.data(), sizeof(Levels));
         });
         m_bPlanarOn = true; m_PlanarWhy = 0;
+    }
+
+    namespace
+    {
+        // (R0b) What a lit draw-list pass reads beyond its own targets, declared conservatively: the texture heap's lit set, the frame's
+        // lights and materials, and the geometry and draw domains (a "*" name is a domain: every resource of that prefix - rg_audit.py)
+        void DeclareLitReads( rg::graph& G, int S ) noexcept
+        {
+            for( const char* p : { "Probes: environment DFG", "Probes: environment atlas", "Probes: probe atlas", "Render target: contact shadow", "Render target: sun shadow mask",
+                                   "Shadows: shadow atlas", "Shadows: white dummy", "Frame: instance data", "GI: dummy", "Lights: cell ring", "Lights: light ring",
+                                   "Materials: entity parameters", "Materials: material parameters", "Geometry: *", "Culling: *", "Render target: tail records", "GI: screen buffer*",
+                                   "GI: light ring", "GI: moment ring" } )
+                G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::SAMPLED);
+        }
     }
 
     void instance::renderScenePass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept
@@ -3711,6 +3725,13 @@ namespace xlionrender
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                     Push.m_Mode = s_bSSGI ? 5u : 1u;
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
+                    for( int k = 0; k < 2; ++k )
+                    {
+                        auto& G = View.m_Graph;
+                        const int S = G.Begin(k == 0 ? "AO (raw)" : "AO (filtered) + gather table", "instance: m_AOCompute");
+                        for( const char* p : { "Render target: depth", "Render target: prepass normals", "Render target: prepass ids", "Render target: last frame's HDR" } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
+                        for( const char* p : { "GI: ambient occlusion", "GI: gather table", "GI: screen buffer*" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
+                    }
                 }
                 View.m_bAOPrev = bAO;
                 // The published light (XLION_VOX_PUBLISHED, gi_published_store_plan_2026-11-08.md): last frame's requests resolved, then this
@@ -3773,6 +3794,16 @@ namespace xlionrender
                 }
                 const bool bHeat = s_bHeat && View.m_HeatToneMap.m_Private;
                 if( bHeat ) { const xgpu::buffer::copy Hc{ 0, 0, 1 }; Window.CopyBuffer(View.m_GIScreenZeros, View.m_HeatBuffer, std::span{ &Hc, 1 }); }
+                {
+                    auto& G = View.m_Graph;
+                    const int S = G.Begin("GI read", "GI: screen colour", false);
+                    for( const char* p : { "Probes: environment DFG", "Probes: environment atlas", "Probes: probe atlas", "Render target: contact shadow", "Render target: depth", "Render target: prepass ids",
+                                           "Render target: prepass normals", "Render target: sun shadow mask", "Shadows: white dummy", "Frame: instance data", "GI: ambient occlusion", "GI: device-local data",
+                                           "GI: dummy", "GI: gather table", "GI: screen buffer previous", "GI: voxel store", "GI: *" } )
+                        G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::SAMPLED);
+                    for( const char* p : { "GI: screen colour", "GI: screen depth" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::CLEAR);
+                    G.Write(S, G.Resource("GI: screen buffer", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
+                }
                 {
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
@@ -3890,6 +3921,17 @@ namespace xlionrender
                     MCmd.WriteTimestamp(m_SunMaskTimes, 1);
                 }
                 Window.CopyTexture(m_SunMaskNew, m_SunMaskTex, View.m_Width, View.m_Height);      // (the materials read it there; next frame's pass reads it as last frame's)
+                {
+                    auto& G = View.m_Graph;
+                    int S = G.Begin("sun shadow mask", "Render target: sun shadow mask (pass)", false);
+                    for( const char* p : { "Probes: environment DFG", "Probes: environment atlas", "Probes: probe atlas", "Render target: contact shadow", "Render target: depth", "Render target: prepass ids",
+                                           "Render target: prepass normals", "Render target: sun shadow mask", "Shadows: shadow atlas", "Shadows: white dummy", "Lights: cell ring", "Lights: light ring", "Shadows: VSM page depth bounds" } )
+                        G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::SAMPLED);
+                    G.Write(S, G.Resource("Render target: sun shadow mask (pass)", rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE);
+                    S = G.Begin("sun shadow mask copy", "copy Render target: sun shadow mask (pass)");
+                    G.Read(S, G.Resource("Render target: sun shadow mask (pass)", rg::lifetime::FRAME), rg::usage::TRANSFER_SRC);
+                    G.Write(S, G.Resource("Render target: sun shadow mask", rg::lifetime::HISTORY), rg::usage::TRANSFER_DST, rg::policy::FULL_OVERWRITE);
+                }
                 View.m_SunMaskPrevW2C = W2C; View.m_bSunMaskValid = true;
                 // mode 3: the materials read it - the flag in the scene's block itself (the light cuts' per draw entries are copies of it) and
                 // that block again (the next binds take the latest entry). A lit pass before this one in the frame sees the flag too: its
@@ -3908,6 +3950,13 @@ namespace xlionrender
             std::optional<xgpu::cmd_buffer> CmdPass;     // (GPU culling's occlusion ends the pass for its Hi-Z and loads it again: the same Cmd)
             CmdPass.emplace(Window.StartRenderPass(bGPre ? View.m_GPrePass : View.m_ScenePass));
             auto& Cmd = *CmdPass;
+            {
+                auto& G = View.m_Graph;
+                const int S = G.Begin("prepass", "Render target: HDR colour", false);
+                DeclareLitReads(G, S);
+                for( const char* p : { "Render target: HDR colour", "Render target: depth", "Render target: prepass ids", "Render target: prepass normals", "Render target: tile attributes" } )
+                    G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::CLEAR);
+            }
             if( bMain ) Cmd.WriteTimestamp(m_Timestamps, 1);
             // Measurement only (XLION_GPU_TIMES): the main view's scene pass split - its start, the depth prepass's end, its end (SCENESPLIT)
             static const bool s_bSplit = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
@@ -3966,6 +4015,13 @@ namespace xlionrender
                 const int GX = (View.m_Width / int(Div) + 7) / 8, GY = (View.m_Height / int(Div) + 7) / 8;
                 if( s_bTimes ) Window.WriteTimestamp(m_ContactTimes, 0);
                 Window.Dispatch(m_ContactCompute, Buffers, Textures, Images, &Push, sizeof(Push), GX, GY);
+                {
+                    auto& G = View.m_Graph;
+                    const int S = G.Begin("contact shadows", "instance: m_ContactCompute");
+                    G.Read(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::SAMPLED);
+                    G.Read(S, G.Resource("GI: gather table", rg::lifetime::FRAME), rg::usage::STORAGE);
+                    G.Write(S, G.Resource("Render target: contact shadow", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
+                }
                 if( s_bTimes ) Window.WriteTimestamp(m_ContactTimes, 1);
                 pLight->m_ShadowLevels[0].m_Z = s_Contact[4];
                 pLight->m_ShadowLevels[0].m_W = s_Contact[0];
@@ -3997,6 +4053,11 @@ namespace xlionrender
                         auto LB = std::array<xgpu::buffer*, 2>{ &m_LightRing, &View.m_LightTiles };
                         const xgpu::texture* LT[] = { &View.m_Depth };
                         Window.Dispatch(m_LightTilesCompute, LB, LT, std::span<const xgpu::texture* const>{}, &LPush, sizeof(LPush), TX, TY);
+                        auto& G = View.m_Graph;
+                        const int S = G.Begin("light tiles", "instance: m_LightTilesCompute");
+                        G.Read(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::SAMPLED);
+                        G.Read(S, G.Resource("Lights: light ring", rg::lifetime::RETAINED), rg::usage::STORAGE);
+                        G.Write(S, G.Resource("Lights: the screen tiles' lists", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
                     }
                 }
                 // A5.0's light funnel (XLION_TILE_ABLATE bit 8, measurement): the counters zeroed before the pass, copied into a ring after it;
@@ -4048,7 +4109,16 @@ namespace xlionrender
                         auto Bindings = LitBindings(Textures, true);
                         if( m_Device.Create(Inst, { .m_PipeLine = G.m_Pipeline, .m_SamplersBindings = Bindings }) ) continue;
                     }
-                    if( !C ) C.emplace(Window.StartRenderPass(View.m_TilePass));
+                    if( !C )
+                    {
+                        C.emplace(Window.StartRenderPass(View.m_TilePass));
+                        auto& G = View.m_Graph;
+                        const int S = G.Begin("tile pass (lighting)", "Render target: HDR colour", false);
+                        DeclareLitReads(G, S);
+                        for( const char* p : { "Render target: depth", "Render target: prepass ids", "Render target: prepass normals", "Render target: tile attributes", "Lights: the screen tiles' lists" } )
+                            G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
+                        G.Write(S, G.Resource("Render target: HDR colour", rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::PRESERVE);
+                    }
                     std::array<xgpu::buffer*, 12> Buffers{ &m_GIDummy, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &View.m_GIScreenBuffer, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer()
                                                          , m_TileCount.m_Private ? &m_TileCount : &m_GIDummy, bLightTiles ? &View.m_LightTiles : &m_GIDummy };
                     C->setPipelineInstance(Inst, std::span{ Buffers });
@@ -4176,6 +4246,13 @@ namespace xlionrender
                     CmdPass.reset();
                     m_pCull->Occlude(Window, View.m_Depth, View.m_HiZ, View.m_Width, View.m_Height);
                     CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
+                    {
+                        auto& G = View.m_Graph;
+                        const int S = G.Begin("prepass (occlusion's second pass)", "Render target: HDR colour", false);
+                        DeclareLitReads(G, S);
+                        for( const char* p : { "Render target: HDR colour", "Render target: depth", "Render target: prepass ids", "Render target: prepass normals", "Render target: tile attributes" } )
+                            G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::PRESERVE);
+                    }
                     PrepassCulled(1);
                 }
                 if( Mode == 2 ) { CmdPass.reset(); if( pSplit ) Window.WriteTimestamp(*pSplit, 4); if( bScreen ) GatherGI(); runDeferredVox(Window); if( bSunMask ) SunMask(); if( bContact ) ContactPass(); if( pSplit ) Window.WriteTimestamp(*pSplit, 5); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
