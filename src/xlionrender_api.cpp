@@ -176,6 +176,27 @@ namespace xlionrender
                 }
                 else if (E == "source") { Reply = std::format("{:016X}", pSystem->m_pScene->m_RenderGraph); bOk = true; }      // (the RenderGraph the chain comes from; 0: the built-in one)
                 else if (E == "describe") { const auto& V = pSystem->m_pScene->m_View; Reply = post::Describe(V.m_PostDesc, V.m_PostPlan, V.m_PostError, V.m_PostSnapshot, V.m_PostNoted, V.m_PostRan); bOk = true; }      // (the Post chain view's text, for the console)
+                else if (E == "stages")         // (the frame stages: the ones bypassed, then every scope the last frame ran - a line each)
+                {
+                    const auto& V = pSystem->m_pScene->m_View;
+                    Reply = "off:"; for (const auto& S : V.m_StagesOff) Reply += " " + S;
+                    const auto T = V.m_Graph.Text();
+                    for (std::size_t b = 0; b < T.size(); )
+                    {
+                        std::size_t e = T.find('\n', b); if (e == std::string::npos) e = T.size();
+                        if (T.compare(b, 2, "S\t") == 0) { const auto f1 = T.find('\t', b + 2), f2 = T.find('\t', f1 + 1); if (f1 < e) Reply += "\n" + T.substr(f1 + 1, std::min(f2, e) - f1 - 1); }
+                        b = e + 1;
+                    }
+                    bOk = true;
+                }
+                else if (E.starts_with("stage "))      // "stage <name> 0|1" on the view (a Level with a RenderGraph: the session edits its descriptor instead)
+                {
+                    char Name[64] = {}; int On = 1;
+                    auto& V = pSystem->m_pScene->m_View;
+                    if (std::sscanf(pEdit + 6, "%63s %d", Name, &On) != 2) Reply = "stage <name> 0|1";
+                    else if (!stage::Bypassable(Name)) Reply = std::format("the stage '{}' cannot be bypassed", Name);
+                    else { std::erase(V.m_StagesOff, std::string(Name)); if (!On) V.m_StagesOff.push_back(Name); Reply = "ok"; bOk = true; }
+                }
                 else bOk = post::Edit(pSystem->m_pScene->m_View.m_PostDesc, E, Reply);
                 if (pOut && Capacity > 0) { const std::size_t n = std::min<std::size_t>(Reply.size(), static_cast<std::size_t>(Capacity - 1)); std::memcpy(pOut, Reply.data(), n); pOut[n] = 0; }
                 return bOk;

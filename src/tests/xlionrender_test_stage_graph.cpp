@@ -283,6 +283,27 @@ int main( int argc, char** argv )
             if( k == 0 ) { std::printf("  (the harness is not trusted for this stage)\n"); break; }
         }
     }
+    // A bypassed stage (render_view::m_StagesOff, the RenderGraph's checkboxes) leaves its passes out of the frame; the others stay
+    if( !pOnly )
+    {
+        for( const auto& Ca : Cases )
+        {
+            const auto& S = Ca.m_Scene;
+            for( const auto& B : stage::bypassable_v )
+            {
+                xlionrender::render_view V;
+                CHECK(!Renderer.CreateView(V, { .m_Width = W, .m_Height = H }), "CreateView");
+                V.m_StagesOff = { std::string(B.m_Stage) };
+                xgpu::tools::view Camera; Camera.setFov(xmath::radian{ 1.0f }); Camera.setViewport({ 0, 0, W, H }); Camera.LookAt(xmath::fvec3{ 0.5f, 1.2f, -2.5f }, xmath::fvec3{ 0, 0, 0 });
+                CHECK(App.RenderFrame(S, V, Camera) && App.RenderFrame(S, V, Camera), "Render");
+                const auto Text = V.m_Graph.Text();
+                const std::pair<std::string_view, const char*> Scopes[] = { { "refl_ssr", "reflections: screen trace" }, { "refl_recon", "reflections: temporal" }, { "ao", "AO (raw)" }, { "light_tiles", "light tiles" } };
+                for( const auto& [Stage, pScope] : Scopes ) if( Stage == B.m_Stage ) CHECK(Scope(Text, pScope).empty(), "%s bypassed: its '%s' still ran (%s)", std::string(Stage).c_str(), pScope, Ca.m_pName);
+                Renderer.DestroyView(V);
+            }
+        }
+        std::printf("bypass: each bypassable stage left out of the frame\n");
+    }
     for( auto& C : Copies ) if( C.m_Private ) App.m_Device.Destroy(std::move(C));
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     if( nFail ) { std::printf("FAIL: %d\n", nFail); return 1; }

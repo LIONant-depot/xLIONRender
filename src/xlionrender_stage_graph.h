@@ -47,6 +47,12 @@ namespace xlionrender::stage
     };
     struct desc { std::vector<pass> m_Passes; bool operator==( const desc& ) const = default; };
 
+    // The stages that can be bypassed (the frame has a way without them), and what the frame does then
+    struct bypass { std::string_view m_Stage, m_Without; };
+    inline constexpr bypass bypassable_v[] = { { "refl_ssr", "no screen trace: the reflections' rays and probes alone" }, { "refl_recon", "no reconstruction: the reflections as traced (noisy)" }
+                                             , { "ao", "no ambient occlusion" }, { "light_tiles", "no light tiles: each pixel walks its world cell's light list" } };
+    inline bool Bypassable( std::string_view Stage ) noexcept { for( const auto& B : bypassable_v ) if( B.m_Stage == Stage ) return true; return false; }
+
     // names to objects: Add once (the index stays), Set per frame
     template< class T >
     struct table

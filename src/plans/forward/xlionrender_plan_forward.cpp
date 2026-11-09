@@ -2653,11 +2653,11 @@ namespace xlionrender
         static const int  s_GradeRough = [] { const char* p = xlionrender::Env("XLION_REFL_GRADE"); return p ? int(std::atof(p) * 1000.0 + 0.5) : 0; }();
         static const bool s_bGrading = xlionrender::Env("XLION_REFL_GRADE") != nullptr && !s_bGradeRays;      // (what's graded is the read at a roughness; the mirror view's rays are mirror rays, painted over it)
         const bool bTraced = !s_bGrading && !Scene.m_bDebugReflectionPathTraced && (m_ReflTraceBench > 0 || Scene.m_ReflectionMaxRoughness > 0) && !BvhR.m_bEmpty && BvhR.m_pData;
-        const bool bScreen = ReflectionScreen(Scene) && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection && xlionrender::Env("XLION_REFL_PT") == nullptr;      // (its colors are last frame's image: in the debug view, reflections of reflections)
+        const bool bScreen = ReflectionScreen(Scene) && m_ReflTraceBench == 0 && !Scene.m_bDebugReflection && xlionrender::Env("XLION_REFL_PT") == nullptr && View.StageOn("refl_ssr");      // (its colors are last frame's image: in the debug view, reflections of reflections)
         const int  Slot    = int(m_Device.getFrameIndex() % ring_frames_v);
         static const bool s_bReflPT = xlionrender::Env("XLION_REFL_PT") != nullptr;      // (A12: the reflections' ground truth, real materials)
         static const bool s_bNoRecon = xlionrender::Env("XLION_REFL_NO_RECON") != nullptr;      // (measurement: the records as traced, no reconstruction)
-        const bool bReconstruct = !s_bReflPT && !s_bNoRecon && Scene.m_bReflectionReconstruct && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || xlionrender::Env("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
+        const bool bReconstruct = !s_bReflPT && !s_bNoRecon && Scene.m_bReflectionReconstruct && View.StageOn("refl_recon") && m_ReflTraceBench == 0 && (!Scene.m_bDebugReflectionMirror || xlionrender::Env("XLION_REFL_GRADE_RECONSTRUCT") != nullptr);      // (its kernel follows the real roughness)
         if( bTraced || bScreen )
         {
             if( bScreen || bReconstruct )
@@ -3365,7 +3365,7 @@ namespace xlionrender
             const auto TileBase = [&]( const material_slot* pMat ) { return TileMat(pMat) ? pMat->m_ParamBase : 0xFFFFFFFFu; };
             // The ambient occlusion (scene::gi_settings::m_bAO; XLION_AO=0/1 overrides): with the half-resolution pass, the GI on or off
             static const int s_AOEnv = [] { const char* p = xlionrender::Env("XLION_AO"); return p ? std::atoi(p) : -1; }();
-            const bool bAO = bScreen && (s_AOEnv >= 0 ? s_AOEnv != 0 : Scene.m_GI.m_bAO);
+            const bool bAO = bScreen && (s_AOEnv >= 0 ? s_AOEnv != 0 : Scene.m_GI.m_bAO) && View.StageOn("ao");
             if( pPre ) Window.WriteTimestamp(*pPre, 1);
             const auto PreCpu0 = std::chrono::steady_clock::now();     // (measurement: the half-res block's CPU, PRESCENE)
             if( bMain ) m_GIStats.m_nScreenDraws = m_GIStats.m_nScreenCalls = 0;
@@ -4198,7 +4198,7 @@ namespace xlionrender
                 // instead of its world cell's list (xlionrender_light_tiles_comp.glsl); the lights' count and base, the mode: this render's block
                 static const bool s_bLightTiles = [] { const char* p = xlionrender::Env("XLION_LIGHT_TILES"); return !(p && p[0] == '0'); }();
                 const int  nLocal = pLight ? int(pLight->m_LocalCount.m_X) : 0;
-                bool bLightTiles = s_bLightTiles && pLight && nLocal > 0 && nLocal < 65536 && pLight->m_LocalCount.m_Y < 1.5f;
+                bool bLightTiles = s_bLightTiles && pLight && nLocal > 0 && nLocal < 65536 && pLight->m_LocalCount.m_Y < 1.5f && View.StageOn("light_tiles");
                 if( bLightTiles )
                 {
                     const int TX = (View.m_Width + 7) / 8, TY = (View.m_Height + 7) / 8, nUints = 16 + 16 * TX * TY;
