@@ -5251,6 +5251,8 @@ namespace xlionrender
     {
         assert(m_bReady && View.m_Width > 0);
         View.m_Graph.BeginFrame();             // (R0b: the frame's declarations, from its first work)
+        static const bool s_bNoStages = xlionrender::Env("XLION_NO_STAGES") != nullptr;      // (measurement: every stage hand-written - the stages' cost)
+        if( s_bNoStages ) View.m_bStageLightTiles = View.m_bStageReflSSR = View.m_bStageReflRecon = View.m_bStageAO = View.m_bStageGIRead = View.m_bStageVSMRequest = View.m_bStageLocalRequest = View.m_bStageTile = false;
         m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
         if( View.m_HDRPrevPendingW )            // (last frame's image for the screen reads, its copy held back while the async rays read the older one)
         {
