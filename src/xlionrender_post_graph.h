@@ -25,7 +25,8 @@ namespace xlionrender::post
     // The authored effects. Bloom is one node: lowering expands it into its levels. The initialisations (TAA history, bloom levels and
     // exposure zeroed) are the nodes' lifecycle, never wired by a user
     enum class node_type : std::uint8_t { TAA, BLOOM, EXPOSURE, TONE_MAP };
-    struct node { node_type m_Type; bool operator==( const node& ) const = default; };
+    struct node { node_type m_Type; bool m_bOn = true; bool operator==( const node& ) const = default; };     // (off: bypassed - kept in the recipe, left out of the plan)
+    inline constexpr std::string_view node_names_v[] = { "taa", "bloom", "exposure", "tonemap" };     // (the edit commands' names; the text's are post.<name>)
 
     // A parameter of the chain: what the nodes push. Source: where a frame reads it ("scene.post.bloom_threshold"; empty: the default
     // only); a value outside Min..Max is clamped (and reported once a change: SnapshotParams). Bools are 0 / 1
@@ -127,8 +128,9 @@ namespace xlionrender::post
     inline int BloomLevels( int H ) noexcept { return std::clamp(int(std::round(std::log2(float(H) / 48.0f))), 3, max_bloom_levels_v); }
 
     // The description, checked and expanded for a W x H view. The bloom's down steps run where the node is, its up steps right before
-    // the tone map (they only feed it; the exposure and the up steps touch different images, so this is the hand-written order)
-    inline plan Lower( const desc& D, int W, int H ) noexcept
+    // the tone map (they only feed it; the exposure and the up steps touch different images, so this is the hand-written order).
+    // (LowerOn: the nodes that are on; Lower below leaves the bypassed ones out and maps the indices back)
+    inline plan LowerOn( const desc& D, int W, int H ) noexcept
     {
         plan P;
         const auto Fail = [&](int i, std::string Why) { P = {}; P.m_Error = i >= 0 ? std::format("node {}: {}", i, Why) : Why; return P; };
@@ -256,6 +258,76 @@ namespace xlionrender::post
         return P;
     }
 
+    inline plan Lower( const desc& D, int W, int H ) noexcept
+    {
+        desc On{ {}, D.m_Params };
+        std::vector<int> Map;
+        for( int i = 0; i < int(D.m_Nodes.size()); ++i ) if( D.m_Nodes[std::size_t(i)].m_bOn ) { On.m_Nodes.push_back(D.m_Nodes[std::size_t(i)]); Map.push_back(i); }
+        if( Map.size() == D.m_Nodes.size() ) return LowerOn(D, W, H);
+        plan P = LowerOn(On, W, H);
+        for( auto* pV : { &P.m_Inits, &P.m_Passes } ) for( auto& Pa : *pV ) if( Pa.m_Node >= 0 ) Pa.m_Node = Map[std::size_t(Pa.m_Node)];
+        if( P.m_Error.starts_with("node ") )        // ("node <i>: ..." in the on nodes' numbering: the description's)
+        {
+            const std::size_t e = P.m_Error.find(':');
+            const int i = std::atoi(P.m_Error.c_str() + 5);
+            if( e != std::string::npos && i >= 0 && i < int(Map.size()) ) P.m_Error = std::format("node {}{}", Map[std::size_t(i)], P.m_Error.substr(e));
+        }
+        return P;
+    }
+
+    // An edit of the description, all or nothing (render graph P6): the candidate must lower (at any size: 64 x 64 checks the structure),
+    // else D is untouched and Message says why. Commands (the console's and the editor's, the same):
+    //      bypass <node> <0|1>         a node off (kept in the recipe, left out of the plan) or on
+    //      insert <gap> <type>         a node before the gap-th (gap = the node count: at the end); type: taa, bloom, exposure, tonemap
+    //      remove <node>
+    //      move <node> <to>            to the gap-th position (before the node there)
+    inline bool Edit( desc& D, std::string_view Command, std::string& Message ) noexcept
+    {
+        std::vector<std::string> W;
+        for( std::size_t b = 0; b < Command.size(); )
+        {
+            while( b < Command.size() && Command[b] == ' ' ) ++b;
+            std::size_t e = Command.find(' ', b); if( e == std::string_view::npos ) e = Command.size();
+            if( e > b ) W.emplace_back(Command.substr(b, e - b));
+            b = e;
+        }
+        const auto Int = [&](std::size_t i, int& Out) { if( i >= W.size() ) return false; char* pEnd = nullptr; const long v = std::strtol(W[i].c_str(), &pEnd, 10); Out = int(v); return pEnd && *pEnd == 0; };
+        desc C = D;
+        const int n = int(C.m_Nodes.size());
+        int a = 0, b = 0;
+        if( W.size() == 3 && W[0] == "bypass" && Int(1, a) && Int(2, b) && a >= 0 && a < n ) C.m_Nodes[std::size_t(a)].m_bOn = b != 0;
+        else if( W.size() == 3 && W[0] == "insert" && Int(1, a) && a >= 0 && a <= n )
+        {
+            const auto It = std::find(std::begin(node_names_v), std::end(node_names_v), W[2]);
+            if( It == std::end(node_names_v) ) { Message = std::format("no node type '{}' (taa, bloom, exposure, tonemap)", W[2]); return false; }
+            C.m_Nodes.insert(C.m_Nodes.begin() + a, node{ node_type(It - std::begin(node_names_v)) });
+        }
+        else if( W.size() == 2 && W[0] == "remove" && Int(1, a) && a >= 0 && a < n ) C.m_Nodes.erase(C.m_Nodes.begin() + a);
+        else if( W.size() == 3 && W[0] == "move" && Int(1, a) && Int(2, b) && a >= 0 && a < n && b >= 0 && b <= n )
+        {
+            const node N = C.m_Nodes[std::size_t(a)];
+            C.m_Nodes.erase(C.m_Nodes.begin() + a);
+            C.m_Nodes.insert(C.m_Nodes.begin() + (b > a ? b - 1 : b), N);
+        }
+        else { Message = std::format("not an edit: '{}' (bypass <node> <0|1>, insert <gap> <type>, remove <node>, move <node> <to>; nodes 0 .. {})", Command, n - 1); return false; }
+        if( const auto P = Lower(C, 64, 64); !P.m_Error.empty() ) { Message = "refused: " + P.m_Error; return false; }
+        D = std::move(C);
+        Message = "ok";
+        return true;
+    }
+
+    // The node types an "insert <gap>" would accept (the editor offers only these)
+    inline std::vector<node_type> Insertable( const desc& D, int Gap ) noexcept
+    {
+        std::vector<node_type> Out;
+        for( std::size_t t = 0; t < std::size(node_names_v); ++t )
+        {
+            desc C = D; std::string M;
+            if( Edit(C, std::format("insert {} {}", Gap, node_names_v[t]), M) ) Out.push_back(node_type(t));
+        }
+        return Out;
+    }
+
     // The frame's values, one read of the Scene by index: Out[i] for plan.m_Params[i], clamped to its range. A clamp is reported (Report:
     // a line) once a change of the raw value - Noted keeps the last reported raw value a parameter (NaN: none)
     template< typename T_REPORT >
@@ -276,7 +348,7 @@ namespace xlionrender::post
 
     // The chain as the editor shows it (xRenderEditor::DescribePost), a line each, fields split by tabs:
     //      E <the description's error>
-    //      N <index> <type>                                                    the authored nodes, in order
+    //      N <index> <type> <on 0|1>                                           the authored nodes, in order (0: bypassed)
     //      P <name> <value> <source> <min> <max> <the Scene's value when clamped, else empty>
     //      X <node> <ran 0|1> <source map> <scope> <kernel> <W> <H> <groups x> <groups y> <runs when>     the frame's passes
     //      I <node> 0 <source map> <scope> <kernel> <W> <H> <groups x> <groups y> <runs when>             the initialisations
@@ -287,7 +359,7 @@ namespace xlionrender::post
         static constexpr const char* s_When[]   = { "always", "TAA on", "Bloom > 0", "AutoExposure on" };
         std::string T;
         if( !Error.empty() ) T += "E\t" + Error + "\n";
-        for( std::size_t i = 0; i < D.m_Nodes.size(); ++i ) T += std::format("N\t{}\t{}\n", i, s_Types[std::size_t(D.m_Nodes[i].m_Type)]);
+        for( std::size_t i = 0; i < D.m_Nodes.size(); ++i ) T += std::format("N\t{}\t{}\t{}\n", i, s_Types[std::size_t(D.m_Nodes[i].m_Type)], D.m_Nodes[i].m_bOn ? 1 : 0);
         for( std::size_t i = 0; i < P.m_Params.size(); ++i )
         {
             const auto& R = P.m_Params[i];

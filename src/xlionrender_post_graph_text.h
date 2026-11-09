@@ -6,11 +6,11 @@
 // authored nodes in order by their semantic names. The renderer never reads files - a view holds a post::desc; this reader is for
 // the tests now and the render graph resource's compiler later (one reader).
 //      [ PostGraph : 4 ]
-//      { Type:s }
-//        "post.taa"
-//        "post.bloom"
-//        "post.exposure"
-//        "post.tonemap"
+//      { Type:s  On:c }
+//        "post.taa"       1
+//        "post.bloom"     1          (0: bypassed - kept in the recipe, left out of the plan)
+//        "post.exposure"  1
+//        "post.tonemap"   1
 //      [ Params : 10 ]
 //      { Name:s  Source:s  Type:s  Default:f  Min:f  Max:f }
 //        "BloomThreshold"  "scene.post.bloom_threshold"  "float"  0.99  0  16
@@ -27,10 +27,11 @@ namespace xlionrender::post
     inline xerr Serialize( xtextfile::stream& F, desc& D, std::string& Problem ) noexcept
     {
         std::vector<std::string> Names;
-        if( !F.isReading() ) for( const auto& N : D.m_Nodes ) for( const auto& [Name, T] : type_names_v ) if( T == N.m_Type ) Names.emplace_back(Name);
+        std::vector<char>        On;        // (bool as the table's c column)
+        if( !F.isReading() ) for( const auto& N : D.m_Nodes ) { for( const auto& [Name, T] : type_names_v ) if( T == N.m_Type ) Names.emplace_back(Name); On.push_back(N.m_bOn ? 1 : 0); }
         if( auto Err = F.Record("PostGraph"
-            , [&](std::size_t& Count, xerr&) { if( F.isReading() ) Names.resize(Count); else Count = Names.size(); }
-            , [&](std::size_t i, xerr& E) { E = F.Field("Type", Names[i]); }); Err ) return Err;
+            , [&](std::size_t& Count, xerr&) { if( F.isReading() ) { Names.resize(Count); On.resize(Count, 1); } else Count = Names.size(); }
+            , [&](std::size_t i, xerr& E) { bool b = On[i] != 0; false || (E = F.Field("Type", Names[i])) || (E = F.Field("On", b)); On[i] = b ? 1 : 0; }); Err ) return Err;
         if( F.isReading() )
         {
             D.m_Nodes.clear();
@@ -38,7 +39,7 @@ namespace xlionrender::post
             {
                 const auto It = std::find_if(std::begin(type_names_v), std::end(type_names_v), [&](const auto& P) { return P.first == Names[i]; });
                 if( It == std::end(type_names_v) ) { Problem = std::format("row {}: no node type '{}' (the types: post.taa, post.bloom, post.exposure, post.tonemap)", i, Names[i]); D.m_Nodes.clear(); return {}; }
-                D.m_Nodes.push_back({ It->second });
+                D.m_Nodes.push_back({ It->second, On[i] != 0 });
             }
         }
         // The parameters (P3): what the nodes push, where a frame reads each, its range

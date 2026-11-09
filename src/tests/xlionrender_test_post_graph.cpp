@@ -167,12 +167,48 @@ int main()
         for( std::size_t i = 0; i < A.m_Passes.size(); ++i ) CHECK(A.m_Passes[i].m_Source == B.m_Passes[i].m_Source, "the same plan: " + A.m_Passes[i].m_Source);
         {
             std::FILE* f = _wfopen(Path.c_str(), L"w"); CHECK(f, "a bad file");
-            std::fputs("[ PostGraph : 3 ]\n{ Type:s }\n  \"post.taa\"\n  \"post.blom\"\n  \"post.tonemap\"\n", f); std::fclose(f);
+            std::fputs("[ PostGraph : 3 ]\n{ Type:s On:c }\n  \"post.taa\" 1\n  \"post.blom\" 1\n  \"post.tonemap\" 1\n", f); std::fclose(f);
             xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT), "the bad file opens");
             post::desc X; Problem.clear();
             CHECK(!post::Serialize(F, X, Problem) && Problem.find("row 1: no node type 'post.blom'") != std::string::npos && X.m_Nodes.empty(), "an unknown type names its row: " + Problem);
         }
         std::filesystem::remove(Path);
+    }
+    // P6: edits are all or nothing - a candidate that does not lower leaves the description as it was and says why
+    {
+        auto D = post::desc::Default(); std::string M;
+        CHECK(post::Edit(D, "bypass 1 0", M) && !D.m_Nodes[1].m_bOn, "bypass the bloom: " + M);
+        {
+            const auto P = post::Lower(D, 1920, 1080);
+            CHECK(P.m_Error.empty() && P.m_nBloom == 0 && P.m_Passes.size() == 3, "the bloom bypassed: TAA, exposure, tone map");
+            CHECK(P.m_Passes[1].m_Node == 2 && P.m_Passes[2].m_Node == 3, "the passes name the description's nodes (not the on ones' numbering)");
+        }
+        CHECK(post::Edit(D, "bypass 1 1", M) && D == post::desc::Default(), "bypass undone: the default again");
+        const auto Before = D;
+        CHECK(!post::Edit(D, "remove 3", M) && M.find("no tone map") != std::string::npos && D == Before, "removing the tone map refused, nothing changed: " + M);
+        CHECK(!post::Edit(D, "insert 1 bloom", M) && M.find("a second one") != std::string::npos && D == Before, "a second bloom refused: " + M);
+        CHECK(!post::Edit(D, "move 0 2", M) && M.find("TAA must come first") != std::string::npos && D == Before, "TAA moved after the bloom refused: " + M);
+        CHECK(!post::Edit(D, "insert 0 blom", M) && M.find("no node type 'blom'") != std::string::npos, "an unknown type: " + M);
+        CHECK(!post::Edit(D, "frobnicate", M) && M.find("not an edit") != std::string::npos, "not a command: " + M);
+        CHECK(post::Edit(D, "move 2 1", M) && D.m_Nodes[1].m_Type == post::node_type::EXPOSURE && D.m_Nodes[2].m_Type == post::node_type::BLOOM, "the exposure before the bloom: " + M);
+        CHECK(post::Edit(D, "move 1 3", M) && D == Before, "and back: " + M);
+        CHECK(post::Edit(D, "remove 1", M) && D.m_Nodes.size() == 3, "the bloom removed: " + M);
+        // The insertion menu: only what lowers at that gap
+        CHECK(post::Insertable(D, 1) == std::vector<post::node_type>{ post::node_type::BLOOM }, "between TAA and exposure: only the bloom (the rest are there, TAA only first)");
+        CHECK(post::Insertable(D, 3).empty(), "after the tone map: nothing");
+        { auto E = D; CHECK(post::Edit(E, "remove 0", M), "TAA removed"); CHECK(post::Insertable(E, 0) == (std::vector<post::node_type>{ post::node_type::TAA, post::node_type::BLOOM }), "at the start: TAA or the bloom"); }
+        // A bypassed TAA does not count as first: the bloom may then come first among the on ones
+        { auto E = post::desc::Default(); CHECK(post::Edit(E, "bypass 0 0", M) && post::Lower(E, 64, 64).m_Error.empty(), "TAA bypassed: the chain still lowers"); }
+        // The text keeps the bypass
+        {
+            auto E = post::desc::Default(); CHECK(post::Edit(E, "bypass 2 0", M), "bypass the exposure");
+            const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_post_graph_bypass.txt").wstring();
+            std::string Problem; post::desc R;
+            { xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !post::Serialize(F, E, Problem), "written"); }
+            { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !post::Serialize(F, R, Problem) && Problem.empty(), "read"); }
+            CHECK(R == E && !R.m_Nodes[2].m_bOn, "the bypass survives the text");
+            std::filesystem::remove(Path);
+        }
     }
     std::printf("post graph plan: ok\n");
     return 0;

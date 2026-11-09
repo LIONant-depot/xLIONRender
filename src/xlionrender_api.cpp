@@ -164,6 +164,20 @@ namespace xlionrender
                 }
                 return static_cast<int>(Text.size());
             }
+            bool          EditPost(const void* pWorld, const char* pEdit, char* pOut, int Capacity) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                std::string Reply; bool bOk = false;
+                if (!pSystem || !pSystem->m_pScene) Reply = "no such world";
+                else if (std::string_view E(pEdit ? pEdit : ""); E.starts_with("insertable "))
+                {
+                    for (const auto T : post::Insertable(pSystem->m_pScene->m_View.m_PostDesc, std::atoi(pEdit + 11))) Reply += std::string(post::node_names_v[std::size_t(T)]) + " ";
+                    bOk = true;
+                }
+                else bOk = post::Edit(pSystem->m_pScene->m_View.m_PostDesc, E, Reply);
+                if (pOut && Capacity > 0) { const std::size_t n = std::min<std::size_t>(Reply.size(), static_cast<std::size_t>(Capacity - 1)); std::memcpy(pOut, Reply.data(), n); pOut[n] = 0; }
+                return bOk;
+            }
             std::uint64_t PickPixel(const void* pWorld, int X, int Y, float* pDistance) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);
