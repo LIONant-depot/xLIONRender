@@ -18,6 +18,7 @@
 #include "plugins/xtexture.plugin/source/xtexture_xgpu_rsc_loader.h"
 #include "plugins/xmaterial.plugin/source/xmaterial_xgpu_rsc_loader.h"
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_xgpu_rsc_loader.h"
+#include "plugins/xrender_graph.plugin/source/xrender_graph_bundle.h"       // (the RenderGraph's runtime form: the post chain a Level's view runs)
 #include "plugins/xmaterial.plugin/source/xmaterial_runtime.h"
 #include "plugins/xmaterial.plugin/source/xmaterial_xlionrender.h"
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_runtime.h"
@@ -47,6 +48,9 @@ namespace xlionrender
         std::unordered_map<const void*, geom_mesh>      m_Meshes;
         struct made_material { material_id m_Id; std::vector<const void*> m_From; };     // m_From: the instance, its material, its textures it was made from
         std::unordered_map<std::uint64_t, made_material> m_Materials;  // per material instance (instance guid)
+        std::uint64_t                                   m_RenderGraph = 0;              // the Environment's RenderGraph (instance; 0: the built-in post chain)
+        std::uint64_t                                   m_AppliedRenderGraph = ~0ull;   // the one the view's post chain came from, and its loaded bundle (a recompile: another)
+        const void*                                     m_pAppliedPost = nullptr;
         std::uint32_t                                   m_UpdateCount = 0;              // xlioncore::resources::UpdateCount when the materials were last checked
         instance_ids                                    m_InstanceIds;                  // per drawn entity: its draw's instance id
         std::unordered_set<std::uint64_t>               m_StaleReported;                // the instances E_LAYOUT_STALE was said for (once each)
@@ -507,6 +511,7 @@ namespace xlionrender
             // The post chain's settings: the Level's Environment (the defaults: Tomas, 2026-11-04 - bloom 0.2, auto exposure and TAA on; XLION_BLOOM, XLION_AUTO_EXPOSURE, XLION_TAA override)
             m_Scene.m_Post = { .m_Bloom = E.m_Bloom, .m_BloomThreshold = E.m_BloomThreshold, .m_BloomKnee = E.m_BloomKnee, .m_BloomSpread = E.m_BloomSpread, .m_bAutoExposure = E.m_bAutoExposure
                              , .m_bTAA = E.m_bTAA, .m_TAABlend = E.m_TAABlend, .m_ExposureKey = E.m_ExposureKey, .m_ExposureRate = E.m_ExposureRate, .m_ExposureMin = E.m_ExposureMin, .m_ExposureMax = E.m_ExposureMax };
+            m_RenderGraph = E.m_RenderGraph.m_Instance.m_Value;
             m_Scene.m_Sky     = { .m_Zenith = E.m_SkyZenith, .m_Horizon = E.m_SkyHorizon, .m_Ground = E.m_SkyGround, .m_Intensity = E.m_SkyIntensity };
             m_Scene.m_Ambient = E.m_Ambient;
             m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget, .m_bPerPixel = E.m_bGIPerPixel, .m_Debug = E.m_GIDebug, .m_RaysPerSurfel = E.m_GIRaysPerSurfel, .m_FilterPasses = E.m_GIFilterPasses, .m_bMoments = E.m_bGIMoments, .m_bHalfRes = E.m_bGIHalfRes, .m_EmissiveScale = E.m_GIEmissiveScale, .m_bShowBlend = true, .m_bEmitterLights = E.m_bGIEmitterLights };     // (m_bShowBlend: a game's and an editor's view - never a jump)
@@ -581,6 +586,18 @@ namespace xlionrender
             {
                 if (!m_bGlobalProbe) { m_GlobalProbe = (m_FrameLo + m_FrameHi) * 0.5f; m_GlobalLo = m_FrameLo; m_GlobalHi = m_FrameHi; m_bGlobalProbe = true; }
                 m_Scene.m_Probes.push_back({ .m_Position = m_GlobalProbe, .m_BoxMin = m_GlobalLo, .m_BoxMax = m_GlobalHi, .m_Blend = 0 });
+            }
+            // The post chain: the Environment's RenderGraph (the core's resource: a recompile gives a new one at once), else the built-in one.
+            // A RenderGraph that does not load (not compiled yet, an old bundle) keeps the chain the view has: last known good
+            // (applied when the source changes - another resource, a recompile - so the Post chain view's own edits stay until then)
+            {
+                const void* pSource = m_RenderGraph ? xlioncore::resources::GetResource(render_graph_type_guid_v.m_Value, m_RenderGraph) : nullptr;
+                if (pSource != m_pAppliedPost || m_RenderGraph != m_AppliedRenderGraph)
+                {
+                    if (pSource) m_View.m_PostDesc = static_cast<const xrender_graph::bundle*>(pSource)->m_Desc;
+                    else if (!m_RenderGraph) m_View.m_PostDesc = xlionrender::post::desc::Default();
+                    if (pSource || !m_RenderGraph) { m_pAppliedPost = pSource; m_AppliedRenderGraph = m_RenderGraph; }
+                }
             }
             m_Renderer.Render(Window, m_Scene, m_View, Camera, [&](xgpu::cmd_buffer& CmdBuffer) { if (pOverlay) pOverlay(CmdBuffer, pUser); });
         }

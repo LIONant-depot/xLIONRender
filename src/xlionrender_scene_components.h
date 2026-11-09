@@ -42,11 +42,13 @@ namespace xlionrender
     inline constexpr auto geom_skin_type_guid_v         = xresource::type_guid(xresource::guid_generator::Instance64FromString("GeomSkin"));
     inline constexpr auto skeleton_type_guid_v          = xresource::type_guid(xresource::guid_generator::Instance64FromString("xSkeleton"));
     inline constexpr auto anim_package_type_guid_v      = xresource::type_guid(xresource::guid_generator::Instance64FromString("xAnimPackage"));
+    inline constexpr auto render_graph_type_guid_v      = xresource::type_guid(xresource::guid_generator::Instance64FromString("RenderGraph"));
     using geom_static_ref       = xresource::def_guid<geom_static_type_guid_v>;
     using geom_skin_ref         = xresource::def_guid<geom_skin_type_guid_v>;
     using anim_package_ref      = xresource::def_guid<anim_package_type_guid_v>;
     using material_instance_ref = xresource::def_guid<material_instance_type_guid_v>;
     using texture_ref           = xresource::def_guid<texture_type_guid_v>;
+    using render_graph_ref      = xresource::def_guid<render_graph_type_guid_v>;
 
     // One parameter a Mesh slot overrides (sparse): a parameter of the slot's material instance, by its id - or only by its name when game code
     // set it that way (mesh::SetColor ...): the renderer finds it in the material's parameters. Values are linear; a texture by its resource
@@ -806,6 +808,7 @@ namespace xlionrender
         float           m_ExposureMax    = 30.0f;
         bool            m_bTAA           = true;
         float           m_TAABlend       = 0.1f;
+        render_graph_ref m_RenderGraph;                     // the post chain (xrender_graph.plugin's RenderGraph resource); none: the built-in chain
 
         XPROPERTY_DEF
         ( "Environment", environment
@@ -842,6 +845,7 @@ namespace xlionrender
         , obj_member<"ExposureMin",    &environment::m_ExposureMin,    member_help<"The least the auto exposure multiplies the light by">>
         , obj_member<"ExposureMax",    &environment::m_ExposureMax,    member_help<"The most the auto exposure multiplies the light by">>
         , obj_member<"TAA",            &environment::m_bTAA,           member_help<"Temporal antialiasing: the view jitters a sub-pixel a frame and the frames are blended (off while path tracing)">>
+        , obj_member<"RenderGraph",    &environment::m_RenderGraph,    member_help<"The post chain: a RenderGraph resource (its nodes in order, each on or bypassed, and their parameters). None: the built-in chain (TAA, bloom, exposure, tone map)">>
         , obj_member<"TAABlend",       &environment::m_TAABlend,       member_help<"This frame's share over the history: lower is smoother, higher reacts faster (0.01 .. 1)">>
         )
     };
