@@ -313,6 +313,16 @@ namespace xlionrender::details
         return D;
     }
 
+    // The GI's update as a stage: one recorded step (its dispatches: the scatter, the migration, the relight, the links, the probes - the
+    // GI's code, gi::gpu_trace), declared: the frame's host-visible GI data read, the world's GI data kept and updated
+    inline const stage::desc& GIUpdateStage( void ) noexcept
+    {
+        static const stage::desc D{ { { .m_Name = "GI update"
+            , .m_Buffers = { { "GI: host-visible data" }, { "GI: *", rg::lifetime::RETAINED, rg::usage::STORAGE, true, rg::policy::PARTIAL } }
+            , .m_Recorder = "gi.update" } } };
+        return D;
+    }
+
     // The shadow pages as a stage: two recorded passes in the shadow atlas's render pass - the sun's virtual pages, the local lights'
     // pages (their page systems choose the pages and the casters: code, xlionrender_plan_forward.cpp renderShadows). Declared: what they
     // read (the instances, the geometry, the shadow data) and the atlas they draw into (the requested pages only: partial)

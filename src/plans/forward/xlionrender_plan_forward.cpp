@@ -5284,7 +5284,7 @@ namespace xlionrender
         assert(m_bReady && View.m_Width > 0);
         View.m_Graph.BeginFrame();             // (R0b: the frame's declarations, from its first work)
         static const bool s_bNoStages = xlionrender::Env("XLION_NO_STAGES") != nullptr;      // (measurement: every stage hand-written - the stages' cost)
-        if( s_bNoStages ) View.m_bStageLightTiles = View.m_bStageReflSSR = View.m_bStageReflRecon = View.m_bStageAO = View.m_bStageGIRead = View.m_bStageVSMRequest = View.m_bStageLocalRequest = View.m_bStageTile = false;
+        if( s_bNoStages ) View.m_bStageLightTiles = View.m_bStageReflSSR = View.m_bStageReflRecon = View.m_bStageAO = View.m_bStageGIRead = View.m_bStageVSMRequest = View.m_bStageLocalRequest = View.m_bStageTile = View.m_bStageShadowPages = View.m_bStageGIUpdate = false;
         m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
         if( View.m_HDRPrevPendingW )            // (last frame's image for the screen reads, its copy held back while the async rays read the older one)
         {
@@ -5422,12 +5422,28 @@ namespace xlionrender
         if( pTS ) Window.WriteTimestamp(*pTS, 1);
         { XPROFILE_SCOPE("Render: instances"); XPROFILE_GPU_SCOPE(Window, "Render: instances"); updateInstances(Window, Scene, Eye); }
         if( pTS ) Window.WriteTimestamp(*pTS, 2);
-        { XPROFILE_SCOPE("Render: GI update"); XPROFILE_GPU_SCOPE(Window, "Render: GI update"); updateGI(Window, Scene, Eye, ProjScale); }
-        {   // (R0b: the GI's own update - a legacy group of its dispatches - keeps the world's GI data)
-            auto& G = View.m_Graph;
-            const int S = G.Begin("GI update", "group:gi: scatter|gi: migrate|gi: relight*|gi: links*|gi: probes*", false);
-            G.Read(S, G.Resource("GI: host-visible data", rg::lifetime::FRAME), rg::usage::STORAGE);
-            G.Write(S, G.Resource("GI: *", rg::lifetime::RETAINED), rg::usage::STORAGE, rg::policy::PARTIAL);
+        {
+            // the GI's own update: a recorded step of the stage gi_update (render graph: its dispatches stay the GI's code, the stage declares them)
+            const auto GIUpdate = [&] { XPROFILE_SCOPE("Render: GI update"); XPROFILE_GPU_SCOPE(Window, "Render: GI update"); updateGI(Window, Scene, Eye, ProjScale); };
+            auto& R = View.m_Stages;
+            if( View.m_bStageGIUpdate )
+            {
+                R.m_Steps.Add("gi.update", GIUpdate);
+                if( View.m_GIUpdatePlan.m_Passes.empty() && View.m_GIUpdatePlan.m_Error.empty() )
+                {
+                    View.m_GIUpdatePlan = stage::Lower(View.StageDesc("gi_update", details::GIUpdateStage()), R);
+                    if( !View.m_GIUpdatePlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: GI update stage: %s\n", View.m_GIUpdatePlan.m_Error.c_str());
+                }
+            }
+            if( View.m_bStageGIUpdate && View.m_GIUpdatePlan.m_Error.empty() ) stage::Run(View.m_GIUpdatePlan, R, Window, View.m_Graph);
+            else
+            {
+                GIUpdate();
+                auto& G = View.m_Graph;      // (R0b: the GI's own update - a legacy group of its dispatches - keeps the world's GI data)
+                const int S = G.Begin("GI update", "group:gi: scatter|gi: migrate|gi: relight*|gi: links*|gi: probes*", false);
+                G.Read(S, G.Resource("GI: host-visible data", rg::lifetime::FRAME), rg::usage::STORAGE);
+                G.Write(S, G.Resource("GI: *", rg::lifetime::RETAINED), rg::usage::STORAGE, rg::policy::PARTIAL);
+            }
         }
         if( pTS ) Window.WriteTimestamp(*pTS, 3);                                   // CPU (getGIStats); the probes' captures read it too
         {

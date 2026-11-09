@@ -95,6 +95,7 @@ namespace xlionrender::stage
         table<std::vector<xgpu::buffer*>> m_Lists;      // (a draw repeated for each)
         table<std::vector<draw_item>>   m_Items;        // (a draw an item)
         table<std::function<void(xgpu::cmd_buffer&)>> m_Recorders;      // (a recorded pass's body, set each frame)
+        table<std::function<void()>>    m_Steps;        // (a recorded pass with no render pass: its own dispatches and copies, set each frame)
         xgpu::buffer*                   m_pFullscreenVB = nullptr, *m_pFullscreenIB = nullptr;      // (a draw pass's triangle)
         // Parameters set from the RenderGraph (its StageParams): frame values by name that win over the code's each run (one word each:
         // a float's bits or a uint) - an AO radius, the screen trace's steps
@@ -131,8 +132,12 @@ namespace xlionrender::stage
             if( !Pa.m_Recorder.empty() )        // (a recorded pass: its render pass and its recorder; its bindings declared)
             {
                 lowered_pass L{ int(&Pa - D.m_Passes.data()) };
-                if( (L.m_RenderPass = R.m_RenderPasses.Find(Pa.m_RenderPass)) < 0 ) return Fail(Pa, "no render pass '" + Pa.m_RenderPass + "'");
-                if( (L.m_Recorder = R.m_Recorders.Find(Pa.m_Recorder)) < 0 ) return Fail(Pa, "no recorder '" + Pa.m_Recorder + "'");
+                if( Pa.m_RenderPass.empty() ) { if( (L.m_Recorder = R.m_Steps.Find(Pa.m_Recorder)) < 0 ) return Fail(Pa, "no recorded step '" + Pa.m_Recorder + "'"); }      // (no render pass: a step of its own)
+                else
+                {
+                    if( (L.m_RenderPass = R.m_RenderPasses.Find(Pa.m_RenderPass)) < 0 ) return Fail(Pa, "no render pass '" + Pa.m_RenderPass + "'");
+                    if( (L.m_Recorder = R.m_Recorders.Find(Pa.m_Recorder)) < 0 ) return Fail(Pa, "no recorder '" + Pa.m_Recorder + "'");
+                }
                 for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& B : *pList ) L.m_DeclareIf.push_back(B.m_DeclareIf == "never" ? -2 : -1);
                 P.m_Passes.push_back(std::move(L));
                 continue;
@@ -197,9 +202,13 @@ namespace xlionrender::stage
             const auto& Pa = P.m_Desc.m_Passes[std::size_t(L.m_iPass)];
             if( L.m_Recorder >= 0 )
             {
-                if( Open != L.m_RenderPass ) { Cmd.reset(); Cmd.emplace(Window.StartRenderPass(*R.m_RenderPasses.m_Items[std::size_t(L.m_RenderPass)])); Open = L.m_RenderPass; }
-                R.m_Recorders.m_Items[std::size_t(L.m_Recorder)](*Cmd);
-                const int S = G.Begin(Pa.m_Name, "group:" + Pa.m_RenderPass, false);
+                if( L.m_RenderPass < 0 ) { Cmd.reset(); Open = -1; R.m_Steps.m_Items[std::size_t(L.m_Recorder)](); }
+                else
+                {
+                    if( Open != L.m_RenderPass ) { Cmd.reset(); Cmd.emplace(Window.StartRenderPass(*R.m_RenderPasses.m_Items[std::size_t(L.m_RenderPass)])); Open = L.m_RenderPass; }
+                    R.m_Recorders.m_Items[std::size_t(L.m_Recorder)](*Cmd);
+                }
+                const int S = G.Begin(Pa.m_Name, "group:" + (Pa.m_RenderPass.empty() ? Pa.m_Recorder : Pa.m_RenderPass), false);
                 std::size_t k = 0;
                 for( int bWrite = 0; bWrite < 2; ++bWrite, k = 0 )
                     for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& Bd : *pList )
