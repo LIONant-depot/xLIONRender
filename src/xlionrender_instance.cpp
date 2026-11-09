@@ -2133,7 +2133,7 @@ namespace xlionrender
             if( View.m_ToneMapCustom[c].m_Private )     m_Device.Destroy(std::move(View.m_ToneMapCustom[c]));
             if( View.m_PostCustom[c].m_Private )        m_Device.Destroy(std::move(View.m_PostCustom[c]));
             View.m_PostCustomCompute[c] = {}; View.m_PostCustomShader[c] = {};
-            View.m_PostCustomMade[c] = 0;
+            View.m_PostCustomMade[c] = View.m_PostCustomTried[c] = 0;
         }
         if( View.m_ExposureTex.m_Private ) m_Device.Destroy(std::move(View.m_ExposureTex));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));

@@ -62,6 +62,7 @@ namespace xlionrender
         // Custom post nodes (render graph stage I): their SPIR-V (set by the owner: the RenderGraph bundle's shader links), and what is made from it
         std::array<std::vector<std::int32_t>, 4>   m_PostCustomSpirv;
         std::array<std::size_t, 4>                 m_PostCustomMade{};      // the SPIR-V's hash the pipeline was made from (0: none)
+        std::array<std::size_t, 4>                 m_PostCustomTried{};     // the last SPIR-V tried (a bad one is not tried again every frame)
         std::array<xgpu::shader, 4>                m_PostCustomShader;
         std::array<xgpu::compute, 4>               m_PostCustomCompute;
         std::array<xgpu::texture, 4>               m_PostCustom;            // each node's output (the chain image after it)

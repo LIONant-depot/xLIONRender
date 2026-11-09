@@ -102,8 +102,34 @@ int main()
     // half: different (it runs), then back to identity (the pipeline replaced twice)
     B.m_PostCustomSpirv[0] = Half;
     { const auto [a, b] = Frames(4); MUST(a != b, "a node that halves the image changes the output"); std::printf("ok: half - differs\n"); }
+    // a bad shader (not SPIR-V): the last good (half) stays - the output still differs, the pipeline is the half's
+    {
+        const auto HalfMade = B.m_PostCustomMade[0];
+        B.m_PostCustomSpirv[0] = std::vector<std::int32_t>(64, 0x12345678);
+        const auto [a, b] = Frames(3);
+        MUST(a != b && B.m_PostCustomMade[0] == HalfMade, "a bad shader keeps the last good one (the half)");
+        std::printf("ok: a bad shader - the last good kept\n");
+    }
     B.m_PostCustomSpirv[0] = Identity;
     { const auto [a, b] = Frames(4); MUST(a == b, "the shader back to identity: the same output again"); std::printf("ok: edit back - identical\n"); }
+    // two views with different shaders in one frame: a third view (the same input) with the half, B with the identity
+    {
+        xlionrender::render_view C3;
+        MUST(!Renderer.CreateView(C3, { .m_Width = 400, .m_Height = 240 }), "CreateView third");
+        C3.m_PostFixedDt = A.m_PostFixedDt; C3.m_pPostInputs = &A; C3.m_PostDesc = B.m_PostDesc; C3.m_PostCustomSpirv[0] = Half;
+        for (int f = 0; f < 3; ++f)
+        {
+            xgpu::tools::view C; C.setFov(xmath::radian{ 1.0f }); C.setViewport({ 0, 0, 400, 240 }); C.LookAt(xmath::fvec3{ 0, 0.1f, -2.0f }, xmath::fvec3{ 0, 0, 0 });
+            MUST(App.RenderFrame(Scene, A, C) && App.RenderFrame(Scene, B, C) && App.RenderFrame(Scene, C3, C), "Render three views");
+        }
+        const auto a = Output(App.m_Device, A), b = Output(App.m_Device, B), c = Output(App.m_Device, C3);
+        MUST(a == b && a != c, "two views, two shaders: the identity view equals the plain one, the half view differs");
+        // closing a view with its custom pipeline right after it rendered (frames in flight)
+        xgpu::tools::view C; C.setFov(xmath::radian{ 1.0f }); C.setViewport({ 0, 0, 400, 240 }); C.LookAt(xmath::fvec3{ 0, 0.1f, -2.0f }, xmath::fvec3{ 0, 0, 0 });
+        MUST(App.RenderFrame(Scene, C3, C), "Render before closing");
+        Renderer.DestroyView(C3);
+        std::printf("ok: two views, two shaders; closed in flight\n");
+    }
     // resize: the node's image made again at the new size
     MUST(!Renderer.CreateView(A, { .m_Width = 320, .m_Height = 200 }) && !Renderer.CreateView(B, { .m_Width = 320, .m_Height = 200 }), "resize");
     {

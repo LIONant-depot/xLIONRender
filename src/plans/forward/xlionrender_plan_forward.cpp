@@ -5226,14 +5226,22 @@ namespace xlionrender
                 const auto& Spv = View.m_PostCustomSpirv[std::size_t(c)];
                 if( Spv.empty() ) continue;
                 const std::size_t Hash = std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(Spv.data()), Spv.size() * 4)) | 1;
-                if( View.m_PostCustomMade[std::size_t(c)] != Hash )
+                // a new SPIR-V (a recompiled node shader): made beside the old pipeline, which it replaces only once made - a SPIR-V that is not
+                // one, or does not make a pipeline, keeps the last good (tried once: m_PostCustomTried)
+                if( View.m_PostCustomMade[std::size_t(c)] != Hash && View.m_PostCustomTried[std::size_t(c)] != Hash )
                 {
-                    View.m_PostCustomCompute[std::size_t(c)] = {}; View.m_PostCustomShader[std::size_t(c)] = {};      // (a compute's end waits for the device: a shader edit is rare)
-                    View.m_PostCustomMade[std::size_t(c)] = 0;
+                    View.m_PostCustomTried[std::size_t(c)] = Hash;
                     static constexpr const char* s_Names[] = { "instance: post custom#0", "instance: post custom#1", "instance: post custom#2", "instance: post custom#3" };     // (they live as long as the compute)
-                    if( !m_Device.Create(View.m_PostCustomShader[std::size_t(c)], { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span<const std::int32_t>(Spv) } })
-                     && !m_Device.Create(View.m_PostCustomCompute[std::size_t(c)], { .m_pShader = &View.m_PostCustomShader[std::size_t(c)], .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32, .m_pName = s_Names[c] }) )
+                    xgpu::shader NewShader; xgpu::compute NewCompute;
+                    const bool bSpirv = Spv.size() > 5 && std::uint32_t(Spv[0]) == 0x07230203u;      // (SPIR-V's magic number)
+                    if( bSpirv
+                     && !m_Device.Create(NewShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span<const std::int32_t>(Spv) } })
+                     && !m_Device.Create(NewCompute, { .m_pShader = &NewShader, .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32, .m_pName = s_Names[c] }) )
+                    {
+                        View.m_PostCustomCompute[std::size_t(c)] = std::move(NewCompute); View.m_PostCustomShader[std::size_t(c)] = std::move(NewShader);     // (the old compute's end waits for the device: a shader edit is rare)
                         View.m_PostCustomMade[std::size_t(c)] = Hash;
+                    }
+                    else { std::printf("Post chain: custom node %d's shader %s - the last good one stays\n", c, bSpirv ? "made no pipeline" : "is not SPIR-V"); std::fflush(stdout); }
                 }
                 if( !View.m_PostCustom[std::size_t(c)].m_Private )
                 {
