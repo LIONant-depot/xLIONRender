@@ -3,7 +3,7 @@
 // Rays: origin and TMax (w), direction. Hits: t, u, v; the world instance (-1: none) and the mesh's triangle
 layout(local_size_x = 64) in;
 
-struct GINode     { uint m_W[14]; };
+struct GINode     { uint m_W[16]; };     // (14-15: the children's order per ray octant)
 struct GITri4     { vec4 m_V0[3]; vec4 m_E1[3]; vec4 m_E2[3]; ivec4 m_Tri; };
 struct GIInstance { vec4 m_W2L[3]; ivec4 m_Info; };
 struct GIRay      { vec4 m_O; vec4 m_D; };

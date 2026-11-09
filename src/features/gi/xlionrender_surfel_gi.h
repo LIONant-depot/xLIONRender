@@ -120,6 +120,8 @@ namespace xlionrender::gi
         {
             float   m_B[6][4];
             int     m_Child[4];
+            std::uint32_t m_Order[2];       // per ray octant (bit 0: x negative, 1: y, 2: z) the children front to back, 2 bits a child, 8 an octant (the
+                                            // binary tree's split axes: walking them in that order needs no sort by entry distance)
         };
         struct leaf { int m_First, m_Count; };
 
@@ -139,7 +141,7 @@ namespace xlionrender::gi
             for (int i = 0; i < n; ++i) { Bounds(i, Lo[i], Hi[i]); Lo[i] = Lo[i] - Pad; Hi[i] = Hi[i] + Pad; C[i] = (Lo[i] + Hi[i]) * 0.5f; m_Prims[i] = i; }
 
             // The binary tree
-            struct bnode { v3 m_Lo, m_Hi; int m_Left = -1, m_Right = -1, m_First = 0, m_Count = 0; };
+            struct bnode { v3 m_Lo, m_Hi; int m_Left = -1, m_Right = -1, m_First = 0, m_Count = 0, m_Axis = 0; };
             std::vector<bnode> B;
             B.reserve(2 * std::size_t(n));
             const auto Area = [](const v3& lo, const v3& hi) { const v3 d = v3::Max(hi - lo, v3{ 0, 0, 0 }); return d.m_X * d.m_Y + d.m_Y * d.m_Z + d.m_Z * d.m_X; };
@@ -202,7 +204,7 @@ namespace xlionrender::gi
                 }
                 else Mid = (It.m_Begin + It.m_End) / 2;                     // every centroid in one place: halve
                 const int L = int(B.size());
-                B[It.m_Node].m_Left = L; B[It.m_Node].m_Right = L + 1;
+                B[It.m_Node].m_Left = L; B[It.m_Node].m_Right = L + 1; B[It.m_Node].m_Axis = BestAxis >= 0 ? BestAxis : 0;
                 B.push_back({}); B.push_back({});
                 Stack.push_back({ L, It.m_Begin, Mid });
                 Stack.push_back({ L + 1, Mid, It.m_End });
@@ -230,6 +232,22 @@ namespace xlionrender::gi
                     const v3 lo = bUsed ? B[Kids[k]].m_Lo : v3{ 1e30f, 1e30f, 1e30f }, hi = bUsed ? B[Kids[k]].m_Hi : v3{ -1e30f, -1e30f, -1e30f };
                     for (int a = 0; a < 3; ++a) { m_Nodes[Idx].m_B[2 * a][k] = lo[a]; m_Nodes[Idx].m_B[2 * a + 1][k] = hi[a]; }
                     m_Nodes[Idx].m_Child[k] = 0;
+                }
+                // the order per octant: the small binary tree under b, each split's near side first (left: the lower coordinates)
+                for (int o = 0; o < 8; ++o)
+                {
+                    int Seq[4], nSeq = 0;
+                    const auto Visit = [&](auto&& V, int x) -> void
+                    {
+                        for (int k = 0; k < nKids; ++k) if (Kids[k] == x) { Seq[nSeq++] = k; return; }
+                        const bool bNeg = ((o >> B[x].m_Axis) & 1) != 0;
+                        V(V, bNeg ? B[x].m_Right : B[x].m_Left); V(V, bNeg ? B[x].m_Left : B[x].m_Right);
+                    };
+                    Visit(Visit, b);
+                    for (int k = nKids; k < 4; ++k) Seq[nSeq++] = k;
+                    std::uint32_t Bits = 0;
+                    for (int s = 0; s < 4; ++s) Bits |= std::uint32_t(Seq[s]) << (2 * s);
+                    m_Nodes[Idx].m_Order[o >> 2] |= Bits << (8 * (o & 3));
                 }
                 for (int k = 0; k < nKids; ++k) { const int c = Self(Self, Kids[k]); m_Nodes[Idx].m_Child[k] = c; }
                 return Idx;
@@ -3047,6 +3065,7 @@ namespace xlionrender::gi
                 std::uint32_t m_Exponents;
                 std::uint32_t m_B[6];       // per axis lo, hi: a byte a child
                 int           m_Child[4];
+                std::uint32_t m_Order[2];   // (bvh::node: the children front to back per ray octant; 64 bytes a node)
             };
             struct instance { float m_W2L[3][4]; int m_Root = 0, m_Inst = -1, m_Pad0 = 0, m_Pad1 = 0; };
             std::vector<gpu_node>   m_Nodes;
@@ -3120,6 +3139,7 @@ namespace xlionrender::gi
             {
                 gpu_scene::gpu_node G{};
                 for (int k = 0; k < 4; ++k) G.m_Child[k] = N.m_Child[k] >= 0 ? N.m_Child[k] + NodeBase : ~(~N.m_Child[k] + LeafBase);
+                G.m_Order[0] = N.m_Order[0]; G.m_Order[1] = N.m_Order[1];
                 for (int a = 0; a < 3; ++a)
                 {
                     float Lo = 1e30f, Hi = -1e30f;

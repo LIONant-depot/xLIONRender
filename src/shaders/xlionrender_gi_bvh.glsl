@@ -2,7 +2,7 @@
 // gi::world::PackGPU writes. Every mesh's BVH4 nodes and the TLAS's are in one array (a child code >= 0 a node, < 0 ~ a leaf: for a
 // mesh its 4-triangle row, for the TLAS its entry in the TLAS leaves); per TLAS primitive the instance's world-to-mesh rows, its mesh's
 // root code and its world id. The includer declares the buffers with these names (std430):
-//   GINode     { uint m_W[14]; }                        GIBvhNodes[]        (56 bytes: 0-2 the origin, floats; 3 an exponent per axis; 4-9 the children's bytes, x lo, x hi, y lo ..; 10-13 the child codes)
+//   GINode     { uint m_W[16]; }                        GIBvhNodes[]        (64 bytes: 0-2 the origin, floats; 3 an exponent per axis; 4-9 the children's bytes, x lo, x hi, y lo ..; 10-13 the child codes; 14-15 the children front to back per ray octant, a byte an octant)
 //   GITri4     { vec4 m_V0[3], m_E1[3], m_E2[3]; ivec4 m_Tri; }   GIBvhTri4[]
 //   GIInstance { vec4 m_W2L[3]; ivec4 m_Info; }         GIBvhInstances[]       (m_Info.x: root code, .y: world instance)
 //   int                                                 GIBvhTlasLeaves[]      (per leaf first, count; the primitives from g_GIBvhPrimOffset)
@@ -43,6 +43,20 @@ int GIBox4(int Node, vec3 O, vec3 Inv, ivec3 Near, float TMax, out vec4 TNear)
 vec3 GISafeInverse(vec3 D)
 {
     return vec3(1.0 / (abs(D.x) > 1e-12 ? D.x : 1e-12), 1.0 / (abs(D.y) > 1e-12 ? D.y : 1e-12), 1.0 / (abs(D.z) > 1e-12 ? D.z : 1e-12));
+}
+
+// A node's entered children pushed far first in the build's order for the ray's octant (bvh::node::m_Order: its split axes, front to
+// back): no sort by entry distance. Bistro Game moving, 2026-11-09: sharp reflection rays 2.26 -> 1.90 ms, visits 59.5 -> 55.6 a ray
+// (a macro: a function taking the stack inout copied all 128 entries in and out at every node - the sharp rays 1.9 -> 20 ms)
+#define GIPushOrdered(c, Mask, Near, Code, n) \
+{ \
+    const int  Oct_ = (Near.x & 1) | ((Near.y & 1) << 1) | ((Near.z & 1) << 2); \
+    const uint Ord_ = (GIBvhNodes[c].m_W[14 + (Oct_ >> 2)] >> (8 * (Oct_ & 3))) & 255u; \
+    for (int s_ = 3; s_ >= 0; --s_) \
+    { \
+        const int k_ = int((Ord_ >> (2 * s_)) & 3u); \
+        if ((Mask & (1 << k_)) != 0 && n < gi_bvh_stack_v) { Code[n] = int(GIBvhNodes[c].m_W[10 + k_]); ++n; } \
+    } \
 }
 
 // tri4::Intersect: the nearest of a row's 4 triangles before TMax (-1 none)
@@ -126,15 +140,7 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
         }
         vec4 TNear;
         int Mask = GIBox4(c, Ro, Inv, Near, H.m_T, TNear);
-        int Kids[4]; float KT[4]; int h = 0;
-        for (int k = 0; k < 4; ++k)
-            if ((Mask & (1 << k)) != 0)
-            {
-                int j = h++;
-                for (; j > 0 && KT[j - 1] < TNear[k]; --j) { Kids[j] = Kids[j - 1]; KT[j] = KT[j - 1]; }
-                Kids[j] = int(GIBvhNodes[c].m_W[10 + k]); KT[j] = TNear[k];
-            }
-        for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; ++n; }
+        GIPushOrdered(c, Mask, Near, Code, n);
     }
     return H;
 }
@@ -164,16 +170,7 @@ void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
         }
         vec4 TNear;
         int Mask = GIBox4(c, O, Inv, Near, H.m_T, TNear);
-        // push far .. near (the nearest last: popped first)
-        int Kids[4]; float KT[4]; int h = 0;
-        for (int k = 0; k < 4; ++k)
-            if ((Mask & (1 << k)) != 0)
-            {
-                int j = h++;
-                for (; j > 0 && KT[j - 1] < TNear[k]; --j) { Kids[j] = Kids[j - 1]; KT[j] = KT[j - 1]; }
-                Kids[j] = int(GIBvhNodes[c].m_W[10 + k]); KT[j] = TNear[k];
-            }
-        for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; ++n; }
+        GIPushOrdered(c, Mask, Near, Code, n);
     }
 }
 
@@ -206,15 +203,7 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
         }
         vec4 TNear;
         int Mask = GIBox4(c, O, Inv, Near, H.m_T, TNear);
-        int Kids[4]; float KT[4]; int h = 0;
-        for (int k = 0; k < 4; ++k)
-            if ((Mask & (1 << k)) != 0)
-            {
-                int j = h++;
-                for (; j > 0 && KT[j - 1] < TNear[k]; --j) { Kids[j] = Kids[j - 1]; KT[j] = KT[j - 1]; }
-                Kids[j] = int(GIBvhNodes[c].m_W[10 + k]); KT[j] = TNear[k];
-            }
-        for (int k = 0; k < h && n < gi_bvh_stack_v; ++k) { Code[n] = Kids[k]; ++n; }
+        GIPushOrdered(c, Mask, Near, Code, n);
     }
     return H;
 }
