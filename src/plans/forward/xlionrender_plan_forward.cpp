@@ -2467,7 +2467,6 @@ namespace xlionrender
     // the tail's parameters; anything missing: mode 2 (the inline sampled tail)
     void instance::renderTail( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept
     {
-        View.m_Graph.BeginFrame();      // (R0b: the frame's declarations start with the screen tail's)
         if( createTailTargets(View) ) { Light.m_LocalCount.m_Y = float(int(light_mode::CELLS)); return; }      // (no targets: the split lists exactly)
         const bool bLights = m_LightModeUsed == light_mode::SCREEN;      // (else only the G-buffer, for the reflections)
         const int W = View.m_TailWidth, H = View.m_TailHeight;
@@ -3331,6 +3330,7 @@ namespace xlionrender
                 {
                     const xgpu::buffer::copy C{ screen_header_v, screen_header_v, View.m_GIScreenWidth * View.m_GIScreenHeight };
                     Window.CopyBuffer(View.m_GIScreenZeros, View.m_GIScreenBuffer, std::span{ &C, 1 });
+                    { auto& G = View.m_Graph; const int S = G.Begin("GI screen buffer cleared", "copy GI: screen zeros"); G.Read(S, G.Resource("GI: screen zeros", rg::lifetime::STATIC), rg::usage::TRANSFER_SRC); G.Write(S, G.Resource("GI: screen buffer*", rg::lifetime::FRAME), rg::usage::TRANSFER_DST, rg::policy::CLEAR); }
                 }
                 {
                     const int HBase = int(m_Device.getFrameIndex() % ring_frames_v) * screen_header_v;
@@ -3348,6 +3348,7 @@ namespace xlionrender
                     });
                     const xgpu::buffer::copy C{ HBase, 0, screen_header_v };
                     Window.CopyBuffer(View.m_GIScreenHeader, View.m_GIScreenBuffer, std::span{ &C, 1 });
+                    { auto& G = View.m_Graph; const int S = G.Begin("GI screen header", "copy GI: screen header"); G.Read(S, G.Resource("GI: screen header", rg::lifetime::FRAME), rg::usage::TRANSFER_SRC); G.Write(S, G.Resource("GI: screen buffer*", rg::lifetime::FRAME), rg::usage::TRANSFER_DST, rg::policy::PARTIAL); }
                 }
                 View.m_GIScreenPrevW2C = W2C; View.m_GIScreenPrevEye = Eye; View.m_bGIScreenPrev = true; ++View.m_GIScreenFrame;
                 {
@@ -3433,6 +3434,9 @@ namespace xlionrender
                             {
                                 if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
                                 m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, Frame, int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
+                                { auto& G = View.m_Graph; const int S = G.Begin("GI voxel rays", "group:gi: vox", false);
+                                  for( const char* p : { "Rays: *", "GI: world data", "GI: device-local data", "Render target: last frame's HDR" } ) G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
+                                  G.Write(S, G.Resource("GI: voxel store", rg::lifetime::RETAINED), rg::usage::STORAGE, rg::policy::PARTIAL); }
                                 if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
                             };
                             // (off by default: 2026-11-08, Bistro Game moving at a fixed 10,000 rays, async 17.84/17.80 ms against 17.40/18.12 in the frame -
@@ -3687,6 +3691,8 @@ namespace xlionrender
                     m_pCull->Begin(m_Device.getFrameIndex());
                     bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
                     m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
+                    { auto& G = View.m_Graph; const int S = G.Begin("GPU cull (pass 1)", "group:copy Culling: zeros|gpu_cull: m_Compute", false);
+                      G.Read(S, G.Resource("Culling: *", rg::lifetime::RETAINED), rg::usage::STORAGE); G.Write(S, G.Resource("Culling: draw args", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
                     static const bool s_bCullTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                     if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
                         std::printf("CULLGPU pass 1 cull %.3f, pyramid + pass 2 cull %.3f ms; occlusion %s (it hid %.0f%% of the triangles it tested); %d clusters, %lld triangles shaded\n"
@@ -4274,7 +4280,9 @@ namespace xlionrender
                 if( Mode == 2 && bOcclude )        // (GPU occlusion with the G-buffer: its Hi-Z from the G-buffer's depth, pass 2's prepass into it too)
                 {
                     CmdPass.reset();
-                    m_pCull->Occlude(Window, View.m_Depth, View.m_HiZ, View.m_Width, View.m_Height);
+                    m_pCull->Occlude(Window, View.m_Depth, View.m_HiZ, View.m_Width, View.m_Height); { auto& G = View.m_Graph; const int S = G.Begin("Hi-Z + GPU cull (pass 2)", "group:gpu_cull: m_HiZCompute|gpu_cull: m_Compute|copy Culling: counts", false);
+                  G.Read(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::SAMPLED); G.Read(S, G.Resource("Culling: *", rg::lifetime::RETAINED), rg::usage::STORAGE);
+                  G.Write(S, G.Resource("Culling: HiZ pyramid", rg::lifetime::HISTORY), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
                     CmdPass.emplace(Window.StartRenderPass(View.m_GPrePassLoad));
                     {
                         auto& G = View.m_Graph;
@@ -4387,7 +4395,9 @@ namespace xlionrender
             if( bOcclude && !bGPre )        // (with the G-buffer prepass: done before the scene pass, above)
             {
                 CmdPass.reset();        // (the pass ends: the copy and the cull run outside it)
-                m_pCull->Occlude(Window, View.m_Depth, View.m_HiZ, View.m_Width, View.m_Height);
+                m_pCull->Occlude(Window, View.m_Depth, View.m_HiZ, View.m_Width, View.m_Height); { auto& G = View.m_Graph; const int S = G.Begin("Hi-Z + GPU cull (pass 2)", "group:gpu_cull: m_HiZCompute|gpu_cull: m_Compute|copy Culling: counts", false);
+                  G.Read(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::SAMPLED); G.Read(S, G.Resource("Culling: *", rg::lifetime::RETAINED), rg::usage::STORAGE);
+                  G.Write(S, G.Resource("Culling: HiZ pyramid", rg::lifetime::HISTORY), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
                 CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad));
                 if( !s_bNoPrepass ) PrepassCulled(1);
                 pBound = nullptr;
@@ -4974,6 +4984,7 @@ namespace xlionrender
     void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& CameraIn, const overlay_fn& Overlay ) noexcept
     {
         assert(m_bReady && View.m_Width > 0);
+        View.m_Graph.BeginFrame();             // (R0b: the frame's declarations, from its first work)
         m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
         if( View.m_HDRPrevPendingW )            // (last frame's image for the screen reads, its copy held back while the async rays read the older one)
         {
@@ -5112,6 +5123,12 @@ namespace xlionrender
         { XPROFILE_SCOPE("Render: instances"); XPROFILE_GPU_SCOPE(Window, "Render: instances"); updateInstances(Window, Scene, Eye); }
         if( pTS ) Window.WriteTimestamp(*pTS, 2);
         { XPROFILE_SCOPE("Render: GI update"); XPROFILE_GPU_SCOPE(Window, "Render: GI update"); updateGI(Window, Scene, Eye, ProjScale); }
+        {   // (R0b: the GI's own update - a legacy group of its dispatches - keeps the world's GI data)
+            auto& G = View.m_Graph;
+            const int S = G.Begin("GI update", "group:gi: scatter|gi: migrate|gi: relight*|gi: links*|gi: probes*", false);
+            G.Read(S, G.Resource("GI: host-visible data", rg::lifetime::FRAME), rg::usage::STORAGE);
+            G.Write(S, G.Resource("GI: *", rg::lifetime::RETAINED), rg::usage::STORAGE, rg::policy::PARTIAL);
+        }
         if( pTS ) Window.WriteTimestamp(*pTS, 3);                                   // CPU (getGIStats); the probes' captures read it too
         {
             XPROFILE_SCOPE("Render: GI capture"); XPROFILE_GPU_SCOPE(Window, "Render: GI capture");
@@ -5129,6 +5146,12 @@ namespace xlionrender
         if( pTS ) { auto [It, bNew] = s_SplitTS.try_emplace(this); if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_SplitTS.erase(It); else pSplit = &It->second; }
         if( pSplit ) Window.WriteTimestamp(*pSplit, 0);
         { XPROFILE_SCOPE("Render: shadows"); XPROFILE_GPU_SCOPE(Window, "Render: shadows"); renderShadows(Window, Scene, Eye, ProjScale); vsmBounds(Window); }
+        {   // (R0b: the shadow atlas's pages drawn - only the requested ones: partial)
+            auto& G = View.m_Graph;
+            const int S = G.Begin("shadow pages", "group:Shadows: shadow atlas|Shadows: *", false);
+            for( const char* p : { "Frame: instance data", "Geometry: *", "Shadows: *" } ) G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
+            G.Write(S, G.Resource("Shadows: shadow atlas", rg::lifetime::RETAINED), rg::usage::DEPTH_ATTACHMENT, rg::policy::PARTIAL);
+        }
         if( pSplit ) Window.WriteTimestamp(*pSplit, 1);
         { XPROFILE_SCOPE("Render: probes"); XPROFILE_GPU_SCOPE(Window, "Render: probes"); updateProbes(Window, Scene, Eye); }
         { XPROFILE_SCOPE("Render: planar"); XPROFILE_GPU_SCOPE(Window, "Render: planar"); renderPlanar(Window, Scene, View, Camera); }
