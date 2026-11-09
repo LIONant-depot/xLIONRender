@@ -858,6 +858,8 @@ namespace xlionrender
     // pass, for the shadowed lights with a light slot. Its bits and counters go to this frame's ring slot, read when the slot comes round
     namespace
     {
+        void DeclareLitReads( rg::graph& G, int S ) noexcept;      // (below, by the scene pass)
+        void DeclareBlended( rg::graph& G ) noexcept;
         // (R0b) A shadow request pass: the requests cleared by a copy of zeros, the dispatch over the depth, the requests copied into a host
         // ring slot read frames later (a side-effect root: nothing on the GPU reads it)
         void DeclareRequests( rg::graph& G, const char* pReq, const char* pFrames, const char* pReadback, const char* pDispatch ) noexcept
@@ -2591,7 +2593,8 @@ namespace xlionrender
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
             auto& G = View.m_Graph;
-            { const int S = G.Begin("sharp G-buffer (imported)", "", false);
+            { const int S = G.Begin("sharp G-buffer", "Render target: sharp colour", false);
+              DeclareLitReads(G, S);
               for( const char* p : { "Render target: sharp colour", "Render target: sharp depth", "Render target: sharp motion" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::CLEAR); }
             const int S = G.Begin("tail G-buffer from sharp", "Render target: tail colour");
             for( const char* p : { "Render target: sharp colour", "Render target: sharp depth", "Render target: sharp motion" } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
@@ -2984,6 +2987,9 @@ namespace xlionrender
             // (the UBOs as they are: the main pass's entries - the capture variant reads neither; a new entry here would be the one the
             // main pass binds, its lighting zeroed)
             auto  Cmd = Window.StartRenderPass(m_HitShadePass);
+            { auto& G = View.m_Graph; const int S = G.Begin("reflection hits: shaded", "Probes: hit shading target", false);
+              DeclareLitReads(G, S); G.Read(S, G.Resource("Probes: hit capture", rg::lifetime::FRAME), rg::usage::STORAGE);
+              G.Write(S, G.Resource("Probes: hit shading target", rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::CLEAR); }
             std::array<xgpu::buffer*, 10> CBuffers{ &m_HitCapture, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
             for( const std::uint32_t b : Drawn )
             {
@@ -3115,6 +3121,14 @@ namespace xlionrender
                                    "GI: light ring", "GI: moment ring" } )
                 G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::SAMPLED);
         }
+        // (R0b) The scene pass loaded again after the lighting: the blended draws and the sky over the lit image (a legacy group)
+        void DeclareBlended( rg::graph& G ) noexcept
+        {
+            const int S = G.Begin("blended + sky", "Render target: HDR colour", false);
+            DeclareLitReads(G, S);
+            G.Write(S, G.Resource("Render target: HDR colour", rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::PRESERVE);
+            G.Write(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::DEPTH_ATTACHMENT, rg::policy::PRESERVE);
+        }
     }
 
     void instance::renderScenePass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept
@@ -3198,6 +3212,8 @@ namespace xlionrender
                 Light.m_VSMPrevParams = { bVSM && m_VSM.HasPrevious() ? 1.0f : 0.0f, m_VSM.Fade(), m_VSM.m_PrevLevel0Texel, float(vsmTableBase() + VS.TableUints()) };
 
                 writeLocalLights(Window, Scene, Eye, Light);
+                { auto& G = View.m_Graph; const int S = G.Begin("light cells uploaded", "group:copy Lights: cell scratch");      // (when the cells are made on the GPU's scratch: a copy into the ring's slot)
+                  G.Read(S, G.Resource("Lights: cell scratch", rg::lifetime::FRAME), rg::usage::TRANSFER_SRC); G.Write(S, G.Resource("Lights: cell ring", rg::lifetime::FRAME), rg::usage::TRANSFER_DST, rg::policy::PARTIAL); }
                 if( m_LightModeUsed == light_mode::SCREEN && !bMain ) Light.m_LocalCount.m_Y = float(int(light_mode::CELLS));     // (the screen tail is the main view's: the others' every light of the list)
                 // XLION_REFL_GRADE=<roughness below 1>: the mirror view at that roughness on every surface, for grading against the ground truth (with XLION_GI_REF: it is what shows: 4 +)
                 static const float s_Grade = [] { const char* p = xlionrender::Env("XLION_REFL_GRADE"); return p ? float(std::atof(p)) : -1.0f; }();
@@ -3894,6 +3910,8 @@ namespace xlionrender
                 if( bVoxPub && m_VoxPubStats.m_Private ) { const xgpu::buffer::copy Cs{ 0, 4 * int(m_Device.getFrameIndex() % ring_frames_v), 4 }; Window.CopyBuffer(m_VoxPub, m_VoxPubStats, std::span{ &Cs, 1 }); }
                 const xgpu::buffer::copy C{ 6, int(m_Device.getFrameIndex() % ring_frames_v), 1 };     // (its counters into this frame's slot, as the geometry read's)
                 Window.CopyBuffer(View.m_GIScreenBuffer, View.m_GIScreenCounters, std::span{ &C, 1 });
+                { auto& G = View.m_Graph; const int S = G.Begin("GI screen counters read back", "group:copy GI: screen buffer*");      // (a side-effect root: the CPU reads it frames later)
+                  G.Read(S, G.Resource("GI: screen buffer*", rg::lifetime::FRAME), rg::usage::TRANSFER_SRC); G.Write(S, G.Resource("GI: screen counters", rg::lifetime::RETAINED), rg::usage::TRANSFER_DST, rg::policy::PARTIAL); }
             };
 
             // The sun's shadow mask (XLION_SUN_MASK; S1a measurement): between the G-buffer prepass and the scene pass, the sun's visibility
@@ -4293,7 +4311,7 @@ namespace xlionrender
                     }
                     PrepassCulled(1);
                 }
-                if( Mode == 2 ) { CmdPass.reset(); if( pSplit ) Window.WriteTimestamp(*pSplit, 4); if( bScreen ) GatherGI(); runDeferredVox(Window); if( bSunMask ) SunMask(); if( bContact ) ContactPass(); if( pSplit ) Window.WriteTimestamp(*pSplit, 5); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
+                if( Mode == 2 ) { CmdPass.reset(); if( pSplit ) Window.WriteTimestamp(*pSplit, 4); if( bScreen ) GatherGI(); runDeferredVox(Window); if( bSunMask ) SunMask(); if( bContact ) ContactPass(); if( pSplit ) Window.WriteTimestamp(*pSplit, 5); if( bTile ) TilePass(); CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad)); DeclareBlended(View.m_Graph); pPrepassGeom = nullptr; pPrepassBound = nullptr; }
                 for( const auto& Vis : m_Visible )
                 {
                     const std::size_t iDraw = Vis.m_iDraw;
@@ -4399,6 +4417,7 @@ namespace xlionrender
                   G.Read(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::SAMPLED); G.Read(S, G.Resource("Culling: *", rg::lifetime::RETAINED), rg::usage::STORAGE);
                   G.Write(S, G.Resource("Culling: HiZ pyramid", rg::lifetime::HISTORY), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
                 CmdPass.emplace(Window.StartRenderPass(View.m_ScenePassLoad));
+                DeclareBlended(View.m_Graph);
                 if( !s_bNoPrepass ) PrepassCulled(1);
                 pBound = nullptr;
             }
@@ -5300,11 +5319,10 @@ namespace xlionrender
             {
                 const int S = G.Begin("tone map", "Render target: tone-mapped output");
                 G.Read(S, pHDR == &View.m_HDR ? rgHDR : pHDR == &View.m_TAA[1] ? rgTAA[1] : rgTAA[0], rg::usage::SAMPLED);
-                if( Bloom > 0.0f ) G.Read(S, rgBloom(0), rg::usage::SAMPLED);
+                G.Read(S, rgBloom(0), rg::usage::SAMPLED);      // (bound whether the bloom is on or not: its weight is 0)
                 G.Read(S, rgExpo, rg::usage::SAMPLED);
                 G.Write(S, rgOut, rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE);
             }
-            G.Dump();
         }
         // XLION_NOISE_LAGS="<seconds to wait> <frames>" (measurement, Tomas 2026-11-06): the noise of the tone-mapped image by how far apart in time, at the
         // real frame rate - every 4th pixel's luminance a frame into a CPU-readable ring (xlionrender_noise_lags_comp.glsl), compared on the CPU at lags
@@ -5356,7 +5374,15 @@ namespace xlionrender
         if( Overlay )
         {
             auto Cmd = Window.StartRenderPass(View.m_OverlayPass);
+            { auto& G = View.m_Graph; const int S = G.Begin("editor overlays", "Render target: tone-mapped output", false);
+              G.Read(S, G.Resource("Textures: *", rg::lifetime::STATIC), rg::usage::SAMPLED);
+              G.Write(S, G.Resource("Render target: tone-mapped output", rg::lifetime::EXTERNAL), rg::usage::COLOR_ATTACHMENT, rg::policy::PRESERVE);
+              G.Write(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::DEPTH_ATTACHMENT, rg::policy::PRESERVE); }
             Overlay(Cmd);
+        }
+        {   // (R0b: the frame's declarations dumped - the largest view's: the editor's previews render too)
+            static int s_DumpPixels = 0;
+            if( View.m_Width * View.m_Height >= s_DumpPixels ) { s_DumpPixels = View.m_Width * View.m_Height; View.m_Graph.Dump(); }
         }
 
         // The selection's outline last, over the overlays too: the host's grid is opaque floor and painted over the outline of an object standing on it
