@@ -936,9 +936,9 @@ namespace xlionrender
         if( m_CellNeed <= m_CellStride ) return;
         const int Stride = ((m_CellNeed + m_CellNeed / 4) + 65535) / 65536 * 65536;
         m_Device.Destroy(std::move(m_CellRing));
-        if( m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * Stride, .m_bWriteOnly = true }) == nullptr )
+        if( m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * Stride, .m_pName = "Lights: cell ring", .m_bWriteOnly = true }) == nullptr )
             m_CellStride = Stride;
-        else (void)m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * m_CellStride, .m_bWriteOnly = true });
+        else (void)m_Device.Create(m_CellRing, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * m_CellStride, .m_pName = "Lights: cell ring", .m_bWriteOnly = true });
         m_CellNeed = 0;
     }
 
@@ -4680,7 +4680,7 @@ namespace xlionrender
                 Data[2 * i]     = xmath::fvec4(S.m_U, S.m_V, S.m_UVRadius, 0);
                 Data[2 * i + 1] = xmath::fvec4(J.m_MaskSlot >= 0 ? gi::v3{ 0, 0, 1 } : J.m_bTriangles ? TriN[J.m_Order[i]] : L0[J.m_Order[i]].m_Normal, 0);
             }
-            if( m_Device.Create(J.m_Data, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = 2 * n, .m_pData = Data.data() }) )
+            if( m_Device.Create(J.m_Data, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(xmath::fvec4), .m_EntryCount = 2 * n, .m_pData = Data.data(), .m_pName = "GI: capture job data" }) )
             { m_GICaptures.pop_front(); return; }
 
             (void)m_GICaptureVB.MemoryMap(0, 4 * gi_capture_passes_v * std::size_t(n), [&](void* p)
@@ -4830,7 +4830,7 @@ namespace xlionrender
                         const std::vector<xmath::fvec3> Colors(All.begin(), All.end());
                         const auto Packed = PackMeshGI(*S.m_pGI, First, Colors);
                         xgpu::buffer B;         // (swapped in: the old one's destructor queues it in the device's deferred destroy)
-                        if( !m_Device.Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Packed.size()), .m_pData = const_cast<std::uint32_t*>(Packed.data()) }) )
+                        if( !m_Device.Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = int(Packed.size()), .m_pData = const_cast<std::uint32_t*>(Packed.data()), .m_pName = "GI: section" }) )
                             S.m_Buffer.m_Private.swap(B.m_Private);
                         CapLap(5);
                     }
