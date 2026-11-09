@@ -3,7 +3,7 @@
 // the kernel, the buffers / textures / images it binds, its push words, its dispatch size - lowered once against a registry (names to
 // indices: no strings per frame) and run by one executor, which also declares each pass to the render graph (the Frame graph shows the
 // stage's real passes). The registry: the kernels the instance registers once; the resources and frame values each view fills per frame.
-namespace xgpu { struct compute; struct buffer; struct texture; }      // (pointers only: the text form and the compiler need no xGPU)
+namespace xgpu { struct compute; struct buffer; struct texture; struct renderpass; struct pipeline_instance; }      // (pointers only: the text form and the compiler need no xGPU)
 #include "xlionrender_render_graph.h"
 #include <string>
 #include <vector>
@@ -12,6 +12,8 @@ namespace xgpu { struct compute; struct buffer; struct texture; }      // (point
 #include <cstring>
 #include <algorithm>
 #include <span>
+#include <optional>
+#include <type_traits>
 
 namespace xlionrender::stage
 {
@@ -36,6 +38,11 @@ namespace xlionrender::stage
         std::vector<binding>    m_Buffers, m_Textures, m_Images;
         std::vector<word>       m_Push;
         std::string             m_Size = "view.size";       // the dispatch: this frame value's two words (width, height) in 8 x 8 tiles
+        // A draw pass (m_RenderPass not empty): a full-screen triangle with the kernel's pipeline instance, inside that render pass
+        // (consecutive draw passes naming the same one share it); its textures are the instance's own (declared, not bound here). Repeated
+        // for each buffer of the list m_Repeat (that buffer at m_RepeatSlot; the push word "repeat.index" its index)
+        std::string             m_RenderPass, m_Repeat;
+        int                     m_RepeatSlot = -1;
         bool operator==( const pass& ) const = default;
     };
     struct desc { std::vector<pass> m_Passes; bool operator==( const desc& ) const = default; };
@@ -50,7 +57,7 @@ namespace xlionrender::stage
         int  Find( std::string_view Name ) const noexcept { for( std::size_t i = 0; i < m_Names.size(); ++i ) if( m_Names[i] == Name ) return int(i); return -1; }
     };
     struct value { std::array<std::uint32_t, 16> m_Words{}; int m_n = 0; };     // (a matrix: 16 words)
-    struct kernel_info { xgpu::compute* m_pCompute = nullptr; int m_nBuffers = 0, m_nTextures = 0, m_nImages = 0, m_PushBytes = 0; std::string m_Recorded; };
+    struct kernel_info { xgpu::compute* m_pCompute = nullptr; int m_nBuffers = 0, m_nTextures = 0, m_nImages = 0, m_PushBytes = 0; std::string m_Recorded; xgpu::pipeline_instance* m_pInstance = nullptr; };      // (m_pInstance: a draw pass's)
 
     struct registry
     {
@@ -58,6 +65,9 @@ namespace xlionrender::stage
         table<xgpu::buffer*>            m_Buffers;
         table<const xgpu::texture*>     m_Textures;     // (sampled textures and storage images alike)
         table<value>                    m_Frame;
+        table<xgpu::renderpass*>        m_RenderPasses;
+        table<std::vector<xgpu::buffer*>> m_Lists;      // (a draw repeated for each)
+        xgpu::buffer*                   m_pFullscreenVB = nullptr, *m_pFullscreenIB = nullptr;      // (a draw pass's triangle)
 
         void SetFloats( int i, const float* p, int n ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = n; std::memcpy(V.m_Words.data(), p, std::size_t(n) * 4); }
         void SetU32   ( int i, std::uint32_t u ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = 1; V.m_Words[0] = u; }
@@ -73,8 +83,10 @@ namespace xlionrender::stage
         std::vector<int>    m_Buffers, m_Textures, m_Images;
         std::vector<int>    m_Push;         // a frame value's index, or -1 - k - 1 for the pass's k-th push word as a constant
         int                 m_Size = -1;    // the frame value of the dispatch's size
+        int                 m_RenderPass = -1, m_Repeat = -1;
         std::vector<int>    m_DeclareIf;    // a binding's (buffers, textures, images in turn) condition: a frame value's index, -1 always, -2 never
     };
+    inline constexpr int repeat_index_v = -1000000;      // (a push word: the repeat's index)
     struct plan { std::vector<lowered_pass> m_Passes; std::string m_Error; desc m_Desc; };      // (m_Desc: what it was lowered from)
 
     // Every name must exist and every pass must match its kernel's layout (the push's size from the frame values registered now)
@@ -88,22 +100,35 @@ namespace xlionrender::stage
             if( L.m_Kernel < 0 ) return Fail(Pa, "no kernel '" + Pa.m_Kernel + "'");
             const auto& K = R.m_Kernels.m_Items[std::size_t(L.m_Kernel)];
             for( const auto& B : Pa.m_Buffers )  { const int i = R.m_Buffers.Find(B.m_Name);  if( i < 0 ) return Fail(Pa, "no buffer '" + B.m_Name + "'");  L.m_Buffers.push_back(i); }
-            for( const auto& B : Pa.m_Textures ) { const int i = R.m_Textures.Find(B.m_Name); if( i < 0 ) return Fail(Pa, "no texture '" + B.m_Name + "'"); L.m_Textures.push_back(i); }
-            for( const auto& B : Pa.m_Images )   { const int i = R.m_Textures.Find(B.m_Name); if( i < 0 ) return Fail(Pa, "no image '" + B.m_Name + "'");   L.m_Images.push_back(i); }
-            if( int(L.m_Buffers.size()) != K.m_nBuffers || int(L.m_Textures.size()) != K.m_nTextures || int(L.m_Images.size()) != K.m_nImages )
+            const bool bDraw = !Pa.m_RenderPass.empty();
+            if( bDraw != (K.m_pInstance != nullptr) ) return Fail(Pa, bDraw ? "a draw pass, the kernel '" + Pa.m_Kernel + "' is a compute" : "a dispatch, the kernel '" + Pa.m_Kernel + "' draws");
+            if( !bDraw )
+            {
+                for( const auto& B : Pa.m_Textures ) { const int i = R.m_Textures.Find(B.m_Name); if( i < 0 ) return Fail(Pa, "no texture '" + B.m_Name + "'"); L.m_Textures.push_back(i); }
+                for( const auto& B : Pa.m_Images )   { const int i = R.m_Textures.Find(B.m_Name); if( i < 0 ) return Fail(Pa, "no image '" + B.m_Name + "'");   L.m_Images.push_back(i); }
+            }
+            if( int(L.m_Buffers.size()) != K.m_nBuffers || (!bDraw && (int(L.m_Textures.size()) != K.m_nTextures || int(L.m_Images.size()) != K.m_nImages)) )
                 return Fail(Pa, "the bindings do not match the kernel '" + Pa.m_Kernel + "'");
+            if( bDraw )
+            {
+                if( (L.m_RenderPass = R.m_RenderPasses.Find(Pa.m_RenderPass)) < 0 ) return Fail(Pa, "no render pass '" + Pa.m_RenderPass + "'");
+                if( !Pa.m_Repeat.empty() && (L.m_Repeat = R.m_Lists.Find(Pa.m_Repeat)) < 0 ) return Fail(Pa, "no buffer list '" + Pa.m_Repeat + "'");
+                if( L.m_Repeat >= 0 && (Pa.m_RepeatSlot < 0 || Pa.m_RepeatSlot >= K.m_nBuffers) ) return Fail(Pa, "repeated into buffer slot " + std::to_string(Pa.m_RepeatSlot) + ", the kernel has " + std::to_string(K.m_nBuffers));
+                if( !R.m_pFullscreenVB || !R.m_pFullscreenIB ) return Fail(Pa, "no full-screen triangle registered");
+            }
             int Bytes = 0;
             for( std::size_t k = 0; k < Pa.m_Push.size(); ++k )
             {
                 const auto& W = Pa.m_Push[k];
                 if( W.m_Frame.empty() ) { L.m_Push.push_back(-int(k) - 1); Bytes += 4; continue; }
+                if( W.m_Frame == "repeat.index" ) { L.m_Push.push_back(repeat_index_v); Bytes += 4; continue; }
                 const int i = R.m_Frame.Find(W.m_Frame);
                 if( i < 0 ) return Fail(Pa, "no frame value '" + W.m_Frame + "'");
                 L.m_Push.push_back(i); Bytes += 4 * R.m_Frame.m_Items[std::size_t(i)].m_n;
             }
             if( Bytes != K.m_PushBytes ) return Fail(Pa, "pushes " + std::to_string(Bytes) + " bytes, the kernel '" + Pa.m_Kernel + "' takes " + std::to_string(K.m_PushBytes));
-            L.m_Size = R.m_Frame.Find(Pa.m_Size);
-            if( L.m_Size < 0 || R.m_Frame.m_Items[std::size_t(L.m_Size)].m_n != 2 ) return Fail(Pa, "no size '" + Pa.m_Size + "' (a frame value of two words)");
+            L.m_Size = bDraw ? -1 : R.m_Frame.Find(Pa.m_Size);
+            if( !bDraw && (L.m_Size < 0 || R.m_Frame.m_Items[std::size_t(L.m_Size)].m_n != 2) ) return Fail(Pa, "no size '" + Pa.m_Size + "' (a frame value of two words)");
             for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& B : *pList )
             {
                 const int i = B.m_DeclareIf.empty() ? -1 : B.m_DeclareIf == "never" ? -2 : R.m_Frame.Find(B.m_DeclareIf);
@@ -115,10 +140,13 @@ namespace xlionrender::stage
         return P;
     }
 
-    // One executor for every stage: the dispatches, then their declarations (the reads before the writes, as the hand-written ones)
-    template< class T_WINDOW >
-    void Run( const plan& P, registry& R, T_WINDOW& Window, rg::graph& G ) noexcept
+    // One executor for every stage: the dispatches and draws, then their declarations (the reads before the writes, as the hand-written
+    // ones). Hook (optional): Hook(pass index, bAfter, cmd_buffer&) around each draw pass's draws - a measurement's timestamps
+    template< class T_WINDOW, class T_HOOK = std::nullptr_t >
+    void Run( const plan& P, registry& R, T_WINDOW& Window, rg::graph& G, T_HOOK&& Hook = nullptr ) noexcept
     {
+        using cmd_t = decltype(Window.StartRenderPass(*R.m_RenderPasses.m_Items[0]));
+        std::optional<cmd_t> Cmd; int Open = -1;
         for( const auto& L : P.m_Passes )
         {
             const auto& Pa = P.m_Desc.m_Passes[std::size_t(L.m_iPass)];
@@ -130,15 +158,43 @@ namespace xlionrender::stage
             std::array<std::uint32_t, 64> Push{}; int n = 0;
             for( const int s : L.m_Push )
             {
+                if( s == repeat_index_v ) { Push[std::size_t(n++)] = 0; continue; }
                 if( s < 0 ) { Push[std::size_t(n++)] = Pa.m_Push[std::size_t(-s - 1)].m_Constant; continue; }
                 const auto& V = R.m_Frame.m_Items[std::size_t(s)];
                 std::copy_n(V.m_Words.begin(), V.m_n, Push.begin() + n); n += V.m_n;
             }
-            const auto& Sz = R.m_Frame.m_Items[std::size_t(L.m_Size)].m_Words;
-            const int X = int(Sz[0] + 7) / 8, Y = int(Sz[1] + 7) / 8;
-            Window.Dispatch(*K.m_pCompute, std::span<xgpu::buffer* const>(B.data(), L.m_Buffers.size()), std::span<const xgpu::texture* const>(T.data(), L.m_Textures.size())
-                           , std::span<const xgpu::texture* const>(I.data(), L.m_Images.size()), Push.data(), std::size_t(n) * 4, X, Y, 1);
-            const int S = G.Begin(Pa.m_Name, K.m_Recorded);
+            if( L.m_RenderPass >= 0 )
+            {
+                if( Open != L.m_RenderPass ) { Cmd.reset(); Cmd.emplace(Window.StartRenderPass(*R.m_RenderPasses.m_Items[std::size_t(L.m_RenderPass)])); Open = L.m_RenderPass; }
+                if constexpr( !std::is_same_v<std::decay_t<T_HOOK>, std::nullptr_t> ) Hook(int(&L - P.m_Passes.data()), false, *Cmd);
+                const auto* pList = L.m_Repeat >= 0 ? &R.m_Lists.m_Items[std::size_t(L.m_Repeat)] : nullptr;
+                const std::size_t nRep = pList ? pList->size() : 1;
+                for( std::size_t r = 0; r < nRep; ++r )
+                {
+                    if( pList ) B[std::size_t(Pa.m_RepeatSlot)] = (*pList)[r];
+                    for( std::size_t w = 0, at = 0; w < L.m_Push.size(); ++w )      // (the repeat's index into its push word)
+                    {
+                        const int s = L.m_Push[w];
+                        if( s == repeat_index_v ) Push[at] = std::uint32_t(r);
+                        at += s >= 0 ? std::size_t(R.m_Frame.m_Items[std::size_t(s)].m_n) : 1;
+                    }
+                    Cmd->setPipelineInstance(*K.m_pInstance, std::span<xgpu::buffer*>(B.data(), L.m_Buffers.size()));
+                    Cmd->setPushConstants(Push.data(), std::size_t(n) * 4);
+                    Cmd->setBuffer(*R.m_pFullscreenVB);
+                    Cmd->setBuffer(*R.m_pFullscreenIB);
+                    Cmd->Draw(3);
+                }
+                if constexpr( !std::is_same_v<std::decay_t<T_HOOK>, std::nullptr_t> ) Hook(int(&L - P.m_Passes.data()), true, *Cmd);
+            }
+            else
+            {
+                Cmd.reset(); Open = -1;
+                const auto& Sz = R.m_Frame.m_Items[std::size_t(L.m_Size)].m_Words;
+                const int X = int(Sz[0] + 7) / 8, Y = int(Sz[1] + 7) / 8;
+                Window.Dispatch(*K.m_pCompute, std::span<xgpu::buffer* const>(B.data(), L.m_Buffers.size()), std::span<const xgpu::texture* const>(T.data(), L.m_Textures.size())
+                               , std::span<const xgpu::texture* const>(I.data(), L.m_Images.size()), Push.data(), std::size_t(n) * 4, X, Y, 1);
+            }
+            const int S = G.Begin(Pa.m_Name, K.m_Recorded, L.m_RenderPass < 0);     // (a render pass: xGPU still places its barriers)
             for( int bWrite = 0; bWrite < 2; ++bWrite )
             {
                 std::size_t k = 0;
@@ -151,5 +207,6 @@ namespace xlionrender::stage
                 }
             }
         }
+        Cmd.reset();
     }
 }

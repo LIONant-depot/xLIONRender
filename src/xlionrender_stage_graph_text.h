@@ -9,7 +9,7 @@
 //      { Name:s }                                (the name a view's override goes by: light_tiles, refl_ssr, refl_recon)
 //        "light_tiles"
 //      [ StagePasses : 1 ]
-//      { Stage:d  Name:s  Kernel:s  Size:s  Push:s }      (Push: the push words in order, comma separated - a frame value's name, or a
+//      { Stage:d  Name:s  Kernel:s  Size:s  Push:s  RenderPass:s  Repeat:s  RepeatSlot:d }   (a draw pass: its render pass, and a buffer list it repeats over; Push: the push words in order, comma separated - a frame value's name, or a
 //        0  "light tiles"  "light_tiles"  "view.size"  "frame.c2w,view.width,..."    constant: a number one uint word, f<number> one float word)
 //      [ StageBindings : 3 ]
 //      { Stage:d  Pass:d  Kind:s  Name:s  Life:s  Usage:s  Write:c  Policy:s  If:s }     (Pass: within its stage; Kind: buffer, texture,
@@ -72,16 +72,16 @@ namespace xlionrender::stage
             , [&](std::size_t& Count, xerr&) { if( F.isReading() ) Stages.resize(Count); else Count = Stages.size(); }
             , [&](std::size_t i, xerr& E) { E = F.Field("Name", Stages[i]); }); Err ) return Err;
 
-        struct pass_row { int m_Stage = 0; std::string m_Name, m_Kernel, m_Size, m_Push; };
+        struct pass_row { int m_Stage = 0; std::string m_Name, m_Kernel, m_Size, m_Push, m_RenderPass, m_Repeat; int m_RepeatSlot = -1; };
         std::vector<pass_row> Passes;
         if( !F.isReading() ) for( std::size_t s = 0; s < L.size(); ++s ) for( const auto& P : L[s].second.m_Passes )
         {
             std::string S; for( const auto& W : P.m_Push ) { if( !S.empty() ) S += ","; S += text::Word(W); }
-            Passes.push_back({ int(s), P.m_Name, P.m_Kernel, P.m_Size, S });
+            Passes.push_back({ int(s), P.m_Name, P.m_Kernel, P.m_Size, S, P.m_RenderPass, P.m_Repeat, P.m_RepeatSlot });
         }
         if( auto Err = F.Record("StagePasses"
             , [&](std::size_t& Count, xerr&) { if( F.isReading() ) Passes.resize(Count); else Count = Passes.size(); }
-            , [&](std::size_t i, xerr& E) { auto& R = Passes[i]; false || (E = F.Field("Stage", R.m_Stage)) || (E = F.Field("Name", R.m_Name)) || (E = F.Field("Kernel", R.m_Kernel)) || (E = F.Field("Size", R.m_Size)) || (E = F.Field("Push", R.m_Push)); }); Err ) return Err;
+            , [&](std::size_t i, xerr& E) { auto& R = Passes[i]; false || (E = F.Field("Stage", R.m_Stage)) || (E = F.Field("Name", R.m_Name)) || (E = F.Field("Kernel", R.m_Kernel)) || (E = F.Field("Size", R.m_Size)) || (E = F.Field("Push", R.m_Push)) || (E = F.Field("RenderPass", R.m_RenderPass)) || (E = F.Field("Repeat", R.m_Repeat)) || (E = F.Field("RepeatSlot", R.m_RepeatSlot)); }); Err ) return Err;
 
         struct binding_row { int m_Stage = 0, m_Pass = 0; std::string m_Kind, m_Name, m_Life, m_Usage, m_Policy, m_If; char m_Write = 0; };
         std::vector<binding_row> Rows;
@@ -113,7 +113,7 @@ namespace xlionrender::stage
         {
             const auto& R = Passes[i];
             if( R.m_Stage < 0 || R.m_Stage >= int(Out.size()) ) return Fail(std::format("pass row {} ({}): no stage {}", i, R.m_Name, R.m_Stage));
-            pass P{ .m_Name = R.m_Name, .m_Kernel = R.m_Kernel, .m_Size = R.m_Size };
+            pass P{ .m_Name = R.m_Name, .m_Kernel = R.m_Kernel, .m_Size = R.m_Size, .m_RenderPass = R.m_RenderPass, .m_Repeat = R.m_Repeat, .m_RepeatSlot = R.m_RepeatSlot };
             for( std::size_t b = 0; b <= R.m_Push.size() && !R.m_Push.empty(); )
             {
                 std::size_t e = R.m_Push.find(',', b); if( e == std::string::npos ) e = R.m_Push.size();

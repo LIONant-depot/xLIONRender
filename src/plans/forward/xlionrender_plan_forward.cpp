@@ -3922,6 +3922,37 @@ namespace xlionrender
                 }
                 const bool bHeat = s_bHeat && View.m_HeatToneMap.m_Private;
                 if( bHeat ) { const xgpu::buffer::copy Hc{ 0, 0, 1 }; Window.CopyBuffer(View.m_GIScreenZeros, View.m_HeatBuffer, std::span{ &Hc, 1 }); }
+                if( View.m_bStageGIRead )
+                {
+                    // (render graph: the GI read from its description - xlionrender_stage_graph.h, draw passes; hand-written below until retired)
+                    auto& R = View.m_Stages;
+                    R.m_Kernels.Add("gi_classify", { nullptr, 13, 0, 0, int(sizeof(details::push_gi_gather)), "GI: screen colour", &View.m_GIClassifyInstance });
+                    R.m_Kernels.Add("gi_gather",   { nullptr, 13, 0, 0, int(sizeof(details::push_gi_gather)), "GI: screen colour", &View.m_GIGatherInstance });
+                    R.m_RenderPasses.Add("GI: screen pass", &View.m_GIScreenPass);
+                    R.m_pFullscreenVB = &m_FullscreenVB; R.m_pFullscreenIB = &m_FullscreenIB;
+                    R.m_Lists.Add("gi.gather_buffers", {});
+                    auto& List = R.m_Lists.m_Items[std::size_t(R.m_Lists.Find("gi.gather_buffers"))];
+                    List.clear(); for( const auto* p : m_GatherBuffers ) List.push_back(const_cast<xgpu::buffer*>(p));
+                    const std::pair<const char*, xgpu::buffer*> Bs[] = { { "Frame: instance data", &m_InstanceBuffer }, { "GI: gather buffers", &m_GIDummy }, { "GI: dummy", &m_GIDummy }, { "GI: light ring", &m_GILightRing }
+                        , { "GI: moment ring", &m_GIMomentRing }, { "GI: screen buffer*", &View.m_GIScreenBuffer }, { "GI: screen buffer previous", &View.m_GIScreenPrev }, { "GI: gather table", &View.m_GIGatherTable }
+                        , { "GI: ambient occlusion", &View.m_AO }, { "GI: voxel clipmap", m_pGatherClip ? m_pGatherClip : &m_GIDummy }, { "GI: reference samples", m_pGatherRefS ? m_pGatherRefS : &m_GIDummy }
+                        , { "GI: reference sums", m_pGatherRefA ? m_pGatherRefA : &m_GIDummy }, { "GI: the published voxel light", bVoxPub && m_VoxPub.m_Private ? &m_VoxPub : &m_GIDummy }
+                        , { "Heat: the gather's clock a pixel", bHeat ? &View.m_HeatBuffer : &m_GIDummy } };
+                    for( const auto& [N, p] : Bs ) R.m_Buffers.Add(N, p);
+                    R.SetU32(R.Value("gi.table_base"), m_GatherTableBase); R.SetU32(R.Value("gi.divisor"), std::uint32_t(GIScreenDivisor()));
+                    R.SetU32(R.Value("gi.ao_mode"), bAO ? (s_bSSGI ? 2u : 1u) : 0u); R.SetU32(R.Value("gi.ao"), bAO ? 1u : 0u);
+                    R.SetU32(R.Value("gi.clip"), m_pGatherClip ? 1u : 0u); R.SetU32(R.Value("gi.reference"), m_pGatherRefS ? 1u : 0u);
+                    R.SetU32(R.Value("gi.voxpub"), bVoxPub && m_VoxPub.m_Private ? 1u : 0u); R.SetU32(R.Value("gi.heat"), bHeat ? 1u : 0u);
+                    if( View.m_GIReadPlan.m_Passes.empty() && View.m_GIReadPlan.m_Error.empty() )
+                    {
+                        View.m_GIReadPlan = stage::Lower(View.StageDesc("gi_read", details::GIReadStage()), R);
+                        if( !View.m_GIReadPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: GI read stage: %s\n", View.m_GIReadPlan.m_Error.c_str());
+                    }
+                }
+                if( View.m_bStageGIRead && View.m_GIReadPlan.m_Error.empty() )
+                    stage::Run(View.m_GIReadPlan, View.m_Stages, Window, View.m_Graph, [&]( int iPass, bool bAfter, xgpu::cmd_buffer& C ) { if( pGS && (iPass == 0 || bAfter) ) C.WriteTimestamp(*pGS, iPass == 0 ? (bAfter ? 2 : 1) : 3); });
+                else
+                {
                 {
                     auto& G = View.m_Graph;
                     const int S = G.Begin("GI read", "GI: screen colour", false);
@@ -3955,6 +3986,7 @@ namespace xlionrender
                         GCmd.Draw(3);
                     }
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 3);
+                }
                 }
                 if( bHeat )
                 {

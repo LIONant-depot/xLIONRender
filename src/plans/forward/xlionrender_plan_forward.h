@@ -286,6 +286,33 @@ namespace xlionrender::details
         return D;
     }
 
+    // The GI read as a stage (render passes: xlionrender_gi_gather): at the GI read's size, the classification (each pixel's GI buffer as
+    // its depth), then a full-screen draw a GI buffer tested EQUAL - the gather buffers' list - into the GI screen buffer the scene pass
+    // upsamples. The pipeline instances hold their textures (declared here, not bound). Optional buffers (the voxel clipmap, the path
+    // traced reference, the published voxel light, the heat) bound as a dummy when off, declared when on
+    inline const stage::desc& GIReadStage( void ) noexcept
+    {
+        const auto Pass = []( const char* pName, bool bGather )
+        {
+            const auto Rd = [&]( const char* p, const char* pIf = "" ) { return stage::binding{ p, rg::lifetime::RETAINED, rg::usage::STORAGE, false, rg::policy::NONE, pIf }; };
+            const auto Tx = [&]( const char* p ) { return stage::binding{ p, rg::lifetime::FRAME, rg::usage::SAMPLED }; };
+            return stage::pass{ .m_Name = pName, .m_Kernel = bGather ? "gi_gather" : "gi_classify"
+                , .m_Buffers  = { Rd("Frame: instance data"), bGather ? Rd("GI: gather buffers") : Rd("GI: dummy", "never"), Rd("GI: light ring"), Rd("GI: moment ring")
+                                , { "GI: screen buffer*", rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::PARTIAL }
+                                , Rd("GI: screen buffer previous"), { "GI: gather table" }, { "GI: ambient occlusion", rg::lifetime::FRAME, rg::usage::STORAGE, false, rg::policy::NONE, "gi.ao" }
+                                , Rd("GI: voxel clipmap", "gi.clip"), Rd("GI: reference samples", "gi.reference"), { "GI: reference sums", rg::lifetime::RETAINED, rg::usage::STORAGE, true, rg::policy::PARTIAL, "gi.reference" }
+                                , Rd("GI: the published voxel light", "gi.voxpub"), { "Heat: the gather's clock a pixel", rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::PARTIAL, "gi.heat" } }
+                , .m_Textures = { Tx("Probes: environment DFG"), Tx("Probes: environment atlas"), Tx("Probes: probe atlas"), Tx("Render target: contact shadow"), Tx("Render target: depth")
+                                , Tx("Render target: prepass ids"), Tx("Render target: prepass normals"), Tx("Render target: sun shadow mask"), Tx("Shadows: white dummy") }
+                , .m_Images   = { { "GI: screen colour", rg::lifetime::FRAME, rg::usage::COLOR_ATTACHMENT, true, bGather ? rg::policy::PRESERVE : rg::policy::DISCARD }
+                                , { "GI: screen depth", rg::lifetime::FRAME, rg::usage::DEPTH_ATTACHMENT, true, bGather ? rg::policy::PRESERVE : rg::policy::DISCARD } }
+                , .m_Push     = { { "gi.table_base" }, bGather ? stage::word{ "repeat.index" } : stage::word{ "", 0u }, { "gi.divisor" }, { "gi.ao_mode" } }
+                , .m_RenderPass = "GI: screen pass", .m_Repeat = bGather ? "gi.gather_buffers" : "", .m_RepeatSlot = bGather ? 1 : -1 };
+        };
+        static const stage::desc D{ { Pass("GI read: classify", false), Pass("GI read: gather", true) } };
+        return D;
+    }
+
     // The reflections' screen trace as a stage (xlionrender_refl_ssr_comp.glsl): last frame's lit image at the ray's hit in this frame's
     // thin G-buffer, into the tail's records (last frame's image declared on the frames there is one: else the view's own HDR, cleared)
     inline const stage::desc& ReflScreenStage( void ) noexcept

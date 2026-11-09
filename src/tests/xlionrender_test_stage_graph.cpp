@@ -68,7 +68,7 @@ int main( int argc, char** argv )
     stage::library FromText;
     {
         const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_stage_graph.txt").wstring();
-        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() }, { "ao", xlionrender::details::AOStage() } };
+        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() }, { "ao", xlionrender::details::AOStage() }, { "gi_read", xlionrender::details::GIReadStage() } };
         std::string Problem;
         { auto L = BuiltIn; xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, L, Problem), "the library written"); }
         { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, FromText, Problem) && Problem.empty(), "the library read: %s", Problem.c_str()); }
@@ -112,6 +112,14 @@ int main( int argc, char** argv )
     xlionrender::mesh_id Sphere, Box;
     CHECK(MakeStaticBuffers(App.m_Device, MakeSphere(), 0.5f, SphereB) && !Renderer.CreateClusterGeom(Sphere, SphereB.Geom()), "the sphere");
     CHECK(MakeStaticBuffers(App.m_Device, xprim_geom::cube::Generate(1, 1, 1, 1, xprim_geom::float3{ 1, 1, 1 }), 0.5f, BoxB) && !Renderer.CreateClusterGeom(Box, BoxB.Geom()), "the box");
+    // the same with GI surfels (the GI read's case: its gathers run a GI buffer each)
+    cluster_buffers SphereGB, BoxGB;
+    xlionrender::mesh_id SphereG, BoxG;
+    {
+        const auto Sp = MakeSphere(); const auto Bx = xprim_geom::cube::Generate(8, 8, 8, 8, xprim_geom::float3{ 1, 1, 1 });
+        CHECK(MakeStaticBuffers(App.m_Device, Sp, 0.5f, SphereGB) && !Renderer.CreateClusterGeom(SphereG, SphereGB.Geom()) && !Renderer.SetMeshGI(SphereG, MakeSurfels(Sp, 0.1f, 0.3f)), "the GI sphere");
+        CHECK(MakeStaticBuffers(App.m_Device, Bx, 0.5f, BoxGB) && !Renderer.CreateClusterGeom(BoxG, BoxGB.Geom()) && !Renderer.SetMeshGI(BoxG, MakeSurfels(Bx, 0.1f, 0.3f)), "the GI box");
+    }
     xlionrender::scene Base;
     Base.m_Draws = { { .m_Mesh = Box, .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.55f, 0 }) * xmath::fmat4::fromScale({ 10.0f, 0.1f, 10.0f }), .m_Material = { .m_BaseColor = { 0.5f, 0.5f, 0.5f }, .m_Roughness = 0.15f } }
                    , { .m_Mesh = Sphere, .m_L2W = xmath::fmat4::fromTranslation({ -0.4f, 0.3f, 0 }), .m_Material = { .m_BaseColor = { 0.9f, 0.9f, 0.9f }, .m_Metallic = 1, .m_Roughness = 0.1f } }
@@ -191,6 +199,18 @@ int main( int argc, char** argv )
                         , []( xlionrender::render_view& V ) { return std::vector<output>{ { &V.m_AORaw, 8 }, { &V.m_AO, 8 }, { &V.m_GIScreenBuffer, 16 } }; }
                         , []( xlionrender::render_view& V ) -> const stage::plan& { return V.m_AOPlan; }, { "the raw AO", "the AO", "the GI screen buffer" }, false });
     }
+    {
+        auto S = Base;
+        S.m_GI.m_bAO = true;
+        auto SG = S;
+        SG.m_GI.m_bEnable = true;
+        SG.m_Draws = { { .m_Mesh = BoxG, .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.55f, 0 }) * xmath::fmat4::fromScale({ 10.0f, 0.1f, 10.0f }), .m_Material = { .m_BaseColor = { 0.5f, 0.5f, 0.5f } }, .m_Instance = 101 }
+                     , { .m_Mesh = SphereG, .m_L2W = xmath::fmat4::fromTranslation({ -0.4f, 0.3f, 0 }), .m_Material = { .m_BaseColor = { 0.9f, 0.3f, 0.2f } }, .m_Instance = 102 }
+                     , { .m_Mesh = BoxG, .m_L2W = xmath::fmat4::fromTranslation({ 0.7f, -0.1f, 0.5f }) * xmath::fmat4::fromScale({ 0.4f, 0.8f, 0.4f }), .m_Material = { .m_BaseColor = { 0.2f, 0.8f, 0.3f } }, .m_Instance = 103 } };
+        Cases.push_back({ "GI read (GI on)", SG, { "GI read: classify", "GI read: gather" }, []( xlionrender::render_view& V, bool b ) { V.m_bStageGIRead = b; }
+                        , []( xlionrender::render_view& V ) { return std::vector<output>{ { &V.m_GIScreenBuffer, 16 } }; }
+                        , []( xlionrender::render_view& V ) -> const stage::plan& { return V.m_GIReadPlan; }, { "the GI screen buffer" }, false });
+    }
 
     const char* pOnly = std::getenv("XLION_SG_ONLY");
     int nFail = 0;
@@ -198,14 +218,14 @@ int main( int argc, char** argv )
     {
         auto& Ca = Cases[c];
         if( pOnly && std::atoi(pOnly) != int(c) ) continue;
-        // four views a frame, one after the other: A hand-written, C hand-written (the harness's own check: A and C must agree - in the
-        // same state of the instance: a pair of views made later can differ from an earlier pair, 2026-11-09), B the stage, T the stage
-        // from its text
+        // six views a frame, one after the other, in pairs - each a hand-written view and the one checked against it: hand-written (the
+        // harness's own check), the stage, the stage from its text. In pairs: the GI's shared state moves on every second render (four
+        // hand-written views in a row: the third and fourth differed from the first on frame 2, 2026-11-10); a pair sees the same
         const char* pNames[] = { "hand-written against itself", "hand-written against the stage", "hand-written against the stage read from text" };
-        xlionrender::render_view V[4];
+        xlionrender::render_view V[6];
         for( auto& v : V ) CHECK(!Renderer.CreateView(v, { .m_Width = W, .m_Height = H }), "CreateView");
-        Ca.m_Stage(V[0], false); Ca.m_Stage(V[1], false); Ca.m_Stage(V[2], true); Ca.m_Stage(V[3], true);
-        for( const auto& [N, D] : FromText ) V[3].SetStageDesc(N, D);
+        for( auto& v : V ) Ca.m_Stage(v, false); { const bool bAllHand = std::getenv("XLION_SG_ALLHAND") != nullptr; Ca.m_Stage(V[3], !bAllHand); Ca.m_Stage(V[5], !bAllHand); }      // (XLION_SG_ALLHAND: a check of the harness - four hand-written views)
+        for( const auto& [N, D] : FromText ) V[5].SetStageDesc(N, D);
         std::string Why[3];
         for( int f = 0; f < nFrames; ++f )
         {
@@ -213,17 +233,17 @@ int main( int argc, char** argv )
             Camera.setFov(xmath::radian{ 1.0f });
             Camera.setViewport({ 0, 0, W, H });
             Camera.LookAt(xmath::fvec3{ 0.5f + 0.05f * float(f), 1.2f, -2.5f }, xmath::fvec3{ 0, 0, 0 });
-            std::vector<std::vector<std::uint32_t>> L[4];
-            for( int v = 0; v < 4; ++v ) CHECK(Frame(Ca.m_Scene, V[v], Camera, Ca.m_Outputs(V[v]), L[v]), "Render view %d", v);
-            for( int v = 1; v < 4; ++v )
+            std::vector<std::vector<std::uint32_t>> L[6];
+            for( int v = 0; v < 6; ++v ) CHECK(Frame(Ca.m_Scene, V[v], Camera, Ca.m_Outputs(V[v]), L[v]), "Render view %d", v);
+            for( int v = 1; v < 6; v += 2 )
             {
-                auto& Wy = Why[v - 1];
+                auto& Wy = Why[v / 2]; const int h = v - 1;      // (its pair's hand-written view)
                 if( !Wy.empty() ) continue;
                 for( const char* pScope : Ca.m_Scopes )
-                    if( !Ca.m_bScopes ) CHECK(!Scope(V[v].m_Graph.Text(), pScope).empty(), "%s: the scope '%s' ran", Ca.m_pName, pScope);
+                    if( !Ca.m_bScopes ) { if( v >= 3 && !std::getenv("XLION_SG_ALLHAND") ) CHECK(!Scope(V[v].m_Graph.Text(), pScope).empty(), "%s: the scope '%s' ran", Ca.m_pName, pScope); }
                     else
                 {
-                    const auto TA = Scope(V[0].m_Graph.Text(), pScope), TB = Scope(V[v].m_Graph.Text(), pScope);
+                    const auto TA = Scope(V[h].m_Graph.Text(), pScope), TB = Scope(V[v].m_Graph.Text(), pScope);
                     CHECK(!TA.empty(), "%s: the scope '%s' ran", Ca.m_pName, pScope);
                     if( TA != TB && Wy.empty() )
                     {
@@ -234,8 +254,8 @@ int main( int argc, char** argv )
                 }
                 for( std::size_t i = 0; i < L[0].size() && Wy.empty(); ++i )
                 {
-                    CHECK(!L[0][i].empty(), "%s: %s made", Ca.m_pName, Ca.m_OutNames[i]);
-                    const auto& a = L[0][i]; const auto& b = L[v][i];
+                    CHECK(!L[h][i].empty(), "%s: %s made", Ca.m_pName, Ca.m_OutNames[i]);
+                    const auto& a = L[h][i]; const auto& b = L[v][i];
                     if( a == b ) continue;
                     std::size_t k = 0; while( k < std::min(a.size(), b.size()) && a[k] == b[k] ) ++k;
                     std::size_t nDiff = 0; for( std::size_t j = 0; j < std::min(a.size(), b.size()); ++j ) nDiff += a[j] != b[j];
@@ -250,10 +270,10 @@ int main( int argc, char** argv )
                 CHECK(nLit > 0 && nLit < nTiles, "some tiles have lights, some not (a test that can tell)");
             }
         }
-        for( int v = 2; v < 4; ++v )
+        for( int v = 3; v < 6; v += 2 )
         {
             const auto& P = Ca.m_Plan(V[v]);
-            if( (!P.m_Error.empty() || P.m_Passes.empty()) && Why[v - 1].empty() ) Why[v - 1] = "the view did not run the stage: " + P.m_Error;
+            if( (!P.m_Error.empty() || P.m_Passes.empty()) && Why[v / 2].empty() ) Why[v / 2] = "the view did not run the stage: " + P.m_Error;
         }
         for( auto& v : V ) Renderer.DestroyView(v);
         for( int k = 0; k < 3; ++k )
