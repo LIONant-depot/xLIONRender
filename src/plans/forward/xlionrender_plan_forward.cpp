@@ -3728,9 +3728,10 @@ namespace xlionrender
                     for( int k = 0; k < 2; ++k )
                     {
                         auto& G = View.m_Graph;
-                        const int S = G.Begin(k == 0 ? "AO (raw)" : "AO (filtered) + gather table", "instance: m_AOCompute");
+                        const int S = G.Begin(k == 0 ? "AO (raw)" : "AO (filtered)", "instance: m_AOCompute");
                         for( const char* p : { "Render target: depth", "Render target: prepass normals", "Render target: prepass ids", "Render target: last frame's HDR" } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
-                        for( const char* p : { "GI: ambient occlusion", "GI: gather table", "GI: screen buffer*" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
+                        G.Read(S, G.Resource("GI: gather table", rg::lifetime::FRAME), rg::usage::STORAGE);      // (read only: the CPU fills it)
+                        for( const char* p : { "GI: ambient occlusion", "GI: screen buffer*" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
                     }
                 }
                 View.m_bAOPrev = bAO;
