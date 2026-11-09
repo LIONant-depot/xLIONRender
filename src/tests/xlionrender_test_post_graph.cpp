@@ -1,0 +1,96 @@
+// The post chain's plan (render graph P1a, xlionrender_post_graph.h), on the CPU: the default description lowers to exactly what the
+// hand-written chain records (xlionrender_plan_forward.cpp, the Node* steps; xLION_Docs/render_graph_post_chain_inventory_2026-11-09.md) -
+// scope names, bindings, targets, sizes, dispatches, the render graph's reads and writes, in order - at several sizes, odd ones too;
+// a bad description is refused with the node it is about.
+#include "xlionrender_post_graph.h"
+#include <cstdio>
+#include <cstdlib>
+
+namespace post = xlionrender::post;
+namespace rg = xlionrender::rg;
+
+#define CHECK(c, what) do { if( !(c) ) { std::printf("FAIL: %s\n", std::string(what).c_str()); std::exit(1); } } while(0)
+
+// The hand-written chain, transcribed (TAA, bloom and auto exposure on): what each step binds, writes and declares
+struct legacy_pass { std::string m_Scope; post::image_ref m_Bind[3]; post::image_ref m_Dst; int m_W, m_H; std::vector<post::pass::access> m_Acc; };
+static void Legacy( int W, int H, std::vector<legacy_pass>& Inits, std::vector<legacy_pass>& Frame )
+{
+    using I = post::image; using A = post::pass::access;
+    const post::image_ref HDR{ I::HDR }, DEPTH{ I::DEPTH }, CHAIN{ I::CHAIN }, EXPO{ I::EXPOSURE };
+    const auto B = [](int i) { return post::image_ref{ I::BLOOM, i }; };
+    const auto R = [](post::image_ref r) { return A{ r, rg::usage::SAMPLED, rg::policy::NONE, false }; };
+    const auto Wr = [](post::image_ref r, rg::policy P) { return A{ r, rg::usage::STORAGE, P, true }; };
+    // NodeTAA: the history images made: each zeroed (post_comp mode 3, T = { HDR, exposure })
+    for( int i = 0; i < 2; ++i ) Inits.push_back({ "TAA history init", { HDR, EXPO }, { i ? I::TAA1 : I::TAA0 }, W, H, { R(HDR), Wr({ i ? I::TAA1 : I::TAA0 }, rg::policy::FULL_OVERWRITE) } });
+    // NodePostInit: Run(HDR, level i) for the 6 levels, Run(HDR, exposure) - T[1] the exposure, or HDR when the target is the exposure
+    for( int i = 0; i < 6; ++i ) { const auto S = post::BloomSize(W, H, i); Inits.push_back({ "post init", { HDR, EXPO }, B(i), S[0], S[1], { R(HDR), R(EXPO), Wr(B(i), rg::policy::FULL_OVERWRITE) } }); }
+    Inits.push_back({ "exposure", { HDR, HDR }, EXPO, 1, 1, { R(HDR), R(HDR), Wr(EXPO, rg::policy::FULL_OVERWRITE) } });
+    // NodeTAA's frame step
+    Frame.push_back({ "TAA", { HDR, DEPTH, { I::TAA_PREV } }, { I::TAA_CUR }, W, H, { R(HDR), R(DEPTH), R({ I::TAA_PREV }), Wr({ I::TAA_CUR }, rg::policy::FULL_OVERWRITE) } });
+    const int n = std::clamp(int(std::round(std::log2(float(H) / 48.0f))), 3, 6);
+    for( int i = 0; i < n; ++i ) { const auto S = post::BloomSize(W, H, i); const auto Src = i ? B(i - 1) : CHAIN; Frame.push_back({ "bloom down", { Src, EXPO }, B(i), S[0], S[1], { R(Src), R(EXPO), Wr(B(i), rg::policy::FULL_OVERWRITE) } }); }
+    Frame.push_back({ "exposure", { CHAIN, HDR }, EXPO, 1, 1, { R(CHAIN), R(HDR), Wr(EXPO, rg::policy::PRESERVE) } });
+    for( int i = n - 2; i >= 0; --i ) { const auto S = post::BloomSize(W, H, i); Frame.push_back({ "bloom up", { B(i + 1), EXPO }, B(i), S[0], S[1], { R(B(i + 1)), R(EXPO), R(B(i)), Wr(B(i), rg::policy::PRESERVE) } }); }
+    Frame.push_back({ "tone map", { CHAIN, B(0), EXPO }, { I::OUTPUT }, W, H, { R(CHAIN), R(B(0)), R(EXPO), A{ { I::OUTPUT }, rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE, true } } });
+}
+
+static void Same( const std::vector<post::pass>& Plan, const std::vector<legacy_pass>& L, const std::string& What )
+{
+    CHECK(Plan.size() == L.size(), std::format("{}: {} passes, the hand-written chain {}", What, Plan.size(), L.size()));
+    for( std::size_t i = 0; i < L.size(); ++i )
+    {
+        const auto& p = Plan[i]; const auto& l = L[i];
+        const auto Where = std::format("{} pass {} ({})", What, i, p.m_Source);
+        CHECK(p.m_Scope == l.m_Scope, Where + ": scope " + p.m_Scope + " vs " + l.m_Scope);
+        for( int b = 0; b < 3; ++b ) CHECK(p.m_Bind[b] == l.m_Bind[b], Where + ": a binding");
+        CHECK(p.m_Dst == l.m_Dst, Where + ": the target");
+        CHECK(p.m_W == l.m_W && p.m_H == l.m_H, std::format("{}: {} x {} vs {} x {}", Where, p.m_W, p.m_H, l.m_W, l.m_H));
+        if( p.m_Kernel != post::kernel::TONE_MAP ) CHECK(p.m_GroupsX == (l.m_W + 7) / 8 && p.m_GroupsY == (l.m_H + 7) / 8, Where + ": the dispatch");
+        CHECK(p.m_Accesses.size() == l.m_Acc.size(), Where + ": the declared accesses");
+        for( std::size_t a = 0; a < l.m_Acc.size(); ++a )
+        {
+            const auto& x = p.m_Accesses[a]; const auto& y = l.m_Acc[a];
+            CHECK(x.m_Ref == y.m_Ref && x.m_Usage == y.m_Usage && x.m_Policy == y.m_Policy && x.m_bWrite == y.m_bWrite, std::format("{}: access {}", Where, a));
+        }
+    }
+}
+
+int main()
+{
+    for( const auto [W, H] : { std::array{ 1920, 1080 }, std::array{ 3218, 1512 }, std::array{ 64, 64 }, std::array{ 1, 1 }, std::array{ 3840, 2160 } } )
+    {
+        const auto P = post::Lower(post::desc::Default(), W, H);
+        const auto What = std::format("{} x {}", W, H);
+        CHECK(P.m_Error.empty(), What + ": " + P.m_Error);
+        std::vector<legacy_pass> Inits, Frame; Legacy(W, H, Inits, Frame);
+        Same(P.m_Inits, Inits, What + " inits");
+        Same(P.m_Passes, Frame, What + " frame");
+    }
+    // The odd size of the inventory: 5 levels, the last two 100 x 47 and 50 x 23 (made, zeroed; the 6th unused)
+    {
+        const auto P = post::Lower(post::desc::Default(), 3218, 1512);
+        CHECK(P.m_nBloom == 5, "3218 x 1512: 5 bloom levels");
+        CHECK(P.m_Passes[5].m_Source == "Bloom, down 4, 100 x 47", "3218 x 1512: the source map names the level and its size: " + P.m_Passes[5].m_Source);
+        CHECK(P.m_Inits[7].m_W == 50 && P.m_Inits[7].m_H == 23, "3218 x 1512: the 6th level 50 x 23");
+    }
+    // Without bloom: no bloom steps (the tone map still binds level 0: zeroed once, its weight 0)
+    {
+        const auto P = post::Lower({ { { post::node_type::TAA }, { post::node_type::EXPOSURE }, { post::node_type::TONE_MAP } } }, 1920, 1080);
+        CHECK(P.m_Error.empty() && P.m_nBloom == 0 && P.m_Passes.size() == 3, "no bloom: TAA, exposure, tone map");
+    }
+    // Exposure before the bloom (a different image while adapting - the threshold sees this frame's exposure - but valid)
+    {
+        const auto P = post::Lower({ { { post::node_type::EXPOSURE }, { post::node_type::BLOOM }, { post::node_type::TONE_MAP } } }, 1920, 1080);
+        CHECK(P.m_Error.empty() && P.m_Passes[0].m_Scope == "exposure" && P.m_Passes[1].m_Scope == "bloom down" && P.m_Passes.back().m_Scope == "tone map", "exposure first");
+        CHECK(P.m_Inits.size() == 7, "no TAA: no TAA history to make");
+    }
+    // Refused, with the node it is about
+    const auto Refused = [](post::desc D, const char* pWhy, const char* pWhat) { const auto P = post::Lower(D, 64, 64); CHECK(P.m_Error.find(pWhy) != std::string::npos && P.m_Passes.empty(), std::string(pWhat) + ": " + P.m_Error); };
+    Refused({ { { post::node_type::BLOOM } } }, "no tone map", "no tone map");
+    Refused({ { { post::node_type::TONE_MAP }, { post::node_type::BLOOM } } }, "node 0: the tone map must be last", "tone map not last");
+    Refused({ { { post::node_type::BLOOM }, { post::node_type::TAA }, { post::node_type::TONE_MAP } } }, "node 1: TAA must come first", "TAA not first");
+    Refused({ { { post::node_type::BLOOM }, { post::node_type::BLOOM }, { post::node_type::TONE_MAP } } }, "node 1: a second one", "two blooms");
+    { const auto P = post::Lower(post::desc::Default(), 0, 1080); CHECK(!P.m_Error.empty(), "a 0-wide view is refused"); }
+    std::printf("post graph plan: ok\n");
+    return 0;
+}
