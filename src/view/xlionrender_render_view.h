@@ -73,6 +73,8 @@ namespace xlionrender
         bool                    m_bStageVSMRequest = true, m_bStageLocalRequest = true;
         stage::plan             m_TilePlan;             // the lighting tile pass (a draw a material graph)
         bool                    m_bStageTile = true;
+        stage::plan             m_ShadowPagesPlan;      // the shadow pages (two recorded passes: the sun's, the local lights')
+        bool                    m_bStageShadowPages = true;
         // XLION_STAGE_AB (a stage's proof on real materials: the same frame's inputs through the hand-written pass and the stage): the HDR
         // saved, a copy, the two results in rings read back frames later, the count
         xgpu::texture           m_ABSave;
@@ -80,7 +82,7 @@ namespace xlionrender
         std::array<xgpu::buffer, 2> m_ABBuffer;
         int                     m_ABFrames = 0, m_ABChecked = 0;
         std::uint64_t           m_ABDiffWords = 0;
-        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon, ao, gi_read, vsm_request, local_request, tile; the RenderGraph
+        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon, ao, gi_read, vsm_request, local_request, tile, shadow_pages; the RenderGraph
         // resource's, xlionrender_stage_graph_text.h): one that does not lower leaves its stage hand-written (and says why once)
         std::vector<std::pair<std::string, stage::desc>> m_StageDescs;
         std::vector<std::string> m_StagesOff;       // the stages bypassed (stage::bypassable_v: the frame takes its way without them)
@@ -89,13 +91,13 @@ namespace xlionrender
         {
             std::erase_if(m_StageDescs, [&]( const auto& P ) { return P.first == Name; });
             if( !D.m_Passes.empty() ) m_StageDescs.emplace_back(Name, std::move(D));
-            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {}; m_TilePlan = {};
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {}; m_TilePlan = {}; m_ShadowPagesPlan = {};
         }
         void SetStageDescs( std::vector<std::pair<std::string, stage::desc>> All ) noexcept      // (all of them at once: the RenderGraph bundle's; none: the built-in ones)
         {
             if( All == m_StageDescs ) return;
             m_StageDescs = std::move(All);
-            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {}; m_TilePlan = {};
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {}; m_TilePlan = {}; m_ShadowPagesPlan = {};
         }
         const stage::desc& StageDesc( std::string_view Name, const stage::desc& BuiltIn ) const noexcept
         {

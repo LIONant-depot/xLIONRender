@@ -1533,7 +1533,7 @@ namespace xlionrender
     //    octahedral for point lights)
     //  - the clipmap tiles straight into the atlas (each cleared and drawn with the casters over it)
     // Before the scene pass, which samples the atlas.
-    void instance::renderShadows( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept
+    void instance::renderShadows( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fvec3& Eye, float ProjScale ) noexcept
     {
         m_MoverMaps.clear(); m_LampMaps.clear();      // (this frame's, if any: none read last frame's)
         // Measurement only (XLION_GPU_TIMES): its CPU time by part - the pages' choice, the casters (light bounds, pairs), the recording -
@@ -2358,7 +2358,6 @@ namespace xlionrender
         };
 
         ShCpu.Lap();
-        auto Cmd = Window.StartRenderPass(m_ShadowPass);
 
             // The sun's virtual pages: each in its slot of the atlas, cleared, its casters (light-space rect test)
             // (XLION_SH_SPLIT, measurement - G0 of gpu_driven_plan_2026-11-07.md: the shadow pass by part, GPU ms, mean of 120 frames: the sun's pages
@@ -2367,6 +2366,10 @@ namespace xlionrender
             static xgpu::timestamps s_ShTS; static bool s_bShTS = false;
             if( s_bShSplit && !s_bShTS ) s_bShTS = m_Device.Create(s_ShTS, { .m_Count = 7 }) == nullptr;
             const bool bShTS = s_bShSplit && s_bShTS;
+        // The pass's two parts (render graph: the shadow pages as a stage of two recorded passes - xlionrender_stage_graph.h; the page
+        // systems and the casters stay this code, the stage owns the render pass and declares them)
+        const auto SunPages = [&]( xgpu::cmd_buffer& Cmd )
+        {
             if( bShTS )
             {
                 static std::vector<std::uint64_t> s_Ns; static double s_Sum[6] = {}; static int s_N = 0, s_Pages[4] = {};
@@ -2446,8 +2449,11 @@ namespace xlionrender
             if( !m_VSM.m_ToRender.empty() ) Cmd.WriteTimestamp(m_VSMRenderTimes, 1);
             if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 3);
 
+        };
         // The local lights' pages (features/shadows/xlionrender_shadow_local_pages.h): each in its slot of the atlas's local part, cleared,
         // the casters its light's sphere reaches (once a light) in the page's frustum
+        const auto LocalPages = [&]( xgpu::cmd_buffer& Cmd )
+        {
         const int LocalX = sunAtlasWidth();
         std::vector<std::vector<std::uint32_t>> LightCasters(Scene.m_LocalLights.size());
         std::vector<std::uint8_t>               bLightCasters(Scene.m_LocalLights.size(), 0);
@@ -2483,6 +2489,32 @@ namespace xlionrender
             DrawPairs(Cmd, true);
         }
         if( bShTS ) Cmd.WriteTimestamp(s_ShTS, 6);
+        };
+        if( View.m_bStageShadowPages )
+        {
+            auto& R = View.m_Stages;
+            R.m_RenderPasses.Add("Shadows: shadow atlas", &m_ShadowPass);
+            R.m_Recorders.Add("shadows.sun_pages", SunPages);
+            R.m_Recorders.Add("shadows.local_pages", LocalPages);
+            for( const char* p : { "Frame: instance data", "Geometry: *", "Shadows: *" } ) R.m_Buffers.Add(p, &m_InstanceBuffer);      // (declared only: the recorders bind their own)
+            R.m_Textures.Add("Shadows: shadow atlas", nullptr);
+            if( View.m_ShadowPagesPlan.m_Passes.empty() && View.m_ShadowPagesPlan.m_Error.empty() )
+            {
+                View.m_ShadowPagesPlan = stage::Lower(View.StageDesc("shadow_pages", details::ShadowPagesStage()), R);
+                if( !View.m_ShadowPagesPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: shadow pages stage: %s\n", View.m_ShadowPagesPlan.m_Error.c_str());
+            }
+        }
+        if( View.m_bStageShadowPages && View.m_ShadowPagesPlan.m_Error.empty() ) stage::Run(View.m_ShadowPagesPlan, View.m_Stages, Window, View.m_Graph);
+        else
+        {
+            auto Cmd = Window.StartRenderPass(m_ShadowPass);
+            SunPages(Cmd);
+            LocalPages(Cmd);
+            auto& G = View.m_Graph;      // (R0b: the shadow atlas's pages drawn - only the requested ones: partial)
+            const int S = G.Begin("shadow pages", "group:Shadows: shadow atlas|Shadows: *", false);
+            for( const char* p : { "Frame: instance data", "Geometry: *", "Shadows: *" } ) G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
+            G.Write(S, G.Resource("Shadows: shadow atlas", rg::lifetime::RETAINED), rg::usage::DEPTH_ATTACHMENT, rg::policy::PARTIAL);
+        }
     }
 
     //------------------------------------------------------------------------------------------------
@@ -5413,13 +5445,7 @@ namespace xlionrender
         xgpu::timestamps* pSplit = nullptr;
         if( pTS ) { auto [It, bNew] = s_SplitTS.try_emplace(this); if( bNew && m_Device.Create(It->second, { .m_Count = 3 }) ) s_SplitTS.erase(It); else pSplit = &It->second; }
         if( pSplit ) Window.WriteTimestamp(*pSplit, 0);
-        { XPROFILE_SCOPE("Render: shadows"); XPROFILE_GPU_SCOPE(Window, "Render: shadows"); renderShadows(Window, Scene, Eye, ProjScale); vsmBounds(Window); }
-        {   // (R0b: the shadow atlas's pages drawn - only the requested ones: partial)
-            auto& G = View.m_Graph;
-            const int S = G.Begin("shadow pages", "group:Shadows: shadow atlas|Shadows: *", false);
-            for( const char* p : { "Frame: instance data", "Geometry: *", "Shadows: *" } ) G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
-            G.Write(S, G.Resource("Shadows: shadow atlas", rg::lifetime::RETAINED), rg::usage::DEPTH_ATTACHMENT, rg::policy::PARTIAL);
-        }
+        { XPROFILE_SCOPE("Render: shadows"); XPROFILE_GPU_SCOPE(Window, "Render: shadows"); renderShadows(Window, Scene, View, Eye, ProjScale); vsmBounds(Window); }      // (it declares the shadow pages: its stage's, or the code's)
         if( pSplit ) Window.WriteTimestamp(*pSplit, 1);
         { XPROFILE_SCOPE("Render: probes"); XPROFILE_GPU_SCOPE(Window, "Render: probes"); updateProbes(Window, Scene, Eye); }
         { XPROFILE_SCOPE("Render: planar"); XPROFILE_GPU_SCOPE(Window, "Render: planar"); renderPlanar(Window, Scene, View, Camera); }

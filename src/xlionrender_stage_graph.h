@@ -3,7 +3,7 @@
 // the kernel, the buffers / textures / images it binds, its push words, its dispatch size - lowered once against a registry (names to
 // indices: no strings per frame) and run by one executor, which also declares each pass to the render graph (the Frame graph shows the
 // stage's real passes). The registry: the kernels the instance registers once; the resources and frame values each view fills per frame.
-namespace xgpu { struct compute; struct buffer; struct texture; struct renderpass; struct pipeline_instance; struct texture_table; }      // (pointers only: the text form and the compiler need no xGPU)
+namespace xgpu { struct compute; struct buffer; struct texture; struct renderpass; struct pipeline_instance; struct texture_table; struct cmd_buffer; }      // (pointers only: the text form and the compiler need no xGPU)
 #include "xlionrender_render_graph.h"
 #include <string>
 #include <vector>
@@ -14,6 +14,7 @@ namespace xgpu { struct compute; struct buffer; struct texture; struct renderpas
 #include <span>
 #include <optional>
 #include <type_traits>
+#include <functional>
 
 namespace xlionrender::stage
 {
@@ -47,6 +48,9 @@ namespace xlionrender::stage
         // pipeline instance and texture table (a material graph's), the push word "repeat.index" its index; no items, no render pass
         std::string             m_Items;
         std::vector<std::string> m_UBOs;        // dynamic uniform buffers by name, bound at their index in the list (a draw pass)
+        // A recorded pass (m_Recorder not empty, no kernel): the code records it (the registry's m_Recorders) inside the stage's render pass -
+        // a node whose inside stays code (the shadow pages' page systems and casters); its bindings are declarations only
+        std::string             m_Recorder;
         bool operator==( const pass& ) const = default;
     };
     struct desc { std::vector<pass> m_Passes; bool operator==( const desc& ) const = default; };
@@ -79,6 +83,7 @@ namespace xlionrender::stage
         table<xgpu::renderpass*>        m_RenderPasses;
         table<std::vector<xgpu::buffer*>> m_Lists;      // (a draw repeated for each)
         table<std::vector<draw_item>>   m_Items;        // (a draw an item)
+        table<std::function<void(xgpu::cmd_buffer&)>> m_Recorders;      // (a recorded pass's body, set each frame)
         xgpu::buffer*                   m_pFullscreenVB = nullptr, *m_pFullscreenIB = nullptr;      // (a draw pass's triangle)
 
         void SetFloats( int i, const float* p, int n ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = n; std::memcpy(V.m_Words.data(), p, std::size_t(n) * 4); }
@@ -95,7 +100,7 @@ namespace xlionrender::stage
         std::vector<int>    m_Buffers, m_Textures, m_Images;
         std::vector<int>    m_Push;         // a frame value's index, or -1 - k - 1 for the pass's k-th push word as a constant
         int                 m_Size = -1;    // the frame value of the dispatch's size
-        int                 m_RenderPass = -1, m_Repeat = -1, m_Items = -1;
+        int                 m_RenderPass = -1, m_Repeat = -1, m_Items = -1, m_Recorder = -1;
         std::vector<int>    m_UBOs;         // the registry's buffers
         std::vector<int>    m_DeclareIf;    // a binding's (buffers, textures, images in turn) condition: a frame value's index, -1 always, -2 never
     };
@@ -109,6 +114,15 @@ namespace xlionrender::stage
         const auto Fail = [&]( const pass& Pa, const std::string& Why ) { P.m_Passes.clear(); P.m_Error = Pa.m_Name + ": " + Why; return P; };
         for( const auto& Pa : D.m_Passes )
         {
+            if( !Pa.m_Recorder.empty() )        // (a recorded pass: its render pass and its recorder; its bindings declared)
+            {
+                lowered_pass L{ int(&Pa - D.m_Passes.data()) };
+                if( (L.m_RenderPass = R.m_RenderPasses.Find(Pa.m_RenderPass)) < 0 ) return Fail(Pa, "no render pass '" + Pa.m_RenderPass + "'");
+                if( (L.m_Recorder = R.m_Recorders.Find(Pa.m_Recorder)) < 0 ) return Fail(Pa, "no recorder '" + Pa.m_Recorder + "'");
+                for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& B : *pList ) L.m_DeclareIf.push_back(B.m_DeclareIf == "never" ? -2 : -1);
+                P.m_Passes.push_back(std::move(L));
+                continue;
+            }
             lowered_pass L{ int(&Pa - D.m_Passes.data()), R.m_Kernels.Find(Pa.m_Kernel) };
             if( L.m_Kernel < 0 ) return Fail(Pa, "no kernel '" + Pa.m_Kernel + "'");
             const auto& K = R.m_Kernels.m_Items[std::size_t(L.m_Kernel)];
@@ -166,6 +180,22 @@ namespace xlionrender::stage
         for( const auto& L : P.m_Passes )
         {
             const auto& Pa = P.m_Desc.m_Passes[std::size_t(L.m_iPass)];
+            if( L.m_Recorder >= 0 )
+            {
+                if( Open != L.m_RenderPass ) { Cmd.reset(); Cmd.emplace(Window.StartRenderPass(*R.m_RenderPasses.m_Items[std::size_t(L.m_RenderPass)])); Open = L.m_RenderPass; }
+                R.m_Recorders.m_Items[std::size_t(L.m_Recorder)](*Cmd);
+                const int S = G.Begin(Pa.m_Name, "group:" + Pa.m_RenderPass, false);
+                std::size_t k = 0;
+                for( int bWrite = 0; bWrite < 2; ++bWrite, k = 0 )
+                    for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& Bd : *pList )
+                    {
+                        const int c = L.m_DeclareIf[k++];
+                        if( Bd.m_bWrite != (bWrite != 0) || c == -2 ) continue;
+                        if( bWrite ) G.Write(S, G.Resource(Bd.m_Name, Bd.m_Life), Bd.m_Usage, Bd.m_Policy);
+                        else         G.Read (S, G.Resource(Bd.m_Name, Bd.m_Life), Bd.m_Usage);
+                    }
+                continue;
+            }
             const auto& K  = R.m_Kernels.m_Items[std::size_t(L.m_Kernel)];
             std::array<xgpu::buffer*, 16> B{}; std::array<const xgpu::texture*, 16> T{}, I{};
             for( std::size_t i = 0; i < L.m_Buffers.size();  ++i ) B[i] = R.m_Buffers.m_Items[std::size_t(L.m_Buffers[i])];

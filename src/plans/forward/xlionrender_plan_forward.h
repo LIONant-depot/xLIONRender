@@ -313,6 +313,22 @@ namespace xlionrender::details
         return D;
     }
 
+    // The shadow pages as a stage: two recorded passes in the shadow atlas's render pass - the sun's virtual pages, the local lights'
+    // pages (their page systems choose the pages and the casters: code, xlionrender_plan_forward.cpp renderShadows). Declared: what they
+    // read (the instances, the geometry, the shadow data) and the atlas they draw into (the requested pages only: partial)
+    inline const stage::desc& ShadowPagesStage( void ) noexcept
+    {
+        const auto Pass = []( const char* pName, const char* pRecorder )
+        {
+            return stage::pass{ .m_Name = pName
+                , .m_Buffers  = { { "Frame: instance data", rg::lifetime::RETAINED }, { "Geometry: *", rg::lifetime::RETAINED }, { "Shadows: *", rg::lifetime::RETAINED } }
+                , .m_Images   = { { "Shadows: shadow atlas", rg::lifetime::RETAINED, rg::usage::DEPTH_ATTACHMENT, true, rg::policy::PARTIAL } }
+                , .m_RenderPass = "Shadows: shadow atlas", .m_Recorder = pRecorder };
+        };
+        static const stage::desc D{ { Pass("shadow pages: sun", "shadows.sun_pages"), Pass("shadow pages: local lights", "shadows.local_pages") } };
+        return D;
+    }
+
     // The lighting tile pass as a stage (xlionrender_tile_pixel.glsl, a material graph's tile variant): one full-screen draw a material
     // graph (the list of draw items the code fills: each graph's pipeline instance - its textures: the G-buffer, the tile attributes - and
     // its materials' texture table) onto the HDR the prepass started; the push: clip to world and the graph's index

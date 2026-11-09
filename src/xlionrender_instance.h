@@ -424,7 +424,7 @@ namespace xlionrender
 
         const mesh_slot*            findMesh        ( mesh_id Id ) const                                        noexcept;
         material_slot*              findMaterial    ( material_id Id )                                          noexcept;
-        void                        renderShadows   ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, float ProjScale ) noexcept;
+        void                        renderShadows   ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fvec3& Eye, float ProjScale ) noexcept;
         void                        updateInstances ( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye ) noexcept;
         void                        writeLocalLights( xgpu::window& Window, const scene& Scene, const xmath::fvec3& Eye, details::ubo_lighting& Light ) noexcept;
         void                        updateEnvironment( xgpu::window& Window, const scene& Scene )               noexcept;
