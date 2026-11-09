@@ -36,6 +36,12 @@ namespace xlionrender::rg
             if( bNew ) m_Resources.push_back({ std::string(Name), Life });
             return It->second;
         }
+        // Some scope of this frame wrote it already
+        bool WrittenThisFrame( int Res ) const noexcept
+        {
+            for( const auto& S : m_Scopes ) for( const auto& A : S.m_Accesses ) if( A.m_Res == Res && A.m_bWrite ) return true;
+            return false;
+        }
         // A history that cannot be read as valid (made again, resized, reset): its next read is an initialisation path
         void Invalidate( int Res ) noexcept { m_Resources[std::size_t(Res)].m_bValid = false; }
 

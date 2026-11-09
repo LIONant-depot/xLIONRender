@@ -5207,7 +5207,15 @@ namespace xlionrender
             const int rgOut   = G.Resource("Render target: tone-mapped output", rg::lifetime::EXTERNAL);
             const int rgTAA[2] = { G.Resource("Render target: TAA#0", rg::lifetime::HISTORY), G.Resource("Render target: TAA#1", rg::lifetime::HISTORY) };
             const auto rgBloom = [&](int i) { return G.Resource("Render target: bloom#" + std::to_string(i), rg::lifetime::FRAME); };
-            { const int S = G.Begin("scene (imported)", "", false); G.Write(S, rgHDR, rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE); G.Write(S, rgDepth, rg::usage::DEPTH_ATTACHMENT, rg::policy::FULL_OVERWRITE); }
+            // (the lit image and depth as the scene passes left them: their writers are declared (prepass, tile pass, blended + sky) - an
+            // import here was a second write, which cut their outputs off from the chain's readers in the Frame graph (Tomas, 2026-11-09).
+            // Only a frame whose scene passes declared none imports them)
+            if( !G.WrittenThisFrame(rgHDR) || !G.WrittenThisFrame(rgDepth) )
+            {
+                const int S = G.Begin("scene (imported)", "", false);
+                if( !G.WrittenThisFrame(rgHDR) )   G.Write(S, rgHDR, rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE);
+                if( !G.WrittenThisFrame(rgDepth) ) G.Write(S, rgDepth, rg::usage::DEPTH_ATTACHMENT, rg::policy::FULL_OVERWRITE);
+            }
             if( s_bSSGIPrev || ReflectionScreen(Scene) )
             {
                 if( !View.m_HDRPrev.m_Private ) (void)m_Device.Create(View.m_HDRPrev, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: last frame's HDR" });
