@@ -27,7 +27,14 @@ namespace xlionrender::post
     // CUSTOM (render graph stage I): a node with its own compute shader - the chain image in, a new chain image out (an image effect); its
     // SPIR-V the view's m_PostCustomSpirv[m_Custom] (the RenderGraph bundle's shader link). Any number, after TAA, before the tone map
     enum class node_type : std::uint8_t { TAA, BLOOM, EXPOSURE, TONE_MAP, CUSTOM };
-    struct node { node_type m_Type; bool m_bOn = true; int m_Custom = -1; bool operator==( const node& ) const = default; };     // (off: bypassed - kept in the recipe, left out of the plan; Custom: the shader's index)
+    struct node
+    {
+        node_type                   m_Type;
+        bool                        m_bOn = true;           // off: bypassed - kept in the recipe, left out of the plan
+        int                         m_Custom = -1;          // CUSTOM: the shader's index
+        std::vector<std::string>    m_Params;               // CUSTOM: the description's parameters it pushes, in order: the shader's Push.m_A .. m_E (at most 5)
+        bool operator==( const node& ) const = default;
+    };
     inline constexpr std::string_view node_names_v[] = { "taa", "bloom", "exposure", "tonemap" };     // (the edit commands' names; the text's are post.<name>)
     inline constexpr int max_custom_nodes_v = 4;
 
@@ -257,9 +264,18 @@ namespace xlionrender::post
             case node_type::CUSTOM:
             {
                 const int c = D.m_Nodes[std::size_t(n)].m_Custom;
+                const auto& Names = D.m_Nodes[std::size_t(n)].m_Params;
+                if( Names.size() > 5 ) return Fail(n, std::format("a custom node pushes at most 5 parameters (it names {})", Names.size()));
+                std::vector<push_slot> Slots;
+                for( std::size_t k = 0; k < Names.size(); ++k )
+                {
+                    if( Param(Names[k]) < 0 ) return Fail(n, std::format("the custom node needs the parameter '{}'", Names[k]));
+                    Slots.push_back(Pm(3 + int(k), Names[k]));          // (words 3..7: the shader's Push.m_A .. m_E)
+                }
                 pass p{ .m_Scope = "custom", .m_Source = std::format("Custom {}, {} x {}", c, W, H), .m_Node = n, .m_Kernel = kernel::CUSTOM, .m_Push = push::FILL,
                         .m_Level = c, .m_Bind = { CHAIN, EXPO }, .m_Dst = { image::CUSTOM, c }, .m_W = W, .m_H = H };
                 p.m_Accesses = { R(CHAIN), R(EXPO), Wr(p.m_Dst, rg::policy::FULL_OVERWRITE) };
+                p.m_Slots = std::move(Slots);
                 Groups(p); P.m_Passes.push_back(std::move(p));
                 break;
             }

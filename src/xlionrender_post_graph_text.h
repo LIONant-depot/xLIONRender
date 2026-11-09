@@ -6,7 +6,7 @@
 // authored nodes in order by their semantic names. The renderer never reads files - a view holds a post::desc; this reader is for
 // the tests now and the render graph resource's compiler later (one reader).
 //      [ PostGraph : 4 ]
-//      { Type:s  On:c  Custom:d }      (Custom: a post.custom node's shader index, -1 for the others)
+//      { Type:s  On:c  Custom:d  Params:s }      (Custom: a post.custom node's shader index, -1 for the others; Params: the parameters it pushes, comma separated)
 //        "post.taa"       1
 //        "post.bloom"     1          (0: bypassed - kept in the recipe, left out of the plan)
 //        "post.exposure"  1
@@ -29,10 +29,16 @@ namespace xlionrender::post
         std::vector<std::string> Names;
         std::vector<char>        On;        // (bool as the table's c column)
         std::vector<int>         Custom;    // (a custom node's shader index; -1 for the others)
-        if( !F.isReading() ) for( const auto& N : D.m_Nodes ) { for( const auto& [Name, T] : type_names_v ) if( T == N.m_Type ) Names.emplace_back(Name); On.push_back(N.m_bOn ? 1 : 0); Custom.push_back(N.m_Custom); }
+        std::vector<std::string> Params;    // (a custom node's parameters, comma separated)
+        if( !F.isReading() ) for( const auto& N : D.m_Nodes )
+        {
+            for( const auto& [Name, T] : type_names_v ) if( T == N.m_Type ) Names.emplace_back(Name);
+            On.push_back(N.m_bOn ? 1 : 0); Custom.push_back(N.m_Custom);
+            std::string P; for( const auto& s : N.m_Params ) { if( !P.empty() ) P += ","; P += s; } Params.push_back(P);
+        }
         if( auto Err = F.Record("PostGraph"
-            , [&](std::size_t& Count, xerr&) { if( F.isReading() ) { Names.resize(Count); On.resize(Count, 1); Custom.resize(Count, -1); } else Count = Names.size(); }
-            , [&](std::size_t i, xerr& E) { bool b = On[i] != 0; false || (E = F.Field("Type", Names[i])) || (E = F.Field("On", b)) || (E = F.Field("Custom", Custom[i])); On[i] = b ? 1 : 0; }); Err ) return Err;
+            , [&](std::size_t& Count, xerr&) { if( F.isReading() ) { Names.resize(Count); On.resize(Count, 1); Custom.resize(Count, -1); Params.resize(Count); } else Count = Names.size(); }
+            , [&](std::size_t i, xerr& E) { bool b = On[i] != 0; false || (E = F.Field("Type", Names[i])) || (E = F.Field("On", b)) || (E = F.Field("Custom", Custom[i])) || (E = F.Field("Params", Params[i])); On[i] = b ? 1 : 0; }); Err ) return Err;
         if( F.isReading() )
         {
             D.m_Nodes.clear();
@@ -40,7 +46,14 @@ namespace xlionrender::post
             {
                 const auto It = std::find_if(std::begin(type_names_v), std::end(type_names_v), [&](const auto& P) { return P.first == Names[i]; });
                 if( It == std::end(type_names_v) ) { Problem = std::format("row {}: no node type '{}' (the types: post.taa, post.bloom, post.exposure, post.tonemap, post.custom)", i, Names[i]); D.m_Nodes.clear(); return {}; }
-                D.m_Nodes.push_back({ It->second, On[i] != 0, Custom[i] });
+                node N{ It->second, On[i] != 0, Custom[i] };
+                for( std::size_t b = 0; b < Params[i].size(); )
+                {
+                    std::size_t e = Params[i].find(',', b); if( e == std::string::npos ) e = Params[i].size();
+                    if( e > b ) N.m_Params.push_back(Params[i].substr(b, e - b));
+                    b = e + 1;
+                }
+                D.m_Nodes.push_back(std::move(N));
             }
         }
         // The parameters (P3): what the nodes push, where a frame reads each, its range

@@ -5359,6 +5359,7 @@ namespace xlionrender
                     if( P.m_Kernel == post::kernel::CUSTOM )        // (its own shader, post_comp's bindings and push: the size, the rest 0)
                     {
                         struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{ P.m_W, P.m_H, 0 };
+                        post::FillSlots(P, Snap, 0.0f, View.m_Exposure, &Push);       // (the node's parameters: Push.m_A .. m_E)
                         Window.Dispatch(View.m_PostCustomCompute[std::size_t(P.m_Level)], std::span<xgpu::buffer* const>{}, std::span<const xgpu::texture* const>(T, 2), I, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
                         return;
                     }

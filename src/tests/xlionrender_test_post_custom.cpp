@@ -112,6 +112,34 @@ int main()
     }
     B.m_PostCustomSpirv[0] = Identity;
     { const auto [a, b] = Frames(4); MUST(a == b, "the shader back to identity: the same output again"); std::printf("ok: edit back - identical\n"); }
+    // a parameter (stage I: the node's Push.m_A from the description): a gain of 0.5 is the half node exactly; 1.0 the identity
+    {
+        const auto Gain = Compile("gain", "vec4 Node(ivec2 p, vec2 uv) { vec4 c = texelFetch(Src, p, 0); return vec4(c.rgb * Push.m_A, c.a); }");
+        // fresh views from A's lit image, the same history from their first frame: G the gain node, H the half node, N no node
+        auto D = B.m_PostDesc;
+        D.m_Params.push_back({ "Grade.Gain", "", post::param_type::FLOAT, 0.5f, 0.0f, 4.0f });
+        D.m_Nodes[1].m_Params = { "Grade.Gain" };
+        const auto Run = [&](float GainValue) -> std::array<std::vector<std::byte>, 3>
+        {
+            xlionrender::render_view G, H, N;
+            for (auto* pV : { &G, &H, &N }) { MUST(!Renderer.CreateView(*pV, { .m_Width = 400, .m_Height = 240 }), "CreateView"); pV->m_PostFixedDt = A.m_PostFixedDt; pV->m_pPostInputs = &A; }
+            G.m_PostDesc = D; G.m_PostDesc.m_Params.back().m_Default = GainValue; G.m_PostCustomSpirv[0] = Gain;
+            H.m_PostDesc = B.m_PostDesc; H.m_PostCustomSpirv[0] = Half;
+            for (int f = 0; f < 3; ++f)
+            {
+                xgpu::tools::view C; C.setFov(xmath::radian{ 1.0f }); C.setViewport({ 0, 0, 400, 240 }); C.LookAt(xmath::fvec3{ 0, 0.1f, -2.0f }, xmath::fvec3{ 0, 0, 0 });
+                MUST(App.RenderFrame(Scene, A, C) && App.RenderFrame(Scene, B, C) && App.RenderFrame(Scene, G, C) && App.RenderFrame(Scene, H, C) && App.RenderFrame(Scene, N, C), "Render");
+            }
+            std::array<std::vector<std::byte>, 3> R{ Output(App.m_Device, G), Output(App.m_Device, H), Output(App.m_Device, N) };
+            Renderer.DestroyView(G); Renderer.DestroyView(H); Renderer.DestroyView(N);
+            return R;
+        };
+        { const auto R = Run(0.5f); MUST(R[0] == R[1], "a gain parameter of 0.5 = the half node"); }
+        { const auto R = Run(1.0f); MUST(R[0] == R[2], "a gain of 1 = no node"); }
+        auto Missing = D; Missing.m_Nodes[1].m_Params = { "Grade.Nope" };
+        MUST(post::Lower(Missing, 64, 64).m_Error.find("needs the parameter 'Grade.Nope'") != std::string::npos, "a missing node parameter is refused");
+        std::printf("ok: a node parameter (0.5 = half, 1 = identity, missing refused)\n");
+    }
     // two views with different shaders in one frame: a third view (the same input) with the half, B with the identity
     {
         xlionrender::render_view C3;
