@@ -5216,6 +5216,17 @@ namespace xlionrender
                 else if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true;
                     const int S = G.Begin("last frame's HDR", "copy Render target: HDR colour"); G.Read(S, rgHDR, rg::usage::TRANSFER_SRC); G.Write(S, rgPrev, rg::usage::TRANSFER_DST, rg::policy::FULL_OVERWRITE); }
             }
+            // (R1a) The post chain's dispatches as one explicit-sync section: one barrier in, the graph's barriers between them (a scope that
+            // reads or overwrites what an earlier one touched), one out before the tone map. XLION_RG_BARRIERS=0: each dispatch its own two
+            static const bool s_bRGBarriers = [] { const char* p = xlionrender::Env("XLION_RG_BARRIERS"); return !p || std::atoi(p) != 0; }();
+            if( s_bRGBarriers )
+            {
+                std::array<const xgpu::texture*, 3 + std::tuple_size_v<decltype(View.m_Bloom)>> Imgs{ &View.m_TAA[0], &View.m_TAA[1], &View.m_ExposureTex };
+                for( std::size_t i = 0; i < View.m_Bloom.size(); ++i ) Imgs[3 + i] = &View.m_Bloom[i];
+                Window.BeginExplicitSync(Imgs); G.SyncStart();
+            }
+            static const bool s_bRGNoSync = [] { const char* p = xlionrender::Env("XLION_RG_BARRIERS"); return p && std::atoi(p) == 2; }();      // (2: the section without its barriers - the sync validation's negative control)
+            const auto Sync = [&](int S) { if( G.Sync(S) && s_bRGBarriers && !s_bRGNoSync ) Window.ComputeBarrier(); };
             static const float s_EnvExposure = [] { const char* p = xlionrender::Env("XLION_EXPOSURE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: a fixed exposure with auto exposure off - graded lit images)
             if( s_EnvExposure > 0.0f ) View.m_Exposure = s_EnvExposure;
             const xgpu::texture* pHDR = &View.m_HDR;
@@ -5234,8 +5245,9 @@ namespace xlionrender
                         if( !bOk ) break;
                         struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Fill{ View.m_Width, View.m_Height, 3, 0.0f };
                         const xgpu::texture* T[] = { &View.m_HDR, &View.m_ExposureTex }; const xgpu::texture* I[] = { &View.m_TAA[i] };
-                        Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Fill, sizeof(Fill), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
                         const int S = G.Begin("TAA history init", "instance: m_PostCompute"); G.Read(S, rgHDR, rg::usage::SAMPLED); G.Write(S, rgTAA[i], rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
+                        Sync(S);
+                        Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Fill, sizeof(Fill), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
                     }
                     View.m_bTAAHistory = false;
                 }
@@ -5243,8 +5255,8 @@ namespace xlionrender
                 static const float s_TAABlendEnv = [] { const char* p = xlionrender::Env("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: this frame's share)
                 struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, s_TAABlendEnv > 0.0f ? s_TAABlendEnv : Scene.m_Post.m_TAABlend, View.m_bTAAHistory ? 1.0f : 0.0f };
                 const xgpu::texture* T[] = { &View.m_HDR, &View.m_Depth, &View.m_TAA[1 - Cur] }; const xgpu::texture* I[] = { &View.m_TAA[Cur] };
+                { const int S = G.Begin("TAA", "instance: m_TAACompute"); G.Read(S, rgHDR, rg::usage::SAMPLED); G.Read(S, rgDepth, rg::usage::SAMPLED); G.Read(S, rgTAA[1 - Cur], rg::usage::SAMPLED); G.Write(S, rgTAA[Cur], rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); Sync(S); }
                 Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
-                { const int S = G.Begin("TAA", "instance: m_TAACompute"); G.Read(S, rgHDR, rg::usage::SAMPLED); G.Read(S, rgDepth, rg::usage::SAMPLED); G.Read(S, rgTAA[1 - Cur], rg::usage::SAMPLED); G.Write(S, rgTAA[Cur], rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
                 pHDR = &View.m_TAA[Cur]; pToneMap = &View.m_ToneMapTAA[Cur];
                 View.m_TAAPrevW2C = W2CNoJitter; View.m_TAAPrevEye = Eye; View.m_bTAAHistory = true; ++View.m_TAAFrame;
             }
@@ -5265,7 +5277,6 @@ namespace xlionrender
                 {
                     const xgpu::texture* T[] = { &Src, &View.m_HDR }; const xgpu::texture* I[] = { &Dst };
                     if( &Dst != &View.m_ExposureTex ) T[1] = &View.m_ExposureTex;      // (read: the threshold; the exposure's own pass writes it)
-                    Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
                     // (the exposure's update (mode 2) reads its own last value: preserve; the rest overwrite their target)
                     const bool bExpo = &Dst == &View.m_ExposureTex;
                     const int  S = G.Begin(bExpo ? "exposure" : Push.m_Mode == 1 ? "bloom up" : Push.m_Mode == 3 ? "post init" : "bloom down", "instance: m_PostCompute");
@@ -5273,6 +5284,8 @@ namespace xlionrender
                     G.Read(S, bExpo ? rgHDR : rgExpo, rg::usage::SAMPLED);      // (the exposure's pass has this frame's HDR bound in that slot)
                     if( Push.m_Mode == 1 ) G.Read(S, rgOf(Dst), rg::usage::SAMPLED);      // (the upsample adds onto its level)
                     G.Write(S, rgOf(Dst), rg::usage::STORAGE, bExpo && Push.m_Mode == 2 ? rg::policy::PRESERVE : Push.m_Mode == 1 ? rg::policy::PRESERVE : rg::policy::FULL_OVERWRITE);
+                    Sync(S);
+                    Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
                 };
                 const auto Size = [&](int i) { return std::array<int, 2>{ std::max(View.m_Width >> (i + 1), 1), std::max(View.m_Height >> (i + 1), 1) }; };
                 if( !View.m_bPostReady )
@@ -5307,6 +5320,7 @@ namespace xlionrender
                     Run(View.m_Bloom[i + 1], View.m_Bloom[i], S[0], S[1]);
                 }
             }
+            if( s_bRGBarriers ) Window.EndExplicitSync();
             auto Cmd = Window.StartRenderPass(View.m_OutputPass);
             const bool bHeatView = View.m_HeatToneMap.m_Private != nullptr;       // (XLION_HEAT: the gather's clock over a grey image)
             Cmd.setPipelineInstance(bHeatView ? View.m_HeatToneMap : *pToneMap);

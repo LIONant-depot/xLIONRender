@@ -111,6 +111,22 @@ namespace xlionrender::rg
             return T;
         }
 
+        // (R1a) The barriers of a managed section: SyncStart at its start (the section's own full barrier: nothing pending), then Sync(S) for
+        // each scope before it records - true: it needs a barrier first (it reads what an earlier scope since the last barrier wrote, or
+        // writes what one read or wrote). The scope's accesses are then pending. ponytail: one global barrier kind (compute to compute); the
+        // stages from the usages when a section holds more than dispatches
+        void SyncStart( void ) noexcept { m_PendingW.assign(m_Resources.size(), 0); m_PendingR.assign(m_Resources.size(), 0); }
+        bool Sync( int Scope ) noexcept
+        {
+            m_PendingW.resize(m_Resources.size(), 0); m_PendingR.resize(m_Resources.size(), 0);
+            const auto& S = m_Scopes[std::size_t(Scope)];
+            bool bHazard = false;
+            for( const auto& A : S.m_Accesses ) bHazard |= m_PendingW[std::size_t(A.m_Res)] || (A.m_bWrite && m_PendingR[std::size_t(A.m_Res)]);
+            if( bHazard ) SyncStart();
+            for( const auto& A : S.m_Accesses ) (A.m_bWrite ? m_PendingW : m_PendingR)[std::size_t(A.m_Res)] = 1;
+            return bHazard;
+        }
+
         const std::vector<std::string>& getErrors( void ) const noexcept { return m_Errors; }
 
     private:
@@ -119,6 +135,7 @@ namespace xlionrender::rg
         std::unordered_map<std::string, int>    m_ByName;
         std::vector<scope>                      m_Scopes;
         std::vector<std::string>                m_Errors;
+        std::vector<std::uint8_t>               m_PendingW, m_PendingR;      // (R1a: written / read since the last barrier, by resource)
     };
 }
 
