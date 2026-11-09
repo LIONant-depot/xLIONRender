@@ -475,6 +475,8 @@ namespace xlionrender
         double                      m_TileCountSum[9] = {};
         int                         m_TileCountN = 0;
         xgpu::shader                m_TileVert;
+        // A5.2: the tile pass's draws tested EQUAL against a classification of each pixel's graph (XLION_TILE_CLASSIFY=0: off)
+        static bool TileClassify( void ) noexcept { static const bool s_b = [] { const char* p = xlionrender::Env("XLION_TILE_CLASSIFY"); return !(p && p[0] == '0'); }(); return s_b; }
         const tile_graph*           m_pBuildTile = nullptr;         // (buildMaterialPipeline: that pipeline)
         xgpu::shader                m_NoiseLagsShader;              // XLION_NOISE_LAGS (xlionrender_noise_lags_comp.glsl): the noise by lag, at the real frame rate
         xgpu::compute               m_NoiseLagsCompute;
@@ -638,6 +640,7 @@ namespace xlionrender
         // The GI gather from it (xlionrender_gi_gather_common.glsl; its instances are the views': render_view::m_GIClassifyInstance ...):
         // the classification (each half-size pixel's GI buffer as its depth), the passes (one a GI buffer, tested EQUAL)
         xgpu::pipeline              m_GIClassifyPipeline, m_GIGatherPipeline;
+        xgpu::pipeline              m_TileClassifyPipeline;     // the tile pass's classification (XLION_TILE_CLASSIFY, A5.2)
         // Both phases of that pass draw in indirect runs: their vertex shader reads each draw's push constants from the view's record
         // buffer (xlionrender_static_geom_gi_records_vert.glsl, binding 12); the depth phase's pipeline is m_DepthPrepassPipeline's with it
         xgpu::pipeline              m_GIScreenDepthPipeline;

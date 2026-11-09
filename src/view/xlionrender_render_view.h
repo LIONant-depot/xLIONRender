@@ -178,6 +178,8 @@ namespace xlionrender
         // The GI gather from them (xlionrender_gi_gather_common.glsl): its classification's and passes' instances (this view's G-buffer
         // bound), the table (a region a ring frame: instance::gather_table_uints_v)
         xgpu::pipeline_instance m_GIClassifyInstance, m_GIGatherInstance;
+        xgpu::texture           m_TileGraphDepth;       // the tile pass's classification (A5.2): each pixel's graph as its depth
+        xgpu::pipeline_instance m_TileClassifyInstance;
         xgpu::buffer            m_GIGatherTable;
         // The screen tail (instance::renderTail, the main view in light_mode::SCREEN; documentation/lighting_p3_design.md "The decision"),
         // made the first time: the thin G-buffer at half size - the octahedral normal and roughness (10-10-10-2; the materials' G-buffer

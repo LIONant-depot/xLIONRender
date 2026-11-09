@@ -4407,6 +4407,15 @@ namespace xlionrender
                     if( !C )
                     {
                         C.emplace(Window.StartRenderPass(View.m_TilePass));
+                        if( View.m_TileClassifyInstance.m_Private )      // (A5.2: each pixel's graph as its depth first - the draws below test EQUAL)
+                        {
+                            auto MB = std::array<xgpu::buffer*, 1>{ &m_MaterialParams };
+                            C->setPipelineInstance(View.m_TileClassifyInstance, std::span{ MB });
+                            C->setPushConstants(details::push_gi_gather{});
+                            C->setBuffer(m_FullscreenVB);
+                            C->setBuffer(m_FullscreenIB);
+                            C->Draw(3);
+                        }
                         auto& G = View.m_Graph;
                         const int S = G.Begin("tile pass (lighting)", "Render target: HDR colour", false);
                         DeclareLitReads(G, S);
@@ -4429,6 +4438,12 @@ namespace xlionrender
                 }
                 if( bTileStage )
                 {
+                    {   // (A5.2: the classification - one item, before the graphs, in the same render pass - when there is a graph to draw)
+                        auto& Cls = R.m_Items.m_Items[std::size_t(R.m_Items.Add("tile.classify", {}))];
+                        Cls.clear();
+                        if( View.m_TileClassifyInstance.m_Private && !R.m_Items.m_Items[std::size_t(R.m_Items.Find("tile.graphs"))].empty() ) Cls.push_back({ &View.m_TileClassifyInstance, nullptr, 0u });
+                        R.m_Kernels.Add("tile_classify", { nullptr, 1, 0, 0, 16, "Render target: HDR colour", nullptr, true });
+                    }
                     R.m_Kernels.Add("tile", { nullptr, 12, 0, 0, 80, "Render target: HDR colour", nullptr, true });
                     R.m_RenderPasses.Add("Render target: HDR colour (the tile pass)", &View.m_TilePass);
                     R.m_pFullscreenVB = &m_FullscreenVB; R.m_pFullscreenIB = &m_FullscreenIB;
@@ -4438,7 +4453,7 @@ namespace xlionrender
                         , { "Lights: the screen tiles' lists", bLightTiles ? &View.m_LightTiles : &m_GIDummy }, { "Lights: lighting block", &m_LightUBO }, { "Geometry: view block", &m_StaticGeomUBO } };
                     for( const auto& [N, p] : Bs ) R.m_Buffers.Add(N, p);
                     { const auto C2W = W2C.Inverse(); R.SetFloats(R.Value("frame.c2w"), reinterpret_cast<const float*>(&C2W), 16); }
-                    R.SetU32(R.Value("tile.funnel"), m_TileCount.m_Private ? 1u : 0u); R.SetU32(R.Value("lights.tiles"), bLightTiles ? 1u : 0u);
+                    R.SetU32(R.Value("tile.funnel"), m_TileCount.m_Private ? 1u : 0u); R.SetU32(R.Value("tile.classify"), View.m_TileClassifyInstance.m_Private ? 1u : 0u); R.SetU32(R.Value("lights.tiles"), bLightTiles ? 1u : 0u);
                     if( View.m_TilePlan.m_Passes.empty() && View.m_TilePlan.m_Error.empty() )
                     {
                         View.m_TilePlan = stage::Lower(View.StageDesc("tile", details::TileStage()), R);

@@ -594,52 +594,67 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
     vec3 Sum = vec3(0.0);
     if (UBOLight.LocalCount.x < 0.5) return Sum;                       // (no lights: no cells either)
     const int Mode = int(UBOLight.LocalCount.y);
+    // The exact lights: one loop for the three lists - the screen tile's (Src 0), every light (1), the cell's head (2) - so the shader holds
+    // one copy of LocalLight there, not three (the tile variant was 1.1 MB of code at 128 registers with 2.7 KB of spills, 2026-11-10);
+    // each list summed in its own order as before (the same result)
+    int  Src = 2;
+    uint nList = 0u, ListAt = 0u;
 #ifdef XLION_TILE_PIXEL
     // the screen tile's list (an exact cull: every light reaching one of its pixels; the same nonzero terms in the cells' order)
     if (Mode <= 1 && LightTiles[1] != 0u)
     {
         const ivec2 Px = ivec2(gl_FragCoord.xy);
         const uint  t  = 16u + 16u * (uint(Px.y >> 3) * LightTiles[0] + uint(Px.x >> 3)), n = LightTiles[t];
-        if (n != 0xFFFFu)
+        if (n != 0xFFFFu) { LOCAL_COUNT(0u) LOCAL_COUNT(1u) Src = 0; nList = n; ListAt = t; }
+    }
+#endif
+    uint EntryBase = 0u, First = 0u, Count = 0u, Head = 0u;
+    bool bInlineTail = false;
+    if (Src != 0)
+    {
+        const int Cell = Mode == 0 ? -1 : LocalLightCell(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
+        LOCAL_COUNT(0u)
+        if (Cell < 0)
         {
-            LOCAL_COUNT(0u) LOCAL_COUNT(1u)
-            for (uint k = 0u; k < n; ++k) Sum += LocalLight(int((LightTiles[t + 1u + (k >> 1)] >> ((k & 1u) * 16u)) & 0xFFFFu), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
-            return Sum;
+            Src = 1; nList = uint(UBOLight.LocalCount.x);
+#ifdef XLION_TILE_PIXEL
+            if (((g_Tile.m_Graph >> 16u) & 8u) != 0u) atomicAdd(TileCount[8], nList);
+#endif
+        }
+        else
+        {
+            const uint Base   = uint(UBOLight.LocalBase.y);
+            const uint Header = LightCells[Base + 2u * uint(Cell) + 1u];      // the header: the first entry; the count (bits 0-23), the head count (24-31)
+            EntryBase = Base + uint(2 * kCellLevels * kLevelCells);
+            First = LightCells[Base + 2u * uint(Cell)]; Count = Header & 0xFFFFFFu; Head = Header >> 24;
+            nList = Mode == 1 ? Count : Head;
+            LOCAL_COUNT(1u)
+            bInlineTail = Mode == 2;
+#ifndef XLION_TAIL_SCREEN
+            if (Mode == 3 && Count > Head)
+            {
+                // the screen tail; where it does not apply - a silhouette it has no texel for, a blended surface, a material without a G-buffer
+                // variant - the inline resampled tail (unbiased, noisy); a hidden fragment (drawn over where no depth prepass ran) or a helper
+                // invocation: none. (The whole list instead cost 3.4 ms against 0.25 at the rig's 4096 lights: the overdraw's hidden fragments)
+                vec3 T;
+                const int Screen = LocalTailScreen(N, NdotV, Albedo, F0, PerceptualRoughness, Metallic, T);
+                if (Screen == 1) Sum = T;
+                bInlineTail = Screen == 0 && !gl_HelperInvocation;
+            }
+#endif
         }
     }
-#endif
-    const int Cell = Mode == 0 ? -1 : LocalLightCell(In.wSpacePosition.xyz + UBOLight.CameraPos.xyz);
-    LOCAL_COUNT(0u)
-    if (Cell < 0)
+    for (uint k = 0u; k < nList; ++k)
     {
-        const int Count = int(UBOLight.LocalCount.x);
 #ifdef XLION_TILE_PIXEL
-        if (((g_Tile.m_Graph >> 16u) & 8u) != 0u) atomicAdd(TileCount[8], uint(Count));
+        const int i = Src == 0 ? int((LightTiles[ListAt + 1u + (k >> 1)] >> ((k & 1u) * 16u)) & 0xFFFFu)
+                    : Src == 1 ? int(k) : int(LightCells[EntryBase + 2u * (First + k)]);
+#else
+        const int i = Src == 1 ? int(k) : int(LightCells[EntryBase + 2u * (First + k)]);
 #endif
-        for (int i = 0; i < Count; ++i) Sum += LocalLight(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
-        return Sum;
+        Sum += LocalLight(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
     }
-
-    const uint Base      = uint(UBOLight.LocalBase.y);
-    const uint Header    = LightCells[Base + 2u * uint(Cell) + 1u];      // the header: the first entry; the count (bits 0-23), the head count (24-31)
-    const uint EntryBase = Base + uint(2 * kCellLevels * kLevelCells);
-    const uint First     = LightCells[Base + 2u * uint(Cell)], Count = Header & 0xFFFFFFu, Head = Header >> 24;
-    const uint nExact = Mode == 1 ? Count : Head;
-    LOCAL_COUNT(1u)
-    bool bInlineTail = Mode == 2;
-#ifndef XLION_TAIL_SCREEN
-    if (Mode == 3 && Count > Head)
-    {
-        // the screen tail; where it does not apply - a silhouette it has no texel for, a blended surface, a material without a G-buffer
-        // variant - the inline resampled tail (unbiased, noisy); a hidden fragment (drawn over where no depth prepass ran) or a helper
-        // invocation: none. (The whole list instead cost 3.4 ms against 0.25 at the rig's 4096 lights: the overdraw's hidden fragments)
-        vec3 T;
-        const int Screen = LocalTailScreen(N, NdotV, Albedo, F0, PerceptualRoughness, Metallic, T);
-        if (Screen == 1) Sum = T;
-        bInlineTail = Screen == 0 && !gl_HelperInvocation;
-    }
-#endif
-    for (uint k = 0u; k < nExact; ++k) Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + k)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
+    if (Src != 2) return Sum;
 
     if (bInlineTail && Count > Head && abs(UBOLight.LocalCount.w) > 1.5)
     {

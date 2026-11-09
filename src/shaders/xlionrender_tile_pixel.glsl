@@ -1,6 +1,8 @@
 // A material's tile variant (XLION_TILE_PIXEL, the material compiler; material_tiles_plan.md): its graph, as compiled, shaded full-screen from what the G-buffer prepass kept: no second raster, no overdraw.
 // The pixel's material: the id's w; the block's vec4 before it says its graph (instance::SetMaterialTile): another graph's pixel waits for that graph's draw. A graph that reads what isn't kept (the second UV) has no variant: the compiler leaves it on the raster path
 #include "xlionrender_tile_attr.glsl"
+// (A5.2, XLION_TILE_CLASSIFY: the depth test before the fragment runs - another graph's pixel never shades; no depth is written here)
+layout(early_fragment_tests) in;
 layout(binding = 1) uniform sampler2D TileDepth;
 layout(binding = 2) uniform sampler2D TileNormal;
 layout(binding = 3) uniform sampler2D TileId;

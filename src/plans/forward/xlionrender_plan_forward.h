@@ -358,7 +358,15 @@ namespace xlionrender::details
     {
         const auto Rd = []( const char* p, const char* pIf = "" ) { return stage::binding{ p, rg::lifetime::RETAINED, rg::usage::STORAGE, false, rg::policy::NONE, pIf }; };
         const auto Tx = []( const char* p ) { return stage::binding{ p, rg::lifetime::FRAME, rg::usage::SAMPLED }; };
-        static const stage::desc D{ { { .m_Name = "tile pass (lighting)", .m_Kernel = "tile"
+        static const stage::desc D{ {
+              // (A5.2, XLION_TILE_CLASSIFY: each pixel's graph as the depth the graphs' draws test EQUAL - no item when off)
+              { .m_Name = "tile pass: classification", .m_Kernel = "tile_classify"
+            , .m_Buffers  = { { "Materials: material parameters", rg::lifetime::RETAINED } }
+            , .m_Textures = { { "Render target: prepass ids", rg::lifetime::FRAME, rg::usage::SAMPLED } }
+            , .m_Images   = { { "Render target: tile graphs", rg::lifetime::FRAME, rg::usage::DEPTH_ATTACHMENT, true, rg::policy::DISCARD } }
+            , .m_Push     = { { "", 0u }, { "", 0u }, { "", 0u }, { "", 0u } }
+            , .m_RenderPass = "Render target: HDR colour (the tile pass)", .m_Items = "tile.classify" }
+            , { .m_Name = "tile pass (lighting)", .m_Kernel = "tile"
             , .m_Buffers  = { Rd("GI: dummy", "never"), Rd("Frame: instance data"), Rd("Lights: light ring"), Rd("Lights: cell ring"), Rd("GI: screen buffer*"), Rd("GI: light ring"), Rd("GI: moment ring")
                             , Rd("Materials: material parameters"), Rd("Materials: entity parameters"), Rd("Render target: tail records")
                             , { "Tile pass: the light funnel's counters", rg::lifetime::RETAINED, rg::usage::STORAGE, true, rg::policy::PARTIAL, "tile.funnel" }
@@ -366,7 +374,8 @@ namespace xlionrender::details
             , .m_Textures = { Tx("Render target: depth"), Tx("Render target: prepass normals"), Tx("Render target: prepass ids"), Tx("Render target: tile attributes")
                             , Tx("Probes: environment DFG"), Tx("Probes: environment atlas"), Tx("Probes: probe atlas"), Tx("Render target: contact shadow"), Tx("Render target: sun shadow mask")
                             , Tx("Shadows: shadow atlas"), Tx("Shadows: white dummy") }
-            , .m_Images   = { { "Render target: HDR colour", rg::lifetime::FRAME, rg::usage::COLOR_ATTACHMENT, true, rg::policy::PRESERVE } }
+            , .m_Images   = { { "Render target: HDR colour", rg::lifetime::FRAME, rg::usage::COLOR_ATTACHMENT, true, rg::policy::PRESERVE }
+                            , { "Render target: tile graphs", rg::lifetime::FRAME, rg::usage::DEPTH_ATTACHMENT, false, rg::policy::NONE, "tile.classify" } }
             , .m_Push     = { { "frame.c2w" }, { "repeat.index" }, { "", 0u }, { "", 0u }, { "", 0u } }
             , .m_RenderPass = "Render target: HDR colour (the tile pass)", .m_Items = "tile.graphs", .m_UBOs = { "Geometry: view block", "Lights: lighting block" } } } };
         return D;

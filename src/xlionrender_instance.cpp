@@ -82,6 +82,12 @@ namespace xlionrender
         constexpr std::uint32_t s_GIClassifyFrag[] = {
             #include "xlionrender_gi_classify_frag.h"
         };
+        constexpr std::uint32_t s_TileClassifyFrag[] = {
+            #include "xlionrender_tile_classify_frag.h"
+        };
+        constexpr std::uint32_t s_TileVert[] = {
+            #include "xlionrender_tile_vert.h"
+        };
         constexpr std::uint32_t s_GIGatherFrag[] = {
             #include "xlionrender_gi_gather_frag.h"
         };
@@ -296,6 +302,7 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_GPreSkinPipeline));
         m_Device.Destroy(std::move(m_GPre2SPipeline));
         m_Device.Destroy(std::move(m_GIClassifyPipeline));
+        if( m_TileClassifyPipeline.m_Private ) m_Device.Destroy(std::move(m_TileClassifyPipeline));
         m_Device.Destroy(std::move(m_GIGatherPipeline));
         m_Device.Destroy(std::move(m_GIScreenDepthInstance));
         m_Device.Destroy(std::move(m_GIScreenDepthPipeline));
@@ -726,7 +733,7 @@ namespace xlionrender
                     if( const char* pTile = xlionrender::Env("XLION_TILE"); pTile && pTile[0] != '0' )      // (the tile pass: the attributes too)
                     {
                         if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPreTileFrag) }); Err ) return Err;
-                        if( auto Err = Device.Create(m_TileVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = SPIRV(s_FullscreenVert) }); Err ) return Err;
+                        if( auto Err = Device.Create(m_TileVert, { .m_Type = xgpu::shader::type::bit::VERTEX, .m_Sharer = TileClassify() ? SPIRV(s_TileVert) : SPIRV(s_FullscreenVert) }); Err ) return Err;
                     }
                     else if( auto Err = Device.Create(GPreFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GPrePassFrag) }); Err ) return Err;
                     std::vector<xgpu::pipeline::uniform_binds> RecBinds(UniformBinds.begin(), UniformBinds.end());
@@ -776,6 +783,18 @@ namespace xlionrender
                     Gather.m_DepthStencil.m_DepthCompare      = xgpu::pipeline::depth_stencil::depth_compare::EQUAL;
                     Gather.m_DepthStencil.m_bDepthWriteEnable = false;
                     if( auto Err = Device.Create(m_GIClassifyPipeline, Classify); Err ) return Err;
+                    if( TileClassify() )        // the tile pass's classification (A5.2): each pixel's graph as its depth - the graphs' draws tested EQUAL
+                    {
+                        xgpu::shader TileClassifyFrag;
+                        if( auto Err = Device.Create(TileClassifyFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_TileClassifyFrag) }); Err ) return Err;
+                        auto TCShaders = std::array<const xgpu::shader*, 2>{ &TileClassifyFrag, &GatherVert };
+                        auto TCBinds   = std::array{ ub{ .m_BindIndex = 9, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC } };      // (the materials' parameters)
+                        xgpu::pipeline::setup TC{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = TCShaders, .m_PushConstantsSize = sizeof(details::push_gi_gather), .m_UniformBinds = TCBinds, .m_Samplers = Samplers };
+                        TC.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
+                        TC.m_Blend.m_ColorWriteMask = 0;
+                        TC.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
+                        if( auto Err = Device.Create(m_TileClassifyPipeline, TC); Err ) return Err;
+                    }
                     if( auto Err = Device.Create(m_GIGatherPipeline, Gather); Err ) return Err;
                 }
             }
@@ -1586,8 +1605,9 @@ namespace xlionrender
             Setup.m_PushConstantsSize = 80;
             Setup.m_Blend = xgpu::pipeline::blend{};
             Setup.m_Primitive.m_Cull = xgpu::pipeline::primitive::cull::NONE;
-            Setup.m_DepthStencil.m_bDepthTestEnable  = false;
+            Setup.m_DepthStencil.m_bDepthTestEnable  = TileClassify();      // (A5.2: at its graph's depth, tested EQUAL against the classification)
             Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+            if( TileClassify() ) Setup.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::EQUAL;
         }
         // (a masked material is an opaque one with a discard: the same depth test and write in every pass - Tomas; its cutout in the prepass and here run the same test)
         if( bGBuffer )      // the thin G-buffer: opaque, its depth laid and tested (a masked one discards in its own code)
@@ -1916,7 +1936,12 @@ namespace xlionrender
             }
             if( auto Err = m_Device.Create(View.m_TileColor, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile attributes" }); Err ) return Err;
             Attachments.push_back(xgpu::renderpass::attachment{ View.m_TileColor });
-            auto TileAttachments = std::array{ xgpu::renderpass::attachment{ View.m_HDR } };
+            auto TileAttachments = std::vector{ xgpu::renderpass::attachment{ View.m_HDR } };
+            if( TileClassify() )        // (A5.2: the graphs' depth - written whole by the classification, so loaded, not cleared)
+            {
+                if( auto Err = m_Device.Create(View.m_TileGraphDepth, { .m_Format = xgpu::texture::format::DEPTH_F32, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: tile graphs" }); Err ) return Err;
+                TileAttachments.push_back(xgpu::renderpass::attachment{ View.m_TileGraphDepth });
+            }
             if( auto Err = m_Device.Create(View.m_TilePass, { .m_Attachments = TileAttachments, .m_bClearOnRender = false }); Err ) return Err;
         }
         Attachments.push_back(xgpu::renderpass::attachment{ View.m_Depth });
@@ -1934,6 +1959,8 @@ namespace xlionrender
             auto Textures = std::array<xgpu::texture*, 4>{ nullptr, &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId };
             auto Bindings = LitBindings(Textures, false);
             if( auto Err = m_Device.Create(View.m_GIClassifyInstance, { .m_PipeLine = m_GIClassifyPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
+            if( m_TileClassifyPipeline.m_Private )
+                if( auto Err = m_Device.Create(View.m_TileClassifyInstance, { .m_PipeLine = m_TileClassifyPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
             if( auto Err = m_Device.Create(View.m_GIGatherInstance,   { .m_PipeLine = m_GIGatherPipeline,   .m_SamplersBindings = Bindings }); Err ) return Err;
             if( auto Err = m_Device.Create(View.m_GIGatherTable, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * gather_table_uints_v, .m_pName = "GI: gather table" }); Err ) return Err;
         }
@@ -2121,6 +2148,8 @@ namespace xlionrender
         for( auto& I : View.m_TileInstances ) if( I.m_Private ) m_Device.Destroy(std::move(I));
         View.m_TileInstances.clear();
         if( View.m_TilePass.m_Private ) m_Device.Destroy(std::move(View.m_TilePass));
+        if( View.m_TileGraphDepth.m_Private ) m_Device.Destroy(std::move(View.m_TileGraphDepth));
+        if( View.m_TileClassifyInstance.m_Private ) m_Device.Destroy(std::move(View.m_TileClassifyInstance));
         for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1, &View.m_TileColor } ) if( p->m_Private ) m_Device.Destroy(std::move(*p));
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         if( View.m_LightTiles.m_Private ) ReleaseBuffer(View.m_LightTiles);
