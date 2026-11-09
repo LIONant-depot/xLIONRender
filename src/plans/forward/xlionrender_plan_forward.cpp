@@ -3824,6 +3824,29 @@ namespace xlionrender
                     auto Buffers  = std::array<xgpu::buffer*, 5>{ &View.m_GIScreenBuffer, &View.m_GIGatherTable, &View.m_AOPrev, &View.m_AO, &View.m_AORaw };
                     auto Textures = std::array<const xgpu::texture*, 4>{ &View.m_Depth, &View.m_GPreNormal, &View.m_GPreId, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };     // (last frame's lit image, XLION_SSGI's light)
                     const int GX = (View.m_GIScreenWidth + 7) / 8, GY = (View.m_GIScreenHeight + 7) / 8;
+                    if( View.m_bStageAO )
+                    {
+                        // (render graph: the AO from its description - xlionrender_stage_graph.h; hand-written below until retired)
+                        auto& R = View.m_Stages;
+                        if( R.m_Kernels.Find("ao") < 0 ) R.m_Kernels.Add("ao", { &m_AOCompute, 5, 4, 0, int(sizeof(details::push_ao)), "instance: m_AOCompute" });
+                        const char* BN[] = { "GI: screen buffer*", "GI: gather table", "GI: ambient occlusion (last frame)", "GI: ambient occlusion", "GI: ambient occlusion (raw)" };
+                        for( int b = 0; b < 5; ++b ) R.m_Buffers.Add(BN[b], Buffers[std::size_t(b)]);
+                        const char* TN[] = { "Render target: depth", "Render target: prepass normals", "Render target: prepass ids", "Render target: last frame's HDR" };
+                        for( int t = 0; t < 4; ++t ) R.m_Textures.Add(TN[t], Textures[std::size_t(t)]);
+                        R.SetU32(R.Value("gi.screen_width"), Push.m_W); R.SetU32(R.Value("gi.screen_height"), Push.m_H); R.SetU32(R.Value("gi.divisor"), Push.m_Div);
+                        R.SetU32(R.Value("ao.mode_raw"), s_bSSGI ? 4u : 0u); R.SetU32(R.Value("ao.mode_filter"), s_bSSGI ? 5u : 1u); R.SetU32(R.Value("ao.ssgi"), s_bSSGI ? 1u : 0u);
+                        R.SetFloats(R.Value("ao.radius"), &Push.m_Radius, 1); R.SetFloats(R.Value("ao.thickness"), &Push.m_Thickness, 1); R.SetFloats(R.Value("ao.pixels_per_unit"), &Push.m_PixelsPerUnit, 1);
+                        R.SetU32(R.Value("gi.table_base"), Push.m_TableBase); R.SetU32(R.Value("never"), 0u);
+                        R.SetSize(R.Value("gi.screen_size"), View.m_GIScreenWidth, View.m_GIScreenHeight);
+                        if( View.m_AOPlan.m_Passes.empty() && View.m_AOPlan.m_Error.empty() )
+                        {
+                            View.m_AOPlan = stage::Lower(View.StageDesc("ao", details::AOStage()), R);
+                            if( !View.m_AOPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: AO stage: %s\n", View.m_AOPlan.m_Error.c_str());
+                        }
+                    }
+                    if( View.m_bStageAO && View.m_AOPlan.m_Error.empty() ) stage::Run(View.m_AOPlan, View.m_Stages, Window, View.m_Graph);
+                    else
+                    {
                     if( s_bSSGI ) Push.m_Mode = 4u;
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                     Push.m_Mode = s_bSSGI ? 5u : 1u;
@@ -3835,6 +3858,7 @@ namespace xlionrender
                         for( const char* p : { "Render target: depth", "Render target: prepass normals", "Render target: prepass ids", "Render target: last frame's HDR" } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
                         G.Read(S, G.Resource("GI: gather table", rg::lifetime::FRAME), rg::usage::STORAGE);      // (read only: the CPU fills it)
                         for( const char* p : { "GI: ambient occlusion", "GI: screen buffer*" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
+                    }
                     }
                 }
                 View.m_bAOPrev = bAO;

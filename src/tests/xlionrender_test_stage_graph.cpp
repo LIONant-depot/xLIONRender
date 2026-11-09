@@ -68,7 +68,7 @@ int main( int argc, char** argv )
     stage::library FromText;
     {
         const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_stage_graph.txt").wstring();
-        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() } };
+        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() }, { "ao", xlionrender::details::AOStage() } };
         std::string Problem;
         { auto L = BuiltIn; xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, L, Problem), "the library written"); }
         { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, FromText, Problem) && Problem.empty(), "the library read: %s", Problem.c_str()); }
@@ -166,6 +166,7 @@ int main( int argc, char** argv )
         std::function<std::vector<output>(xlionrender::render_view&)> m_Outputs;
         std::function<const stage::plan&(xlionrender::render_view&)> m_Plan;
         std::vector<const char*>                                    m_OutNames;
+        bool                                                        m_bScopes = true;      // (its Frame graph scopes as the hand-written ones; false: the stage declares more exactly)
     };
     std::vector<test_case> Cases;
     {
@@ -182,6 +183,13 @@ int main( int argc, char** argv )
         Cases.push_back({ "reflection screen trace + reconstruction", S, { "reflections: screen trace", "reflections: temporal", "reflections: spatial" }, []( xlionrender::render_view& V, bool b ) { V.m_bStageReflSSR = V.m_bStageReflRecon = b; }
                         , []( xlionrender::render_view& V ) { return std::vector<output>{ { &V.m_TailResult, 16 }, { &V.m_ReflTemporal, 16 }, { &V.m_ReflHistory, 16 } }; }
                         , []( xlionrender::render_view& V ) -> const stage::plan& { return V.m_ReflReconPlan; }, { "the tail's records", "the temporal result", "the history" } });
+    }
+    {
+        auto S = Base;
+        S.m_GI.m_bAO = true;
+        Cases.push_back({ "ambient occlusion", S, { "AO (raw)", "AO (filtered)" }, []( xlionrender::render_view& V, bool b ) { V.m_bStageAO = b; }
+                        , []( xlionrender::render_view& V ) { return std::vector<output>{ { &V.m_AORaw, 8 }, { &V.m_AO, 8 }, { &V.m_GIScreenBuffer, 16 } }; }
+                        , []( xlionrender::render_view& V ) -> const stage::plan& { return V.m_AOPlan; }, { "the raw AO", "the AO", "the GI screen buffer" }, false });
     }
 
     const char* pOnly = std::getenv("XLION_SG_ONLY");
@@ -212,6 +220,8 @@ int main( int argc, char** argv )
                 auto& Wy = Why[v - 1];
                 if( !Wy.empty() ) continue;
                 for( const char* pScope : Ca.m_Scopes )
+                    if( !Ca.m_bScopes ) CHECK(!Scope(V[v].m_Graph.Text(), pScope).empty(), "%s: the scope '%s' ran", Ca.m_pName, pScope);
+                    else
                 {
                     const auto TA = Scope(V[0].m_Graph.Text(), pScope), TB = Scope(V[v].m_Graph.Text(), pScope);
                     CHECK(!TA.empty(), "%s: the scope '%s' ran", Ca.m_pName, pScope);

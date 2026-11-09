@@ -261,6 +261,31 @@ namespace xlionrender::details
         return D;
     }
 
+    // The ambient occlusion as a stage (xlionrender_ao_comp.glsl, on the GI read's grid): the raw AO from the G-buffer (and, XLION_SSGI,
+    // last frame's lit image), then its 4 x 4 filter into the AO and an "AO only" entry into each pixel of the GI screen buffer (its
+    // header: last frame's world to clip). The modes are frame values (XLION_SSGI: 4 and 5, else 0 and 1); last frame's AO is bound,
+    // not read (no history: each frame good on its own)
+    inline const stage::desc& AOStage( void ) noexcept
+    {
+        const auto Pass = []( const char* pName, bool bFilter )
+        {
+            const auto Tex = [&]( const char* p ) { return stage::binding{ p, rg::lifetime::FRAME, rg::usage::SAMPLED }; };
+            return stage::pass{ .m_Name = pName, .m_Kernel = "ao"
+                , .m_Buffers  = { { "GI: screen buffer*", rg::lifetime::FRAME, rg::usage::STORAGE, bFilter, bFilter ? rg::policy::PARTIAL : rg::policy::NONE, bFilter ? "" : "never" }
+                                , { "GI: gather table" }
+                                , { "GI: ambient occlusion (last frame)", rg::lifetime::HISTORY, rg::usage::STORAGE, false, rg::policy::NONE, "never" }
+                                , { "GI: ambient occlusion", rg::lifetime::FRAME, rg::usage::STORAGE, bFilter, bFilter ? rg::policy::FULL_OVERWRITE : rg::policy::NONE, bFilter ? "" : "never" }
+                                , { "GI: ambient occlusion (raw)", rg::lifetime::FRAME, rg::usage::STORAGE, !bFilter, bFilter ? rg::policy::NONE : rg::policy::FULL_OVERWRITE } }
+                , .m_Textures = { Tex("Render target: depth"), Tex("Render target: prepass normals"), Tex("Render target: prepass ids")
+                                , { "Render target: last frame's HDR", rg::lifetime::HISTORY, rg::usage::SAMPLED, false, rg::policy::NONE, bFilter ? "never" : "ao.ssgi" } }
+                , .m_Push     = { { "gi.screen_width" }, { "gi.screen_height" }, { "gi.divisor" }, { bFilter ? "ao.mode_filter" : "ao.mode_raw" }, { "ao.radius" }, { "ao.thickness" }, { "ao.pixels_per_unit" }
+                                , { "gi.table_base" }, { "", 0u }, { "", 0x3EA8F5C3u } }      // (0x3EA8F5C3: 0.33f, the history's blend - unused)
+                , .m_Size     = "gi.screen_size" };
+        };
+        static const stage::desc D{ { Pass("AO (raw)", false), Pass("AO (filtered)", true) } };
+        return D;
+    }
+
     // The reflections' screen trace as a stage (xlionrender_refl_ssr_comp.glsl): last frame's lit image at the ray's hit in this frame's
     // thin G-buffer, into the tail's records (last frame's image declared on the frames there is one: else the view's own HDR, cleared)
     inline const stage::desc& ReflScreenStage( void ) noexcept

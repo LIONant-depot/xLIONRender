@@ -65,20 +65,22 @@ namespace xlionrender
         bool                    m_bStageReflRecon = true;
         stage::plan             m_ReflSSRPlan;          // the reflections' screen trace
         bool                    m_bStageReflSSR = true;
-        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon; the RenderGraph
+        stage::plan             m_AOPlan;               // the ambient occlusion (raw + filtered)
+        bool                    m_bStageAO = true;
+        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon, ao; the RenderGraph
         // resource's, xlionrender_stage_graph_text.h): one that does not lower leaves its stage hand-written (and says why once)
         std::vector<std::pair<std::string, stage::desc>> m_StageDescs;
         void SetStageDesc( const std::string& Name, stage::desc D ) noexcept      // (no passes: the built-in again)
         {
             std::erase_if(m_StageDescs, [&]( const auto& P ) { return P.first == Name; });
             if( !D.m_Passes.empty() ) m_StageDescs.emplace_back(Name, std::move(D));
-            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {};
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {};
         }
         void SetStageDescs( std::vector<std::pair<std::string, stage::desc>> All ) noexcept      // (all of them at once: the RenderGraph bundle's; none: the built-in ones)
         {
             if( All == m_StageDescs ) return;
             m_StageDescs = std::move(All);
-            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {};
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {};
         }
         const stage::desc& StageDesc( std::string_view Name, const stage::desc& BuiltIn ) const noexcept
         {
