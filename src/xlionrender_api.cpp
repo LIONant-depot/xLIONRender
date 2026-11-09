@@ -174,6 +174,7 @@ namespace xlionrender
                     for (const auto T : post::Insertable(pSystem->m_pScene->m_View.m_PostDesc, std::atoi(pEdit + 11))) Reply += std::string(post::node_names_v[std::size_t(T)]) + " ";
                     bOk = true;
                 }
+                else if (E == "source") { Reply = std::format("{:016X}", pSystem->m_pScene->m_RenderGraph); bOk = true; }      // (the RenderGraph the chain comes from; 0: the built-in one)
                 else if (E == "describe") { const auto& V = pSystem->m_pScene->m_View; Reply = post::Describe(V.m_PostDesc, V.m_PostPlan, V.m_PostError, V.m_PostSnapshot, V.m_PostNoted, V.m_PostRan); bOk = true; }      // (the Post chain view's text, for the console)
                 else bOk = post::Edit(pSystem->m_pScene->m_View.m_PostDesc, E, Reply);
                 if (pOut && Capacity > 0) { const std::size_t n = std::min<std::size_t>(Reply.size(), static_cast<std::size_t>(Capacity - 1)); std::memcpy(pOut, Reply.data(), n); pOut[n] = 0; }
