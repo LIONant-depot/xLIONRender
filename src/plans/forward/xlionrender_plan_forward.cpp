@@ -2693,8 +2693,34 @@ namespace xlionrender
                 auto SBuffers  = std::array<xgpu::buffer*, 2>{ &m_ReflFrames, &View.m_TailResult };
                 auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };      // (m_HDRPrev: m_HDR itself is cleared by the prepass)
                 Window.WriteTimestamp(m_ReflSSRTimes, 0);
-                Window.Dispatch(m_ReflSSR, SBuffers, STextures, &SPush, sizeof(SPush), (W + 7) / 8, (H + 7) / 8);
+                if( View.m_bStageReflSSR )
                 {
+                    // (render graph R2: the screen trace from its description - xlionrender_stage_graph.h; hand-written below until retired)
+                    auto& R = View.m_Stages;
+                    if( R.m_Kernels.Find("refl_ssr") < 0 ) R.m_Kernels.Add("refl_ssr", { &m_ReflSSR, 2, 3, 0, 32, "instance: m_ReflSSR" });
+                    R.m_Buffers.Add("Frame: reflection frames", &m_ReflFrames);
+                    R.m_Buffers.Add("Render target: tail records", &View.m_TailResult);
+                    R.m_Textures.Add("Render target: tail colour", &View.m_TailGColor);
+                    R.m_Textures.Add("Render target: tail depth", &View.m_TailGDepth);
+                    R.m_Textures.Add("Render target: last frame's HDR", STextures[2]);
+                    R.SetU32(R.Value("refl.slot"), SPush.m_Slot);
+                    R.SetU32(R.Value("refl.ssr_frame"), SPush.m_Frame);
+                    R.SetU32(R.Value("refl.ssr_steps"), SPush.m_Steps);
+                    R.SetFloats(R.Value("refl.ssr_max_dist"), &SPush.m_MaxDist, 1);
+                    R.SetFloats(R.Value("refl.ssr_thickness"), &SPush.m_Thickness, 1);
+                    R.SetFloats(R.Value("refl.ssr_max_rough"), &SPush.m_MaxRough, 1);
+                    R.SetU32(R.Value("view.hdr_prev"), View.m_bHDRPrev ? 1u : 0u);
+                    R.SetSize(R.Value("refl.size"), W, H);
+                    if( View.m_ReflSSRPlan.m_Passes.empty() && View.m_ReflSSRPlan.m_Error.empty() )
+                    {
+                        View.m_ReflSSRPlan = stage::Lower(details::ReflScreenStage(), R);
+                        if( !View.m_ReflSSRPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: reflection screen trace stage: %s\n", View.m_ReflSSRPlan.m_Error.c_str());
+                    }
+                }
+                if( View.m_bStageReflSSR && View.m_ReflSSRPlan.m_Error.empty() ) stage::Run(View.m_ReflSSRPlan, View.m_Stages, Window, View.m_Graph);
+                else
+                {
+                Window.Dispatch(m_ReflSSR, SBuffers, STextures, &SPush, sizeof(SPush), (W + 7) / 8, (H + 7) / 8);
                     auto& G = View.m_Graph;
                     const int S = G.Begin("reflections: screen trace", "instance: m_ReflSSR");
                     G.Read(S, G.Resource("Frame: reflection frames", rg::lifetime::FRAME), rg::usage::STORAGE);

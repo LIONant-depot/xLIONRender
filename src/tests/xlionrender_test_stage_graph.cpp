@@ -3,7 +3,7 @@
 // description (view B), the stage's own outputs read back each frame - equal bit for bit (the lit image is not: two views of the prepass
 // path differ by their frame-indexed noise) - and its Frame graph scopes the same accesses. First A against A (both hand-written): if two
 // views differ the harness is not trusted. Stages: the light tiles (local lights; XLION_TILE=1 and cluster geometry - the G-buffer
-// prepass's depth), the reflections' reconstruction (screen reflections).
+// prepass's depth), the reflections' screen trace and reconstruction (screen reflections).
 //   xlionrender_test_stage_graph [frames]
 #include "xlionrender_test_common.h"
 #include "plans/forward/xlionrender_plan_forward.h"
@@ -143,7 +143,7 @@ int main( int argc, char** argv )
     {
         auto S = Base;
         S.m_bReflectionScreen = true; S.m_bReflectionReconstruct = true;
-        Cases.push_back({ "reflection reconstruction", S, { "reflections: temporal", "reflections: spatial" }, []( xlionrender::render_view& V, bool b ) { V.m_bStageReflRecon = b; }
+        Cases.push_back({ "reflection screen trace + reconstruction", S, { "reflections: screen trace", "reflections: temporal", "reflections: spatial" }, []( xlionrender::render_view& V, bool b ) { V.m_bStageReflSSR = V.m_bStageReflRecon = b; }
                         , []( xlionrender::render_view& V ) { return std::vector<output>{ { &V.m_TailResult, 16 }, { &V.m_ReflTemporal, 16 }, { &V.m_ReflHistory, 16 } }; }
                         , []( xlionrender::render_view& V ) -> const stage::plan& { return V.m_ReflReconPlan; }, { "the tail's records", "the temporal result", "the history" } });
     }

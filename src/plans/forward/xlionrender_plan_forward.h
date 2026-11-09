@@ -261,6 +261,19 @@ namespace xlionrender::details
         return D;
     }
 
+    // The reflections' screen trace as a stage (xlionrender_refl_ssr_comp.glsl): last frame's lit image at the ray's hit in this frame's
+    // thin G-buffer, into the tail's records (last frame's image declared on the frames there is one: else the view's own HDR, cleared)
+    inline const stage::desc& ReflScreenStage( void ) noexcept
+    {
+        static const stage::desc D{ { { .m_Name = "reflections: screen trace", .m_Kernel = "refl_ssr"
+            , .m_Buffers  = { { "Frame: reflection frames" }, { "Render target: tail records", rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::FULL_OVERWRITE } }
+            , .m_Textures = { { "Render target: tail colour", rg::lifetime::FRAME, rg::usage::SAMPLED }, { "Render target: tail depth", rg::lifetime::FRAME, rg::usage::SAMPLED }
+                            , { "Render target: last frame's HDR", rg::lifetime::HISTORY, rg::usage::SAMPLED, false, rg::policy::NONE, "view.hdr_prev" } }
+            , .m_Push     = { { "refl.slot" }, { "", 0u }, { "refl.ssr_frame" }, { "refl.ssr_steps" }, { "refl.ssr_max_dist" }, { "refl.ssr_thickness" }, { "refl.ssr_max_rough" }, { "", 0u } }
+            , .m_Size     = "refl.size" } } };
+        return D;
+    }
+
     // The reflections' reconstruction as a stage (xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then
     // spatial, on the tail's records; the history read by the temporal pass on the frames it is valid, written by the spatial one
     inline const stage::desc& ReflReconStage( void ) noexcept
