@@ -5003,12 +5003,25 @@ namespace xlionrender
             // (last frame's lit image for the next frame's screen reads: the prepass clears m_HDR - they had read black)
             static const bool s_bSSGIPrev = xlionrender::Env("XLION_SSGI") != nullptr || xlionrender::Env("XLION_VOX_SEEN") != nullptr;      // (and the voxels' lit feed)
             runDeferredVox(Window);      // (not run yet - no gather this frame: here, in the frame)
+            // The render graph (R0b): the post chain's scopes declared as they record. m_HDR is this frame's lit image (a version the scene
+            // passes made: imported here, valid); the histories (last HDR, TAA, exposure) keep their versions across frames
+            auto& G = View.m_Graph;
+            G.BeginFrame();
+            const int rgHDR   = G.Resource("Render target: HDR colour", rg::lifetime::EXTERNAL);
+            const int rgDepth = G.Resource("Render target: depth", rg::lifetime::EXTERNAL);
+            const int rgPrev  = G.Resource("Render target: last frame's HDR", rg::lifetime::HISTORY);
+            const int rgExpo  = G.Resource("Render target: exposure", rg::lifetime::HISTORY);
+            const int rgOut   = G.Resource("Render target: tone-mapped output", rg::lifetime::EXTERNAL);
+            const int rgTAA[2] = { G.Resource("Render target: TAA#0", rg::lifetime::HISTORY), G.Resource("Render target: TAA#1", rg::lifetime::HISTORY) };
+            const auto rgBloom = [&](int i) { return G.Resource("Render target: bloom#" + std::to_string(i), rg::lifetime::FRAME); };
+            { const int S = G.Begin("scene (imported)", "", false); G.Write(S, rgHDR, rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE); G.Write(S, rgDepth, rg::usage::DEPTH_ATTACHMENT, rg::policy::FULL_OVERWRITE); }
             if( s_bSSGIPrev || ReflectionScreen(Scene) )
             {
                 if( !View.m_HDRPrev.m_Private ) (void)m_Device.Create(View.m_HDRPrev, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: last frame's HDR" });
                 // (the async rays may still read m_HDRPrev: the copy at the next Render's start, before anything reads it)
                 if( View.m_HDRPrev.m_Private && m_bAsyncVoxThisFrame ) { View.m_HDRPrevPendingW = View.m_Width; View.m_HDRPrevPendingH = View.m_Height; }
-                else if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true; }
+                else if( View.m_HDRPrev.m_Private ) { Window.CopyTexture(View.m_HDR, View.m_HDRPrev, View.m_Width, View.m_Height); View.m_bHDRPrev = true;
+                    const int S = G.Begin("last frame's HDR", "copy Render target: HDR colour"); G.Read(S, rgHDR, rg::usage::TRANSFER_SRC); G.Write(S, rgPrev, rg::usage::TRANSFER_DST, rg::policy::FULL_OVERWRITE); }
             }
             static const float s_EnvExposure = [] { const char* p = xlionrender::Env("XLION_EXPOSURE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: a fixed exposure with auto exposure off - graded lit images)
             if( s_EnvExposure > 0.0f ) View.m_Exposure = s_EnvExposure;
@@ -5029,6 +5042,7 @@ namespace xlionrender
                         struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Fill{ View.m_Width, View.m_Height, 3, 0.0f };
                         const xgpu::texture* T[] = { &View.m_HDR, &View.m_ExposureTex }; const xgpu::texture* I[] = { &View.m_TAA[i] };
                         Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Fill, sizeof(Fill), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
+                        const int S = G.Begin("TAA history init", "instance: m_PostCompute"); G.Read(S, rgHDR, rg::usage::SAMPLED); G.Write(S, rgTAA[i], rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
                     }
                     View.m_bTAAHistory = false;
                 }
@@ -5037,17 +5051,35 @@ namespace xlionrender
                 struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, s_TAABlendEnv > 0.0f ? s_TAABlendEnv : Scene.m_Post.m_TAABlend, View.m_bTAAHistory ? 1.0f : 0.0f };
                 const xgpu::texture* T[] = { &View.m_HDR, &View.m_Depth, &View.m_TAA[1 - Cur] }; const xgpu::texture* I[] = { &View.m_TAA[Cur] };
                 Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
+                { const int S = G.Begin("TAA", "instance: m_TAACompute"); G.Read(S, rgHDR, rg::usage::SAMPLED); G.Read(S, rgDepth, rg::usage::SAMPLED); G.Read(S, rgTAA[1 - Cur], rg::usage::SAMPLED); G.Write(S, rgTAA[Cur], rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
                 pHDR = &View.m_TAA[Cur]; pToneMap = &View.m_ToneMapTAA[Cur];
                 View.m_TAAPrevW2C = W2CNoJitter; View.m_TAAPrevEye = Eye; View.m_bTAAHistory = true; ++View.m_TAAFrame;
             }
             else View.m_bTAAHistory = false;
             {
                 struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{};
+                const int rgSrcHDR = pHDR == &View.m_HDR ? rgHDR : pHDR == &View.m_TAA[1] ? rgTAA[1] : rgTAA[0];
+                const auto rgOf = [&](const xgpu::texture& X) -> int
+                {
+                    if( &X == &View.m_HDR ) return rgHDR;
+                    if( &X == &View.m_ExposureTex ) return rgExpo;
+                    if( &X == &View.m_TAA[0] ) return rgTAA[0];
+                    if( &X == &View.m_TAA[1] ) return rgTAA[1];
+                    for( int i = 0; i < int(View.m_Bloom.size()); ++i ) if( &X == &View.m_Bloom[i] ) return rgBloom(i);
+                    return rgSrcHDR;
+                };
                 const auto Run = [&](const xgpu::texture& Src, const xgpu::texture& Dst, int W, int H)
                 {
                     const xgpu::texture* T[] = { &Src, &View.m_HDR }; const xgpu::texture* I[] = { &Dst };
                     if( &Dst != &View.m_ExposureTex ) T[1] = &View.m_ExposureTex;      // (read: the threshold; the exposure's own pass writes it)
                     Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, T, I, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
+                    // (the exposure's update (mode 2) reads its own last value: preserve; the rest overwrite their target)
+                    const bool bExpo = &Dst == &View.m_ExposureTex;
+                    const int  S = G.Begin(bExpo ? "exposure" : Push.m_Mode == 1 ? "bloom up" : Push.m_Mode == 3 ? "post init" : "bloom down", "instance: m_PostCompute");
+                    G.Read(S, rgOf(Src), rg::usage::SAMPLED);
+                    G.Read(S, bExpo ? rgHDR : rgExpo, rg::usage::SAMPLED);      // (the exposure's pass has this frame's HDR bound in that slot)
+                    if( Push.m_Mode == 1 ) G.Read(S, rgOf(Dst), rg::usage::SAMPLED);      // (the upsample adds onto its level)
+                    G.Write(S, rgOf(Dst), rg::usage::STORAGE, bExpo && Push.m_Mode == 2 ? rg::policy::PRESERVE : Push.m_Mode == 1 ? rg::policy::PRESERVE : rg::policy::FULL_OVERWRITE);
                 };
                 const auto Size = [&](int i) { return std::array<int, 2>{ std::max(View.m_Width >> (i + 1), 1), std::max(View.m_Height >> (i + 1), 1) }; };
                 if( !View.m_bPostReady )
@@ -5091,6 +5123,14 @@ namespace xlionrender
             Cmd.Draw(3);
             Cmd.WriteTimestamp(m_Timestamps, 3);
             if( pTS ) Cmd.WriteTimestamp(*pTS, 5);
+            {
+                const int S = G.Begin("tone map", "Render target: tone-mapped output");
+                G.Read(S, pHDR == &View.m_HDR ? rgHDR : pHDR == &View.m_TAA[1] ? rgTAA[1] : rgTAA[0], rg::usage::SAMPLED);
+                if( Bloom > 0.0f ) G.Read(S, rgBloom(0), rg::usage::SAMPLED);
+                G.Read(S, rgExpo, rg::usage::SAMPLED);
+                G.Write(S, rgOut, rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE);
+            }
+            G.Dump();
         }
         // XLION_NOISE_LAGS="<seconds to wait> <frames>" (measurement, Tomas 2026-11-06): the noise of the tone-mapped image by how far apart in time, at the
         // real frame rate - every 4th pixel's luminance a frame into a CPU-readable ring (xlionrender_noise_lags_comp.glsl), compared on the CPU at lags

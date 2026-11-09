@@ -12,6 +12,7 @@
 
 #include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xmath/source/xmath.h"
+#include "../xlionrender_render_graph.h"
 
 namespace xlionrender
 {
@@ -52,6 +53,7 @@ namespace xlionrender
         std::array<xgpu::pipeline_instance, 2> m_ToneMapTAA;
         int                     m_TAAFrame = 0;
         bool                    m_bTAAHistory = false;
+        rg::graph               m_Graph;                // the render graph's declarations (R0b: the post chain's scopes; xlionrender_render_graph.h)
         xmath::fmat4            m_TAAPrevW2C{};         // without the jitter
         xmath::fvec3            m_TAAPrevEye{};
         // XLION_HEAT (measurement): the GI gather's clock a pixel (4-uint header, then the gather's grid), its colours (xlionrender_heat_comp.glsl),
