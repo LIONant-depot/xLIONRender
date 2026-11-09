@@ -150,6 +150,20 @@ namespace xlionrender
                 }
                 return static_cast<int>(Text.size());
             }
+            int           DescribePost(const void* pWorld, char* pOut, int Capacity) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                if (!pSystem) return -1;
+                std::string Text;
+                if (pSystem->m_pScene) { const auto& V = pSystem->m_pScene->m_View; Text = post::Describe(V.m_PostDesc, V.m_PostPlan, V.m_PostError, V.m_PostSnapshot, V.m_PostNoted, V.m_PostRan); }
+                if (pOut && Capacity > 0)
+                {
+                    const std::size_t n = std::min<std::size_t>(Text.size(), static_cast<std::size_t>(Capacity - 1));
+                    std::memcpy(pOut, Text.data(), n);
+                    pOut[n] = 0;
+                }
+                return static_cast<int>(Text.size());
+            }
             std::uint64_t PickPixel(const void* pWorld, int X, int Y, float* pDistance) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);

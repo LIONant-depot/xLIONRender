@@ -53,7 +53,7 @@ namespace xlionrender
     // the host's (xgpu, xmath) or a world address / raw entity value, never an xecs type. Release() frees it.
     struct xRenderEditor
     {
-        static constexpr std::uint32_t kVersion = 16;               // 16: DescribeGraph (the render graph's last frame: the editor's view); 15: PickPixel's distance; 14: PickPixel (the G-buffer prepass's id under the mouse); 13: view_options::m_bPathTraced (the path traced ground truth on a Level); 12: view_options::m_bNoGPUCull / m_bNoGPUOcclusion / m_bFreezeCull (GPU cluster culling), DescribeScene's GPUCull lines; 11: OldMaterials, UpgradeOldMaterials (old files' MeshMaterial into the Mesh's slots); 10: NotDrawnBoxes and view_options::m_bBoxesOnly / m_FrameBudgetMs (huge meshes: drawn as their boxes, or as many clusters as a frame budget allows); 9: GITraceMs and view_options::m_GITraceAllowanceMs (the host's shared GI allowance); 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
+        static constexpr std::uint32_t kVersion = 17;               // 17: DescribePost (the post chain: recipe, parameters, expanded passes); 16: DescribeGraph (the render graph's last frame: the editor's view); 15: PickPixel's distance; 14: PickPixel (the G-buffer prepass's id under the mouse); 13: view_options::m_bPathTraced (the path traced ground truth on a Level); 12: view_options::m_bNoGPUCull / m_bNoGPUOcclusion / m_bFreezeCull (GPU cluster culling), DescribeScene's GPUCull lines; 11: OldMaterials, UpgradeOldMaterials (old files' MeshMaterial into the Mesh's slots); 10: NotDrawnBoxes and view_options::m_bBoxesOnly / m_FrameBudgetMs (huge meshes: drawn as their boxes, or as many clusters as a frame budget allows); 9: GITraceMs and view_options::m_GITraceAllowanceMs (the host's shared GI allowance); 8: EntityBox (an entity's box in the world: the editor's selection outline and the camera's frame); 7: SetViewOptions (the editor's GI view, not saved); 6: DumpGI (the GI's surfels to a file); 5: RenderScene, BlitScene, DescribeScene (the world's Meshes and lights through the forward renderer); 4: DrawRoles, PickRoles, DescribeRoleDraw (editing in context: context scenes drawn faded, never picked); 3: Draw and Pick say which view asks
         virtual std::uint32_t Version() const noexcept = 0;
         virtual void          Release() noexcept = 0;
         virtual bool          Init(xgpu::device& Device) noexcept = 0;
@@ -107,6 +107,9 @@ namespace xlionrender
         // by tabs). Returns the whole text's length (copied up to Capacity - 1, zero ended): call again with more room if it is larger;
         // -1: no such world. Call between frames. Version 16
         virtual int           DescribeGraph(const void* pWorld, char* pOut, int Capacity) noexcept = 0;
+        // The post chain of the world's view (post::Describe: its nodes, parameters with their effective values, the passes it expands to and
+        // whether each ran last frame), as DescribeGraph returns text. Version 17
+        virtual int           DescribePost(const void* pWorld, char* pOut, int Capacity) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";

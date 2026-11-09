@@ -274,6 +274,37 @@ namespace xlionrender::post
         }
     }
 
+    // The chain as the editor shows it (xRenderEditor::DescribePost), a line each, fields split by tabs:
+    //      E <the description's error>
+    //      N <index> <type>                                                    the authored nodes, in order
+    //      P <name> <value> <source> <min> <max> <the Scene's value when clamped, else empty>
+    //      X <node> <ran 0|1> <source map> <scope> <kernel> <W> <H> <groups x> <groups y> <runs when>     the frame's passes
+    //      I <node> 0 <source map> <scope> <kernel> <W> <H> <groups x> <groups y> <runs when>             the initialisations
+    inline std::string Describe( const desc& D, const plan& P, const std::string& Error, const std::vector<float>& Snapshot, const std::vector<float>& Noted, const std::vector<std::uint8_t>& Ran ) noexcept
+    {
+        static constexpr const char* s_Types[]  = { "TAA", "Bloom", "Exposure", "Tone map" };
+        static constexpr const char* s_Kernel[] = { "taa (compute)", "post (compute)", "tone map (raster)" };
+        static constexpr const char* s_When[]   = { "always", "TAA on", "Bloom > 0", "AutoExposure on" };
+        std::string T;
+        if( !Error.empty() ) T += "E\t" + Error + "\n";
+        for( std::size_t i = 0; i < D.m_Nodes.size(); ++i ) T += std::format("N\t{}\t{}\n", i, s_Types[std::size_t(D.m_Nodes[i].m_Type)]);
+        for( std::size_t i = 0; i < P.m_Params.size(); ++i )
+        {
+            const auto& R = P.m_Params[i];
+            const std::string Src = R.m_Source >= 0 ? std::string(sources_v[std::size_t(R.m_Source)].m_Name) : std::string("(default)");
+            const float V = i < Snapshot.size() ? Snapshot[i] : R.m_Default;
+            const std::string Raw = i < Noted.size() && !std::isnan(Noted[i]) ? std::format("{}", Noted[i]) : std::string();
+            T += std::format("P\t{}\t{}\t{}\t{}\t{}\t{}\n", R.m_Name, R.m_Type == param_type::BOOL ? (V > 0.5f ? "on" : "off") : std::format("{}", V), Src, R.m_Min, R.m_Max, Raw);
+        }
+        const auto Pass = [&](char K, const pass& Pa, bool bRan)
+        {
+            T += std::format("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", K, Pa.m_Node, bRan ? 1 : 0, Pa.m_Source, Pa.m_Scope, s_Kernel[std::size_t(Pa.m_Kernel)], Pa.m_W, Pa.m_H, Pa.m_GroupsX, Pa.m_GroupsY, s_When[std::size_t(Pa.m_When)]);
+        };
+        for( std::size_t i = 0; i < P.m_Passes.size(); ++i ) Pass('X', P.m_Passes[i], i < Ran.size() && Ran[i]);
+        for( const auto& Pa : P.m_Inits ) Pass('I', Pa, false);
+        return T;
+    }
+
     // A pass's push words from the snapshot (the frame's own words - sizes, mode, matrices - written by the caller)
     inline void FillSlots( const pass& Pa, const std::vector<float>& Snapshot, float Dt, float ViewExposure, void* pPush ) noexcept
     {

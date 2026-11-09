@@ -5239,6 +5239,7 @@ namespace xlionrender
                 {
                     View.m_PostPlan = post::Lower(View.m_PostDesc, View.m_Width, View.m_Height);
                     View.m_PostPlanW = View.m_Width; View.m_PostPlanH = View.m_Height; View.m_PostPlanDesc = View.m_PostDesc;
+                    View.m_PostError = View.m_PostPlan.m_Error;
                     if( !View.m_PostPlan.m_Error.empty() )      // (an invalid description: the lit image tone mapped, nothing else)
                     {
                         std::printf("Post chain: %s - tone map only\n", View.m_PostPlan.m_Error.c_str()); std::fflush(stdout);
@@ -5358,11 +5359,13 @@ namespace xlionrender
                         for( const auto& P : Plan.m_Inits ) if( P.m_When != post::when::TAA_ON && !(View.m_bExposureReady && P.m_Dst.m_Image == post::image::EXPOSURE) ) Exec(P);
                         View.m_bPostReady = View.m_bExposureReady = true;
                     }
+                    View.m_PostRan.assign(Plan.m_Passes.size(), 0);
                     for( const auto& P : Plan.m_Passes )
                     {
-                        if( P.m_Kernel == post::kernel::TONE_MAP ) { Exec(P); continue; }     // (always: the graph's root)
-                        if( !On(P.m_When) ) continue;
+                        if( P.m_Kernel != post::kernel::TONE_MAP && !On(P.m_When) ) continue;      // (the tone map always: the graph's root)
+                        View.m_PostRan[std::size_t(&P - Plan.m_Passes.data())] = 1;
                         Exec(P);
+                        if( P.m_Kernel == post::kernel::TONE_MAP ) continue;
                         if( P.m_Kernel == post::kernel::TAA )
                         {
                             const int Cur = View.m_TAAFrame & 1;

@@ -58,7 +58,9 @@ namespace xlionrender
         post::desc              m_PostDesc = post::desc::Default();     // the post chain (xlionrender_post_graph.h; as text: xlionrender_post_graph_text.h) - set it to change the chain
         post::plan              m_PostPlan;             // m_PostDesc lowered for this view's size: made again when either changes
         post::desc              m_PostPlanDesc;
-        std::vector<float>      m_PostSnapshot, m_PostNoted;    // the frame's parameter values (post::SnapshotParams), and the clamps already reported
+        std::vector<float>      m_PostSnapshot, m_PostNoted;
+        std::vector<std::uint8_t> m_PostRan;            // the last frame: which of the plan's passes ran (its settings skip some) - the editor's view
+        std::string             m_PostError;            // the description's error when it did not lower (the chain then tone maps only)    // the frame's parameter values (post::SnapshotParams), and the clamps already reported
         int                     m_PostPlanW = 0, m_PostPlanH = 0;
         float                   m_PostFixedDt = -1.0f;
         const render_view*      m_pPostInputs = nullptr;    // the harness: the post chain starts from this view's lit image (copied in; same size), so two views' chains see the same input  // >= 0: the auto exposure's step in seconds instead of the wall clock (the harness: two views, the same adaptation)                // the render graph's declarations (R0b: the post chain's scopes; xlionrender_render_graph.h)
