@@ -493,6 +493,8 @@ namespace xlionrender
 
         // The GI's material capture: its target, pass, the quads (4 corners a surfel, twice: albedo and emission) and their indices
         if( auto Err = Device.Create(m_GICaptureTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = gi_capture_w_v, .m_Height = gi_capture_h_v, .m_isGamma = false, .m_pName = "GI: capture target" }); Err ) return Err;
+        // (read back through a buffer the frame copies it into: a ReadTexture's own submit made NVIDIA's driver keep 12 allocations of each)
+        if( auto Err = Device.Create(m_GICaptureReadB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = gi_capture_w_v * gi_capture_h_v, .m_pName = "GI: capture read back" }); Err ) return Err;
         {
             // Cleared to 0: a texel a cut out (alpha tested) material discards reads back as no albedo and no emission - the pass's default
             // clear (0.45 gray) made every cut out surfel emit 0.45, a light at EmissiveScale

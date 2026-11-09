@@ -4578,6 +4578,7 @@ namespace xlionrender
                     }
             });
 
+            {
             auto  Cmd = Window.StartRenderPass(m_GICapturePass);
             auto& ViewBlock = m_StaticGeomUBO.allocEntry<details::ubo_geom_view>();
             std::memset(&ViewBlock, 0, sizeof(ViewBlock));
@@ -4608,6 +4609,8 @@ namespace xlionrender
                 }
                 a = b;
             }
+            }
+            Window.CopyTextureToBuffer(m_GICaptureTex, m_GICaptureReadB);      // (read when the frame is done: below)
             J.m_bRecorded = true;
             J.m_Frame     = Frame;
             return;
@@ -4622,7 +4625,9 @@ namespace xlionrender
             if( All > 500 ) std::printf("GICAPTURE %.0f ms: read back %.0f, unpack %.0f, surfel/triangle albedo %.0f, emission %.0f, all albedo %.0f, buildMeshGI %.0f\n", All, p[0], p[1], p[2], p[3], p[4], p[5]), std::fflush(stdout); } } CapReport{ CapMs, TCap };
         std::vector<std::byte> Raw;
         int W = 0, H = 0;
-        const bool bRead = m_Device.ReadTexture(m_GICaptureTex, Raw, W, H) == nullptr;
+        Raw.resize(std::size_t(gi_capture_w_v) * gi_capture_h_v * 8);
+        const bool bRead = m_GICaptureReadB.MemoryMap(0, gi_capture_w_v * gi_capture_h_v, [&](void* p) { std::memcpy(Raw.data(), p, Raw.size()); }) == nullptr;
+        W = gi_capture_w_v; H = gi_capture_h_v;
         CapLap(0);
         if( bRead && W == gi_capture_w_v && H == gi_capture_h_v )
         {

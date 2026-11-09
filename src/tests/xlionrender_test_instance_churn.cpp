@@ -72,6 +72,25 @@ namespace
     {
         static const int s_Stage = [] { const char* p = xlionrender::Env("XLION_CHURN_STAGE"); return p ? std::atoi(p) : 9; }();      // (bisection: -1 one compute pipeline 50 times, 0 Init only, 1 + a view, 2 + meshes, 9 all)
         if (s_Stage == -2 || s_Stage == -3) return GraphicsChurn(App, s_Stage == -2);      // (-2: Device.Destroy, -3: the handles dropped)
+        if (s_Stage == -7)      // (-7: one texel read back 50 times - the setup command buffer's submit and wait, as the editor's click)
+        {
+            static xgpu::texture s_Tex;
+            if (!s_Tex.m_Private && App.m_Device.Create(s_Tex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 64, .m_Height = 64, .m_isGamma = false })) return false;
+            std::vector<std::byte> Out; int W = 0, H = 0;
+            for (int k = 0; k < 50; ++k) if (App.m_Device.ReadTexture(s_Tex, Out, W, H, 3, 3, 1, 1)) return false;
+            return true;
+        }
+        if (s_Stage == -8)      // (-8: a host-visible buffer made, written and destroyed 50 times)
+        {
+            for (int k = 0; k < 50; ++k)
+            {
+                xgpu::buffer B;
+                if (App.m_Device.Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 64 })) return false;
+                (void)B.MemoryMap(0, 64, [](void* p) { std::memset(p, 0, 64 * 16); });
+                App.m_Device.Destroy(std::move(B));
+            }
+            return true;
+        }
         if (s_Stage == -4 || s_Stage == -5 || s_Stage == -6)      // (-4: a render target, -5: a texture with data, -6: a render target and its pass)
         {
             for (int k = 0; k < 50; ++k)

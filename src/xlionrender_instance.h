@@ -611,6 +611,7 @@ namespace xlionrender
         std::deque<gi_capture_job>  m_GICaptures;
         int                         m_GICapturesQuiet = 0;      // frames since the captures were last pending (updateGI: XLION_GI_HOLD_CAPTURES)
         xgpu::texture               m_GICaptureTex;
+        xgpu::buffer                m_GICaptureReadB;               // its texels copied in the capture's frame (Window.CopyTextureToBuffer), read ring frames later
         xgpu::renderpass            m_GICapturePass;
         xgpu::buffer                m_GICaptureVB, m_GICaptureIB;
         xgpu::pipeline              m_GIConstCapturePipeline;   // the constant material's capture (geom standard)
