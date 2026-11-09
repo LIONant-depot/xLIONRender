@@ -54,9 +54,8 @@ namespace xlionrender
         int                     m_TAAFrame = 0;
         bool                    m_bTAAHistory = false;
         rg::graph               m_Graph;
-        post::plan              m_PostPlan;             // the post chain lowered for this view's size (XLION_RG_PLAN=1; xlionrender_post_graph.h)
+        post::plan              m_PostPlan;             // the post chain lowered for this view's size (xlionrender_post_graph.h)
         int                     m_PostPlanW = 0, m_PostPlanH = 0;
-        int                     m_PostPath = -1;        // the post chain: 0 the hand-written steps, 1 the plan, -1 XLION_RG_PLAN decides (the equivalence harness runs both)
         float                   m_PostFixedDt = -1.0f;
         const render_view*      m_pPostInputs = nullptr;    // the harness: the post chain starts from this view's lit image (copied in; same size), so two views' chains see the same input  // >= 0: the auto exposure's step in seconds instead of the wall clock (the harness: two views, the same adaptation)                // the render graph's declarations (R0b: the post chain's scopes; xlionrender_render_graph.h)
         xmath::fmat4            m_TAAPrevW2C{};         // without the jitter

@@ -89,7 +89,6 @@ int main( int argc, char** argv )
         Scene.m_Post.m_bTAA = C.m_bTAA; Scene.m_Post.m_Bloom = C.m_bBloom ? 0.4f : 0.0f; Scene.m_Post.m_bAutoExposure = C.m_bAuto;
         xlionrender::render_view A, B;
         CHECK(!Renderer.CreateView(A, { .m_Width = C.m_W, .m_Height = C.m_H }) && !Renderer.CreateView(B, { .m_Width = C.m_W, .m_Height = C.m_H }), "CreateView");
-        A.m_PostPath = 0; B.m_PostPath = Control ? 0 : 1;
         A.m_PostFixedDt = B.m_PostFixedDt = 1.0f / 30.0f;
         B.m_pPostInputs = &A;       // (the scene passes are not the same twice - frame-indexed noise: B's chain starts from A's lit image)
         std::string Why;
@@ -105,11 +104,11 @@ int main( int argc, char** argv )
             CHECK(App.RenderFrame(Scene, B, Camera) && Read(Device, B, SB), "Render B");
             Why = Compare(SA, SB);
         }
-        const auto What = std::format("{} {}", Control ? "hand-written vs hand-written" : "hand-written vs plan", C.m_pName);
+        const auto What = std::format("{} {}", Control ? "the chain against itself" : "the chain against its description from a file", C.m_pName);
         if( Why.empty() ) std::printf("same: %s, %d frames\n", What.c_str(), nFrames);
         else { std::printf("DIFFERENT: %s, frame %d - %s\n", What.c_str(), Frame - 1, Why.c_str()); ++nFail; }
         Renderer.DestroyView(A); Renderer.DestroyView(B);
-        if( Control && !Why.empty() ) { std::printf("FAIL: the harness is not trusted (the hand-written chain differs from itself)\n"); return 1; }
+        if( Control && !Why.empty() ) { std::printf("FAIL: the harness is not trusted (the chain differs from itself)\n"); return 1; }
     }
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     if( nFail ) { std::printf("FAIL: %d cases differ\n", nFail); return 1; }
