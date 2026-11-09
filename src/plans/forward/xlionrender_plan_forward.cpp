@@ -2,6 +2,7 @@
 #include "../../xlionrender_env.h"
 #include "xlionrender_instance.h"
 #include "plans/forward/xlionrender_plan_forward.h"
+#include "xlionrender_post_graph.h"
 // The profiler (xprofile / Tracy): the frame's passes as CPU and GPU zones - in LIONRender.dll; the tests are built without it
 #if __has_include("xprofile.h")
     #include "xprofile.h"
@@ -5197,6 +5198,7 @@ namespace xlionrender
             // (last frame's lit image for the next frame's screen reads: the prepass clears m_HDR - they had read black)
             static const bool s_bSSGIPrev = xlionrender::Env("XLION_SSGI") != nullptr || xlionrender::Env("XLION_VOX_SEEN") != nullptr;      // (and the voxels' lit feed)
             runDeferredVox(Window);      // (not run yet - no gather this frame: here, in the frame)
+            if( View.m_pPostInputs && View.m_pPostInputs->m_HDR.m_Private ) Window.CopyTexture(View.m_pPostInputs->m_HDR, View.m_HDR, View.m_Width, View.m_Height);     // (the equivalence harness's imported input)
             // The render graph (R0b): the post chain's scopes declared as they record. m_HDR is this frame's lit image (a version the scene
             // passes made: imported here, valid); the histories (last HDR, TAA, exposure) keep their versions across frames
             auto& G = View.m_Graph;
@@ -5315,7 +5317,7 @@ namespace xlionrender
                 if( bAuto )
                 {
                     const auto Now = clock::now();
-                    const float Dt = View.m_PostLast == clock::time_point{} ? 0.0f : std::min(std::chrono::duration<float>(Now - View.m_PostLast).count(), 0.25f);
+                    const float Dt = View.m_PostFixedDt >= 0.0f ? View.m_PostFixedDt : View.m_PostLast == clock::time_point{} ? 0.0f : std::min(std::chrono::duration<float>(Now - View.m_PostLast).count(), 0.25f);
                     View.m_PostLast = Now;
                     Push = { 1, 1, 2, Dt, Scene.m_Post.m_ExposureRate, Scene.m_Post.m_ExposureKey, Scene.m_Post.m_ExposureMin, Scene.m_Post.m_ExposureMax };
                     Run(*pHDR, View.m_ExposureTex, 1, 1);
@@ -5374,6 +5376,139 @@ namespace xlionrender
                 std::printf("XLION_RG_POST: %zu nodes from %s\n", Chain.size(), pFile); std::fflush(stdout);
                 return Chain;
             }();
+            // (P1b) XLION_RG_PLAN=1: the chain from its plan (xlionrender_post_graph.h: the description lowered for this view's size, kept until
+            // the size changes) - the same kernels, bindings, sizes, pushes and declarations as the steps above, walked as a flat list.
+            // ponytail: the TAA images' creation is the steps' copy; the steps go once the harness (P1c) shows the two the same
+            static const bool s_bRGPlan = [] { const char* p = xlionrender::Env("XLION_RG_PLAN"); return p && std::atoi(p) != 0; }();
+            if( View.m_PostPath >= 0 ? View.m_PostPath == 1 : s_bRGPlan )
+            {
+                if( View.m_PostPlanW != View.m_Width || View.m_PostPlanH != View.m_Height )
+                {
+                    View.m_PostPlan = post::Lower(post::desc::Default(), View.m_Width, View.m_Height);
+                    View.m_PostPlanW = View.m_Width; View.m_PostPlanH = View.m_Height;
+                    if( !View.m_PostPlan.m_Error.empty() ) { std::printf("XLION_RG_PLAN: %s\n", View.m_PostPlan.m_Error.c_str()); std::fflush(stdout); }
+                }
+                const auto& Plan = View.m_PostPlan;
+                const auto On = [&](post::when W) { return W == post::when::ALWAYS || (W == post::when::TAA_ON && bTAA) || (W == post::when::BLOOM_ON && Bloom > 0.0f) || (W == post::when::AUTO_EXPOSURE && bAuto); };
+                bool bTAARan = false;
+                const auto Tex = [&](const post::image_ref& r) -> const xgpu::texture*
+                {
+                    switch( r.m_Image )
+                    {
+                        case post::image::HDR:      return &View.m_HDR;
+                        case post::image::DEPTH:    return &View.m_Depth;
+                        case post::image::CHAIN:    return pHDR;
+                        case post::image::TAA_PREV: return &View.m_TAA[1 - (View.m_TAAFrame & 1)];
+                        case post::image::TAA_CUR:  return &View.m_TAA[View.m_TAAFrame & 1];
+                        case post::image::TAA0:     return &View.m_TAA[0];
+                        case post::image::TAA1:     return &View.m_TAA[1];
+                        case post::image::EXPOSURE: return &View.m_ExposureTex;
+                        case post::image::BLOOM:    return &View.m_Bloom[std::size_t(r.m_Level)];
+                        default:                    return nullptr;
+                    }
+                };
+                const auto RgOf = [&](const post::image_ref& r) -> int
+                {
+                    switch( r.m_Image )
+                    {
+                        case post::image::HDR:      return rgHDR;
+                        case post::image::DEPTH:    return rgDepth;
+                        case post::image::CHAIN:    return pHDR == &View.m_HDR ? rgHDR : pHDR == &View.m_TAA[1] ? rgTAA[1] : rgTAA[0];
+                        case post::image::TAA_PREV: return rgTAA[1 - (View.m_TAAFrame & 1)];
+                        case post::image::TAA_CUR:  return rgTAA[View.m_TAAFrame & 1];
+                        case post::image::TAA0:     return rgTAA[0];
+                        case post::image::TAA1:     return rgTAA[1];
+                        case post::image::EXPOSURE: return rgExpo;
+                        case post::image::BLOOM:    return rgBloom(r.m_Level);
+                        default:                    return rgOut;
+                    }
+                };
+                const auto Declare = [&](const post::pass& P)
+                {
+                    const int S = G.Begin(P.m_Scope, P.m_Kernel == post::kernel::TAA ? "instance: m_TAACompute" : P.m_Kernel == post::kernel::TONE_MAP ? "Render target: tone-mapped output" : "instance: m_PostCompute");
+                    for( const auto& A : P.m_Accesses ) { if( A.m_bWrite ) G.Write(S, RgOf(A.m_Ref), A.m_Usage, A.m_Policy); else G.Read(S, RgOf(A.m_Ref), A.m_Usage); }
+                    return S;
+                };
+                const auto Exec = [&](const post::pass& P)
+                {
+                    if( P.m_Kernel == post::kernel::TONE_MAP )
+                    {
+                        if( s_bRGBarriers ) Window.EndExplicitSync();
+                        auto Cmd = Window.StartRenderPass(View.m_OutputPass);
+                        const bool bHeatView = View.m_HeatToneMap.m_Private != nullptr;
+                        Cmd.setPipelineInstance(bHeatView ? View.m_HeatToneMap : *pToneMap);
+                        Cmd.setPushConstants(details::push_tonemap{ { View.m_Exposure, Bloom, bAuto ? 1.0f : 0.0f, bHeatView ? 1.0f : 0.0f }, View.m_Background });
+                        Cmd.setBuffer(m_FullscreenVB);
+                        Cmd.setBuffer(m_FullscreenIB);
+                        Cmd.Draw(3);
+                        Cmd.WriteTimestamp(m_Timestamps, 3);
+                        if( pTS ) Cmd.WriteTimestamp(*pTS, 5);
+                        (void)Declare(P);
+                        return;
+                    }
+                    const int S = Declare(P);
+                    Sync(S);
+                    const xgpu::texture* T[3] = { Tex(P.m_Bind[0]), Tex(P.m_Bind[1]), Tex(P.m_Bind[2]) };
+                    const xgpu::texture* I[] = { Tex(P.m_Dst) };
+                    const std::span<const xgpu::texture* const> Ts(T, P.m_Kernel == post::kernel::TAA ? 3 : 2);
+                    if( P.m_Kernel == post::kernel::TAA )
+                    {
+                        static const float s_TAABlendEnv = [] { const char* p = xlionrender::Env("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : 0.0f; }();
+                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, s_TAABlendEnv > 0.0f ? s_TAABlendEnv : Scene.m_Post.m_TAABlend, View.m_bTAAHistory ? 1.0f : 0.0f };
+                        Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, Ts, I, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
+                        return;
+                    }
+                    struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{ P.m_W, P.m_H, P.m_Mode };
+                    switch( P.m_Push )
+                    {
+                        case post::push::BLOOM_DOWN: Push.m_A = P.m_Level == 0 ? 1.0f : 0.0f; Push.m_B = Scene.m_Post.m_BloomThreshold; Push.m_C = Scene.m_Post.m_BloomKnee; Push.m_D = View.m_Exposure; Push.m_E = bAuto ? 1.0f : 0.0f; break;
+                        case post::push::BLOOM_UP:   Push.m_A = Scene.m_Post.m_BloomSpread; break;
+                        case post::push::EXPOSURE:
+                        {
+                            const auto Now = clock::now();
+                            const float Dt = View.m_PostFixedDt >= 0.0f ? View.m_PostFixedDt : View.m_PostLast == clock::time_point{} ? 0.0f : std::min(std::chrono::duration<float>(Now - View.m_PostLast).count(), 0.25f);
+                            View.m_PostLast = Now;
+                            Push.m_A = Dt; Push.m_B = Scene.m_Post.m_ExposureRate; Push.m_C = Scene.m_Post.m_ExposureKey; Push.m_D = Scene.m_Post.m_ExposureMin; Push.m_E = Scene.m_Post.m_ExposureMax;
+                            break;
+                        }
+                        default: break;      // (FILL: 0)
+                    }
+                    Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, Ts, I, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
+                };
+                if( Plan.m_Error.empty() )
+                {
+                    // Lifecycle: the TAA's images when first on (made, each zeroed), the bloom levels and the exposure once a view
+                    if( bTAA && !View.m_TAA[0].m_Private )
+                    {
+                        bool bOk = true;
+                        for( int i = 0; i < 2 && bOk; ++i )
+                        {
+                            bOk = !m_Device.Create(View.m_TAA[i], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: TAA" });
+                            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_TAA[i] }, xgpu::pipeline_instance::sampler_binding{ View.m_Bloom[0] }, xgpu::pipeline_instance::sampler_binding{ View.m_ExposureTex } };
+                            bOk = bOk && !m_Device.Create(View.m_ToneMapTAA[i], { .m_PipeLine = m_ToneMapPipeline, .m_SamplersBindings = Bindings });
+                        }
+                        for( const auto& P : Plan.m_Inits ) if( P.m_When == post::when::TAA_ON ) Exec(P);
+                        View.m_bTAAHistory = false;
+                    }
+                    if( !View.m_bPostReady ) { for( const auto& P : Plan.m_Inits ) if( P.m_When != post::when::TAA_ON ) Exec(P); View.m_bPostReady = true; }
+                    for( const auto& P : Plan.m_Passes )
+                    {
+                        if( P.m_Kernel == post::kernel::TONE_MAP ) { Exec(P); continue; }     // (always: the graph's root)
+                        if( !On(P.m_When) ) continue;
+                        Exec(P);
+                        if( P.m_Kernel == post::kernel::TAA )
+                        {
+                            const int Cur = View.m_TAAFrame & 1;
+                            pHDR = &View.m_TAA[Cur]; pToneMap = &View.m_ToneMapTAA[Cur]; bTAARan = true;
+                            View.m_TAAPrevW2C = W2CNoJitter; View.m_TAAPrevEye = Eye; View.m_bTAAHistory = true; ++View.m_TAAFrame;
+                        }
+                    }
+                    if( !bTAARan ) View.m_bTAAHistory = false;
+                }
+                else NodeToneMap();      // (an invalid plan: the lit image tone mapped, nothing else)
+            }
+            else
+            {
             bool bToneMapped = false;
             for( const post_node N : s_PostChain ) switch( N )
             {
@@ -5385,6 +5520,7 @@ namespace xlionrender
                 case post_node::TONE_MAP:   NodeToneMap(); bToneMapped = true; break;
             }
             if( !bToneMapped ) NodeToneMap();      // (the output is the graph's root: always made)
+            }
         }
         // XLION_NOISE_LAGS="<seconds to wait> <frames>" (measurement, Tomas 2026-11-06): the noise of the tone-mapped image by how far apart in time, at the
         // real frame rate - every 4th pixel's luminance a frame into a CPU-readable ring (xlionrender_noise_lags_comp.glsl), compared on the CPU at lags
