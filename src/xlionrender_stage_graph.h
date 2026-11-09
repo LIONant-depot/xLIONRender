@@ -14,10 +14,6 @@
 
 namespace xlionrender::stage
 {
-    // the dispatch's size: the view's pixels in 8 x 8 tiles
-    enum class size_rule : std::uint8_t { TILES8 };
-    enum class kind      : std::uint8_t { BUFFER, TEXTURE, IMAGE };
-
     // a bound resource by its render graph name (what the Frame graph calls it), and how the pass uses it
     struct binding
     {
@@ -26,6 +22,7 @@ namespace xlionrender::stage
         rg::usage       m_Usage     = rg::usage::STORAGE;
         bool            m_bWrite    = false;
         rg::policy      m_Policy    = rg::policy::NONE;
+        std::string     m_DeclareIf;            // declared only when this frame value's first word is not 0 (a history read on its valid frames)
     };
     // a push word source: a frame value by name (all its words), or one constant word when m_Frame is empty
     struct word { std::string m_Frame; std::uint32_t m_Constant = 0; };
@@ -35,7 +32,7 @@ namespace xlionrender::stage
         std::string             m_Name, m_Kernel;
         std::vector<binding>    m_Buffers, m_Textures, m_Images;
         std::vector<word>       m_Push;
-        size_rule               m_Size = size_rule::TILES8;
+        std::string             m_Size = "view.size";       // the dispatch: this frame value's two words (width, height) in 8 x 8 tiles
     };
     struct desc { std::vector<pass> m_Passes; };
 
@@ -57,10 +54,11 @@ namespace xlionrender::stage
         table<xgpu::buffer*>            m_Buffers;
         table<const xgpu::texture*>     m_Textures;     // (sampled textures and storage images alike)
         table<value>                    m_Frame;
-        int                             m_Width = 0, m_Height = 0;
 
         void SetFloats( int i, const float* p, int n ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = n; std::memcpy(V.m_Words.data(), p, std::size_t(n) * 4); }
         void SetU32   ( int i, std::uint32_t u ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = 1; V.m_Words[0] = u; }
+        void SetSize  ( int i, int W, int H ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = 2; V.m_Words[0] = std::uint32_t(W); V.m_Words[1] = std::uint32_t(H); }
+        int  Value    ( std::string_view Name ) { if( int i = m_Frame.Find(Name); i >= 0 ) return i; return m_Frame.Add(std::string(Name)); }     // (the index of a frame value, added the first time)
     };
 
     // lowered: indices into the registry
@@ -70,6 +68,8 @@ namespace xlionrender::stage
         int                 m_Kernel = -1;
         std::vector<int>    m_Buffers, m_Textures, m_Images;
         std::vector<int>    m_Push;         // a frame value's index, or -1 - k - 1 for the pass's k-th push word as a constant
+        int                 m_Size = -1;    // the frame value of the dispatch's size
+        std::vector<int>    m_DeclareIf;    // a binding's (buffers, textures, images in turn) condition: a frame value's index, -1 always
     };
     struct plan { std::vector<lowered_pass> m_Passes; std::string m_Error; };
 
@@ -98,6 +98,14 @@ namespace xlionrender::stage
                 L.m_Push.push_back(i); Bytes += 4 * R.m_Frame.m_Items[std::size_t(i)].m_n;
             }
             if( Bytes != K.m_PushBytes ) return Fail(Pa, "pushes " + std::to_string(Bytes) + " bytes, the kernel '" + Pa.m_Kernel + "' takes " + std::to_string(K.m_PushBytes));
+            L.m_Size = R.m_Frame.Find(Pa.m_Size);
+            if( L.m_Size < 0 || R.m_Frame.m_Items[std::size_t(L.m_Size)].m_n != 2 ) return Fail(Pa, "no size '" + Pa.m_Size + "' (a frame value of two words)");
+            for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& B : *pList )
+            {
+                const int i = B.m_DeclareIf.empty() ? -1 : R.m_Frame.Find(B.m_DeclareIf);
+                if( !B.m_DeclareIf.empty() && i < 0 ) return Fail(Pa, "no frame value '" + B.m_DeclareIf + "'");
+                L.m_DeclareIf.push_back(i);
+            }
             P.m_Passes.push_back(std::move(L));
         }
         return P;
@@ -122,12 +130,22 @@ namespace xlionrender::stage
                 const auto& V = R.m_Frame.m_Items[std::size_t(s)];
                 std::copy_n(V.m_Words.begin(), V.m_n, Push.begin() + n); n += V.m_n;
             }
-            const int X = (R.m_Width + 7) / 8, Y = (R.m_Height + 7) / 8;      // (size_rule::TILES8, the only one so far)
+            const auto& Sz = R.m_Frame.m_Items[std::size_t(L.m_Size)].m_Words;
+            const int X = int(Sz[0] + 7) / 8, Y = int(Sz[1] + 7) / 8;
             Window.Dispatch(*K.m_pCompute, std::span<xgpu::buffer* const>(B.data(), L.m_Buffers.size()), std::span<const xgpu::texture* const>(T.data(), L.m_Textures.size())
                            , std::span<const xgpu::texture* const>(I.data(), L.m_Images.size()), Push.data(), std::size_t(n) * 4, X, Y, 1);
             const int S = G.Begin(Pa.m_Name, K.m_Recorded);
-            for( const auto* pList : { &Pa.m_Textures, &Pa.m_Buffers, &Pa.m_Images } ) for( const auto& Bd : *pList ) if( !Bd.m_bWrite ) G.Read(S, G.Resource(Bd.m_Name, Bd.m_Life), Bd.m_Usage);
-            for( const auto* pList : { &Pa.m_Textures, &Pa.m_Buffers, &Pa.m_Images } ) for( const auto& Bd : *pList ) if(  Bd.m_bWrite ) G.Write(S, G.Resource(Bd.m_Name, Bd.m_Life), Bd.m_Usage, Bd.m_Policy);
+            for( int bWrite = 0; bWrite < 2; ++bWrite )
+            {
+                std::size_t k = 0;
+                for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& Bd : *pList )
+                {
+                    const int c = L.m_DeclareIf[k++];
+                    if( Bd.m_bWrite != (bWrite != 0) || (c >= 0 && R.m_Frame.m_Items[std::size_t(c)].m_Words[0] == 0) ) continue;
+                    if( bWrite ) G.Write(S, G.Resource(Bd.m_Name, Bd.m_Life), Bd.m_Usage, Bd.m_Policy);
+                    else         G.Read (S, G.Resource(Bd.m_Name, Bd.m_Life), Bd.m_Usage);
+                }
+            }
         }
     }
 }

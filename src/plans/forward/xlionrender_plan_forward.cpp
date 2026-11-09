@@ -2871,13 +2871,37 @@ namespace xlionrender
         {
             // the reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then spatial;
             // the half-size records it leaves are what the materials read (REFLSPLIT's reconstruction includes the screen trace when both run)
-            if( bReconstruct )
+            static const bool s_bDiskFresh = xlionrender::Env("XLION_REFL_DISK_FRESH") != nullptr;      // (measurement: the spatial disk only for fresh histories)
+            if( bReconstruct && View.m_bStageReflRecon )
+            {
+                // (render graph R2: the reconstruction from its description - xlionrender_stage_graph.h; the hand-written one below stays until
+                // the equivalence test retires it)
+                auto& R = View.m_Stages;
+                if( R.m_Kernels.Find("refl_denoise") < 0 ) R.m_Kernels.Add("refl_denoise", { &m_ReflDenoise, 4, 3, 0, 16, "instance: m_ReflDenoise" });
+                R.m_Buffers.Add("Frame: reflection frames", &m_ReflFrames);
+                R.m_Buffers.Add("Render target: tail records", &View.m_TailResult);
+                R.m_Buffers.Add("Reflections: reconstruction temporal", &View.m_ReflTemporal);
+                R.m_Buffers.Add("Reflections: history", &View.m_ReflHistory);
+                R.m_Textures.Add("Render target: tail colour", &View.m_TailGColor);
+                R.m_Textures.Add("Render target: tail depth", &View.m_TailGDepth);
+                R.m_Textures.Add("Render target: tail motion", &View.m_TailGMotion);
+                R.SetU32(R.Value("refl.slot"), std::uint32_t(Slot));
+                R.SetU32(R.Value("refl.disk_fresh"), s_bDiskFresh ? 1u : 0u);
+                R.SetU32(R.Value("refl.history_valid"), View.m_bTailPrev ? 1u : 0u);
+                R.SetSize(R.Value("refl.size"), W, H);
+                if( View.m_ReflReconPlan.m_Passes.empty() && View.m_ReflReconPlan.m_Error.empty() )
+                {
+                    View.m_ReflReconPlan = stage::Lower(details::ReflReconStage(), R);
+                    if( !View.m_ReflReconPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: reflection reconstruction stage: %s\n", View.m_ReflReconPlan.m_Error.c_str());
+                }
+            }
+            if( bReconstruct && View.m_bStageReflRecon && View.m_ReflReconPlan.m_Error.empty() ) stage::Run(View.m_ReflReconPlan, View.m_Stages, Window, View.m_Graph);
+            else if( bReconstruct )
             {
                 auto DBuffers  = std::array<xgpu::buffer*, 4>{ &m_ReflFrames, &View.m_TailResult, &View.m_ReflTemporal, &View.m_ReflHistory };
                 auto DTextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, &View.m_TailGMotion };
                 for( std::uint32_t Pass = 0; Pass < 2; ++Pass )
                 {
-                    static const bool s_bDiskFresh = xlionrender::Env("XLION_REFL_DISK_FRESH") != nullptr;      // (measurement: the spatial disk only for fresh histories)
                     const std::uint32_t DPush[4] = { Pass, std::uint32_t(Slot), s_bDiskFresh ? 1u : 0u, 0 };
                     Window.Dispatch(m_ReflDenoise, DBuffers, DTextures, DPush, sizeof(DPush), (W + 7) / 8, (H + 7) / 8);
                     auto& G = View.m_Graph;
@@ -4124,7 +4148,7 @@ namespace xlionrender
                             R.SetU32(R.m_Frame.Find("view.height"), LPush.m_H);
                             R.SetU32(R.m_Frame.Find("lights.local_base"), LPush.m_LightBase);
                             R.SetU32(R.m_Frame.Find("lights.local_count"), LPush.m_nLights);
-                            R.m_Width = View.m_Width; R.m_Height = View.m_Height;
+                            R.SetSize(R.Value("view.size"), View.m_Width, View.m_Height);
                             if( View.m_LightTilesPlan.m_Passes.empty() && View.m_LightTilesPlan.m_Error.empty() )
                             {
                                 View.m_LightTilesPlan = stage::Lower(details::LightTilesStage(), R);

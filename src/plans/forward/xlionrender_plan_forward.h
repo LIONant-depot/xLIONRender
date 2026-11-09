@@ -261,6 +261,27 @@ namespace xlionrender::details
         return D;
     }
 
+    // The reflections' reconstruction as a stage (xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then
+    // spatial, on the tail's records; the history read by the temporal pass on the frames it is valid, written by the spatial one
+    inline const stage::desc& ReflReconStage( void ) noexcept
+    {
+        const auto Pass = []( const char* pName, std::uint32_t Pass )
+        {
+            const bool b1 = Pass == 1;
+            return stage::pass{ .m_Name = pName, .m_Kernel = "refl_denoise"
+                , .m_Buffers  = { { "Frame: reflection frames" }
+                                , { "Render target: tail records", rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::PRESERVE }
+                                , { "Reflections: reconstruction temporal", rg::lifetime::FRAME, rg::usage::STORAGE, !b1, b1 ? rg::policy::NONE : rg::policy::FULL_OVERWRITE }
+                                , { "Reflections: history", rg::lifetime::HISTORY, rg::usage::STORAGE, b1, b1 ? rg::policy::FULL_OVERWRITE : rg::policy::NONE, b1 ? "" : "refl.history_valid" } }
+                , .m_Textures = { { "Render target: tail colour", rg::lifetime::FRAME, rg::usage::SAMPLED }, { "Render target: tail depth", rg::lifetime::FRAME, rg::usage::SAMPLED }
+                                , { "Render target: tail motion", rg::lifetime::FRAME, rg::usage::SAMPLED } }
+                , .m_Push     = { { "", Pass }, { "refl.slot" }, { "refl.disk_fresh" }, { "", 0u } }
+                , .m_Size     = "refl.size" };
+        };
+        static const stage::desc D{ { Pass("reflections: temporal", 0), Pass("reflections: spatial", 1) } };
+        return D;
+    }
+
     // xlionrender_ao_comp.glsl push_t
     struct push_ao
     {

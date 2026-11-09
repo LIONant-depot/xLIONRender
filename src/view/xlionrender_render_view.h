@@ -61,6 +61,8 @@ namespace xlionrender
         stage::registry         m_Stages;
         stage::plan             m_LightTilesPlan;
         bool                    m_bStageLightTiles = true;
+        stage::plan             m_ReflReconPlan;        // the reflections' reconstruction (temporal + spatial), the same way
+        bool                    m_bStageReflRecon = true;
         post::desc              m_PostDesc = post::desc::Default();     // the post chain (xlionrender_post_graph.h; as text: xlionrender_post_graph_text.h) - set it to change the chain
         post::plan              m_PostPlan;             // m_PostDesc lowered for this view's size: made again when either changes
         post::desc              m_PostPlanDesc;
