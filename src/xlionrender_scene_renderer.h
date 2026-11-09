@@ -594,7 +594,12 @@ namespace xlionrender
                 const void* pSource = m_RenderGraph ? xlioncore::resources::GetResource(render_graph_type_guid_v.m_Value, m_RenderGraph) : nullptr;
                 if (pSource != m_pAppliedPost || m_RenderGraph != m_AppliedRenderGraph)
                 {
-                    if (pSource) m_View.m_PostDesc = static_cast<const xrender_graph::bundle*>(pSource)->m_Desc;
+                    if (pSource)
+                    {
+                        const auto& B = *static_cast<const xrender_graph::bundle*>(pSource);
+                        m_View.m_PostDesc = B.m_Desc;
+                        for (std::size_t c = 0; c < m_View.m_PostCustomSpirv.size(); ++c) m_View.m_PostCustomSpirv[c] = c < B.m_Spirv.size() ? B.m_Spirv[c] : std::vector<std::int32_t>{};     // (its custom nodes' shaders: the bundle's shader links)
+                    }
                     else if (!m_RenderGraph) m_View.m_PostDesc = xlionrender::post::desc::Default();
                     if (pSource || !m_RenderGraph) { m_pAppliedPost = pSource; m_AppliedRenderGraph = m_RenderGraph; }
                 }
