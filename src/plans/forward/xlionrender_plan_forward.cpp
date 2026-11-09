@@ -5353,7 +5353,11 @@ namespace xlionrender
                         for( const auto& P : Plan.m_Inits ) if( P.m_When == post::when::TAA_ON ) Exec(P);
                         View.m_bTAAHistory = false;
                     }
-                    if( !View.m_bPostReady ) { for( const auto& P : Plan.m_Inits ) if( P.m_When != post::when::TAA_ON ) Exec(P); View.m_bPostReady = true; }
+                    if( !View.m_bPostReady )
+                    {
+                        for( const auto& P : Plan.m_Inits ) if( P.m_When != post::when::TAA_ON && !(View.m_bExposureReady && P.m_Dst.m_Image == post::image::EXPOSURE) ) Exec(P);
+                        View.m_bPostReady = View.m_bExposureReady = true;
+                    }
                     for( const auto& P : Plan.m_Passes )
                     {
                         if( P.m_Kernel == post::kernel::TONE_MAP ) { Exec(P); continue; }     // (always: the graph's root)

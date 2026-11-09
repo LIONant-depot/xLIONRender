@@ -43,6 +43,7 @@ namespace xlionrender
         std::array<xgpu::texture, 6> m_Bloom;           // half the view's size, and half again
         xgpu::texture           m_ExposureTex;          // 1 x 1: the adapted exposure
         bool                    m_bPostReady = false;   // (the images written once: they can be sampled)
+        bool                    m_bExposureReady = false;   // (the exposure kept across a resize: not zeroed again)
         std::chrono::steady_clock::time_point m_PostLast{};
         // The material tile pass's prototype (XLION_TILE, material_tiles_plan.md): the prepass's attributes, the pass into m_HDR, the pipeline's instance over this view's G-buffer
         xgpu::texture           m_TileAttr0, m_TileAttr1, m_TileColor;   // R32G32_UINT, R32_UINT: the polar codec (xlionrender_tile_attr.glsl); R8G8B8A8_UNORM: the vertex color

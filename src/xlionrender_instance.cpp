@@ -1750,7 +1750,13 @@ namespace xlionrender
     xgpu::device::error* instance::CreateView( render_view& View, const render_view::setup& Setup ) noexcept
     {
         assert(m_bReady && Setup.m_Width > 0 && Setup.m_Height > 0);
+        // (a view made again - a resize - keeps its adapted exposure: 1 x 1, the same at any size; remade, it snapped and adapted again
+        // while a panel edge was dragged - render graph P4)
+        xgpu::texture KeptExposure = std::move(View.m_ExposureTex);
+        View.m_ExposureTex = {};
         DestroyView(View);
+        View.m_ExposureTex = std::move(KeptExposure);       // (back at once: an error below leaves it with the view, which destroys it)
+        View.m_bExposureReady = View.m_ExposureTex.m_Private != nullptr;
 
         View.m_Width  = Setup.m_Width;
         View.m_Height = Setup.m_Height;
@@ -1773,6 +1779,7 @@ namespace xlionrender
 
         for( int i = 0; i < int(View.m_Bloom.size()); ++i )
             if( auto Err = m_Device.Create(View.m_Bloom[i], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = std::max(Setup.m_Width >> (i + 1), 1), .m_Height = std::max(Setup.m_Height >> (i + 1), 1), .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: bloom" }); Err ) return Err;
+        if( !View.m_bExposureReady )
         if( auto Err = m_Device.Create(View.m_ExposureTex, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = 1, .m_Height = 1, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: exposure" }); Err ) return Err;
         View.m_bPostReady = false;
 
