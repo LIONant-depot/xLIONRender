@@ -313,6 +313,27 @@ namespace xlionrender::details
         return D;
     }
 
+    // The lighting tile pass as a stage (xlionrender_tile_pixel.glsl, a material graph's tile variant): one full-screen draw a material
+    // graph (the list of draw items the code fills: each graph's pipeline instance - its textures: the G-buffer, the tile attributes - and
+    // its materials' texture table) onto the HDR the prepass started; the push: clip to world and the graph's index
+    inline const stage::desc& TileStage( void ) noexcept
+    {
+        const auto Rd = []( const char* p, const char* pIf = "" ) { return stage::binding{ p, rg::lifetime::RETAINED, rg::usage::STORAGE, false, rg::policy::NONE, pIf }; };
+        const auto Tx = []( const char* p ) { return stage::binding{ p, rg::lifetime::FRAME, rg::usage::SAMPLED }; };
+        static const stage::desc D{ { { .m_Name = "tile pass (lighting)", .m_Kernel = "tile"
+            , .m_Buffers  = { Rd("GI: dummy", "never"), Rd("Frame: instance data"), Rd("Lights: light ring"), Rd("Lights: cell ring"), Rd("GI: screen buffer*"), Rd("GI: light ring"), Rd("GI: moment ring")
+                            , Rd("Materials: material parameters"), Rd("Materials: entity parameters"), Rd("Render target: tail records")
+                            , { "Tile pass: the light funnel's counters", rg::lifetime::RETAINED, rg::usage::STORAGE, true, rg::policy::PARTIAL, "tile.funnel" }
+                            , { "Lights: the screen tiles' lists", rg::lifetime::FRAME, rg::usage::STORAGE, false, rg::policy::NONE, "lights.tiles" } }
+            , .m_Textures = { Tx("Render target: depth"), Tx("Render target: prepass normals"), Tx("Render target: prepass ids"), Tx("Render target: tile attributes")
+                            , Tx("Probes: environment DFG"), Tx("Probes: environment atlas"), Tx("Probes: probe atlas"), Tx("Render target: contact shadow"), Tx("Render target: sun shadow mask")
+                            , Tx("Shadows: shadow atlas"), Tx("Shadows: white dummy") }
+            , .m_Images   = { { "Render target: HDR colour", rg::lifetime::FRAME, rg::usage::COLOR_ATTACHMENT, true, rg::policy::PRESERVE } }
+            , .m_Push     = { { "frame.c2w" }, { "repeat.index" }, { "", 0u }, { "", 0u }, { "", 0u } }
+            , .m_RenderPass = "Render target: HDR colour (the tile pass)", .m_Items = "tile.graphs", .m_UBOs = { "Geometry: view block", "Lights: lighting block" } } } };
+        return D;
+    }
+
     // The shadow request passes as stages (xlionrender_vsm_request_comp.glsl, xlionrender_local_request_comp.glsl): over the main view's
     // depth, the pages each pixel needs into the requests (cleared before, read back after by the code: the page systems are CPU side)
     inline stage::pass RequestPass( const char* pName, const char* pKernel, const char* pFrames, const char* pReq, std::vector<stage::word> Push )

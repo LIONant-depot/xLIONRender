@@ -2124,6 +2124,9 @@ namespace xlionrender
         for( auto* p : { &View.m_TileAttr0, &View.m_TileAttr1, &View.m_TileColor } ) if( p->m_Private ) m_Device.Destroy(std::move(*p));
         if( View.m_ToneMapInstance.m_Private ) m_Device.Destroy(std::move(View.m_ToneMapInstance));
         if( View.m_LightTiles.m_Private ) ReleaseBuffer(View.m_LightTiles);
+        if( View.m_ABSave.m_Private ) m_Device.Destroy(std::move(View.m_ABSave));      // (XLION_STAGE_AB)
+        if( View.m_ABScratch.m_Private ) ReleaseBuffer(View.m_ABScratch);
+        for( auto& B : View.m_ABBuffer ) if( B.m_Private ) ReleaseBuffer(B);
         for( auto& T : View.m_Bloom ) if( T.m_Private ) m_Device.Destroy(std::move(T));
         for( auto& I : View.m_ToneMapTAA ) if( I.m_Private ) m_Device.Destroy(std::move(I));
         for( auto& T : View.m_TAA ) if( T.m_Private ) m_Device.Destroy(std::move(T));

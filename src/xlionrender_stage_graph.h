@@ -3,7 +3,7 @@
 // the kernel, the buffers / textures / images it binds, its push words, its dispatch size - lowered once against a registry (names to
 // indices: no strings per frame) and run by one executor, which also declares each pass to the render graph (the Frame graph shows the
 // stage's real passes). The registry: the kernels the instance registers once; the resources and frame values each view fills per frame.
-namespace xgpu { struct compute; struct buffer; struct texture; struct renderpass; struct pipeline_instance; }      // (pointers only: the text form and the compiler need no xGPU)
+namespace xgpu { struct compute; struct buffer; struct texture; struct renderpass; struct pipeline_instance; struct texture_table; }      // (pointers only: the text form and the compiler need no xGPU)
 #include "xlionrender_render_graph.h"
 #include <string>
 #include <vector>
@@ -43,6 +43,10 @@ namespace xlionrender::stage
         // for each buffer of the list m_Repeat (that buffer at m_RepeatSlot; the push word "repeat.index" its index)
         std::string             m_RenderPass, m_Repeat;
         int                     m_RepeatSlot = -1;
+        // A draw pass over a list of draw items (m_Items not empty: the registry's m_Items): one full-screen draw an item, with its own
+        // pipeline instance and texture table (a material graph's), the push word "repeat.index" its index; no items, no render pass
+        std::string             m_Items;
+        std::vector<std::string> m_UBOs;        // dynamic uniform buffers by name, bound at their index in the list (a draw pass)
         bool operator==( const pass& ) const = default;
     };
     struct desc { std::vector<pass> m_Passes; bool operator==( const desc& ) const = default; };
@@ -63,7 +67,8 @@ namespace xlionrender::stage
         int  Find( std::string_view Name ) const noexcept { for( std::size_t i = 0; i < m_Names.size(); ++i ) if( m_Names[i] == Name ) return int(i); return -1; }
     };
     struct value { std::array<std::uint32_t, 16> m_Words{}; int m_n = 0; };     // (a matrix: 16 words)
-    struct kernel_info { xgpu::compute* m_pCompute = nullptr; int m_nBuffers = 0, m_nTextures = 0, m_nImages = 0, m_PushBytes = 0; std::string m_Recorded; xgpu::pipeline_instance* m_pInstance = nullptr; };      // (m_pInstance: a draw pass's)
+    struct kernel_info { xgpu::compute* m_pCompute = nullptr; int m_nBuffers = 0, m_nTextures = 0, m_nImages = 0, m_PushBytes = 0; std::string m_Recorded; xgpu::pipeline_instance* m_pInstance = nullptr; bool m_bItems = false; };      // (m_pInstance: a draw pass's; m_bItems: its draws' instances come from a list of draw items)
+    struct draw_item { xgpu::pipeline_instance* m_pInstance = nullptr; xgpu::texture_table* m_pTable = nullptr; std::uint32_t m_Index = 0; };
 
     struct registry
     {
@@ -73,6 +78,7 @@ namespace xlionrender::stage
         table<value>                    m_Frame;
         table<xgpu::renderpass*>        m_RenderPasses;
         table<std::vector<xgpu::buffer*>> m_Lists;      // (a draw repeated for each)
+        table<std::vector<draw_item>>   m_Items;        // (a draw an item)
         xgpu::buffer*                   m_pFullscreenVB = nullptr, *m_pFullscreenIB = nullptr;      // (a draw pass's triangle)
 
         void SetFloats( int i, const float* p, int n ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = n; std::memcpy(V.m_Words.data(), p, std::size_t(n) * 4); }
@@ -89,7 +95,8 @@ namespace xlionrender::stage
         std::vector<int>    m_Buffers, m_Textures, m_Images;
         std::vector<int>    m_Push;         // a frame value's index, or -1 - k - 1 for the pass's k-th push word as a constant
         int                 m_Size = -1;    // the frame value of the dispatch's size
-        int                 m_RenderPass = -1, m_Repeat = -1;
+        int                 m_RenderPass = -1, m_Repeat = -1, m_Items = -1;
+        std::vector<int>    m_UBOs;         // the registry's buffers
         std::vector<int>    m_DeclareIf;    // a binding's (buffers, textures, images in turn) condition: a frame value's index, -1 always, -2 never
     };
     inline constexpr int repeat_index_v = -1000000;      // (a push word: the repeat's index)
@@ -107,7 +114,10 @@ namespace xlionrender::stage
             const auto& K = R.m_Kernels.m_Items[std::size_t(L.m_Kernel)];
             for( const auto& B : Pa.m_Buffers )  { const int i = R.m_Buffers.Find(B.m_Name);  if( i < 0 ) return Fail(Pa, "no buffer '" + B.m_Name + "'");  L.m_Buffers.push_back(i); }
             const bool bDraw = !Pa.m_RenderPass.empty();
-            if( bDraw != (K.m_pInstance != nullptr) ) return Fail(Pa, bDraw ? "a draw pass, the kernel '" + Pa.m_Kernel + "' is a compute" : "a dispatch, the kernel '" + Pa.m_Kernel + "' draws");
+            if( bDraw != (K.m_pInstance != nullptr || K.m_bItems) ) return Fail(Pa, bDraw ? "a draw pass, the kernel '" + Pa.m_Kernel + "' is a compute" : "a dispatch, the kernel '" + Pa.m_Kernel + "' draws");
+            if( K.m_bItems != !Pa.m_Items.empty() ) return Fail(Pa, K.m_bItems ? "the kernel '" + Pa.m_Kernel + "' draws a list of items: the pass names none" : "a list of items, the kernel '" + Pa.m_Kernel + "' has one pipeline");
+            if( !Pa.m_Items.empty() && (L.m_Items = R.m_Items.Find(Pa.m_Items)) < 0 ) return Fail(Pa, "no draw item list '" + Pa.m_Items + "'");
+            for( const auto& U : Pa.m_UBOs ) { const int i = R.m_Buffers.Find(U); if( i < 0 ) return Fail(Pa, "no uniform buffer '" + U + "'"); L.m_UBOs.push_back(i); }
             if( !bDraw )
             {
                 for( const auto& B : Pa.m_Textures ) { const int i = R.m_Textures.Find(B.m_Name); if( i < 0 ) return Fail(Pa, "no texture '" + B.m_Name + "'"); L.m_Textures.push_back(i); }
@@ -171,20 +181,25 @@ namespace xlionrender::stage
             }
             if( L.m_RenderPass >= 0 )
             {
+                const auto* pItems = L.m_Items >= 0 ? &R.m_Items.m_Items[std::size_t(L.m_Items)] : nullptr;
+                if( pItems && pItems->empty() ) continue;       // (nothing to draw: no render pass, nothing declared - as the code)
                 if( Open != L.m_RenderPass ) { Cmd.reset(); Cmd.emplace(Window.StartRenderPass(*R.m_RenderPasses.m_Items[std::size_t(L.m_RenderPass)])); Open = L.m_RenderPass; }
                 if constexpr( !std::is_same_v<std::decay_t<T_HOOK>, std::nullptr_t> ) Hook(int(&L - P.m_Passes.data()), false, *Cmd);
                 const auto* pList = L.m_Repeat >= 0 ? &R.m_Lists.m_Items[std::size_t(L.m_Repeat)] : nullptr;
-                const std::size_t nRep = pList ? pList->size() : 1;
+                const std::size_t nRep = pItems ? pItems->size() : pList ? pList->size() : 1;
                 for( std::size_t r = 0; r < nRep; ++r )
                 {
                     if( pList ) B[std::size_t(Pa.m_RepeatSlot)] = (*pList)[r];
+                    const std::uint32_t Index = pItems ? (*pItems)[r].m_Index : std::uint32_t(r);
                     for( std::size_t w = 0, at = 0; w < L.m_Push.size(); ++w )      // (the repeat's index into its push word)
                     {
                         const int s = L.m_Push[w];
-                        if( s == repeat_index_v ) Push[at] = std::uint32_t(r);
+                        if( s == repeat_index_v ) Push[at] = Index;
                         at += s >= 0 ? std::size_t(R.m_Frame.m_Items[std::size_t(s)].m_n) : 1;
                     }
-                    Cmd->setPipelineInstance(*K.m_pInstance, std::span<xgpu::buffer*>(B.data(), L.m_Buffers.size()));
+                    Cmd->setPipelineInstance(pItems ? *(*pItems)[r].m_pInstance : *K.m_pInstance, std::span<xgpu::buffer*>(B.data(), L.m_Buffers.size()));
+                    if( pItems && (*pItems)[r].m_pTable ) Cmd->setTextureTable(*(*pItems)[r].m_pTable);
+                    for( std::size_t u = 0; u < L.m_UBOs.size(); ++u ) Cmd->setDynamicUBO(*R.m_Buffers.m_Items[std::size_t(L.m_UBOs[u])], int(u));
                     Cmd->setPushConstants(Push.data(), std::size_t(n) * 4);
                     Cmd->setBuffer(*R.m_pFullscreenVB);
                     Cmd->setBuffer(*R.m_pFullscreenIB);

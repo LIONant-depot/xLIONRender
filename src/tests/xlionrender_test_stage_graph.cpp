@@ -68,7 +68,7 @@ int main( int argc, char** argv )
     stage::library FromText;
     {
         const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_stage_graph.txt").wstring();
-        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() }, { "ao", xlionrender::details::AOStage() }, { "gi_read", xlionrender::details::GIReadStage() }, { "vsm_request", xlionrender::details::VSMRequestStage() }, { "local_request", xlionrender::details::LocalRequestStage() } };
+        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() }, { "ao", xlionrender::details::AOStage() }, { "gi_read", xlionrender::details::GIReadStage() }, { "vsm_request", xlionrender::details::VSMRequestStage() }, { "local_request", xlionrender::details::LocalRequestStage() }, { "tile", xlionrender::details::TileStage() } };
         std::string Problem;
         { auto L = BuiltIn; xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, L, Problem), "the library written"); }
         { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, FromText, Problem) && Problem.empty(), "the library read: %s", Problem.c_str()); }

@@ -4323,7 +4323,15 @@ namespace xlionrender
                     Window.CopyBuffer(View.m_GIScreenZeros, m_TileCount, std::span{ &Zc, 1 });
                 }
                 View.m_TileInstances.resize(m_TileGraphs.size());
+                const auto TileBody = [&]( const bool bTileStage )
+                {
                 std::optional<xgpu::cmd_buffer> C;
+                static const std::uint32_t s_TileAblate = [] { const char* p = xlionrender::Env("XLION_TILE_ABLATE"); return p ? std::uint32_t(std::atoi(p)) & 0xFFFFu : 0u; }();      // (measurement, A5 step 0: mb_standard_pbr.frag TILE_ABLATE)
+                // (render graph: the tile pass from its description - xlionrender_stage_graph.h, a draw a material graph: the code makes each graph's
+                // pipeline and instance, the stage draws them; hand-written below until retired)
+                // (bTileStage: the stage draws; else the hand-written loop)
+                auto& R = View.m_Stages;
+                if( bTileStage ) { R.m_Items.Add("tile.graphs", {}); R.m_Items.m_Items[std::size_t(R.m_Items.Find("tile.graphs"))].clear(); }
                 for( std::size_t g = 0; g < m_TileGraphs.size(); ++g )
                 {
                     material_slot* pFirst = nullptr;
@@ -4346,6 +4354,7 @@ namespace xlionrender
                         auto Bindings = LitBindings(Textures, true);
                         if( m_Device.Create(Inst, { .m_PipeLine = G.m_Pipeline, .m_SamplersBindings = Bindings }) ) continue;
                     }
+                    if( bTileStage ) { R.m_Items.m_Items[std::size_t(R.m_Items.Find("tile.graphs"))].push_back({ &Inst, &pFirst->m_Table, std::uint32_t(g) | (s_TileAblate << 16) }); continue; }
                     if( !C )
                     {
                         C.emplace(Window.StartRenderPass(View.m_TilePass));
@@ -4362,7 +4371,6 @@ namespace xlionrender
                     C->setTextureTable(pFirst->m_Table);      // (bindless: the heaps' set)
                     C->setDynamicUBO(m_LightUBO, 1);
                     C->setDynamicUBO(m_StaticGeomUBO, 0);
-                    static const std::uint32_t s_TileAblate = [] { const char* p = xlionrender::Env("XLION_TILE_ABLATE"); return p ? std::uint32_t(std::atoi(p)) & 0xFFFFu : 0u; }();      // (measurement, A5 step 0: mb_standard_pbr.frag TILE_ABLATE)
                     struct { xmath::fmat4 m_C2W; std::uint32_t m_Graph, m_Pad[3]; } Push{ W2C.Inverse(), std::uint32_t(g) | (s_TileAblate << 16), {} };
                     C->setPushConstants(Push);
                     C->setBuffer(m_FullscreenVB);
@@ -4370,7 +4378,63 @@ namespace xlionrender
                     C->Draw(3);
                     ++nTileDraws;
                 }
+                if( bTileStage )
+                {
+                    R.m_Kernels.Add("tile", { nullptr, 12, 0, 0, 80, "Render target: HDR colour", nullptr, true });
+                    R.m_RenderPasses.Add("Render target: HDR colour (the tile pass)", &View.m_TilePass);
+                    R.m_pFullscreenVB = &m_FullscreenVB; R.m_pFullscreenIB = &m_FullscreenIB;
+                    const std::pair<const char*, xgpu::buffer*> Bs[] = { { "GI: dummy", &m_GIDummy }, { "Frame: instance data", &m_InstanceBuffer }, { "Lights: light ring", &m_LightRing }, { "Lights: cell ring", &m_CellRing }
+                        , { "GI: screen buffer*", &View.m_GIScreenBuffer }, { "GI: light ring", &m_GILightRing }, { "GI: moment ring", &m_GIMomentRing }, { "Materials: material parameters", &m_MaterialParams }
+                        , { "Materials: entity parameters", &m_EntityParams }, { "Render target: tail records", TailBuffer() }, { "Tile pass: the light funnel's counters", m_TileCount.m_Private ? &m_TileCount : &m_GIDummy }
+                        , { "Lights: the screen tiles' lists", bLightTiles ? &View.m_LightTiles : &m_GIDummy }, { "Lights: lighting block", &m_LightUBO }, { "Geometry: view block", &m_StaticGeomUBO } };
+                    for( const auto& [N, p] : Bs ) R.m_Buffers.Add(N, p);
+                    { const auto C2W = W2C.Inverse(); R.SetFloats(R.Value("frame.c2w"), reinterpret_cast<const float*>(&C2W), 16); }
+                    R.SetU32(R.Value("tile.funnel"), m_TileCount.m_Private ? 1u : 0u); R.SetU32(R.Value("lights.tiles"), bLightTiles ? 1u : 0u);
+                    if( View.m_TilePlan.m_Passes.empty() && View.m_TilePlan.m_Error.empty() )
+                    {
+                        View.m_TilePlan = stage::Lower(View.StageDesc("tile", details::TileStage()), R);
+                        if( !View.m_TilePlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: tile pass stage: %s\n", View.m_TilePlan.m_Error.c_str());
+                    }
+                    const auto& Items = R.m_Items.m_Items[std::size_t(R.m_Items.Find("tile.graphs"))];
+                    if( View.m_TilePlan.m_Error.empty() ) { stage::Run(View.m_TilePlan, R, Window, View.m_Graph); nTileDraws = int(Items.size()); }
+                    if( m_TileCount.m_Private && bMain && !Items.empty() ) { const xgpu::buffer::copy Cc{ 0, 4 * int(m_Device.getFrameIndex() % ring_frames_v), 4 }; Window.CopyBuffer(m_TileCount, m_TileCountStats, std::span{ &Cc, 1 }); }
+                }
                 if( m_TileCount.m_Private && bMain && C ) { C.reset(); const xgpu::buffer::copy Cc{ 0, 4 * int(m_Device.getFrameIndex() % ring_frames_v), 4 }; Window.CopyBuffer(m_TileCount, m_TileCountStats, std::span{ &Cc, 1 }); }
+                };
+                // XLION_STAGE_AB=tile (the stage's proof on real materials, 2026-11-10): the same frame's inputs through both - the HDR saved,
+                // the hand-written pass, its result copied; the HDR restored, the stage, its result copied - a TILEAB line a second (the copies
+                // read back a ring of frames later) with how many words differ. Main view only; its cost: two copies and a second pass
+                static const bool s_bAB = [] { const char* p = xlionrender::Env("XLION_STAGE_AB"); return p && std::string_view(p).find("tile") != std::string_view::npos; }();
+                if( s_bAB && bMain && View.m_HDR.m_Private )
+                {
+                    const int nTexels = View.m_Width * View.m_Height;
+                    if( View.m_ABSave.m_Private && int(View.m_ABBuffer[0].getEntryCount()) != nTexels * ring_frames_v ) { m_Device.Destroy(std::move(View.m_ABSave)); m_Device.Destroy(std::move(View.m_ABScratch)); for( auto& B : View.m_ABBuffer ) m_Device.Destroy(std::move(B)); View.m_ABFrames = 0; }
+                    if( !View.m_ABSave.m_Private )
+                    {
+                        (void)m_Device.Create(View.m_ABSave, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Stage A/B: the HDR before" });
+                        (void)m_Device.Create(View.m_ABScratch, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = nTexels, .m_pName = "Stage A/B: a copy" });
+                        for( auto& B : View.m_ABBuffer ) (void)m_Device.Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = nTexels * ring_frames_v, .m_pName = "Stage A/B: a result" });
+                    }
+                    const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+                    if( View.m_ABFrames >= ring_frames_v )      // (this slot's results: written ring_frames_v frames ago, done)
+                    {
+                        std::vector<std::uint32_t> A(std::size_t(nTexels) * 2), B(A.size());
+                        (void)View.m_ABBuffer[0].MemoryMap(Slot * nTexels, nTexels, [&](void* p) { std::memcpy(A.data(), p, A.size() * 4); });
+                        (void)View.m_ABBuffer[1].MemoryMap(Slot * nTexels, nTexels, [&](void* p) { std::memcpy(B.data(), p, B.size() * 4); });
+                        std::size_t nDiff = 0; for( std::size_t k = 0; k < A.size(); ++k ) nDiff += A[k] != B[k];
+                        View.m_ABDiffWords += nDiff; ++View.m_ABChecked;
+                        if( View.m_ABChecked % 60 == 0 ) { std::printf("TILEAB %d frames checked: %llu words differ in all (%zu this one, of %zu)\n", View.m_ABChecked, (unsigned long long)View.m_ABDiffWords, nDiff, A.size()); std::fflush(stdout); }
+                    }
+                    const xgpu::buffer::copy Ca{ 0, Slot * nTexels, nTexels };
+                    Window.CopyTexture(View.m_HDR, View.m_ABSave, View.m_Width, View.m_Height);
+                    TileBody(false);
+                    Window.CopyTextureToBuffer(View.m_HDR, View.m_ABScratch); Window.CopyBuffer(View.m_ABScratch, View.m_ABBuffer[0], std::span{ &Ca, 1 });
+                    Window.CopyTexture(View.m_ABSave, View.m_HDR, View.m_Width, View.m_Height);
+                    TileBody(true);
+                    Window.CopyTextureToBuffer(View.m_HDR, View.m_ABScratch); Window.CopyBuffer(View.m_ABScratch, View.m_ABBuffer[1], std::span{ &Ca, 1 });
+                    ++View.m_ABFrames;
+                }
+                else TileBody(View.m_bStageTile);
                 static const bool s_bTileLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static int s_TileN = 0;     // (measurement: the full-screen draws a frame - one a graph)
                 if( s_bTileLog && ++s_TileN % 600 == 0 ) { std::printf("TILEPASS %d full-screen draws (graphs) of %zu\n", nTileDraws, m_TileGraphs.size()); std::fflush(stdout); }
             };
