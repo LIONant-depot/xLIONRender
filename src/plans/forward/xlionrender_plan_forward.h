@@ -323,6 +323,18 @@ namespace xlionrender::details
         return D;
     }
 
+    // The GI's voxel rays as a stage: one recorded step (gi::gpu_trace VoxStep: rays from the GI read's pixels into the voxel store), declared:
+    // the rays' BVH, the world's GI data, last frame's lit image read; the voxel store kept and updated
+    inline const stage::desc& VoxRaysStage( void ) noexcept
+    {
+        static const stage::desc D{ { { .m_Name = "GI voxel rays"
+            , .m_Buffers = { { "Rays: *", rg::lifetime::RETAINED }, { "GI: world data", rg::lifetime::RETAINED }, { "GI: device-local data", rg::lifetime::RETAINED }
+                           , { "GI: voxel store", rg::lifetime::RETAINED, rg::usage::STORAGE, true, rg::policy::PARTIAL } }
+            , .m_Textures = { { "Render target: last frame's HDR", rg::lifetime::RETAINED } }
+            , .m_Recorder = "gi.voxel_rays" } } };
+        return D;
+    }
+
     // The shadow pages as a stage: two recorded passes in the shadow atlas's render pass - the sun's virtual pages, the local lights'
     // pages (their page systems choose the pages and the casters: code, xlionrender_plan_forward.cpp renderShadows). Declared: what they
     // read (the instances, the geometry, the shadow data) and the atlas they draw into (the requested pages only: partial)

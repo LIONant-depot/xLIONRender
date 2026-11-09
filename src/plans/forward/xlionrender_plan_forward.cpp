@@ -3575,19 +3575,36 @@ namespace xlionrender
                             // forward, post: ~6.5 ms of graphics on Bistro Game; the frame map 2026-11-08); the next frame waits for them before
                             // anything of its own. This frame's gather and reflections read the store as the last frame's rays left it. XLION_ASYNC=0:
                             // here, in the frame (the default: XLION_ASYNC=1 turns the second queue on)
-                            const auto Rays = [this, &Window, &View, &Scene, Eye, Vox = Vox, Frame = m_Device.getFrameIndex()]()
+                            const auto RaysBody = [this, &Window, &View, &Scene, Eye, Vox = Vox, Frame = m_Device.getFrameIndex()]()
                             {
                                 if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
                                 m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, Frame, int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
-                                { auto& G = View.m_Graph; const int S = G.Begin("GI voxel rays", "group:gi: vox", false);
-                                  for( const char* p : { "Rays: *", "GI: world data", "GI: device-local data", "Render target: last frame's HDR" } ) G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
-                                  G.Write(S, G.Resource("GI: voxel store", rg::lifetime::RETAINED), rg::usage::STORAGE, rg::policy::PARTIAL); }
                                 if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
+                            };
+                            const auto Rays = [RaysBody, &View]()
+                            {
+                                RaysBody();
+                                auto& G = View.m_Graph; const int S = G.Begin("GI voxel rays", "group:gi: vox", false);
+                                for( const char* p : { "Rays: *", "GI: world data", "GI: device-local data", "Render target: last frame's HDR" } ) G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
+                                G.Write(S, G.Resource("GI: voxel store", rg::lifetime::RETAINED), rg::usage::STORAGE, rg::policy::PARTIAL);
                             };
                             // (off by default: 2026-11-08, Bistro Game moving at a fixed 10,000 rays, async 17.84/17.80 ms against 17.40/18.12 in the frame -
                             // no gain: on the second queue the rays took 5-7 ms instead of 2; and the rays' budget, measured on that queue, cut them to 2048)
                             static const bool s_bAsync = [] { const char* p = xlionrender::Env("XLION_ASYNC"); return p && p[0] == '1'; }();
-                            if( s_bAsync ) m_DeferredVox = Rays; else Rays();
+                            // (render graph: in the frame, the rays are a recorded step of the stage gi_voxel_rays - declared by it; on the second queue: the code's)
+                            auto& R = View.m_Stages;
+                            if( !s_bAsync && View.m_bStageVoxRays )
+                            {
+                                R.m_Steps.Add("gi.voxel_rays", RaysBody);
+                                if( View.m_VoxRaysPlan.m_Passes.empty() && View.m_VoxRaysPlan.m_Error.empty() )
+                                {
+                                    View.m_VoxRaysPlan = stage::Lower(View.StageDesc("gi_voxel_rays", details::VoxRaysStage()), R);
+                                    if( !View.m_VoxRaysPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: GI voxel rays stage: %s\n", View.m_VoxRaysPlan.m_Error.c_str());
+                                }
+                            }
+                            if( s_bAsync ) m_DeferredVox = Rays;
+                            else if( View.m_bStageVoxRays && View.m_VoxRaysPlan.m_Error.empty() ) stage::Run(View.m_VoxRaysPlan, R, Window, View.m_Graph);
+                            else Rays();
                         }
                         if( s_Vox[0] > 0.0f && !m_pGatherRefS && m_bVoxOn && m_pGITrace && m_pGITrace->RefSamples() && m_pGITrace->VoxBuffer() )     // (the ground truth above stays: the voxels overwrote it, a black or voxel image in its place)
                         {
@@ -5284,7 +5301,7 @@ namespace xlionrender
         assert(m_bReady && View.m_Width > 0);
         View.m_Graph.BeginFrame();             // (R0b: the frame's declarations, from its first work)
         static const bool s_bNoStages = xlionrender::Env("XLION_NO_STAGES") != nullptr;      // (measurement: every stage hand-written - the stages' cost)
-        if( s_bNoStages ) View.m_bStageLightTiles = View.m_bStageReflSSR = View.m_bStageReflRecon = View.m_bStageAO = View.m_bStageGIRead = View.m_bStageVSMRequest = View.m_bStageLocalRequest = View.m_bStageTile = View.m_bStageShadowPages = View.m_bStageGIUpdate = false;
+        if( s_bNoStages ) View.m_bStageLightTiles = View.m_bStageReflSSR = View.m_bStageReflRecon = View.m_bStageAO = View.m_bStageGIRead = View.m_bStageVSMRequest = View.m_bStageLocalRequest = View.m_bStageTile = View.m_bStageShadowPages = View.m_bStageGIUpdate = View.m_bStageVoxRays = false;
         m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
         if( View.m_HDRPrevPendingW )            // (last frame's image for the screen reads, its copy held back while the async rays read the older one)
         {
