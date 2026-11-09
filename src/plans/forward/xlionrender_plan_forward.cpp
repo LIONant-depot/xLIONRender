@@ -5193,8 +5193,6 @@ namespace xlionrender
             XPROFILE_SCOPE("Render: tone map"); XPROFILE_GPU_SCOPE(Window, "Render: tone map");
             static const float s_EnvBloom = [] { const char* p = xlionrender::Env("XLION_BLOOM"); return p ? float(std::atof(p)) : -1.0f; }();       // (measurement)
             static const int   s_EnvAuto = [] { const char* p = xlionrender::Env("XLION_AUTO_EXPOSURE"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();     // (measurement: 0 off, else on)
-            const float Bloom = s_EnvBloom >= 0.0f ? s_EnvBloom : Scene.m_Post.m_Bloom;
-            const bool  bAuto = s_EnvAuto >= 0 ? s_EnvAuto == 1 : Scene.m_Post.m_bAutoExposure;
             // (last frame's lit image for the next frame's screen reads: the prepass clears m_HDR - they had read black)
             static const bool s_bSSGIPrev = xlionrender::Env("XLION_SSGI") != nullptr || xlionrender::Env("XLION_VOX_SEEN") != nullptr;      // (and the voxels' lit feed)
             runDeferredVox(Window);      // (not run yet - no gather this frame: here, in the frame)
@@ -5248,7 +5246,15 @@ namespace xlionrender
                     }
                 }
                 const auto& Plan = View.m_PostPlan;
-                const auto On = [&](post::when W) { return W == post::when::ALWAYS || (W == post::when::TAA_ON && bTAA) || (W == post::when::BLOOM_ON && Bloom > 0.0f) || (W == post::when::AUTO_EXPOSURE && bAuto); };
+                // The frame's parameters, once: the Scene's by index, clamped; then the measurement overrides (XLION_BLOOM, XLION_AUTO_EXPOSURE, XLION_TAA_BLEND)
+                post::SnapshotParams(Plan, Scene.m_Post, View.m_PostSnapshot, View.m_PostNoted, [](const std::string& Line) { std::printf("Post chain: %s\n", Line.c_str()); std::fflush(stdout); });
+                auto& Snap = View.m_PostSnapshot;
+                static const float s_TAABlendEnv = [] { const char* p = xlionrender::Env("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : 0.0f; }();
+                if( s_EnvBloom >= 0.0f && Plan.m_iBloom >= 0 )          Snap[std::size_t(Plan.m_iBloom)] = s_EnvBloom;
+                if( s_EnvAuto >= 0 && Plan.m_iAutoExposure >= 0 )      Snap[std::size_t(Plan.m_iAutoExposure)] = s_EnvAuto == 1 ? 1.0f : 0.0f;
+                if( s_TAABlendEnv > 0.0f && Plan.m_iTAABlend >= 0 )    Snap[std::size_t(Plan.m_iTAABlend)] = s_TAABlendEnv;
+                const auto SnapOf = [&](int i) { return i >= 0 ? Snap[std::size_t(i)] : 0.0f; };
+                const auto On = [&](post::when W) { return W == post::when::ALWAYS || (W == post::when::TAA_ON && bTAA) || (W == post::when::BLOOM_ON && SnapOf(Plan.m_iBloom) > 0.0f) || (W == post::when::AUTO_EXPOSURE && SnapOf(Plan.m_iAutoExposure) > 0.5f); };
                 bool bTAARan = false;
                 const auto Tex = [&](const post::image_ref& r) -> const xgpu::texture*
                 {
@@ -5296,7 +5302,9 @@ namespace xlionrender
                         auto Cmd = Window.StartRenderPass(View.m_OutputPass);
                         const bool bHeatView = View.m_HeatToneMap.m_Private != nullptr;
                         Cmd.setPipelineInstance(bHeatView ? View.m_HeatToneMap : *pToneMap);
-                        Cmd.setPushConstants(details::push_tonemap{ { View.m_Exposure, Bloom, bAuto ? 1.0f : 0.0f, bHeatView ? 1.0f : 0.0f }, View.m_Background });
+                        details::push_tonemap Push{ { 0.0f, 0.0f, 0.0f, bHeatView ? 1.0f : 0.0f }, View.m_Background };
+                        post::FillSlots(P, Snap, 0.0f, View.m_Exposure, &Push);
+                        Cmd.setPushConstants(Push);
                         Cmd.setBuffer(m_FullscreenVB);
                         Cmd.setBuffer(m_FullscreenIB);
                         Cmd.Draw(3);
@@ -5312,26 +5320,21 @@ namespace xlionrender
                     const std::span<const xgpu::texture* const> Ts(T, P.m_Kernel == post::kernel::TAA ? 3 : 2);
                     if( P.m_Kernel == post::kernel::TAA )
                     {
-                        static const float s_TAABlendEnv = [] { const char* p = xlionrender::Env("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : 0.0f; }();
-                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, s_TAABlendEnv > 0.0f ? s_TAABlendEnv : Scene.m_Post.m_TAABlend, View.m_bTAAHistory ? 1.0f : 0.0f };
+                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, 0.0f, View.m_bTAAHistory ? 1.0f : 0.0f };
+                        static_assert(offsetof(decltype(Push), m_Blend) == 18 * 4);     // (the plan's TAA slot: word 18)
+                        post::FillSlots(P, Snap, 0.0f, View.m_Exposure, &Push);
                         Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, Ts, I, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
                         return;
                     }
-                    struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{ P.m_W, P.m_H, P.m_Mode };
-                    switch( P.m_Push )
+                    struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{ P.m_W, P.m_H, P.m_Mode };     // (words 3..7: the plan's slots)
+                    float Dt = 0.0f;
+                    if( std::any_of(P.m_Slots.begin(), P.m_Slots.end(), [](const post::push_slot& s) { return s.m_From == post::slot_from::FRAME_DT; }) )
                     {
-                        case post::push::BLOOM_DOWN: Push.m_A = P.m_Level == 0 ? 1.0f : 0.0f; Push.m_B = Scene.m_Post.m_BloomThreshold; Push.m_C = Scene.m_Post.m_BloomKnee; Push.m_D = View.m_Exposure; Push.m_E = bAuto ? 1.0f : 0.0f; break;
-                        case post::push::BLOOM_UP:   Push.m_A = Scene.m_Post.m_BloomSpread; break;
-                        case post::push::EXPOSURE:
-                        {
-                            const auto Now = clock::now();
-                            const float Dt = View.m_PostFixedDt >= 0.0f ? View.m_PostFixedDt : View.m_PostLast == clock::time_point{} ? 0.0f : std::min(std::chrono::duration<float>(Now - View.m_PostLast).count(), 0.25f);
-                            View.m_PostLast = Now;
-                            Push.m_A = Dt; Push.m_B = Scene.m_Post.m_ExposureRate; Push.m_C = Scene.m_Post.m_ExposureKey; Push.m_D = Scene.m_Post.m_ExposureMin; Push.m_E = Scene.m_Post.m_ExposureMax;
-                            break;
-                        }
-                        default: break;      // (FILL: 0)
+                        const auto Now = clock::now();
+                        Dt = View.m_PostFixedDt >= 0.0f ? View.m_PostFixedDt : View.m_PostLast == clock::time_point{} ? 0.0f : std::min(std::chrono::duration<float>(Now - View.m_PostLast).count(), 0.25f);
+                        View.m_PostLast = Now;
                     }
+                    post::FillSlots(P, Snap, Dt, View.m_Exposure, &Push);
                     Window.Dispatch(m_PostCompute, std::span<xgpu::buffer* const>{}, Ts, I, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
                 };
                 if( Plan.m_Error.empty() )

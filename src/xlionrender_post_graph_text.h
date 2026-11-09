@@ -11,6 +11,10 @@
 //        "post.bloom"
 //        "post.exposure"
 //        "post.tonemap"
+//      [ Params : 10 ]
+//      { Name:s  Source:s  Type:s  Default:f  Min:f  Max:f }
+//        "BloomThreshold"  "scene.post.bloom_threshold"  "float"  0.99  0  16
+//        ...
 #include "xlionrender_post_graph.h"
 #include "dependencies/xtextfile/source/xtextfile.h"
 
@@ -37,6 +41,19 @@ namespace xlionrender::post
                 D.m_Nodes.push_back({ It->second });
             }
         }
+        // The parameters (P3): what the nodes push, where a frame reads each, its range
+        if( auto Err = F.Record("Params"
+            , [&](std::size_t& Count, xerr&) { if( F.isReading() ) D.m_Params.resize(Count); else Count = D.m_Params.size(); }
+            , [&](std::size_t i, xerr& E)
+            {
+                auto& Pa = D.m_Params[i];
+                std::string Type = Pa.m_Type == param_type::BOOL ? "bool" : "float";
+                false || (E = F.Field("Name", Pa.m_Name)) || (E = F.Field("Source", Pa.m_Source)) || (E = F.Field("Type", Type))
+                      || (E = F.Field("Default", Pa.m_Default)) || (E = F.Field("Min", Pa.m_Min)) || (E = F.Field("Max", Pa.m_Max));
+                if( F.isReading() ) Pa.m_Type = Type == "bool" ? param_type::BOOL : param_type::FLOAT;
+            }); Err ) return Err;
+        if( F.isReading() ) for( std::size_t i = 0; i < D.m_Params.size(); ++i )
+            if( D.m_Params[i].m_Type == param_type::FLOAT && std::isnan(D.m_Params[i].m_Default) ) { Problem = std::format("parameter row {}: no default", i); D = {}; return {}; }
         return {};
     }
 }

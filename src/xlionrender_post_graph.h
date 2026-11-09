@@ -6,12 +6,17 @@
 // an authored description (the effects, in order) is validated and lowered, for a view's size, into an immutable plan - a flat list of
 // passes with their kernel, images, size, dispatch and the render graph's reads / writes - that a frame walks with no name lookups.
 // The plan matches what the hand-written chain records (xLION_Docs/render_graph_post_chain_inventory_2026-11-09.md): same kernels,
-// sizes, bindings, order. Nothing runs it yet (P1b).
+// sizes, bindings, order. P3: the values the passes push are data too - the description declares its parameters (typed, ranged, with
+// a source such as "scene.post.bloom_threshold"), each pass says which word of its push takes which; lowering resolves the names, a
+// frame takes one snapshot by index (Snapshot) - no string lookups per frame.
 #include "xlionrender_render_graph.h"
+#include "scene/xlionrender_scene.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <format>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -21,10 +26,52 @@ namespace xlionrender::post
     // exposure zeroed) are the nodes' lifecycle, never wired by a user
     enum class node_type : std::uint8_t { TAA, BLOOM, EXPOSURE, TONE_MAP };
     struct node { node_type m_Type; bool operator==( const node& ) const = default; };
+
+    // A parameter of the chain: what the nodes push. Source: where a frame reads it ("scene.post.bloom_threshold"; empty: the default
+    // only); a value outside Min..Max is clamped (and reported once a change: SnapshotParams). Bools are 0 / 1
+    enum class param_type : std::uint8_t { FLOAT, BOOL };
+    struct param
+    {
+        std::string     m_Name, m_Source;
+        param_type      m_Type = param_type::FLOAT;
+        float           m_Default = 0, m_Min = 0, m_Max = 0;
+        bool operator==( const param& ) const = default;
+    };
+
+    // The scene's settings a parameter can come from (stable names: the description refers to them; the Scene is read each frame,
+    // never kept - Play / Stop replace it)
+    struct source { std::string_view m_Name; float post_settings::* m_pFloat; bool post_settings::* m_pBool; };
+    inline constexpr source sources_v[] = {
+        { "scene.post.bloom",           &post_settings::m_Bloom,          nullptr },
+        { "scene.post.bloom_threshold", &post_settings::m_BloomThreshold, nullptr },
+        { "scene.post.bloom_knee",      &post_settings::m_BloomKnee,      nullptr },
+        { "scene.post.bloom_spread",    &post_settings::m_BloomSpread,    nullptr },
+        { "scene.post.auto_exposure",   nullptr,                          &post_settings::m_bAutoExposure },
+        { "scene.post.taa_blend",       &post_settings::m_TAABlend,       nullptr },
+        { "scene.post.exposure_key",    &post_settings::m_ExposureKey,    nullptr },
+        { "scene.post.exposure_rate",   &post_settings::m_ExposureRate,   nullptr },
+        { "scene.post.exposure_min",    &post_settings::m_ExposureMin,    nullptr },
+        { "scene.post.exposure_max",    &post_settings::m_ExposureMax,    nullptr },
+    };
+
     struct desc
     {
-        std::vector<node> m_Nodes;
-        static desc Default( void ) { return { { { node_type::TAA }, { node_type::BLOOM }, { node_type::EXPOSURE }, { node_type::TONE_MAP } } }; }
+        std::vector<node>  m_Nodes;
+        std::vector<param> m_Params;
+        static desc Default( void )
+        {
+            return { { { node_type::TAA }, { node_type::BLOOM }, { node_type::EXPOSURE }, { node_type::TONE_MAP } }
+                   , { { "Bloom",          "scene.post.bloom",           param_type::FLOAT, 0.0f,   0.0f,    1.0f }
+                     , { "BloomThreshold", "scene.post.bloom_threshold", param_type::FLOAT, 0.99f,  0.0f,    16.0f }
+                     , { "BloomKnee",      "scene.post.bloom_knee",      param_type::FLOAT, 0.5f,   0.0f,    4.0f }
+                     , { "BloomSpread",    "scene.post.bloom_spread",    param_type::FLOAT, 0.7f,   0.0f,    1.0f }
+                     , { "AutoExposure",   "scene.post.auto_exposure",   param_type::BOOL,  0.0f,   0.0f,    1.0f }
+                     , { "TAABlend",       "scene.post.taa_blend",       param_type::FLOAT, 0.1f,   0.01f,   1.0f }
+                     , { "ExposureKey",    "scene.post.exposure_key",    param_type::FLOAT, 0.115f, 0.001f,  10.0f }
+                     , { "ExposureRate",   "scene.post.exposure_rate",   param_type::FLOAT, 1.5f,   0.0f,    20.0f }
+                     , { "ExposureMin",    "scene.post.exposure_min",    param_type::FLOAT, 0.03f,  0.0001f, 1000.0f }
+                     , { "ExposureMax",    "scene.post.exposure_max",    param_type::FLOAT, 30.0f,  0.0001f, 1000.0f } } };
+        }
         bool operator==( const desc& ) const = default;
     };
 
@@ -35,6 +82,11 @@ namespace xlionrender::post
     enum class kernel : std::uint8_t { TAA, POST, TONE_MAP };       // xlionrender_taa_comp, xlionrender_post_comp, xlionrender_tonemap_frag
     enum class when   : std::uint8_t { ALWAYS, TAA_ON, BLOOM_ON, AUTO_EXPOSURE };      // (settings, not topology: a slider at 0 skips, it rebuilds nothing)
     enum class push   : std::uint8_t { FILL, TAA, BLOOM_DOWN, EXPOSURE, BLOOM_UP, TONE_MAP };
+
+    // A word of a pass's push constants (4 bytes, counted from the push's start) and what fills it: a constant, a parameter of the
+    // frame's snapshot, or a value only the frame knows (the exposure step's seconds, the view's manual exposure)
+    enum class slot_from : std::uint8_t { CONSTANT, PARAM, FRAME_DT, VIEW_EXPOSURE };
+    struct push_slot { int m_Word; slot_from m_From; int m_Param = -1; float m_Constant = 0; };
 
     struct pass
     {
@@ -51,13 +103,19 @@ namespace xlionrender::post
         int                     m_W = 0, m_H = 0, m_GroupsX = 0, m_GroupsY = 0;
         struct access { image_ref m_Ref; rg::usage m_Usage; rg::policy m_Policy; bool m_bWrite; };
         std::vector<access>     m_Accesses;     // what it declares to the render graph (R0b), in the legacy order
+        std::vector<push_slot>  m_Slots;        // the push words the plan fills (the rest - sizes, mode, TAA's matrix and history flag - the frame's)
     };
+
+    // A parameter resolved: its source by index (-1: the default only), its range
+    struct resolved_param { int m_Source = -1; param_type m_Type = param_type::FLOAT; float m_Default = 0, m_Min = 0, m_Max = 0; std::string m_Name; };
 
     struct plan
     {
         std::vector<pass>       m_Inits;        // once: TAA history (both images; when the TAA's images are first made), bloom levels + exposure (once a view)
         std::vector<pass>       m_Passes;       // a frame, in order
         int                     m_nBloom = 0;   // the levels the bloom uses
+        std::vector<resolved_param> m_Params;   // the snapshot's layout (SnapshotParams)
+        int                     m_iBloom = -1, m_iAutoExposure = -1, m_iTAABlend = -1;     // (what decides whether passes run, and the measurement overrides)
         std::string             m_Error;        // not empty: the description is not valid (and the plan is empty)
     };
 
@@ -85,6 +143,33 @@ namespace xlionrender::post
             if( T == node_type::TONE_MAP && i != int(D.m_Nodes.size()) - 1 ) return Fail(i, "the tone map must be last: it makes the output");
         }
         if( !nType[std::size_t(node_type::TONE_MAP)] ) return Fail(-1, "no tone map: the chain makes no output");
+
+        // The parameters: names unique, sources known, ranges sane - resolved to indices once
+        for( const auto& Pa : D.m_Params )
+        {
+            resolved_param R{ -1, Pa.m_Type, Pa.m_Default, Pa.m_Min, Pa.m_Max, Pa.m_Name };
+            if( std::count_if(D.m_Params.begin(), D.m_Params.end(), [&](const param& Q) { return Q.m_Name == Pa.m_Name; }) > 1 ) return Fail(-1, std::format("parameter '{}' is declared twice", Pa.m_Name));
+            if( !(Pa.m_Min <= Pa.m_Max) ) return Fail(-1, std::format("parameter '{}': its range {} .. {} is empty", Pa.m_Name, Pa.m_Min, Pa.m_Max));
+            if( !Pa.m_Source.empty() )
+            {
+                const auto It = std::find_if(std::begin(sources_v), std::end(sources_v), [&](const source& S) { return S.m_Name == Pa.m_Source; });
+                if( It == std::end(sources_v) ) return Fail(-1, std::format("parameter '{}': no source '{}'", Pa.m_Name, Pa.m_Source));
+                if( (It->m_pBool != nullptr) != (Pa.m_Type == param_type::BOOL) ) return Fail(-1, std::format("parameter '{}': its source '{}' is a {}", Pa.m_Name, Pa.m_Source, It->m_pBool ? "bool" : "float"));
+                R.m_Source = int(It - std::begin(sources_v));
+            }
+            P.m_Params.push_back(std::move(R));
+        }
+        const auto Param = [&](std::string_view Name) { for( int i = 0; i < int(P.m_Params.size()); ++i ) if( P.m_Params[std::size_t(i)].m_Name == Name ) return i; return -1; };
+        // Each node's parameters (a node that needs one the description lacks is refused, naming both)
+        static constexpr std::string_view s_Needs[4][5] = { { "TAABlend" }, { "Bloom", "BloomThreshold", "BloomKnee", "BloomSpread", "AutoExposure" }
+                                                          , { "AutoExposure", "ExposureRate", "ExposureKey", "ExposureMin", "ExposureMax" }, { "Bloom", "AutoExposure" } };
+        static constexpr std::string_view s_TypeNames[4] = { "taa", "bloom", "exposure", "tone map" };
+        for( int i = 0; i < int(D.m_Nodes.size()); ++i )
+            for( const auto Need : s_Needs[std::size_t(D.m_Nodes[std::size_t(i)].m_Type)] )
+                if( !Need.empty() && Param(Need) < 0 ) return Fail(i, std::format("the {} needs the parameter '{}'", s_TypeNames[std::size_t(D.m_Nodes[std::size_t(i)].m_Type)], Need));
+        P.m_iBloom = Param("Bloom"); P.m_iAutoExposure = Param("AutoExposure"); P.m_iTAABlend = Param("TAABlend");
+        const auto Pm = [&](int Word, std::string_view Name) { return push_slot{ Word, slot_from::PARAM, Param(Name) }; };
+        const auto Ct = [](int Word, float V) { return push_slot{ Word, slot_from::CONSTANT, -1, V }; };
 
         using A = pass::access;
         const auto Groups = [](pass& p) { p.m_GroupsX = (p.m_W + 7) / 8; p.m_GroupsY = (p.m_H + 7) / 8; };
@@ -122,6 +207,7 @@ namespace xlionrender::post
                 pass p{ .m_Scope = "TAA", .m_Source = std::format("TAA, {} x {}", W, H), .m_Node = n, .m_Kernel = kernel::TAA, .m_Push = push::TAA, .m_When = when::TAA_ON,
                         .m_Bind = { HDR, DEPTH, { image::TAA_PREV } }, .m_Dst = { image::TAA_CUR }, .m_W = W, .m_H = H };
                 p.m_Accesses = { R(HDR), R(DEPTH), R({ image::TAA_PREV }), Wr(p.m_Dst, rg::policy::FULL_OVERWRITE) };
+                p.m_Slots = { Pm(18, "TAABlend") };
                 Groups(p); P.m_Passes.push_back(std::move(p));
                 break;
             }
@@ -133,6 +219,7 @@ namespace xlionrender::post
                     pass p{ .m_Scope = "bloom down", .m_Source = std::format("Bloom, down {}, {} x {}", i, S[0], S[1]), .m_Node = n, .m_Mode = 0, .m_Push = push::BLOOM_DOWN,
                             .m_When = when::BLOOM_ON, .m_Level = i, .m_Bind = { Src, EXPO }, .m_Dst = Bloom(i), .m_W = S[0], .m_H = S[1] };
                     p.m_Accesses = { R(Src), R(EXPO), Wr(p.m_Dst, rg::policy::FULL_OVERWRITE) };
+                    p.m_Slots = { Ct(3, i == 0 ? 1.0f : 0.0f), Pm(4, "BloomThreshold"), Pm(5, "BloomKnee"), { 6, slot_from::VIEW_EXPOSURE }, Pm(7, "AutoExposure") };
                     Groups(p); P.m_Passes.push_back(std::move(p));
                 }
                 for( int i = P.m_nBloom - 2; i >= 0; --i )
@@ -141,6 +228,7 @@ namespace xlionrender::post
                     pass p{ .m_Scope = "bloom up", .m_Source = std::format("Bloom, up {}, {} x {}", i, S[0], S[1]), .m_Node = n, .m_Mode = 1, .m_Push = push::BLOOM_UP,
                             .m_When = when::BLOOM_ON, .m_Level = i, .m_Bind = { Bloom(i + 1), EXPO }, .m_Dst = Bloom(i), .m_W = S[0], .m_H = S[1] };
                     p.m_Accesses = { R(Bloom(i + 1)), R(EXPO), R(Bloom(i)), Wr(p.m_Dst, rg::policy::PRESERVE) };
+                    p.m_Slots = { Pm(3, "BloomSpread") };
                     Groups(p); Ups.push_back(std::move(p));
                 }
                 break;
@@ -150,6 +238,7 @@ namespace xlionrender::post
                 pass p{ .m_Scope = "exposure", .m_Source = "Exposure, adapt", .m_Node = n, .m_Mode = 2, .m_Push = push::EXPOSURE, .m_When = when::AUTO_EXPOSURE,
                         .m_Bind = { CHAIN, HDR }, .m_Dst = EXPO, .m_W = 1, .m_H = 1 };
                 p.m_Accesses = { R(CHAIN), R(HDR), Wr(EXPO, rg::policy::PRESERVE) };
+                p.m_Slots = { { 3, slot_from::FRAME_DT }, Pm(4, "ExposureRate"), Pm(5, "ExposureKey"), Pm(6, "ExposureMin"), Pm(7, "ExposureMax") };
                 Groups(p); P.m_Passes.push_back(std::move(p));
                 break;
             }
@@ -159,11 +248,43 @@ namespace xlionrender::post
                 pass p{ .m_Scope = "tone map", .m_Source = std::format("Tone map, {} x {}", W, H), .m_Node = n, .m_Kernel = kernel::TONE_MAP, .m_Push = push::TONE_MAP,
                         .m_Bind = { CHAIN, Bloom(0), EXPO }, .m_Dst = { image::OUTPUT }, .m_W = W, .m_H = H };
                 p.m_Accesses = { R(CHAIN), R(Bloom(0)), R(EXPO), Wr(p.m_Dst, rg::policy::FULL_OVERWRITE, rg::usage::COLOR_ATTACHMENT) };
+                p.m_Slots = { { 0, slot_from::VIEW_EXPOSURE }, Pm(1, "Bloom"), Pm(2, "AutoExposure") };
                 P.m_Passes.push_back(std::move(p));
                 break;
             }
         }
         return P;
+    }
+
+    // The frame's values, one read of the Scene by index: Out[i] for plan.m_Params[i], clamped to its range. A clamp is reported (Report:
+    // a line) once a change of the raw value - Noted keeps the last reported raw value a parameter (NaN: none)
+    template< typename T_REPORT >
+    void SnapshotParams( const plan& P, const post_settings& S, std::vector<float>& Out, std::vector<float>& Noted, T_REPORT&& Report ) noexcept
+    {
+        Out.resize(P.m_Params.size()); Noted.resize(P.m_Params.size(), std::numeric_limits<float>::quiet_NaN());
+        for( std::size_t i = 0; i < P.m_Params.size(); ++i )
+        {
+            const auto& R = P.m_Params[i];
+            float V = R.m_Default;
+            if( R.m_Source >= 0 ) { const auto& Src = sources_v[std::size_t(R.m_Source)]; V = Src.m_pBool ? (S.*Src.m_pBool ? 1.0f : 0.0f) : S.*Src.m_pFloat; }
+            const float C = std::isnan(V) ? R.m_Default : std::clamp(V, R.m_Min, R.m_Max);
+            if( C != V ) { if( !(Noted[i] == V) ) { Noted[i] = V; Report(std::format("{} = {} is outside {} .. {}: {} is used", R.m_Name, V, R.m_Min, R.m_Max, C)); } }
+            else Noted[i] = std::numeric_limits<float>::quiet_NaN();
+            Out[i] = C;
+        }
+    }
+
+    // A pass's push words from the snapshot (the frame's own words - sizes, mode, matrices - written by the caller)
+    inline void FillSlots( const pass& Pa, const std::vector<float>& Snapshot, float Dt, float ViewExposure, void* pPush ) noexcept
+    {
+        for( const auto& s : Pa.m_Slots )
+        {
+            float V = s.m_Constant;
+            if( s.m_From == slot_from::PARAM ) V = Snapshot[std::size_t(s.m_Param)];
+            else if( s.m_From == slot_from::FRAME_DT ) V = Dt;
+            else if( s.m_From == slot_from::VIEW_EXPOSURE ) V = ViewExposure;
+            std::memcpy(static_cast<std::byte*>(pPush) + std::size_t(s.m_Word) * 4, &V, 4);
+        }
     }
 }
 #endif

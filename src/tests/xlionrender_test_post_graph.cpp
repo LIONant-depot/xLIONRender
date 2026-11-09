@@ -4,11 +4,15 @@
 // a bad description is refused with the node it is about.
 #include "xlionrender_post_graph_text.h"
 #include <filesystem>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 
 namespace post = xlionrender::post;
 namespace rg = xlionrender::rg;
+
+// A description with these nodes and the default parameters
+static post::desc With( std::vector<post::node> Nodes ) { auto D = post::desc::Default(); D.m_Nodes = std::move(Nodes); return D; }
 
 #define CHECK(c, what) do { if( !(c) ) { std::printf("FAIL: %s\n", std::string(what).c_str()); std::exit(1); } } while(0)
 
@@ -76,21 +80,79 @@ int main()
     }
     // Without bloom: no bloom steps (the tone map still binds level 0: zeroed once, its weight 0)
     {
-        const auto P = post::Lower({ { { post::node_type::TAA }, { post::node_type::EXPOSURE }, { post::node_type::TONE_MAP } } }, 1920, 1080);
+        const auto P = post::Lower(With({ { post::node_type::TAA }, { post::node_type::EXPOSURE }, { post::node_type::TONE_MAP } }), 1920, 1080);
         CHECK(P.m_Error.empty() && P.m_nBloom == 0 && P.m_Passes.size() == 3, "no bloom: TAA, exposure, tone map");
     }
     // Exposure before the bloom (a different image while adapting - the threshold sees this frame's exposure - but valid)
     {
-        const auto P = post::Lower({ { { post::node_type::EXPOSURE }, { post::node_type::BLOOM }, { post::node_type::TONE_MAP } } }, 1920, 1080);
+        const auto P = post::Lower(With({ { post::node_type::EXPOSURE }, { post::node_type::BLOOM }, { post::node_type::TONE_MAP } }), 1920, 1080);
         CHECK(P.m_Error.empty() && P.m_Passes[0].m_Scope == "exposure" && P.m_Passes[1].m_Scope == "bloom down" && P.m_Passes.back().m_Scope == "tone map", "exposure first");
         CHECK(P.m_Inits.size() == 7, "no TAA: no TAA history to make");
     }
     // Refused, with the node it is about
     const auto Refused = [](post::desc D, const char* pWhy, const char* pWhat) { const auto P = post::Lower(D, 64, 64); CHECK(P.m_Error.find(pWhy) != std::string::npos && P.m_Passes.empty(), std::string(pWhat) + ": " + P.m_Error); };
-    Refused({ { { post::node_type::BLOOM } } }, "no tone map", "no tone map");
-    Refused({ { { post::node_type::TONE_MAP }, { post::node_type::BLOOM } } }, "node 0: the tone map must be last", "tone map not last");
-    Refused({ { { post::node_type::BLOOM }, { post::node_type::TAA }, { post::node_type::TONE_MAP } } }, "node 1: TAA must come first", "TAA not first");
-    Refused({ { { post::node_type::BLOOM }, { post::node_type::BLOOM }, { post::node_type::TONE_MAP } } }, "node 1: a second one", "two blooms");
+    Refused(With({ { post::node_type::BLOOM } }), "no tone map", "no tone map");
+    Refused(With({ { post::node_type::TONE_MAP }, { post::node_type::BLOOM } }), "node 0: the tone map must be last", "tone map not last");
+    Refused(With({ { post::node_type::BLOOM }, { post::node_type::TAA }, { post::node_type::TONE_MAP } }), "node 1: TAA must come first", "TAA not first");
+    Refused(With({ { post::node_type::BLOOM }, { post::node_type::BLOOM }, { post::node_type::TONE_MAP } }), "node 1: a second one", "two blooms");
+    // P3: parameters - a node needing one the description lacks, an unknown source, a type mismatch, a duplicate, an empty range
+    { auto D = post::desc::Default(); std::erase_if(D.m_Params, [](const post::param& p) { return p.m_Name == "BloomKnee"; }); Refused(D, "node 1: the bloom needs the parameter 'BloomKnee'", "a missing parameter"); }
+    { auto D = post::desc::Default(); D.m_Params[1].m_Source = "scene.post.bloom_treshold"; Refused(D, "parameter 'BloomThreshold': no source 'scene.post.bloom_treshold'", "an unknown source"); }
+    { auto D = post::desc::Default(); D.m_Params[4].m_Type = post::param_type::FLOAT; Refused(D, "parameter 'AutoExposure': its source 'scene.post.auto_exposure' is a bool", "a type mismatch"); }
+    { auto D = post::desc::Default(); D.m_Params.push_back(D.m_Params[0]); Refused(D, "parameter 'Bloom' is declared twice", "a duplicate"); }
+    { auto D = post::desc::Default(); D.m_Params[0].m_Min = 2; Refused(D, "parameter 'Bloom': its range 2 .. 1 is empty", "an empty range"); }
+    // P3: every push word a plan fills is filled once, from a known parameter
+    {
+        const auto P = post::Lower(post::desc::Default(), 1920, 1080);
+        for( const auto& Pa : P.m_Passes )
+            for( std::size_t i = 0; i < Pa.m_Slots.size(); ++i )
+            {
+                CHECK(Pa.m_Slots[i].m_From != post::slot_from::PARAM || (Pa.m_Slots[i].m_Param >= 0 && Pa.m_Slots[i].m_Param < int(P.m_Params.size())), Pa.m_Source + ": a slot's parameter resolved");
+                for( std::size_t j = 0; j < i; ++j ) CHECK(Pa.m_Slots[i].m_Word != Pa.m_Slots[j].m_Word, Pa.m_Source + ": a push word filled twice");
+            }
+        // The snapshot: the Scene's values by index; out of range clamped and reported once a change
+        xlionrender::post_settings S; S.m_BloomThreshold = 0.6f; S.m_Bloom = 3.0f; S.m_bAutoExposure = true;
+        std::vector<float> Snap, Noted; int nReports = 0; std::string Last;
+        const auto Rep = [&](const std::string& L) { ++nReports; Last = L; };
+        post::SnapshotParams(P, S, Snap, Noted, Rep);
+        CHECK(Snap[std::size_t(P.m_iBloom)] == 1.0f && nReports == 1 && Last.find("Bloom = 3 is outside 0 .. 1: 1 is used") != std::string::npos, "an out-of-range value clamped and reported: " + Last);
+        CHECK(Snap[1] == 0.6f && Snap[std::size_t(P.m_iAutoExposure)] == 1.0f && Snap[6] == 0.115f, "the Scene's values, by index");
+        post::SnapshotParams(P, S, Snap, Noted, Rep);
+        CHECK(nReports == 1, "the same clamp is not reported again");
+        S.m_Bloom = 0.5f; post::SnapshotParams(P, S, Snap, Noted, Rep); S.m_Bloom = 3.0f; post::SnapshotParams(P, S, Snap, Noted, Rep);
+        CHECK(nReports == 2, "back in range, then out again: reported again");
+        // FillSlots: the bloom's first down step - the words 3..7 of post_comp's push
+        struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{};
+        const auto& Down0 = P.m_Passes[1];
+        CHECK(Down0.m_Scope == "bloom down" && Down0.m_Level == 0, "pass 1 is the first down step");
+        post::FillSlots(Down0, Snap, 0.0f, 2.0f, &Push);
+        CHECK(Push.m_A == 1.0f && Push.m_B == 0.6f && Push.m_C == 0.5f && Push.m_D == 2.0f && Push.m_E == 1.0f && Push.m_W == 0, "the first down step's push from the snapshot");
+        // Every pass's pushed words against the hand-written chain's formulas (P2's xlionrender_plan_forward.cpp, transcribed)
+        S.m_Bloom = 0.4f; S.m_BloomSpread = 0.65f; S.m_ExposureRate = 2.5f; S.m_ExposureKey = 0.2f; S.m_ExposureMin = 0.05f; S.m_ExposureMax = 20.0f; S.m_TAABlend = 0.15f;
+        post::SnapshotParams(P, S, Snap, Noted, Rep);
+        const float Dt = 1.0f / 30.0f, ViewExposure = 1.5f;
+        for( const auto& Pa : P.m_Passes )
+        {
+            if( Pa.m_Kernel == post::kernel::TAA )
+            {
+                float W[20] = {}; post::FillSlots(Pa, Snap, Dt, ViewExposure, W);
+                CHECK(W[18] == S.m_TAABlend, "TAA: the blend");
+                continue;
+            }
+            if( Pa.m_Kernel == post::kernel::TONE_MAP )
+            {
+                float W[8] = {}; post::FillSlots(Pa, Snap, Dt, ViewExposure, W);
+                CHECK(W[0] == ViewExposure && W[1] == S.m_Bloom && W[2] == 1.0f && W[3] == 0.0f, "tone map: exposure, bloom, auto");
+                continue;
+            }
+            decltype(Push) X{}, L{}; post::FillSlots(Pa, Snap, Dt, ViewExposure, &X);
+            if( Pa.m_Push == post::push::BLOOM_DOWN ) { L.m_A = Pa.m_Level == 0 ? 1.0f : 0.0f; L.m_B = S.m_BloomThreshold; L.m_C = S.m_BloomKnee; L.m_D = ViewExposure; L.m_E = S.m_bAutoExposure ? 1.0f : 0.0f; }
+            if( Pa.m_Push == post::push::BLOOM_UP ) L.m_A = S.m_BloomSpread;
+            if( Pa.m_Push == post::push::EXPOSURE ) { L.m_A = Dt; L.m_B = S.m_ExposureRate; L.m_C = S.m_ExposureKey; L.m_D = S.m_ExposureMin; L.m_E = S.m_ExposureMax; }
+            CHECK(!std::memcmp(&X, &L, sizeof(X)), Pa.m_Source + ": the push words the hand-written chain pushed");
+        }
+        for( const auto& Pa : P.m_Inits ) CHECK(Pa.m_Slots.empty(), Pa.m_Source + ": an initialisation pushes only its fill (0)");
+    }
     { const auto P = post::Lower(post::desc::Default(), 0, 1080); CHECK(!P.m_Error.empty(), "a 0-wide view is refused"); }
     // P2: the description as text - written and read back it is the same description, and lowers to the same plan; an unknown type names its row
     {
