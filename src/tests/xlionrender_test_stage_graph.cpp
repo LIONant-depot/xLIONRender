@@ -64,25 +64,29 @@ int main( int argc, char** argv )
     }
 
     // the text form (R3): every built-in description written and read back the same; a bad row refused with its reason
-    std::vector<std::pair<std::string, stage::desc>> FromText;
+    // (XLION_SG_EXPORT=<folder>: each built-in written there as <name>.stage.txt - the xrender_graph plugin's Stages folder is made this way)
+    stage::library FromText;
     {
         const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_stage_graph.txt").wstring();
-        const std::pair<const char*, const stage::desc*> BuiltIn[] = { { "light_tiles", &xlionrender::details::LightTilesStage() }, { "refl_ssr", &xlionrender::details::ReflScreenStage() }, { "refl_recon", &xlionrender::details::ReflReconStage() } };
-        for( const auto& [pName, pD] : BuiltIn )
+        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() } };
+        std::string Problem;
+        { auto L = BuiltIn; xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, L, Problem), "the library written"); }
+        { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, FromText, Problem) && Problem.empty(), "the library read: %s", Problem.c_str()); }
+        CHECK(FromText == BuiltIn, "the same descriptions back from their text");
+        if( const char* pDir = std::getenv("XLION_SG_EXPORT") )
+            for( const auto& S : BuiltIn )
+            {
+                stage::library One{ S };
+                xtextfile::stream F;
+                CHECK(!F.Open(false, (std::filesystem::path(pDir) / (S.first + ".stage.txt")).wstring(), xtextfile::file_type::TEXT) && !stage::Serialize(F, One, Problem), "%s exported", S.first.c_str());
+                std::printf("exported %s\n", S.first.c_str());
+            }
         {
-            auto D = *pD; stage::desc Back; std::string Problem;
-            { xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, D, Problem), "%s written", pName); }
-            { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, Back, Problem) && Problem.empty(), "%s read: %s", pName, Problem.c_str()); }
-            CHECK(Back == *pD, "%s: the same description back from its text", pName);
-            FromText.emplace_back(pName, std::move(Back));
-        }
-        {
-            auto D = xlionrender::details::LightTilesStage(); D.m_Passes[0].m_Push[1] = { "", 7u }; D.m_Passes[0].m_Push[2] = { "", std::bit_cast<std::uint32_t>(0.5f) };
-            stage::desc Back; std::string Problem;
-            { xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, D, Problem), "constants written"); }
+            stage::library L = { { "light_tiles", xlionrender::details::LightTilesStage() } }, Back;
+            auto& D = L[0].second; D.m_Passes[0].m_Push[1] = { "", 7u }; D.m_Passes[0].m_Push[2] = { "", std::bit_cast<std::uint32_t>(0.5f) };
+            { auto W = L; xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, W, Problem), "constants written"); }
             { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, Back, Problem) && Problem.empty(), "constants read: %s", Problem.c_str()); }
-            CHECK(Back.m_Passes[0].m_Push[1] == D.m_Passes[0].m_Push[1], "a constant word back");
-            CHECK(Back.m_Passes[0].m_Push[2] == D.m_Passes[0].m_Push[2], "a float constant back (its bits)");
+            CHECK(Back == L, "constant words back (a float's bits)");
             stage::word W;
             CHECK(stage::text::Word("f0.5", W) && W.m_Constant == std::bit_cast<std::uint32_t>(0.5f) && W.m_Frame.empty(), "f0.5 is a float word");
             CHECK(stage::text::Word("12", W) && W.m_Constant == 12u && W.m_Frame.empty(), "12 is a uint word");

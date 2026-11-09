@@ -2,25 +2,30 @@
 #define XLIONRENDER_STAGE_GRAPH_TEXT_H
 #pragma once
 
-// A frame stage's description as text (render graph R3; xlionrender_stage_graph.h): two xtextfile tables - its passes, then every pass's
-// bindings. The renderer never reads files - a view holds stage::desc overrides; this reader is the tests' and the RenderGraph
-// compiler's (one reader).
+// Frame stages' descriptions as text (render graph R3; xlionrender_stage_graph.h): a library of named stages in three xtextfile tables -
+// the stages, their passes, every pass's bindings. The renderer never reads files - a view holds stage::desc overrides by name; this
+// reader is the tests', the RenderGraph compiler's (the plugin's Stages/*.stage.txt) and its bundle's (one reader, one format).
+//      [ Stages : 1 ]
+//      { Name:s }                                (the name a view's override goes by: light_tiles, refl_ssr, refl_recon)
+//        "light_tiles"
 //      [ StagePasses : 1 ]
-//      { Name:s  Kernel:s  Size:s  Push:s }      (Push: the push words in order, comma separated - a frame value's name, or a constant:
-//        "light tiles"  "light_tiles"  "view.size"  "frame.c2w,view.width,view.height,lights.local_base,lights.local_count"
-//                                                    a number is one uint word, f<number> one float word: "0", "f0.5")
+//      { Stage:d  Name:s  Kernel:s  Size:s  Push:s }      (Push: the push words in order, comma separated - a frame value's name, or a
+//        0  "light tiles"  "light_tiles"  "view.size"  "frame.c2w,view.width,..."    constant: a number one uint word, f<number> one float word)
 //      [ StageBindings : 3 ]
-//      { Pass:d  Kind:s  Name:s  Life:s  Usage:s  Write:c  Policy:s  If:s }     (Kind: buffer, texture, image - each in its kernel's order;
-//        0  "buffer"   "Lights: light ring"  "retained"  "storage"  0  "none"  ""      If: a frame value whose first word 0 leaves the
-//        ...                                                                            binding undeclared that frame - "" always)
+//      { Stage:d  Pass:d  Kind:s  Name:s  Life:s  Usage:s  Write:c  Policy:s  If:s }     (Pass: within its stage; Kind: buffer, texture,
+//        0  0  "buffer"  "Lights: light ring"  "retained"  "storage"  0  "none"  ""      image - each in its kernel's order; If: a frame
+//        ...                                                                              value whose first word 0 leaves it undeclared)
 #include "xlionrender_stage_graph.h"
 #include "dependencies/xtextfile/source/xtextfile.h"
 #include <format>
 #include <bit>
 #include <charconv>
+#include <cctype>
 
 namespace xlionrender::stage
 {
+    using library = std::vector<std::pair<std::string, desc>>;     // named stages
+
     namespace text
     {
         inline constexpr std::string_view life_v[]   = { "frame", "history", "retained", "static", "external" };
@@ -58,28 +63,35 @@ namespace xlionrender::stage
         }
     }
 
-    // Reads or writes D. Problem: why a row was refused; the file's own errors come back as xerr
-    inline xerr Serialize( xtextfile::stream& F, desc& D, std::string& Problem ) noexcept
+    // Reads or writes L. Problem: why a row was refused (L left empty); the file's own errors come back as xerr
+    inline xerr Serialize( xtextfile::stream& F, library& L, std::string& Problem ) noexcept
     {
-        std::vector<std::string> Name, Kernel, Size, Push;
-        if( !F.isReading() ) for( const auto& P : D.m_Passes )
+        std::vector<std::string> Stages;
+        if( !F.isReading() ) for( const auto& [N, D] : L ) Stages.push_back(N);
+        if( auto Err = F.Record("Stages"
+            , [&](std::size_t& Count, xerr&) { if( F.isReading() ) Stages.resize(Count); else Count = Stages.size(); }
+            , [&](std::size_t i, xerr& E) { E = F.Field("Name", Stages[i]); }); Err ) return Err;
+
+        struct pass_row { int m_Stage = 0; std::string m_Name, m_Kernel, m_Size, m_Push; };
+        std::vector<pass_row> Passes;
+        if( !F.isReading() ) for( std::size_t s = 0; s < L.size(); ++s ) for( const auto& P : L[s].second.m_Passes )
         {
-            Name.push_back(P.m_Name); Kernel.push_back(P.m_Kernel); Size.push_back(P.m_Size);
-            std::string S; for( const auto& W : P.m_Push ) { if( !S.empty() ) S += ","; S += text::Word(W); } Push.push_back(S);
+            std::string S; for( const auto& W : P.m_Push ) { if( !S.empty() ) S += ","; S += text::Word(W); }
+            Passes.push_back({ int(s), P.m_Name, P.m_Kernel, P.m_Size, S });
         }
         if( auto Err = F.Record("StagePasses"
-            , [&](std::size_t& Count, xerr&) { if( F.isReading() ) { Name.resize(Count); Kernel.resize(Count); Size.resize(Count); Push.resize(Count); } else Count = Name.size(); }
-            , [&](std::size_t i, xerr& E) { false || (E = F.Field("Name", Name[i])) || (E = F.Field("Kernel", Kernel[i])) || (E = F.Field("Size", Size[i])) || (E = F.Field("Push", Push[i])); }); Err ) return Err;
+            , [&](std::size_t& Count, xerr&) { if( F.isReading() ) Passes.resize(Count); else Count = Passes.size(); }
+            , [&](std::size_t i, xerr& E) { auto& R = Passes[i]; false || (E = F.Field("Stage", R.m_Stage)) || (E = F.Field("Name", R.m_Name)) || (E = F.Field("Kernel", R.m_Kernel)) || (E = F.Field("Size", R.m_Size)) || (E = F.Field("Push", R.m_Push)); }); Err ) return Err;
 
-        struct row { int m_Pass = 0; std::string m_Kind, m_Name, m_Life, m_Usage, m_Policy, m_If; char m_Write = 0; };
-        std::vector<row> Rows;
-        if( !F.isReading() ) for( std::size_t p = 0; p < D.m_Passes.size(); ++p )
+        struct binding_row { int m_Stage = 0, m_Pass = 0; std::string m_Kind, m_Name, m_Life, m_Usage, m_Policy, m_If; char m_Write = 0; };
+        std::vector<binding_row> Rows;
+        if( !F.isReading() ) for( std::size_t s = 0; s < L.size(); ++s ) for( std::size_t p = 0; p < L[s].second.m_Passes.size(); ++p )
         {
-            const auto& P = D.m_Passes[p];
+            const auto& P = L[s].second.m_Passes[p];
             int k = 0;
             for( const auto* pList : { &P.m_Buffers, &P.m_Textures, &P.m_Images } )
             {
-                for( const auto& B : *pList ) Rows.push_back({ int(p), std::string(text::kind_v[k]), B.m_Name, std::string(text::life_v[int(B.m_Life)]), std::string(text::usage_v[int(B.m_Usage)]), std::string(text::policy_v[int(B.m_Policy)]), B.m_DeclareIf, char(B.m_bWrite ? 1 : 0) });
+                for( const auto& B : *pList ) Rows.push_back({ int(s), int(p), std::string(text::kind_v[k]), B.m_Name, std::string(text::life_v[int(B.m_Life)]), std::string(text::usage_v[int(B.m_Usage)]), std::string(text::policy_v[int(B.m_Policy)]), B.m_DeclareIf, char(B.m_bWrite ? 1 : 0) });
                 ++k;
             }
         }
@@ -88,39 +100,45 @@ namespace xlionrender::stage
             , [&](std::size_t i, xerr& E)
             {
                 auto& R = Rows[i]; bool b = R.m_Write != 0;
-                false || (E = F.Field("Pass", R.m_Pass)) || (E = F.Field("Kind", R.m_Kind)) || (E = F.Field("Name", R.m_Name)) || (E = F.Field("Life", R.m_Life))
+                false || (E = F.Field("Stage", R.m_Stage)) || (E = F.Field("Pass", R.m_Pass)) || (E = F.Field("Kind", R.m_Kind)) || (E = F.Field("Name", R.m_Name)) || (E = F.Field("Life", R.m_Life))
                       || (E = F.Field("Usage", R.m_Usage)) || (E = F.Field("Write", b)) || (E = F.Field("Policy", R.m_Policy)) || (E = F.Field("If", R.m_If));
                 R.m_Write = b ? 1 : 0;
             }); Err ) return Err;
         if( !F.isReading() ) return {};
 
-        desc Out;
-        for( std::size_t i = 0; i < Name.size(); ++i )
+        library Out;
+        for( auto& N : Stages ) Out.emplace_back(std::move(N), desc{});
+        const auto Fail = [&]( std::string Why ) { Problem = std::move(Why); L.clear(); return xerr{}; };
+        for( std::size_t i = 0; i < Passes.size(); ++i )
         {
-            pass P{ .m_Name = Name[i], .m_Kernel = Kernel[i], .m_Size = Size[i] };
-            for( std::size_t b = 0; b <= Push[i].size() && !Push[i].empty(); )
+            const auto& R = Passes[i];
+            if( R.m_Stage < 0 || R.m_Stage >= int(Out.size()) ) return Fail(std::format("pass row {} ({}): no stage {}", i, R.m_Name, R.m_Stage));
+            pass P{ .m_Name = R.m_Name, .m_Kernel = R.m_Kernel, .m_Size = R.m_Size };
+            for( std::size_t b = 0; b <= R.m_Push.size() && !R.m_Push.empty(); )
             {
-                std::size_t e = Push[i].find(',', b); if( e == std::string::npos ) e = Push[i].size();
-                word W; if( !text::Word(std::string_view(Push[i]).substr(b, e - b), W) ) { Problem = std::format("pass {} ({}): push word {} '{}' is not a frame value, a number or f<number>", i, Name[i], P.m_Push.size(), Push[i].substr(b, e - b)); return {}; }
+                std::size_t e = R.m_Push.find(',', b); if( e == std::string::npos ) e = R.m_Push.size();
+                word W; if( !text::Word(std::string_view(R.m_Push).substr(b, e - b), W) ) return Fail(std::format("pass row {} ({}): push word {} '{}' is not a frame value, a number or f<number>", i, R.m_Name, P.m_Push.size(), R.m_Push.substr(b, e - b)));
                 P.m_Push.push_back(std::move(W));
                 b = e + 1;
             }
-            Out.m_Passes.push_back(std::move(P));
+            Out[std::size_t(R.m_Stage)].second.m_Passes.push_back(std::move(P));
         }
         for( std::size_t i = 0; i < Rows.size(); ++i )
         {
             const auto& R = Rows[i];
-            if( R.m_Pass < 0 || R.m_Pass >= int(Out.m_Passes.size()) ) { Problem = std::format("binding {}: no pass {}", i, R.m_Pass); return {}; }
+            if( R.m_Stage < 0 || R.m_Stage >= int(Out.size()) ) return Fail(std::format("binding row {} ({}): no stage {}", i, R.m_Name, R.m_Stage));
+            auto& D = Out[std::size_t(R.m_Stage)].second;
+            if( R.m_Pass < 0 || R.m_Pass >= int(D.m_Passes.size()) ) return Fail(std::format("binding row {} ({}): stage {} has no pass {}", i, R.m_Name, Out[std::size_t(R.m_Stage)].first, R.m_Pass));
             binding B{ .m_Name = R.m_Name, .m_bWrite = R.m_Write != 0, .m_DeclareIf = R.m_If };
             int Kind = 0;
-            if( !text::Find(text::kind_v, R.m_Kind, Kind) )         { Problem = std::format("binding {} ({}): no kind '{}' (buffer, texture, image)", i, R.m_Name, R.m_Kind); return {}; }
-            if( !text::Find(text::life_v, R.m_Life, B.m_Life) )     { Problem = std::format("binding {} ({}): no lifetime '{}'", i, R.m_Name, R.m_Life); return {}; }
-            if( !text::Find(text::usage_v, R.m_Usage, B.m_Usage) )  { Problem = std::format("binding {} ({}): no usage '{}'", i, R.m_Name, R.m_Usage); return {}; }
-            if( !text::Find(text::policy_v, R.m_Policy, B.m_Policy) ) { Problem = std::format("binding {} ({}): no policy '{}'", i, R.m_Name, R.m_Policy); return {}; }
-            auto& P = Out.m_Passes[std::size_t(R.m_Pass)];
+            if( !text::Find(text::kind_v, R.m_Kind, Kind) )           return Fail(std::format("binding row {} ({}): no kind '{}' (buffer, texture, image)", i, R.m_Name, R.m_Kind));
+            if( !text::Find(text::life_v, R.m_Life, B.m_Life) )       return Fail(std::format("binding row {} ({}): no lifetime '{}' (frame, history, retained, static, external)", i, R.m_Name, R.m_Life));
+            if( !text::Find(text::usage_v, R.m_Usage, B.m_Usage) )    return Fail(std::format("binding row {} ({}): no usage '{}' (sampled, storage, color, depth, transfer_src, transfer_dst)", i, R.m_Name, R.m_Usage));
+            if( !text::Find(text::policy_v, R.m_Policy, B.m_Policy) ) return Fail(std::format("binding row {} ({}): no policy '{}' (none, clear, full_overwrite, preserve, partial, discard)", i, R.m_Name, R.m_Policy));
+            auto& P = D.m_Passes[std::size_t(R.m_Pass)];
             (Kind == 0 ? P.m_Buffers : Kind == 1 ? P.m_Textures : P.m_Images).push_back(std::move(B));
         }
-        D = std::move(Out);
+        L = std::move(Out);
         return {};
     }
 }
