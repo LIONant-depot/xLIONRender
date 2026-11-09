@@ -504,7 +504,9 @@ namespace xlionrender
 
         void SetEnvironment(const environment& E) noexcept
         {
-            m_Scene.m_Post.m_Bloom = 0.2f; m_Scene.m_Post.m_bAutoExposure = true; m_Scene.m_Post.m_bTAA = true;     // (Tomas, 2026-11-04; XLION_BLOOM, XLION_AUTO_EXPOSURE, XLION_TAA)
+            // The post chain's settings: the Level's Environment (the defaults: Tomas, 2026-11-04 - bloom 0.2, auto exposure and TAA on; XLION_BLOOM, XLION_AUTO_EXPOSURE, XLION_TAA override)
+            m_Scene.m_Post = { .m_Bloom = E.m_Bloom, .m_BloomThreshold = E.m_BloomThreshold, .m_BloomKnee = E.m_BloomKnee, .m_BloomSpread = E.m_BloomSpread, .m_bAutoExposure = E.m_bAutoExposure
+                             , .m_bTAA = E.m_bTAA, .m_TAABlend = E.m_TAABlend, .m_ExposureKey = E.m_ExposureKey, .m_ExposureRate = E.m_ExposureRate, .m_ExposureMin = E.m_ExposureMin, .m_ExposureMax = E.m_ExposureMax };
             m_Scene.m_Sky     = { .m_Zenith = E.m_SkyZenith, .m_Horizon = E.m_SkyHorizon, .m_Ground = E.m_SkyGround, .m_Intensity = E.m_SkyIntensity };
             m_Scene.m_Ambient = E.m_Ambient;
             m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget, .m_bPerPixel = E.m_bGIPerPixel, .m_Debug = E.m_GIDebug, .m_RaysPerSurfel = E.m_GIRaysPerSurfel, .m_FilterPasses = E.m_GIFilterPasses, .m_bMoments = E.m_bGIMoments, .m_bHalfRes = E.m_bGIHalfRes, .m_EmissiveScale = E.m_GIEmissiveScale, .m_bShowBlend = true, .m_bEmitterLights = E.m_bGIEmitterLights };     // (m_bShowBlend: a game's and an editor's view - never a jump)

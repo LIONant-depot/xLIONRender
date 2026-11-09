@@ -793,6 +793,19 @@ namespace xlionrender
         bool            m_bReflectionDebug   = false;       // every lit pixel shows only its environment / reflection specular
         float           m_ReflectionTextureMaxRoughness = 0.3f;     // the receivers up to this roughness see the hits' own material (textures)
         float           m_ReflectionTextureMinReflectance = 0.6f;   // ... when their reflection shows at least this much (visible reflectance x sharpness)
+        // The post chain's settings (scene::post_settings; render graph P6: they were constants in SetEnvironment - now the Level's own,
+        // the defaults those constants). The chain reads them by name (scene.post.*, xlionrender_post_graph.h) and clamps to its ranges
+        float           m_Bloom          = 0.2f;
+        float           m_BloomThreshold = 0.99f;
+        float           m_BloomKnee      = 0.5f;
+        float           m_BloomSpread    = 0.7f;
+        bool            m_bAutoExposure  = true;
+        float           m_ExposureKey    = 0.115f;
+        float           m_ExposureRate   = 1.5f;
+        float           m_ExposureMin    = 0.03f;
+        float           m_ExposureMax    = 30.0f;
+        bool            m_bTAA           = true;
+        float           m_TAABlend       = 0.1f;
 
         XPROPERTY_DEF
         ( "Environment", environment
@@ -819,6 +832,17 @@ namespace xlionrender
         , obj_member<"ReflectionTextureMaxRoughness", &environment::m_ReflectionTextureMaxRoughness, member_help<"Traced reflections on surfaces up to this roughness show what they hit with its material's own textures (each hit shaded by its material: costs more with more materials hit); rougher ones show its captured color (blended over the last quarter). 0: none">>
         , obj_member<"ReflectionTextureMinReflectance", &environment::m_ReflectionTextureMinReflectance, member_help<"Hits are shaded by their material only where the reflection shows: the surface's visible reflectance (its F0 through the view angle) times its sharpness at least this (1: mirrors and polished metals only; lower: more surfaces, more cost). A white dielectric reflects about 4%: its reflection keeps the captured color">>
         , obj_member<"ReflectionDebug",  &environment::m_bReflectionDebug, member_help<"Every lit pixel shows only its environment / reflection specular (what the probes or the traced reflections give it)">>
+        , obj_member<"Bloom",          &environment::m_Bloom,          member_help<"How much of what is too bright for the eye is added, blurred (0: off; the post chain takes 0 .. 1)">>
+        , obj_member<"BloomThreshold", &environment::m_BloomThreshold, member_help<"Only exposed light above this blooms: 1 is white, 0.18 middle grey. What is under it stays sharp (0 .. 16)">>
+        , obj_member<"BloomKnee",      &environment::m_BloomKnee,      member_help<"How softly the bloom starts around its threshold (0 .. 4)">>
+        , obj_member<"BloomSpread",    &environment::m_BloomSpread,    member_help<"0 tight around the light .. 1 wide (the weight of each wider level)">>
+        , obj_member<"AutoExposure",   &environment::m_bAutoExposure,  member_help<"The exposure follows the light, as an eye adapts; off: Exposure alone">>
+        , obj_member<"ExposureKey",    &environment::m_ExposureKey,    member_help<"What the metered light is brought to: higher is brighter (0.001 .. 10)">>
+        , obj_member<"ExposureRate",   &environment::m_ExposureRate,   member_help<"How fast the eye adapts (per second; 0 .. 20)">>
+        , obj_member<"ExposureMin",    &environment::m_ExposureMin,    member_help<"The least the auto exposure multiplies the light by">>
+        , obj_member<"ExposureMax",    &environment::m_ExposureMax,    member_help<"The most the auto exposure multiplies the light by">>
+        , obj_member<"TAA",            &environment::m_bTAA,           member_help<"Temporal antialiasing: the view jitters a sub-pixel a frame and the frames are blended (off while path tracing)">>
+        , obj_member<"TAABlend",       &environment::m_TAABlend,       member_help<"This frame's share over the history: lower is smoother, higher reacts faster (0.01 .. 1)">>
         )
     };
 
