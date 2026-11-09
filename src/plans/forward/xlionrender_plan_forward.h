@@ -10,6 +10,7 @@
 #include "scene/xlionrender_scene.h"
 #include "features/lights/xlionrender_light_cells.h"
 #include "features/shadows/xlionrender_shadow_vsm.h"
+#include "xlionrender_stage_graph.h"
 #include <array>
 #include <cstddef>
 
@@ -248,6 +249,17 @@ namespace xlionrender::details
         std::uint32_t   m_Div;              // the read's resolution divisor
         std::uint32_t   m_AO = 0;           // 1: the ambient occlusion is on (render_view::m_AO; the pixels' AO entries)
     };
+
+    // The light tiles as a stage description (render graph R1, xlionrender_stage_graph.h): each 8 x 8 tile's local lights from the depth
+    // (xlionrender_light_tiles_comp.glsl; push: the clip-to-world matrix, the view's size, the frame's local lights)
+    inline const stage::desc& LightTilesStage( void ) noexcept
+    {
+        static const stage::desc D{ { { .m_Name = "light tiles", .m_Kernel = "light_tiles"
+            , .m_Buffers  = { { "Lights: light ring", rg::lifetime::RETAINED }, { "Lights: the screen tiles' lists", rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::FULL_OVERWRITE } }
+            , .m_Textures = { { "Render target: depth", rg::lifetime::FRAME, rg::usage::SAMPLED } }
+            , .m_Push     = { { "frame.c2w" }, { "view.width" }, { "view.height" }, { "lights.local_base" }, { "lights.local_count" } } } } };
+        return D;
+    }
 
     // xlionrender_ao_comp.glsl push_t
     struct push_ao

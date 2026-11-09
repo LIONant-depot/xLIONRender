@@ -4106,6 +4106,34 @@ namespace xlionrender
                     if( bLightTiles )
                     {
                         struct { xmath::fmat4 m_C2W; std::uint32_t m_W, m_H, m_LightBase, m_nLights; } LPush{ W2C.Inverse(), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(pLight->m_LocalBase.m_X), std::uint32_t(nLocal) };
+                        if( View.m_bStageLightTiles )
+                        {
+                            // (render graph R1: the same pass from its description - xlionrender_stage_graph.h; the hand-written one below stays
+                            // until the equivalence test retires it)
+                            auto& R = View.m_Stages;
+                            if( R.m_Kernels.Find("light_tiles") < 0 )
+                            {
+                                R.m_Kernels.Add("light_tiles", { &m_LightTilesCompute, 2, 1, 0, 80, "instance: m_LightTilesCompute" });
+                                for( const char* p : { "frame.c2w", "view.width", "view.height", "lights.local_base", "lights.local_count" } ) R.m_Frame.Add(p);
+                            }
+                            R.m_Buffers.Add("Lights: light ring", &m_LightRing);
+                            R.m_Buffers.Add("Lights: the screen tiles' lists", &View.m_LightTiles);
+                            R.m_Textures.Add("Render target: depth", &View.m_Depth);
+                            R.SetFloats(R.m_Frame.Find("frame.c2w"), reinterpret_cast<const float*>(&LPush.m_C2W), 16);
+                            R.SetU32(R.m_Frame.Find("view.width"), LPush.m_W);
+                            R.SetU32(R.m_Frame.Find("view.height"), LPush.m_H);
+                            R.SetU32(R.m_Frame.Find("lights.local_base"), LPush.m_LightBase);
+                            R.SetU32(R.m_Frame.Find("lights.local_count"), LPush.m_nLights);
+                            R.m_Width = View.m_Width; R.m_Height = View.m_Height;
+                            if( View.m_LightTilesPlan.m_Passes.empty() && View.m_LightTilesPlan.m_Error.empty() )
+                            {
+                                View.m_LightTilesPlan = stage::Lower(details::LightTilesStage(), R);
+                                if( !View.m_LightTilesPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: light tiles stage: %s\n", View.m_LightTilesPlan.m_Error.c_str());
+                            }
+                        }
+                        if( View.m_bStageLightTiles && View.m_LightTilesPlan.m_Error.empty() ) stage::Run(View.m_LightTilesPlan, View.m_Stages, Window, View.m_Graph);
+                        else
+                        {
                         auto LB = std::array<xgpu::buffer*, 2>{ &m_LightRing, &View.m_LightTiles };
                         const xgpu::texture* LT[] = { &View.m_Depth };
                         Window.Dispatch(m_LightTilesCompute, LB, LT, std::span<const xgpu::texture* const>{}, &LPush, sizeof(LPush), TX, TY);
@@ -4114,6 +4142,7 @@ namespace xlionrender
                         G.Read(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::SAMPLED);
                         G.Read(S, G.Resource("Lights: light ring", rg::lifetime::RETAINED), rg::usage::STORAGE);
                         G.Write(S, G.Resource("Lights: the screen tiles' lists", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
+                        }
                     }
                 }
                 // A5.0's light funnel (XLION_TILE_ABLATE bit 8, measurement): the counters zeroed before the pass, copied into a ring after it;

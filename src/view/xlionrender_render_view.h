@@ -13,6 +13,7 @@
 #include "dependencies/xGPU/source/xGPU.h"
 #include "dependencies/xmath/source/xmath.h"
 #include "../xlionrender_post_graph.h"      // (and the render graph)
+#include "../xlionrender_stage_graph.h"
 
 namespace xlionrender
 {
@@ -55,6 +56,11 @@ namespace xlionrender
         int                     m_TAAFrame = 0;
         bool                    m_bTAAHistory = false;
         rg::graph               m_Graph;
+        // Frame stages as data (render graph R1, xlionrender_stage_graph.h): the names a stage binds (kernels, resources, frame values), and
+        // the stages lowered against them (made the first time). m_bStageLightTiles: the light tiles from their description (off: hand-written)
+        stage::registry         m_Stages;
+        stage::plan             m_LightTilesPlan;
+        bool                    m_bStageLightTiles = true;
         post::desc              m_PostDesc = post::desc::Default();     // the post chain (xlionrender_post_graph.h; as text: xlionrender_post_graph_text.h) - set it to change the chain
         post::plan              m_PostPlan;             // m_PostDesc lowered for this view's size: made again when either changes
         post::desc              m_PostPlanDesc;
