@@ -3836,7 +3836,7 @@ namespace xlionrender
                         R.SetU32(R.Value("gi.screen_width"), Push.m_W); R.SetU32(R.Value("gi.screen_height"), Push.m_H); R.SetU32(R.Value("gi.divisor"), Push.m_Div);
                         R.SetU32(R.Value("ao.mode_raw"), s_bSSGI ? 4u : 0u); R.SetU32(R.Value("ao.mode_filter"), s_bSSGI ? 5u : 1u); R.SetU32(R.Value("ao.ssgi"), s_bSSGI ? 1u : 0u);
                         R.SetFloats(R.Value("ao.radius"), &Push.m_Radius, 1); R.SetFloats(R.Value("ao.thickness"), &Push.m_Thickness, 1); R.SetFloats(R.Value("ao.pixels_per_unit"), &Push.m_PixelsPerUnit, 1);
-                        R.SetU32(R.Value("gi.table_base"), Push.m_TableBase); R.SetU32(R.Value("never"), 0u);
+                        R.SetU32(R.Value("gi.table_base"), Push.m_TableBase);
                         R.SetSize(R.Value("gi.screen_size"), View.m_GIScreenWidth, View.m_GIScreenHeight);
                         if( View.m_AOPlan.m_Passes.empty() && View.m_AOPlan.m_Error.empty() )
                         {

@@ -23,7 +23,8 @@ namespace xlionrender::stage
         rg::usage       m_Usage     = rg::usage::STORAGE;
         bool            m_bWrite    = false;
         rg::policy      m_Policy    = rg::policy::NONE;
-        std::string     m_DeclareIf;            // declared only when this frame value's first word is not 0 (a history read on its valid frames)
+        std::string     m_DeclareIf;            // declared only when this frame value's first word is not 0 (a history read on its valid frames);
+                                                // "never": bound only (the kernel's layout has the slot; this pass does not touch it)
         bool operator==( const binding& ) const = default;
     };
     // a push word source: a frame value by name (all its words), or one constant word when m_Frame is empty
@@ -72,7 +73,7 @@ namespace xlionrender::stage
         std::vector<int>    m_Buffers, m_Textures, m_Images;
         std::vector<int>    m_Push;         // a frame value's index, or -1 - k - 1 for the pass's k-th push word as a constant
         int                 m_Size = -1;    // the frame value of the dispatch's size
-        std::vector<int>    m_DeclareIf;    // a binding's (buffers, textures, images in turn) condition: a frame value's index, -1 always
+        std::vector<int>    m_DeclareIf;    // a binding's (buffers, textures, images in turn) condition: a frame value's index, -1 always, -2 never
     };
     struct plan { std::vector<lowered_pass> m_Passes; std::string m_Error; desc m_Desc; };      // (m_Desc: what it was lowered from)
 
@@ -105,8 +106,8 @@ namespace xlionrender::stage
             if( L.m_Size < 0 || R.m_Frame.m_Items[std::size_t(L.m_Size)].m_n != 2 ) return Fail(Pa, "no size '" + Pa.m_Size + "' (a frame value of two words)");
             for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& B : *pList )
             {
-                const int i = B.m_DeclareIf.empty() ? -1 : R.m_Frame.Find(B.m_DeclareIf);
-                if( !B.m_DeclareIf.empty() && i < 0 ) return Fail(Pa, "no frame value '" + B.m_DeclareIf + "'");
+                const int i = B.m_DeclareIf.empty() ? -1 : B.m_DeclareIf == "never" ? -2 : R.m_Frame.Find(B.m_DeclareIf);
+                if( i == -1 && !B.m_DeclareIf.empty() ) return Fail(Pa, "no frame value '" + B.m_DeclareIf + "'");
                 L.m_DeclareIf.push_back(i);
             }
             P.m_Passes.push_back(std::move(L));
@@ -144,7 +145,7 @@ namespace xlionrender::stage
                 for( const auto* pList : { &Pa.m_Buffers, &Pa.m_Textures, &Pa.m_Images } ) for( const auto& Bd : *pList )
                 {
                     const int c = L.m_DeclareIf[k++];
-                    if( Bd.m_bWrite != (bWrite != 0) || (c >= 0 && R.m_Frame.m_Items[std::size_t(c)].m_Words[0] == 0) ) continue;
+                    if( Bd.m_bWrite != (bWrite != 0) || c == -2 || (c >= 0 && R.m_Frame.m_Items[std::size_t(c)].m_Words[0] == 0) ) continue;
                     if( bWrite ) G.Write(S, G.Resource(Bd.m_Name, Bd.m_Life), Bd.m_Usage, Bd.m_Policy);
                     else         G.Read (S, G.Resource(Bd.m_Name, Bd.m_Life), Bd.m_Usage);
                 }

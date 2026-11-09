@@ -14,7 +14,7 @@
 //      [ StageBindings : 3 ]
 //      { Stage:d  Pass:d  Kind:s  Name:s  Life:s  Usage:s  Write:c  Policy:s  If:s }     (Pass: within its stage; Kind: buffer, texture,
 //        0  0  "buffer"  "Lights: light ring"  "retained"  "storage"  0  "none"  ""      image - each in its kernel's order; If: a frame
-//        ...                                                                              value whose first word 0 leaves it undeclared)
+//        ...                                                                              value whose first word 0 leaves it undeclared; "never": bound only)
 #include "xlionrender_stage_graph.h"
 #include "dependencies/xtextfile/source/xtextfile.h"
 #include <format>
