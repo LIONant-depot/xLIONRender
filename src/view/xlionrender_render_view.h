@@ -65,6 +65,20 @@ namespace xlionrender
         bool                    m_bStageReflRecon = true;
         stage::plan             m_ReflSSRPlan;          // the reflections' screen trace
         bool                    m_bStageReflSSR = true;
+        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon; the RenderGraph
+        // resource's, xlionrender_stage_graph_text.h): one that does not lower leaves its stage hand-written (and says why once)
+        std::vector<std::pair<std::string, stage::desc>> m_StageDescs;
+        void SetStageDesc( const std::string& Name, stage::desc D ) noexcept      // (no passes: the built-in again)
+        {
+            std::erase_if(m_StageDescs, [&]( const auto& P ) { return P.first == Name; });
+            if( !D.m_Passes.empty() ) m_StageDescs.emplace_back(Name, std::move(D));
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {};
+        }
+        const stage::desc& StageDesc( std::string_view Name, const stage::desc& BuiltIn ) const noexcept
+        {
+            for( const auto& [N, D] : m_StageDescs ) if( N == Name ) return D;
+            return BuiltIn;
+        }
         post::desc              m_PostDesc = post::desc::Default();     // the post chain (xlionrender_post_graph.h; as text: xlionrender_post_graph_text.h) - set it to change the chain
         post::plan              m_PostPlan;             // m_PostDesc lowered for this view's size: made again when either changes
         post::desc              m_PostPlanDesc;

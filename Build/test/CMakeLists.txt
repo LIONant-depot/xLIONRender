@@ -91,8 +91,8 @@ foreach(TEST xlionrender_test_forward xlionrender_test_static_geom xlionrender_t
   target_link_libraries(${TEST} PRIVATE xlionrender_new)
   add_test(NAME ${TEST} COMMAND ${TEST})
 endforeach()
-# The post chain description as text (xlionrender_post_graph_text.h) needs xtextfile: the tests that read it build it in
-foreach(TEST xlionrender_test_post_graph xlionrender_test_post_equivalence)
+# The post chain and stage descriptions as text (xlionrender_post_graph_text.h, xlionrender_stage_graph_text.h) need xtextfile: the tests that read them build it in
+foreach(TEST xlionrender_test_post_graph xlionrender_test_post_equivalence xlionrender_test_stage_graph)
   target_sources(${TEST} PRIVATE "${XLION_ROOT}/dependencies/xtextfile/source/xtextfile.cpp")
   target_include_directories(${TEST} PRIVATE "${XLION_ROOT}/dependencies/xerr" "${XLION_ROOT}/dependencies/xtextfile")
 endforeach()

@@ -2713,7 +2713,7 @@ namespace xlionrender
                     R.SetSize(R.Value("refl.size"), W, H);
                     if( View.m_ReflSSRPlan.m_Passes.empty() && View.m_ReflSSRPlan.m_Error.empty() )
                     {
-                        View.m_ReflSSRPlan = stage::Lower(details::ReflScreenStage(), R);
+                        View.m_ReflSSRPlan = stage::Lower(View.StageDesc("refl_ssr", details::ReflScreenStage()), R);
                         if( !View.m_ReflSSRPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: reflection screen trace stage: %s\n", View.m_ReflSSRPlan.m_Error.c_str());
                     }
                 }
@@ -2917,7 +2917,7 @@ namespace xlionrender
                 R.SetSize(R.Value("refl.size"), W, H);
                 if( View.m_ReflReconPlan.m_Passes.empty() && View.m_ReflReconPlan.m_Error.empty() )
                 {
-                    View.m_ReflReconPlan = stage::Lower(details::ReflReconStage(), R);
+                    View.m_ReflReconPlan = stage::Lower(View.StageDesc("refl_recon", details::ReflReconStage()), R);
                     if( !View.m_ReflReconPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: reflection reconstruction stage: %s\n", View.m_ReflReconPlan.m_Error.c_str());
                 }
             }
@@ -4177,7 +4177,7 @@ namespace xlionrender
                             R.SetSize(R.Value("view.size"), View.m_Width, View.m_Height);
                             if( View.m_LightTilesPlan.m_Passes.empty() && View.m_LightTilesPlan.m_Error.empty() )
                             {
-                                View.m_LightTilesPlan = stage::Lower(details::LightTilesStage(), R);
+                                View.m_LightTilesPlan = stage::Lower(View.StageDesc("light_tiles", details::LightTilesStage()), R);
                                 if( !View.m_LightTilesPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: light tiles stage: %s\n", View.m_LightTilesPlan.m_Error.c_str());
                             }
                         }

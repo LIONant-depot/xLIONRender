@@ -23,9 +23,10 @@ namespace xlionrender::stage
         bool            m_bWrite    = false;
         rg::policy      m_Policy    = rg::policy::NONE;
         std::string     m_DeclareIf;            // declared only when this frame value's first word is not 0 (a history read on its valid frames)
+        bool operator==( const binding& ) const = default;
     };
     // a push word source: a frame value by name (all its words), or one constant word when m_Frame is empty
-    struct word { std::string m_Frame; std::uint32_t m_Constant = 0; };
+    struct word { std::string m_Frame; std::uint32_t m_Constant = 0; bool operator==( const word& ) const = default; };
 
     struct pass
     {
@@ -33,8 +34,9 @@ namespace xlionrender::stage
         std::vector<binding>    m_Buffers, m_Textures, m_Images;
         std::vector<word>       m_Push;
         std::string             m_Size = "view.size";       // the dispatch: this frame value's two words (width, height) in 8 x 8 tiles
+        bool operator==( const pass& ) const = default;
     };
-    struct desc { std::vector<pass> m_Passes; };
+    struct desc { std::vector<pass> m_Passes; bool operator==( const desc& ) const = default; };
 
     // names to objects: Add once (the index stays), Set per frame
     template< class T >
@@ -64,23 +66,23 @@ namespace xlionrender::stage
     // lowered: indices into the registry
     struct lowered_pass
     {
-        const pass*         m_pPass = nullptr;
+        int                 m_iPass = -1;   // the plan's own copy of the description's pass
         int                 m_Kernel = -1;
         std::vector<int>    m_Buffers, m_Textures, m_Images;
         std::vector<int>    m_Push;         // a frame value's index, or -1 - k - 1 for the pass's k-th push word as a constant
         int                 m_Size = -1;    // the frame value of the dispatch's size
         std::vector<int>    m_DeclareIf;    // a binding's (buffers, textures, images in turn) condition: a frame value's index, -1 always
     };
-    struct plan { std::vector<lowered_pass> m_Passes; std::string m_Error; };
+    struct plan { std::vector<lowered_pass> m_Passes; std::string m_Error; desc m_Desc; };      // (m_Desc: what it was lowered from)
 
     // Every name must exist and every pass must match its kernel's layout (the push's size from the frame values registered now)
     inline plan Lower( const desc& D, const registry& R ) noexcept
     {
-        plan P;
+        plan P; P.m_Desc = D;
         const auto Fail = [&]( const pass& Pa, const std::string& Why ) { P.m_Passes.clear(); P.m_Error = Pa.m_Name + ": " + Why; return P; };
         for( const auto& Pa : D.m_Passes )
         {
-            lowered_pass L{ &Pa, R.m_Kernels.Find(Pa.m_Kernel) };
+            lowered_pass L{ int(&Pa - D.m_Passes.data()), R.m_Kernels.Find(Pa.m_Kernel) };
             if( L.m_Kernel < 0 ) return Fail(Pa, "no kernel '" + Pa.m_Kernel + "'");
             const auto& K = R.m_Kernels.m_Items[std::size_t(L.m_Kernel)];
             for( const auto& B : Pa.m_Buffers )  { const int i = R.m_Buffers.Find(B.m_Name);  if( i < 0 ) return Fail(Pa, "no buffer '" + B.m_Name + "'");  L.m_Buffers.push_back(i); }
@@ -117,7 +119,7 @@ namespace xlionrender::stage
     {
         for( const auto& L : P.m_Passes )
         {
-            const auto& Pa = *L.m_pPass;
+            const auto& Pa = P.m_Desc.m_Passes[std::size_t(L.m_iPass)];
             const auto& K  = R.m_Kernels.m_Items[std::size_t(L.m_Kernel)];
             std::array<xgpu::buffer*, 16> B{}; std::array<const xgpu::texture*, 16> T{}, I{};
             for( std::size_t i = 0; i < L.m_Buffers.size();  ++i ) B[i] = R.m_Buffers.m_Items[std::size_t(L.m_Buffers[i])];

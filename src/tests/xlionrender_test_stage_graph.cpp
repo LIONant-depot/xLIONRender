@@ -10,6 +10,8 @@
 #include <cstring>
 #include <functional>
 #include <algorithm>
+#include <filesystem>
+#include "xlionrender_stage_graph_text.h"
 
 using namespace xlionrender::test;
 namespace stage = xlionrender::stage;
@@ -59,6 +61,36 @@ int main( int argc, char** argv )
         Bad = D; Bad.m_Passes[0].m_Buffers[0].m_DeclareIf = "nope";
         CHECK(stage::Lower(Bad, R).m_Error.find("no frame value 'nope'") != std::string::npos, "an unknown declaration condition is refused");
         std::printf("lowering: refusals as expected\n");
+    }
+
+    // the text form (R3): every built-in description written and read back the same; a bad row refused with its reason
+    std::vector<std::pair<std::string, stage::desc>> FromText;
+    {
+        const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_stage_graph.txt").wstring();
+        const std::pair<const char*, const stage::desc*> BuiltIn[] = { { "light_tiles", &xlionrender::details::LightTilesStage() }, { "refl_ssr", &xlionrender::details::ReflScreenStage() }, { "refl_recon", &xlionrender::details::ReflReconStage() } };
+        for( const auto& [pName, pD] : BuiltIn )
+        {
+            auto D = *pD; stage::desc Back; std::string Problem;
+            { xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, D, Problem), "%s written", pName); }
+            { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, Back, Problem) && Problem.empty(), "%s read: %s", pName, Problem.c_str()); }
+            CHECK(Back == *pD, "%s: the same description back from its text", pName);
+            FromText.emplace_back(pName, std::move(Back));
+        }
+        {
+            auto D = xlionrender::details::LightTilesStage(); D.m_Passes[0].m_Push[1] = { "", 7u }; D.m_Passes[0].m_Push[2] = { "", std::bit_cast<std::uint32_t>(0.5f) };
+            stage::desc Back; std::string Problem;
+            { xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, D, Problem), "constants written"); }
+            { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, Back, Problem) && Problem.empty(), "constants read: %s", Problem.c_str()); }
+            CHECK(Back.m_Passes[0].m_Push[1] == D.m_Passes[0].m_Push[1], "a constant word back");
+            CHECK(Back.m_Passes[0].m_Push[2] == D.m_Passes[0].m_Push[2], "a float constant back (its bits)");
+            stage::word W;
+            CHECK(stage::text::Word("f0.5", W) && W.m_Constant == std::bit_cast<std::uint32_t>(0.5f) && W.m_Frame.empty(), "f0.5 is a float word");
+            CHECK(stage::text::Word("12", W) && W.m_Constant == 12u && W.m_Frame.empty(), "12 is a uint word");
+            CHECK(stage::text::Word("view.size", W) && W.m_Frame == "view.size", "a name is a frame value");
+            CHECK(!stage::text::Word("12x", W) && !stage::text::Word("", W), "12x and nothing are refused");
+        }
+        std::filesystem::remove(Path);
+        std::printf("text: the built-in descriptions read back the same\n");
     }
 
     // the tile pass (and its light tiles) is on with XLION_TILE (read at the first frame)
@@ -154,59 +186,67 @@ int main( int argc, char** argv )
     {
         auto& Ca = Cases[c];
         if( pOnly && std::atoi(pOnly) != int(c) ) continue;
-        for( int Control = 1; Control >= 0; --Control )         // 1: hand-written against itself (the harness's own check), 0: against the stage
+        // four views a frame, one after the other: A hand-written, C hand-written (the harness's own check: A and C must agree - in the
+        // same state of the instance: a pair of views made later can differ from an earlier pair, 2026-11-09), B the stage, T the stage
+        // from its text
+        const char* pNames[] = { "hand-written against itself", "hand-written against the stage", "hand-written against the stage read from text" };
+        xlionrender::render_view V[4];
+        for( auto& v : V ) CHECK(!Renderer.CreateView(v, { .m_Width = W, .m_Height = H }), "CreateView");
+        Ca.m_Stage(V[0], false); Ca.m_Stage(V[1], false); Ca.m_Stage(V[2], true); Ca.m_Stage(V[3], true);
+        for( const auto& [N, D] : FromText ) V[3].SetStageDesc(N, D);
+        std::string Why[3];
+        for( int f = 0; f < nFrames; ++f )
         {
-            xlionrender::render_view A, B;
-            CHECK(!Renderer.CreateView(A, { .m_Width = W, .m_Height = H }) && !Renderer.CreateView(B, { .m_Width = W, .m_Height = H }), "CreateView");
-            Ca.m_Stage(A, false);
-            Ca.m_Stage(B, !Control);
-            std::string Why;
-            for( int f = 0; f < nFrames && Why.empty(); ++f )
+            xgpu::tools::view Camera;
+            Camera.setFov(xmath::radian{ 1.0f });
+            Camera.setViewport({ 0, 0, W, H });
+            Camera.LookAt(xmath::fvec3{ 0.5f + 0.05f * float(f), 1.2f, -2.5f }, xmath::fvec3{ 0, 0, 0 });
+            std::vector<std::vector<std::uint32_t>> L[4];
+            for( int v = 0; v < 4; ++v ) CHECK(Frame(Ca.m_Scene, V[v], Camera, Ca.m_Outputs(V[v]), L[v]), "Render view %d", v);
+            for( int v = 1; v < 4; ++v )
             {
-                xgpu::tools::view Camera;
-                Camera.setFov(xmath::radian{ 1.0f });
-                Camera.setViewport({ 0, 0, W, H });
-                Camera.LookAt(xmath::fvec3{ 0.5f + 0.05f * float(f), 1.2f, -2.5f }, xmath::fvec3{ 0, 0, 0 });
-                std::vector<std::vector<std::uint32_t>> LA, LB;
-                CHECK(Frame(Ca.m_Scene, A, Camera, Ca.m_Outputs(A), LA), "Render A");
-                CHECK(Frame(Ca.m_Scene, B, Camera, Ca.m_Outputs(B), LB), "Render B");
+                auto& Wy = Why[v - 1];
+                if( !Wy.empty() ) continue;
                 for( const char* pScope : Ca.m_Scopes )
                 {
-                    const auto TA = Scope(A.m_Graph.Text(), pScope), TB = Scope(B.m_Graph.Text(), pScope);
+                    const auto TA = Scope(V[0].m_Graph.Text(), pScope), TB = Scope(V[v].m_Graph.Text(), pScope);
                     CHECK(!TA.empty(), "%s: the scope '%s' ran", Ca.m_pName, pScope);
-                    if( TA != TB && Why.empty() )
+                    if( TA != TB && Wy.empty() )
                     {
-                        Why = std::format("frame {}: the Frame graph's '{}' differs:", f, pScope);
-                        for( const auto& l : TA ) Why += "\n   A " + l;
-                        for( const auto& l : TB ) Why += "\n   B " + l;
+                        Wy = std::format("frame {}: the Frame graph's '{}' differs:", f, pScope);
+                        for( const auto& l : TA ) Wy += "\n   A " + l;
+                        for( const auto& l : TB ) Wy += "\n   B " + l;
                     }
                 }
-                for( std::size_t i = 0; i < LA.size() && Why.empty(); ++i )
+                for( std::size_t i = 0; i < L[0].size() && Wy.empty(); ++i )
                 {
-                    CHECK(!LA[i].empty(), "%s: %s made", Ca.m_pName, Ca.m_OutNames[i]);
-                    if( LA[i] == LB[i] ) continue;
-                    std::size_t k = 0; while( k < std::min(LA[i].size(), LB[i].size()) && LA[i][k] == LB[i][k] ) ++k;
-                    std::size_t nDiff = 0; for( std::size_t j = 0; j < std::min(LA[i].size(), LB[i].size()); ++j ) nDiff += LA[i][j] != LB[i][j];
-                    Why = std::format("frame {}: {} differs ({} vs {} words, {} differ), the first at word {}", f, Ca.m_OutNames[i], LA[i].size(), LB[i].size(), nDiff, k);
-                }
-                if( f == nFrames - 1 && Control && c == 0 )
-                {
-                    int nTiles = 0, nLit = 0;
-                    for( std::size_t t = 16; t + 16 <= LA[0].size(); t += 16 ) { ++nTiles; nLit += LA[0][t] != 0; }
-                    std::printf("light tiles: %d tiles, %d with lights\n", nTiles, nLit);
-                    CHECK(nLit > 0 && nLit < nTiles, "some tiles have lights, some not (a test that can tell)");
+                    CHECK(!L[0][i].empty(), "%s: %s made", Ca.m_pName, Ca.m_OutNames[i]);
+                    const auto& a = L[0][i]; const auto& b = L[v][i];
+                    if( a == b ) continue;
+                    std::size_t k = 0; while( k < std::min(a.size(), b.size()) && a[k] == b[k] ) ++k;
+                    std::size_t nDiff = 0; for( std::size_t j = 0; j < std::min(a.size(), b.size()); ++j ) nDiff += a[j] != b[j];
+                    Wy = std::format("frame {}: {} differs ({} vs {} words, {} differ), the first at word {}", f, Ca.m_OutNames[i], a.size(), b.size(), nDiff, k);
                 }
             }
-            const auto& P = Ca.m_Plan(B);
-            const char* pWhat = Control ? "hand-written against itself" : "hand-written against the stage";
-            if( !Control && (!P.m_Error.empty() || P.m_Passes.empty()) ) { Why = "view B did not run the stage: " + P.m_Error; }
-            Renderer.DestroyView(A); Renderer.DestroyView(B);
-            if( !Why.empty() )
+            if( f == nFrames - 1 && c == 0 )
             {
-                std::printf("DIFFERENT: %s, %s - %s\n", Ca.m_pName, pWhat, Why.c_str()); ++nFail;
-                if( Control ) { std::printf("  (the harness is not trusted for this stage: the stage against it not run)\n"); break; }
+                int nTiles = 0, nLit = 0;
+                for( std::size_t t = 16; t + 16 <= L[0][0].size(); t += 16 ) { ++nTiles; nLit += L[0][0][t] != 0; }
+                std::printf("light tiles: %d tiles, %d with lights\n", nTiles, nLit);
+                CHECK(nLit > 0 && nLit < nTiles, "some tiles have lights, some not (a test that can tell)");
             }
-            else std::printf("same: %s, %s, %d frames\n", Ca.m_pName, pWhat, nFrames);
+        }
+        for( int v = 2; v < 4; ++v )
+        {
+            const auto& P = Ca.m_Plan(V[v]);
+            if( (!P.m_Error.empty() || P.m_Passes.empty()) && Why[v - 1].empty() ) Why[v - 1] = "the view did not run the stage: " + P.m_Error;
+        }
+        for( auto& v : V ) Renderer.DestroyView(v);
+        for( int k = 0; k < 3; ++k )
+        {
+            if( Why[k].empty() ) { std::printf("same: %s, %s, %d frames\n", Ca.m_pName, pNames[k], nFrames); continue; }
+            std::printf("DIFFERENT: %s, %s - %s\n", Ca.m_pName, pNames[k], Why[k].c_str()); ++nFail;
+            if( k == 0 ) { std::printf("  (the harness is not trusted for this stage)\n"); break; }
         }
     }
     for( auto& C : Copies ) if( C.m_Private ) App.m_Device.Destroy(std::move(C));
