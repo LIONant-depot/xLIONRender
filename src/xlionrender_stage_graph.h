@@ -3,7 +3,7 @@
 // the kernel, the buffers / textures / images it binds, its push words, its dispatch size - lowered once against a registry (names to
 // indices: no strings per frame) and run by one executor, which also declares each pass to the render graph (the Frame graph shows the
 // stage's real passes). The registry: the kernels the instance registers once; the resources and frame values each view fills per frame.
-#include "dependencies/xGPU/source/xGPU.h"
+namespace xgpu { struct compute; struct buffer; struct texture; }      // (pointers only: the text form and the compiler need no xGPU)
 #include "xlionrender_render_graph.h"
 #include <string>
 #include <vector>
@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <span>
 
 namespace xlionrender::stage
 {

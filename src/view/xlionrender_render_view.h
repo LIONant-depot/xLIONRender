@@ -74,6 +74,12 @@ namespace xlionrender
             if( !D.m_Passes.empty() ) m_StageDescs.emplace_back(Name, std::move(D));
             m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {};
         }
+        void SetStageDescs( std::vector<std::pair<std::string, stage::desc>> All ) noexcept      // (all of them at once: the RenderGraph bundle's; none: the built-in ones)
+        {
+            if( All == m_StageDescs ) return;
+            m_StageDescs = std::move(All);
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {};
+        }
         const stage::desc& StageDesc( std::string_view Name, const stage::desc& BuiltIn ) const noexcept
         {
             for( const auto& [N, D] : m_StageDescs ) if( N == Name ) return D;
