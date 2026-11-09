@@ -3855,7 +3855,7 @@ namespace xlionrender
                                            "Render target: prepass normals", "Render target: sun shadow mask", "Shadows: white dummy", "Frame: instance data", "GI: ambient occlusion", "GI: device-local data",
                                            "GI: dummy", "GI: gather table", "GI: screen buffer previous", "GI: voxel store", "GI: *" } )
                         G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::SAMPLED);
-                    for( const char* p : { "GI: screen colour", "GI: screen depth" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::CLEAR);
+                    for( const char* p : { "GI: screen colour", "GI: screen depth" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::DISCARD);     // (the render pass's attachments only: the read's result is the screen buffer - nothing reads these: scratch)
                     G.Write(S, G.Resource("GI: screen buffer*", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);      // (the same buffer as the readers' name: the Frame graph showed it cut off)
                 }
                 {
