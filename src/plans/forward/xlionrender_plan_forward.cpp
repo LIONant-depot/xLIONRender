@@ -2446,6 +2446,7 @@ namespace xlionrender
     // the tail's parameters; anything missing: mode 2 (the inline sampled tail)
     void instance::renderTail( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept
     {
+        View.m_Graph.BeginFrame();      // (R0b: the frame's declarations start with the screen tail's)
         if( createTailTargets(View) ) { Light.m_LocalCount.m_Y = float(int(light_mode::CELLS)); return; }      // (no targets: the split lists exactly)
         const bool bLights = m_LightModeUsed == light_mode::SCREEN;      // (else only the G-buffer, for the reflections)
         const int W = View.m_TailWidth, H = View.m_TailHeight;
@@ -2569,6 +2570,12 @@ namespace xlionrender
             Cmd.setBuffer(m_FullscreenVB);
             Cmd.setBuffer(m_FullscreenIB);
             Cmd.Draw(3);
+            auto& G = View.m_Graph;
+            { const int S = G.Begin("sharp G-buffer (imported)", "", false);
+              for( const char* p : { "Render target: sharp colour", "Render target: sharp depth", "Render target: sharp motion" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::CLEAR); }
+            const int S = G.Begin("tail G-buffer from sharp", "Render target: tail colour");
+            for( const char* p : { "Render target: sharp colour", "Render target: sharp depth", "Render target: sharp motion" } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
+            for( const char* p : { "Render target: tail colour", "Render target: tail depth", "Render target: tail motion" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE);
         }
         else
         {
@@ -2663,6 +2670,14 @@ namespace xlionrender
                 auto STextures = std::array<const xgpu::texture*, 3>{ &View.m_TailGColor, &View.m_TailGDepth, View.m_bHDRPrev ? &View.m_HDRPrev : &View.m_HDR };      // (m_HDRPrev: m_HDR itself is cleared by the prepass)
                 Window.WriteTimestamp(m_ReflSSRTimes, 0);
                 Window.Dispatch(m_ReflSSR, SBuffers, STextures, &SPush, sizeof(SPush), (W + 7) / 8, (H + 7) / 8);
+                {
+                    auto& G = View.m_Graph;
+                    const int S = G.Begin("reflections: screen trace", "instance: m_ReflSSR");
+                    G.Read(S, G.Resource("Frame: reflection frames", rg::lifetime::FRAME), rg::usage::STORAGE);
+                    for( const char* p : { "Render target: tail colour", "Render target: tail depth" } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
+                    if( View.m_bHDRPrev ) G.Read(S, G.Resource("Render target: last frame's HDR", rg::lifetime::HISTORY), rg::usage::SAMPLED);
+                    G.Write(S, G.Resource("Render target: tail records", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
+                }
                 Light.m_EnvParams.m_W = std::max(Light.m_EnvParams.m_W, ssr_max_rough_v);      // (the materials read the records up to the screen trace's roughness: 1e-3 here read none - EnvLighting fades them out by .7 w)
             }
         }
@@ -2814,6 +2829,25 @@ namespace xlionrender
         }
         if( bTraced || bScreen )
         {
+            // (R0b: the trace's dispatches declared after they record - a legacy group: their internal order stays the code's)
+            if( bTraced )
+            {
+                auto& G = View.m_Graph;
+                const auto Trace = [&](bool bSharpPass)
+                {
+                    const int S = G.Begin(bSharpPass ? "reflections: sharp rays" : "reflections: rays", "instance: m_ReflTrace", false);
+                    for( const char* p : { "Rays: BVH nodes", "Rays: Tri4 rows", "Rays: instances", "Rays: TLAS leaves", "GI: world data", "Frame: tail frames", "Frame: planar reflection parameters", "Probes: environment atlas" } )
+                        G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
+                    if( m_bVoxOn && m_pGITrace && m_pGITrace->VoxBuffer() ) G.Read(S, G.Resource("GI: voxel store", rg::lifetime::RETAINED), rg::usage::STORAGE);
+                    for( const char* p : bSharpPass ? std::initializer_list<const char*>{ "Render target: sharp colour", "Render target: sharp depth", "Render target: sharp motion", "Render target: tail colour", "Render target: tail depth" }
+                                                    : std::initializer_list<const char*>{ "Render target: tail colour", "Render target: tail depth", "Render target: tail motion" } )
+                        G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
+                    for( const char* p : { "Render target: tail records", "Debug: reflection stats", "Probes: hit list", "Reflections: the sharp receivers' list", "Render target: planar reflection mips" } )
+                        G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
+                };
+                if( bSharp ) { Trace(true); Trace(true); }
+                Trace(false);
+            }
             // the reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then spatial;
             // the half-size records it leaves are what the materials read (REFLSPLIT's reconstruction includes the screen trace when both run)
             if( bReconstruct )
@@ -2825,6 +2859,17 @@ namespace xlionrender
                     static const bool s_bDiskFresh = xlionrender::Env("XLION_REFL_DISK_FRESH") != nullptr;      // (measurement: the spatial disk only for fresh histories)
                     const std::uint32_t DPush[4] = { Pass, std::uint32_t(Slot), s_bDiskFresh ? 1u : 0u, 0 };
                     Window.Dispatch(m_ReflDenoise, DBuffers, DTextures, DPush, sizeof(DPush), (W + 7) / 8, (H + 7) / 8);
+                    auto& G = View.m_Graph;
+                    const int S = G.Begin(Pass == 0 ? "reflections: temporal" : "reflections: spatial", "instance: m_ReflDenoise");
+                    G.Read(S, G.Resource("Frame: reflection frames", rg::lifetime::FRAME), rg::usage::STORAGE);
+                    for( const char* p : { "Render target: tail colour", "Render target: tail depth", "Render target: tail motion" } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
+                    G.Write(S, G.Resource("Render target: tail records", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PRESERVE);
+                    if( Pass == 0 ) G.Write(S, G.Resource("Reflections: reconstruction temporal", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
+                    else            G.Read(S, G.Resource("Reflections: reconstruction temporal", rg::lifetime::FRAME), rg::usage::STORAGE);
+                    // (the history: last frame's result read by the temporal pass, this frame's written by the spatial one)
+                    const int Hist = G.Resource("Reflections: history", rg::lifetime::HISTORY);
+                    if( Pass == 0 && View.m_bTailPrev ) G.Read(S, Hist, rg::usage::STORAGE);
+                    if( Pass == 1 ) G.Write(S, Hist, rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
                 }
             }
             if( bScreen ) Window.WriteTimestamp(m_ReflSSRTimes, 1);     // (SSRGPU: the screen trace and the reconstruction)
@@ -5006,7 +5051,6 @@ namespace xlionrender
             // The render graph (R0b): the post chain's scopes declared as they record. m_HDR is this frame's lit image (a version the scene
             // passes made: imported here, valid); the histories (last HDR, TAA, exposure) keep their versions across frames
             auto& G = View.m_Graph;
-            G.BeginFrame();
             const int rgHDR   = G.Resource("Render target: HDR colour", rg::lifetime::EXTERNAL);
             const int rgDepth = G.Resource("Render target: depth", rg::lifetime::EXTERNAL);
             const int rgPrev  = G.Resource("Render target: last frame's HDR", rg::lifetime::HISTORY);

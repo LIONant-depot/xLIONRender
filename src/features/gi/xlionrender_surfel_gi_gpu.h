@@ -949,7 +949,7 @@ namespace xlionrender::gi
             const int Keep = KeepMax;
             if (!m_bVox || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
             const std::size_t nEntries = std::size_t(vox_slots_v) * 3;
-            if (!FitScreen(nPixels) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries))) return false;
+            if (!FitScreen(nPixels) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries, "GI: voxel store"))) return false;
             // (XLION_VOX_RELIGHT=<connections a frame>, a prototype: rays keep what they found, 200000 of them; that many are relit each frame, no traversal; its buffer a token otherwise)
             static const int s_Relight = [] { const char* p = xlionrender::Env("XLION_VOX_RELIGHT"); return p ? std::atoi(p) : 0; }();
             // (measurement, XLION_VOX_BRICKS=<frames>: the connections' token is the brick bitmaps instead - host-visible, marked by every face the
@@ -1107,12 +1107,13 @@ namespace xlionrender::gi
 
         // A device-local buffer made with V (GPU_READ: xGPU copies it through a staging buffer; the GPU reads its own memory, not the host's
         // across the bus: Police's rays were 70 times slower than the Cornell box's with the scene in host memory)
-        template <class T> bool Local(xgpu::buffer& B, const std::vector<T>& V) noexcept
+        // (pName: a literal - the frame map and the render graph's audit tell buffers apart by it)
+        template <class T> bool Local(xgpu::buffer& B, const std::vector<T>& V, const char* pName = "GI: device-local data") noexcept
         {
             std::vector<T> Tmp = V;
             if (Tmp.empty()) Tmp.push_back(T{});
             B = {};
-            return m_pDevice->Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = int(sizeof(T)), .m_EntryCount = int(Tmp.size()), .m_pData = static_cast<void*>(Tmp.data()), .m_pName = "GI: device-local data" }) == nullptr;
+            return m_pDevice->Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = int(sizeof(T)), .m_EntryCount = int(Tmp.size()), .m_pData = static_cast<void*>(Tmp.data()), .m_pName = pName }) == nullptr;
         }
         // B holds at least n entries of Size bytes (made, or made larger: half again, nothing in flight reads it)
         bool Fit(xgpu::buffer& B, int Size, std::size_t n) noexcept
@@ -1125,12 +1126,12 @@ namespace xlionrender::gi
         }
 
         // B (device-local, the GPU's only) holds at least n entries of Size bytes (made larger: half again, nothing in flight reads it)
-        bool FitLocal(xgpu::buffer& B, int Size, std::size_t n) noexcept
+        bool FitLocal(xgpu::buffer& B, int Size, std::size_t n, const char* pName = "GI: device-local data") noexcept
         {
             n = std::max<std::size_t>(n, 1);
             const std::size_t Words = std::size_t(Size / 4) * n;
             if (B.m_Private && std::size_t(B.getEntryCount()) >= Words) return true;
-            return Local(B, std::vector<std::uint32_t>(Grown(4, Words), 0u));
+            return Local(B, std::vector<std::uint32_t>(Grown(4, Words), 0u), pName);
         }
 
         // n entries of Size bytes and half again of slack - the slack only up to the device's storage buffer range (llvmpipe: 128 MB; a 96 MB need was
@@ -1192,9 +1193,9 @@ namespace xlionrender::gi
                 auto Nodes = m_Scene.m_Nodes;
                 Nodes.resize(Nodes.size() + 2 * (Nodes.size() - std::size_t(m_Scene.m_nMeshNodes)) + 64);
                 m_NodeCap = Nodes.size();
-                if (!Local(m_Nodes, Nodes)) return false;
+                if (!Local(m_Nodes, Nodes, "Rays: BVH nodes")) return false;
             }
-            if (!Local(m_Tri4, m_Scene.m_Tri4) || !Local(m_Inst, m_Scene.m_Instances) || !Local(m_Tlas, m_Scene.m_TlasLeaves) || !Local(m_DataB, m_Data)
+            if (!Local(m_Tri4, m_Scene.m_Tri4, "Rays: Tri4 rows") || !Local(m_Inst, m_Scene.m_Instances, "Rays: instances") || !Local(m_Tlas, m_Scene.m_TlasLeaves, "Rays: TLAS leaves") || !Local(m_DataB, m_Data, "GI: world data")
                 || !Local(m_OwnerB, Owners) || !Local(m_ScratchB, std::vector<float>(std::max<std::size_t>(18 * std::max(m_nShown, m_ShownRoom), 1), 0.0f))) return false;
             PLap(2);
             if (Old.empty() || !m_OldDataB.m_Private) return true;
@@ -1288,7 +1289,7 @@ namespace xlionrender::gi
             m_XformGen = W.GPUXformGen();
             m_bPlaced = true;
             ++m_nRetlas;
-            if (!Local(m_Inst, m_Scene.m_Instances) || !Local(m_Tlas, m_Scene.m_TlasLeaves)) return false;
+            if (!Local(m_Inst, m_Scene.m_Instances, "Rays: instances") || !Local(m_Tlas, m_Scene.m_TlasLeaves, "Rays: TLAS leaves")) return false;
             const std::size_t n0 = std::size_t(m_Scene.m_nMeshNodes), nW = (m_Scene.m_Nodes.size() - n0) * sizeof(world::gpu_scene::gpu_node) / 4;
             if (nW == 0) return true;
             constexpr std::size_t node_words_v = sizeof(world::gpu_scene::gpu_node) / 4;

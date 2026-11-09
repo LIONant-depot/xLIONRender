@@ -2025,7 +2025,7 @@ namespace xlionrender
         // the records (binding 14): the tail's W x H, then the reflections' W x H (xlionrender_refl_trace_comp.glsl); the denoiser's temporal
         const std::vector<std::array<std::uint32_t, 4>> Zeros(2 * std::size_t(W) * std::size_t(H), std::array<std::uint32_t, 4>{});
         for( auto* pB : { &View.m_TailResult, &View.m_TailTemporal, &View.m_ReflTemporal, &View.m_ReflHistory } )      // (the reflections' reconstruction: its two)
-            if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = (pB == &View.m_TailResult ? 2 : 1) * W * H, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()), .m_pName = "Render target: tail records" }); Err ) return Err;
+            if( auto Err = m_Device.Create(*pB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = (pB == &View.m_TailResult ? 2 : 1) * W * H, .m_pData = const_cast<std::array<std::uint32_t, 4>*>(Zeros.data()), .m_pName = pB == &View.m_TailResult ? "Render target: tail records" : pB == &View.m_TailTemporal ? "Render target: tail temporal" : pB == &View.m_ReflTemporal ? "Reflections: reconstruction temporal" : "Reflections: history" }); Err ) return Err;
         View.m_TailWidth = W; View.m_TailHeight = H;
         View.m_bTailPrev = false;
         return nullptr;
