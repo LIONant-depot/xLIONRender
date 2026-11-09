@@ -59,6 +59,13 @@ namespace xlionrender
         post::plan              m_PostPlan;             // m_PostDesc lowered for this view's size: made again when either changes
         post::desc              m_PostPlanDesc;
         std::vector<float>      m_PostSnapshot, m_PostNoted;
+        // Custom post nodes (render graph stage I): their SPIR-V (set by the owner: the RenderGraph bundle's shader links), and what is made from it
+        std::array<std::vector<std::int32_t>, 4>   m_PostCustomSpirv;
+        std::array<std::size_t, 4>                 m_PostCustomMade{};      // the SPIR-V's hash the pipeline was made from (0: none)
+        std::array<xgpu::shader, 4>                m_PostCustomShader;
+        std::array<xgpu::compute, 4>               m_PostCustomCompute;
+        std::array<xgpu::texture, 4>               m_PostCustom;            // each node's output (the chain image after it)
+        std::array<xgpu::pipeline_instance, 4>     m_ToneMapCustom;         // the tone map over it
         std::vector<std::uint8_t> m_PostRan;            // the last frame: which of the plan's passes ran (its settings skip some) - the editor's view
         std::string             m_PostError;            // the description's error when it did not lower (the chain then tone maps only)    // the frame's parameter values (post::SnapshotParams), and the clamps already reported
         int                     m_PostPlanW = 0, m_PostPlanH = 0;

@@ -24,9 +24,12 @@ namespace xlionrender::post
 {
     // The authored effects. Bloom is one node: lowering expands it into its levels. The initialisations (TAA history, bloom levels and
     // exposure zeroed) are the nodes' lifecycle, never wired by a user
-    enum class node_type : std::uint8_t { TAA, BLOOM, EXPOSURE, TONE_MAP };
-    struct node { node_type m_Type; bool m_bOn = true; bool operator==( const node& ) const = default; };     // (off: bypassed - kept in the recipe, left out of the plan)
+    // CUSTOM (render graph stage I): a node with its own compute shader - the chain image in, a new chain image out (an image effect); its
+    // SPIR-V the view's m_PostCustomSpirv[m_Custom] (the RenderGraph bundle's shader link). Any number, after TAA, before the tone map
+    enum class node_type : std::uint8_t { TAA, BLOOM, EXPOSURE, TONE_MAP, CUSTOM };
+    struct node { node_type m_Type; bool m_bOn = true; int m_Custom = -1; bool operator==( const node& ) const = default; };     // (off: bypassed - kept in the recipe, left out of the plan; Custom: the shader's index)
     inline constexpr std::string_view node_names_v[] = { "taa", "bloom", "exposure", "tonemap" };     // (the edit commands' names; the text's are post.<name>)
+    inline constexpr int max_custom_nodes_v = 4;
 
     // A parameter of the chain: what the nodes push. Source: where a frame reads it ("scene.post.bloom_threshold"; empty: the default
     // only); a value outside Min..Max is clamped (and reported once a change: SnapshotParams). Bools are 0 / 1
@@ -77,10 +80,10 @@ namespace xlionrender::post
     };
 
     // The images a pass touches, resolved by the view each frame. CHAIN: the TAA's output when it ran this frame, else the lit image
-    enum class image : std::uint8_t { NONE, HDR, DEPTH, CHAIN, TAA_PREV, TAA_CUR, TAA0, TAA1, EXPOSURE, BLOOM, OUTPUT };
+    enum class image : std::uint8_t { NONE, HDR, DEPTH, CHAIN, TAA_PREV, TAA_CUR, TAA0, TAA1, EXPOSURE, BLOOM, OUTPUT, CUSTOM };     // (CUSTOM: m_Level is the custom node's index)
     struct image_ref { image m_Image = image::NONE; int m_Level = 0; bool operator==( const image_ref& ) const = default; };     // (Level: the bloom's)
 
-    enum class kernel : std::uint8_t { TAA, POST, TONE_MAP };       // xlionrender_taa_comp, xlionrender_post_comp, xlionrender_tonemap_frag
+    enum class kernel : std::uint8_t { TAA, POST, TONE_MAP, CUSTOM };     // (CUSTOM: the node's own shader, post_comp's bindings and push - xlionrender_post_node.glsl)       // xlionrender_taa_comp, xlionrender_post_comp, xlionrender_tonemap_frag
     enum class when   : std::uint8_t { ALWAYS, TAA_ON, BLOOM_ON, AUTO_EXPOSURE };      // (settings, not topology: a slider at 0 skips, it rebuilds nothing)
     enum class push   : std::uint8_t { FILL, TAA, BLOOM_DOWN, EXPOSURE, BLOOM_UP, TONE_MAP };
 
@@ -135,11 +138,18 @@ namespace xlionrender::post
         plan P;
         const auto Fail = [&](int i, std::string Why) { P = {}; P.m_Error = i >= 0 ? std::format("node {}: {}", i, Why) : Why; return P; };
         if( W <= 0 || H <= 0 ) return Fail(-1, std::format("the view is {} x {}: nothing to lower", W, H));
-        int nType[4] = {};
+        int nType[5] = {};
         for( int i = 0; i < int(D.m_Nodes.size()); ++i )
         {
             const auto T = D.m_Nodes[std::size_t(i)].m_Type;
-            if( std::size_t(T) >= 4 ) return Fail(i, "unknown node type");
+            if( std::size_t(T) >= 5 ) return Fail(i, "unknown node type");
+            if( T == node_type::CUSTOM )
+            {
+                const int c = D.m_Nodes[std::size_t(i)].m_Custom;
+                if( c < 0 || c >= max_custom_nodes_v ) return Fail(i, std::format("a custom node's shader index {} is not 0 .. {}", c, max_custom_nodes_v - 1));
+                for( int j = 0; j < i; ++j ) if( D.m_Nodes[std::size_t(j)].m_Type == node_type::CUSTOM && D.m_Nodes[std::size_t(j)].m_Custom == c ) return Fail(i, std::format("shader {} is used by node {} already (each custom node its own image)", c, j));
+                ++nType[4]; continue;
+            }
             if( ++nType[std::size_t(T)] > 1 ) return Fail(i, "a second one of a node that keeps state (one each)");
             if( T == node_type::TAA && i != 0 ) return Fail(i, "TAA must come first: everything after it reads its output");
             if( T == node_type::TONE_MAP && i != int(D.m_Nodes.size()) - 1 ) return Fail(i, "the tone map must be last: it makes the output");
@@ -163,9 +173,9 @@ namespace xlionrender::post
         }
         const auto Param = [&](std::string_view Name) { for( int i = 0; i < int(P.m_Params.size()); ++i ) if( P.m_Params[std::size_t(i)].m_Name == Name ) return i; return -1; };
         // Each node's parameters (a node that needs one the description lacks is refused, naming both)
-        static constexpr std::string_view s_Needs[4][5] = { { "TAABlend" }, { "Bloom", "BloomThreshold", "BloomKnee", "BloomSpread", "AutoExposure" }
-                                                          , { "AutoExposure", "ExposureRate", "ExposureKey", "ExposureMin", "ExposureMax" }, { "Bloom", "AutoExposure" } };
-        static constexpr std::string_view s_TypeNames[4] = { "taa", "bloom", "exposure", "tone map" };
+        static constexpr std::string_view s_Needs[5][5] = { { "TAABlend" }, { "Bloom", "BloomThreshold", "BloomKnee", "BloomSpread", "AutoExposure" }
+                                                          , { "AutoExposure", "ExposureRate", "ExposureKey", "ExposureMin", "ExposureMax" }, { "Bloom", "AutoExposure" }, {} };
+        static constexpr std::string_view s_TypeNames[5] = { "taa", "bloom", "exposure", "tone map", "custom" };
         for( int i = 0; i < int(D.m_Nodes.size()); ++i )
             for( const auto Need : s_Needs[std::size_t(D.m_Nodes[std::size_t(i)].m_Type)] )
                 if( !Need.empty() && Param(Need) < 0 ) return Fail(i, std::format("the {} needs the parameter '{}'", s_TypeNames[std::size_t(D.m_Nodes[std::size_t(i)].m_Type)], Need));
@@ -241,6 +251,15 @@ namespace xlionrender::post
                         .m_Bind = { CHAIN, HDR }, .m_Dst = EXPO, .m_W = 1, .m_H = 1 };
                 p.m_Accesses = { R(CHAIN), R(HDR), Wr(EXPO, rg::policy::PRESERVE) };
                 p.m_Slots = { { 3, slot_from::FRAME_DT }, Pm(4, "ExposureRate"), Pm(5, "ExposureKey"), Pm(6, "ExposureMin"), Pm(7, "ExposureMax") };
+                Groups(p); P.m_Passes.push_back(std::move(p));
+                break;
+            }
+            case node_type::CUSTOM:
+            {
+                const int c = D.m_Nodes[std::size_t(n)].m_Custom;
+                pass p{ .m_Scope = "custom", .m_Source = std::format("Custom {}, {} x {}", c, W, H), .m_Node = n, .m_Kernel = kernel::CUSTOM, .m_Push = push::FILL,
+                        .m_Level = c, .m_Bind = { CHAIN, EXPO }, .m_Dst = { image::CUSTOM, c }, .m_W = W, .m_H = H };
+                p.m_Accesses = { R(CHAIN), R(EXPO), Wr(p.m_Dst, rg::policy::FULL_OVERWRITE) };
                 Groups(p); P.m_Passes.push_back(std::move(p));
                 break;
             }
@@ -354,8 +373,8 @@ namespace xlionrender::post
     //      I <node> 0 <source map> <scope> <kernel> <W> <H> <groups x> <groups y> <runs when>             the initialisations
     inline std::string Describe( const desc& D, const plan& P, const std::string& Error, const std::vector<float>& Snapshot, const std::vector<float>& Noted, const std::vector<std::uint8_t>& Ran ) noexcept
     {
-        static constexpr const char* s_Types[]  = { "TAA", "Bloom", "Exposure", "Tone map" };
-        static constexpr const char* s_Kernel[] = { "taa (compute)", "post (compute)", "tone map (raster)" };
+        static constexpr const char* s_Types[]  = { "TAA", "Bloom", "Exposure", "Tone map", "Custom" };
+        static constexpr const char* s_Kernel[] = { "taa (compute)", "post (compute)", "tone map (raster)", "custom (compute)" };
         static constexpr const char* s_When[]   = { "always", "TAA on", "Bloom > 0", "AutoExposure on" };
         std::string T;
         if( !Error.empty() ) T += "E\t" + Error + "\n";

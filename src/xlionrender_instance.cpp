@@ -2128,6 +2128,13 @@ namespace xlionrender
         for( auto& I : View.m_ToneMapTAA ) if( I.m_Private ) m_Device.Destroy(std::move(I));
         for( auto& T : View.m_TAA ) if( T.m_Private ) m_Device.Destroy(std::move(T));
         View.m_bTAAHistory = false;
+        for( int c = 0; c < post::max_custom_nodes_v; ++c )     // (the custom post nodes' images and pipelines; their SPIR-V stays: the owner's)
+        {
+            if( View.m_ToneMapCustom[c].m_Private )     m_Device.Destroy(std::move(View.m_ToneMapCustom[c]));
+            if( View.m_PostCustom[c].m_Private )        m_Device.Destroy(std::move(View.m_PostCustom[c]));
+            View.m_PostCustomCompute[c] = {}; View.m_PostCustomShader[c] = {};
+            View.m_PostCustomMade[c] = 0;
+        }
         if( View.m_ExposureTex.m_Private ) m_Device.Destroy(std::move(View.m_ExposureTex));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));

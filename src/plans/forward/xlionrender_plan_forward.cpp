@@ -5219,10 +5219,36 @@ namespace xlionrender
             // (R1a) The post chain's dispatches as one explicit-sync section: one barrier in, the graph's barriers between them (a scope that
             // reads or overwrites what an earlier one touched), one out before the tone map. XLION_RG_BARRIERS=0: each dispatch its own two
             static const bool s_bRGBarriers = [] { const char* p = xlionrender::Env("XLION_RG_BARRIERS"); return !p || std::atoi(p) != 0; }();
+            // (stage I) The custom nodes' images and pipelines, made before the section (its images go into it): an image a node, full size;
+            // a pipeline per SPIR-V (made again when it changes: a recompiled shader); the tone map over each image
+            for( int c = 0; c < post::max_custom_nodes_v; ++c )
+            {
+                const auto& Spv = View.m_PostCustomSpirv[std::size_t(c)];
+                if( Spv.empty() ) continue;
+                const std::size_t Hash = std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(Spv.data()), Spv.size() * 4)) | 1;
+                if( View.m_PostCustomMade[std::size_t(c)] != Hash )
+                {
+                    View.m_PostCustomCompute[std::size_t(c)] = {}; View.m_PostCustomShader[std::size_t(c)] = {};      // (a compute's end waits for the device: a shader edit is rare)
+                    View.m_PostCustomMade[std::size_t(c)] = 0;
+                    static constexpr const char* s_Names[] = { "instance: post custom#0", "instance: post custom#1", "instance: post custom#2", "instance: post custom#3" };     // (they live as long as the compute)
+                    if( !m_Device.Create(View.m_PostCustomShader[std::size_t(c)], { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span<const std::int32_t>(Spv) } })
+                     && !m_Device.Create(View.m_PostCustomCompute[std::size_t(c)], { .m_pShader = &View.m_PostCustomShader[std::size_t(c)], .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32, .m_pName = s_Names[c] }) )
+                        View.m_PostCustomMade[std::size_t(c)] = Hash;
+                }
+                if( !View.m_PostCustom[std::size_t(c)].m_Private )
+                {
+                    if( !m_Device.Create(View.m_PostCustom[std::size_t(c)], { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: post custom" }) )
+                    {
+                        auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ View.m_PostCustom[std::size_t(c)] }, xgpu::pipeline_instance::sampler_binding{ View.m_Bloom[0] }, xgpu::pipeline_instance::sampler_binding{ View.m_ExposureTex } };
+                        (void)m_Device.Create(View.m_ToneMapCustom[std::size_t(c)], { .m_PipeLine = m_ToneMapPipeline, .m_SamplersBindings = Bindings });
+                    }
+                }
+            }
             if( s_bRGBarriers )
             {
-                std::array<const xgpu::texture*, 3 + std::tuple_size_v<decltype(View.m_Bloom)>> Imgs{ &View.m_TAA[0], &View.m_TAA[1], &View.m_ExposureTex };
-                for( std::size_t i = 0; i < View.m_Bloom.size(); ++i ) Imgs[3 + i] = &View.m_Bloom[i];
+                std::vector<const xgpu::texture*> Imgs{ &View.m_TAA[0], &View.m_TAA[1], &View.m_ExposureTex };
+                for( const auto& B : View.m_Bloom ) Imgs.push_back(&B);
+                for( const auto& C : View.m_PostCustom ) if( C.m_Private ) Imgs.push_back(&C);
                 Window.BeginExplicitSync(Imgs); G.SyncStart();
             }
             static const bool s_bRGNoSync = [] { const char* p = xlionrender::Env("XLION_RG_BARRIERS"); return p && std::atoi(p) == 2; }();      // (2: the section without its barriers - the sync validation's negative control)
@@ -5230,6 +5256,7 @@ namespace xlionrender
             static const float s_EnvExposure = [] { const char* p = xlionrender::Env("XLION_EXPOSURE"); return p ? float(std::atof(p)) : 0.0f; }();      // (measurement: a fixed exposure with auto exposure off - graded lit images)
             if( s_EnvExposure > 0.0f ) View.m_Exposure = s_EnvExposure;
             const xgpu::texture* pHDR = &View.m_HDR;
+            int rgChain = -1;           // (the chain image's render graph resource once a TAA or custom node made it; -1: the lit image)
             xgpu::pipeline_instance* pToneMap = &View.m_ToneMapInstance;
             // The post chain from its plan (render graph P1; xlionrender_post_graph.h): the description lowered for this view's size, kept until
             // the size changes, walked as a flat list of passes. (It replaced the hand-written steps after the equivalence harness showed the
@@ -5270,6 +5297,7 @@ namespace xlionrender
                         case post::image::TAA1:     return &View.m_TAA[1];
                         case post::image::EXPOSURE: return &View.m_ExposureTex;
                         case post::image::BLOOM:    return &View.m_Bloom[std::size_t(r.m_Level)];
+                        case post::image::CUSTOM:   return &View.m_PostCustom[std::size_t(r.m_Level)];
                         default:                    return nullptr;
                     }
                 };
@@ -5279,13 +5307,14 @@ namespace xlionrender
                     {
                         case post::image::HDR:      return rgHDR;
                         case post::image::DEPTH:    return rgDepth;
-                        case post::image::CHAIN:    return pHDR == &View.m_HDR ? rgHDR : pHDR == &View.m_TAA[1] ? rgTAA[1] : rgTAA[0];
+                        case post::image::CHAIN:    return rgChain >= 0 ? rgChain : rgHDR;
                         case post::image::TAA_PREV: return rgTAA[1 - (View.m_TAAFrame & 1)];
                         case post::image::TAA_CUR:  return rgTAA[View.m_TAAFrame & 1];
                         case post::image::TAA0:     return rgTAA[0];
                         case post::image::TAA1:     return rgTAA[1];
                         case post::image::EXPOSURE: return rgExpo;
                         case post::image::BLOOM:    return rgBloom(r.m_Level);
+                        case post::image::CUSTOM:   return G.Resource(std::format("Render target: post custom#{}", r.m_Level), rg::lifetime::FRAME);
                         default:                    return rgOut;
                     }
                 };
@@ -5319,6 +5348,12 @@ namespace xlionrender
                     const xgpu::texture* T[3] = { Tex(P.m_Bind[0]), Tex(P.m_Bind[1]), Tex(P.m_Bind[2]) };
                     const xgpu::texture* I[] = { Tex(P.m_Dst) };
                     const std::span<const xgpu::texture* const> Ts(T, P.m_Kernel == post::kernel::TAA ? 3 : 2);
+                    if( P.m_Kernel == post::kernel::CUSTOM )        // (its own shader, post_comp's bindings and push: the size, the rest 0)
+                    {
+                        struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{ P.m_W, P.m_H, 0 };
+                        Window.Dispatch(View.m_PostCustomCompute[std::size_t(P.m_Level)], std::span<xgpu::buffer* const>{}, std::span<const xgpu::texture* const>(T, 2), I, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
+                        return;
+                    }
                     if( P.m_Kernel == post::kernel::TAA )
                     {
                         struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, 0.0f, View.m_bTAAHistory ? 1.0f : 0.0f };
@@ -5363,13 +5398,15 @@ namespace xlionrender
                     for( const auto& P : Plan.m_Passes )
                     {
                         if( P.m_Kernel != post::kernel::TONE_MAP && !On(P.m_When) ) continue;      // (the tone map always: the graph's root)
+                        if( P.m_Kernel == post::kernel::CUSTOM && View.m_PostCustomMade[std::size_t(P.m_Level)] == 0 ) continue;      // (no pipeline: its SPIR-V missing or refused - the chain goes on without it)
                         View.m_PostRan[std::size_t(&P - Plan.m_Passes.data())] = 1;
                         Exec(P);
                         if( P.m_Kernel == post::kernel::TONE_MAP ) continue;
+                        if( P.m_Kernel == post::kernel::CUSTOM ) { pHDR = &View.m_PostCustom[std::size_t(P.m_Level)]; pToneMap = &View.m_ToneMapCustom[std::size_t(P.m_Level)]; rgChain = RgOf(P.m_Dst); }
                         if( P.m_Kernel == post::kernel::TAA )
                         {
                             const int Cur = View.m_TAAFrame & 1;
-                            pHDR = &View.m_TAA[Cur]; pToneMap = &View.m_ToneMapTAA[Cur]; bTAARan = true;
+                            pHDR = &View.m_TAA[Cur]; pToneMap = &View.m_ToneMapTAA[Cur]; bTAARan = true; rgChain = rgTAA[Cur];
                             View.m_TAAPrevW2C = W2CNoJitter; View.m_TAAPrevEye = Eye; View.m_bTAAHistory = true; ++View.m_TAAFrame;
                         }
                     }

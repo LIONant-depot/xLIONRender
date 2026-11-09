@@ -167,7 +167,7 @@ int main()
         for( std::size_t i = 0; i < A.m_Passes.size(); ++i ) CHECK(A.m_Passes[i].m_Source == B.m_Passes[i].m_Source, "the same plan: " + A.m_Passes[i].m_Source);
         {
             std::FILE* f = _wfopen(Path.c_str(), L"w"); CHECK(f, "a bad file");
-            std::fputs("[ PostGraph : 3 ]\n{ Type:s On:c }\n  \"post.taa\" 1\n  \"post.blom\" 1\n  \"post.tonemap\" 1\n", f); std::fclose(f);
+            std::fputs("[ PostGraph : 3 ]\n{ Type:s On:c Custom:d }\n  \"post.taa\" 1 -1\n  \"post.blom\" 1 -1\n  \"post.tonemap\" 1 -1\n", f); std::fclose(f);
             xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT), "the bad file opens");
             post::desc X; Problem.clear();
             CHECK(!post::Serialize(F, X, Problem) && Problem.find("row 1: no node type 'post.blom'") != std::string::npos && X.m_Nodes.empty(), "an unknown type names its row: " + Problem);
