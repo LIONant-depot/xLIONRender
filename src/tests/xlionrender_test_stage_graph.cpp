@@ -315,6 +315,27 @@ int main( int argc, char** argv )
             }
         }
         std::printf("bypass: each bypassable stage left out of the frame\n");
+        // A stage parameter set (the RenderGraph's StageParams): the AO's radius at its scene value - the frame the same; another - different
+        {
+            const auto& Ca = Cases[2];      // (ambient occlusion)
+            const float Radius = Ca.m_Scene.m_GI.m_AORadius;
+            std::vector<std::uint32_t> Raw[3];
+            for( int k = 0; k < 3; ++k )
+            {
+                xlionrender::render_view V;
+                CHECK(!Renderer.CreateView(V, { .m_Width = W, .m_Height = H }), "CreateView");
+                if( k == 1 ) V.StageParams() = { { "ao.radius", stage::param{ "ao.radius", "float", Radius }.Word() } };
+                if( k == 2 ) V.StageParams() = { { "ao.radius", stage::param{ "ao.radius", "float", Radius * 3.0f }.Word() } };
+                xgpu::tools::view Camera; Camera.setFov(xmath::radian{ 1.0f }); Camera.setViewport({ 0, 0, W, H }); Camera.LookAt(xmath::fvec3{ 0.5f, 1.2f, -2.5f }, xmath::fvec3{ 0, 0, 0 });
+                std::vector<std::vector<std::uint32_t>> L;
+                CHECK(Frame(Ca.m_Scene, V, Camera, Ca.m_Outputs(V), L), "Render");
+                Raw[k] = L[0];
+                Renderer.DestroyView(V);
+            }
+            CHECK(!Raw[0].empty() && Raw[1] == Raw[0], "ao.radius set to its own value: the raw AO the same");
+            CHECK(Raw[2] != Raw[0], "ao.radius set to another value: the raw AO differs");
+            std::printf("parameters: ao.radius from the RenderGraph wins over the frame's\n");
+        }
     }
     for( auto& C : Copies ) if( C.m_Private ) App.m_Device.Destroy(std::move(C));
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);

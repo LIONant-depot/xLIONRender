@@ -12,6 +12,7 @@ namespace xgpu { struct compute; struct buffer; struct texture; struct renderpas
 #include <cstring>
 #include <algorithm>
 #include <span>
+#include <bit>
 #include <optional>
 #include <type_traits>
 #include <functional>
@@ -61,6 +62,16 @@ namespace xlionrender::stage
                                              , { "ao", "no ambient occlusion" }, { "light_tiles", "no light tiles: each pixel walks its world cell's light list" } };
     inline bool Bypassable( std::string_view Stage ) noexcept { for( const auto& B : bypassable_v ) if( B.m_Stage == Stage ) return true; return false; }
 
+    // The parameters a RenderGraph can set (frame values the stages push), their type and what they do
+    struct parameter { std::string_view m_Name, m_Type, m_Help; };
+    inline constexpr parameter parameters_v[] = { { "ao.radius", "float", "the ambient occlusion's reach (world units)" }, { "ao.thickness", "float", "how thick the AO takes what it sees" }
+                                                , { "refl.ssr_steps", "uint", "the screen trace's steps a ray" }, { "refl.ssr_max_dist", "float", "the screen trace's longest ray (world units)" }
+                                                , { "refl.ssr_thickness", "float", "how thick the screen trace takes what it hits" } };
+    inline const parameter* Parameter( std::string_view Name ) noexcept { for( const auto& P : parameters_v ) if( P.m_Name == Name ) return &P; return nullptr; }
+    // A stage parameter the RenderGraph sets: a frame value by name, its type (float, uint) and value
+    struct param { std::string m_Name, m_Type = "float"; float m_Value = 0; bool operator==( const param& ) const = default;
+                   std::uint32_t Word( void ) const noexcept { return m_Type == "uint" ? std::uint32_t(std::max(m_Value, 0.0f)) : std::bit_cast<std::uint32_t>(m_Value); } };
+
     // names to objects: Add once (the index stays), Set per frame
     template< class T >
     struct table
@@ -85,6 +96,9 @@ namespace xlionrender::stage
         table<std::vector<draw_item>>   m_Items;        // (a draw an item)
         table<std::function<void(xgpu::cmd_buffer&)>> m_Recorders;      // (a recorded pass's body, set each frame)
         xgpu::buffer*                   m_pFullscreenVB = nullptr, *m_pFullscreenIB = nullptr;      // (a draw pass's triangle)
+        // Parameters set from the RenderGraph (its StageParams): frame values by name that win over the code's each run (one word each:
+        // a float's bits or a uint) - an AO radius, the screen trace's steps
+        std::vector<std::pair<std::string, std::uint32_t>> m_Overrides;
 
         void SetFloats( int i, const float* p, int n ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = n; std::memcpy(V.m_Words.data(), p, std::size_t(n) * 4); }
         void SetU32   ( int i, std::uint32_t u ) noexcept { auto& V = m_Frame.m_Items[std::size_t(i)]; V.m_n = 1; V.m_Words[0] = u; }
@@ -175,6 +189,7 @@ namespace xlionrender::stage
     template< class T_WINDOW, class T_HOOK = std::nullptr_t >
     void Run( const plan& P, registry& R, T_WINDOW& Window, rg::graph& G, T_HOOK&& Hook = nullptr ) noexcept
     {
+        for( const auto& [Name, Word] : R.m_Overrides ) if( const int i = R.m_Frame.Find(Name); i >= 0 ) { auto& V = R.m_Frame.m_Items[std::size_t(i)]; V.m_n = 1; V.m_Words[0] = Word; }
         using cmd_t = decltype(Window.StartRenderPass(*R.m_RenderPasses.m_Items[0]));
         std::optional<cmd_t> Cmd; int Open = -1;
         for( const auto& L : P.m_Passes )

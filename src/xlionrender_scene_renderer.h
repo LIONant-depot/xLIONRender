@@ -601,8 +601,9 @@ namespace xlionrender
                         for (std::size_t c = 0; c < m_View.m_PostCustomSpirv.size(); ++c) m_View.m_PostCustomSpirv[c] = c < B.m_Spirv.size() ? B.m_Spirv[c] : std::vector<std::int32_t>{};     // (its custom nodes' shaders: the bundle's shader links)
                         m_View.SetStageDescs(B.m_Stages);       // (the frame stages' descriptions: the plugin's Stages, render graph R3)
                         m_View.m_StagesOff = B.m_StagesOff;      // (and the ones bypassed)
+                        m_View.StageParams().clear(); for (const auto& P : B.m_StageParams) m_View.StageParams().emplace_back(P.m_Name, P.Word());      // (and the parameters it sets)
                     }
-                    else if (!m_RenderGraph) { m_View.m_PostDesc = xlionrender::post::desc::Default(); m_View.SetStageDescs({}); m_View.m_StagesOff.clear(); }
+                    else if (!m_RenderGraph) { m_View.m_PostDesc = xlionrender::post::desc::Default(); m_View.SetStageDescs({}); m_View.m_StagesOff.clear(); m_View.StageParams().clear(); }
                     if (pSource || !m_RenderGraph) { m_pAppliedPost = pSource; m_AppliedRenderGraph = m_RenderGraph; }
                 }
             }

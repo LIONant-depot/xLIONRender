@@ -26,6 +26,7 @@ namespace xlionrender::stage
 {
     using library = std::vector<std::pair<std::string, desc>>;     // named stages
 
+
     namespace text
     {
         inline constexpr std::string_view life_v[]   = { "frame", "history", "retained", "static", "external" };

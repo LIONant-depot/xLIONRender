@@ -85,6 +85,7 @@ namespace xlionrender
         // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon, ao, gi_read, vsm_request, local_request, tile, shadow_pages; the RenderGraph
         // resource's, xlionrender_stage_graph_text.h): one that does not lower leaves its stage hand-written (and says why once)
         std::vector<std::pair<std::string, stage::desc>> m_StageDescs;
+        std::vector<std::pair<std::string, std::uint32_t>>& StageParams( void ) noexcept { return m_Stages.m_Overrides; }      // (the RenderGraph's StageParams: frame values that win)
         std::vector<std::string> m_StagesOff;       // the stages bypassed (stage::bypassable_v: the frame takes its way without them)
         bool StageOn( std::string_view Name ) const noexcept { return std::find(m_StagesOff.begin(), m_StagesOff.end(), Name) == m_StagesOff.end(); }
         void SetStageDesc( const std::string& Name, stage::desc D ) noexcept      // (no passes: the built-in again)

@@ -197,6 +197,15 @@ namespace xlionrender
                     else if (!stage::Bypassable(Name)) Reply = std::format("the stage '{}' cannot be bypassed", Name);
                     else { std::erase(V.m_StagesOff, std::string(Name)); if (!On) V.m_StagesOff.push_back(Name); Reply = "ok"; bOk = true; }
                 }
+                else if (E.starts_with("param "))      // "param <name> [value]" on the view (a Level with a RenderGraph: the session edits its descriptor instead)
+                {
+                    char Name[64] = {}; float Value = 0;
+                    auto& Ov = pSystem->m_pScene->m_View.StageParams();
+                    const int n = std::sscanf(pEdit + 6, "%63s %f", Name, &Value);
+                    const auto* pP = n >= 1 ? stage::Parameter(Name) : nullptr;
+                    if (!pP) Reply = "param <name> [value]: ao.radius, ao.thickness, refl.ssr_steps, refl.ssr_max_dist, refl.ssr_thickness";
+                    else { std::erase_if(Ov, [&](const auto& P) { return P.first == Name; }); if (n == 2) Ov.emplace_back(Name, stage::param{ Name, std::string(pP->m_Type), Value }.Word()); Reply = "ok"; bOk = true; }
+                }
                 else bOk = post::Edit(pSystem->m_pScene->m_View.m_PostDesc, E, Reply);
                 if (pOut && Capacity > 0) { const std::size_t n = std::min<std::size_t>(Reply.size(), static_cast<std::size_t>(Capacity - 1)); std::memcpy(pOut, Reply.data(), n); pOut[n] = 0; }
                 return bOk;
