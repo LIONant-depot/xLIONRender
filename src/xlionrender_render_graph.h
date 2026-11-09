@@ -89,6 +89,28 @@ namespace xlionrender::rg
             std::fclose(f);
         }
 
+        // The last frame's scopes as text for the editor's view (xRenderEditor::DescribeGraph), a line each, fields split by tabs:
+        //      E <error>      S <managed 0|1> <name> <recorded>      A <write 0|1> <version> <usage> <policy> <lifetime> <resource>
+        // (BeginFrame clears the scopes at the next frame's start: read between frames)
+        std::string Text( void ) const noexcept
+        {
+            static constexpr const char* s_Usage[]  = { "sampled", "storage", "colour attachment", "depth attachment", "transfer src", "transfer dst" };
+            static constexpr const char* s_Policy[] = { "", "clear", "full overwrite", "preserve", "partial", "discard" };
+            static constexpr const char* s_Life[]   = { "frame", "history", "retained", "static", "external" };
+            std::string T;
+            for( const auto& E : m_Errors ) T += "E\t" + E + "\n";
+            for( const auto& S : m_Scopes )
+            {
+                T += std::string("S\t") + (S.m_bManaged ? "1" : "0") + "\t" + S.m_Name + "\t" + S.m_Recorded + "\n";
+                for( const auto& A : S.m_Accesses )
+                {
+                    const auto& R = m_Resources[std::size_t(A.m_Res)];
+                    T += std::string("A\t") + (A.m_bWrite ? "1" : "0") + "\t" + std::to_string(A.m_Version) + "\t" + s_Usage[int(A.m_Usage)] + "\t" + s_Policy[int(A.m_Policy)] + "\t" + s_Life[int(R.m_Life)] + "\t" + R.m_Name + "\n";
+                }
+            }
+            return T;
+        }
+
         const std::vector<std::string>& getErrors( void ) const noexcept { return m_Errors; }
 
     private:

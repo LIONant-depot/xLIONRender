@@ -137,6 +137,19 @@ namespace xlionrender
                 auto* pSystem = FindSystem(pWorld);
                 return pSystem ? pSystem->Pick(Origin, Dir, MaxT, View, nullptr, false) : ~0ull;
             }
+            int           DescribeGraph(const void* pWorld, char* pOut, int Capacity) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                if (!pSystem) return -1;
+                const std::string Text = pSystem->m_pScene ? pSystem->m_pScene->m_View.m_Graph.Text() : std::string();
+                if (pOut && Capacity > 0)
+                {
+                    const std::size_t n = std::min<std::size_t>(Text.size(), static_cast<std::size_t>(Capacity - 1));
+                    std::memcpy(pOut, Text.data(), n);
+                    pOut[n] = 0;
+                }
+                return static_cast<int>(Text.size());
+            }
             std::uint64_t PickPixel(const void* pWorld, int X, int Y, float* pDistance) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);
