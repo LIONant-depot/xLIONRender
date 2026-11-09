@@ -3118,7 +3118,7 @@ namespace xlionrender
         {
             for( const char* p : { "Probes: environment DFG", "Probes: environment atlas", "Probes: probe atlas", "Render target: contact shadow", "Render target: sun shadow mask",
                                    "Shadows: shadow atlas", "Shadows: white dummy", "Frame: instance data", "GI: dummy", "Lights: cell ring", "Lights: light ring",
-                                   "Materials: entity parameters", "Materials: material parameters", "Geometry: *", "Culling: *", "Render target: tail records", "GI: screen buffer*",
+                                   "Materials: entity parameters", "Materials: material parameters", "Geometry: *", "Culling: *", "Culling: draw args", "Render target: tail records", "GI: screen buffer*",
                                    "GI: light ring", "GI: moment ring" } )
                 G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::SAMPLED);
         }
@@ -3709,7 +3709,8 @@ namespace xlionrender
                     bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
                     m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
                     { auto& G = View.m_Graph; const int S = G.Begin("GPU cull (pass 1)", "group:copy Culling: zeros|gpu_cull: m_Compute", false);
-                      G.Read(S, G.Resource("Culling: *", rg::lifetime::RETAINED), rg::usage::STORAGE); G.Write(S, G.Resource("Culling: draw args", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
+                      G.Read(S, G.Resource("Culling: *", rg::lifetime::RETAINED), rg::usage::STORAGE); G.Read(S, G.Resource("Culling: HiZ pyramid", rg::lifetime::HISTORY), rg::usage::SAMPLED);      // (last frame's pyramid: the occlusion test)
+                      G.Write(S, G.Resource("Culling: draw args", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
                     static const bool s_bCullTimes = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                     if( s_bCullTimes && m_Device.getFrameIndex() % 120 == 0 )
                         std::printf("CULLGPU pass 1 cull %.3f, pyramid + pass 2 cull %.3f ms; occlusion %s (it hid %.0f%% of the triangles it tested); %d clusters, %lld triangles shaded\n"
@@ -3855,7 +3856,7 @@ namespace xlionrender
                                            "GI: dummy", "GI: gather table", "GI: screen buffer previous", "GI: voxel store", "GI: *" } )
                         G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::SAMPLED);
                     for( const char* p : { "GI: screen colour", "GI: screen depth" } ) G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::CLEAR);
-                    G.Write(S, G.Resource("GI: screen buffer", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
+                    G.Write(S, G.Resource("GI: screen buffer*", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);      // (the same buffer as the readers' name: the Frame graph showed it cut off)
                 }
                 {
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
