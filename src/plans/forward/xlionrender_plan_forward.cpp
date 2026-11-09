@@ -856,6 +856,25 @@ namespace xlionrender
 
     // The local lights' pages: the request pass over the main view's depth (shaders/xlionrender_local_request_comp.glsl), after the scene
     // pass, for the shadowed lights with a light slot. Its bits and counters go to this frame's ring slot, read when the slot comes round
+    namespace
+    {
+        // (R0b) A shadow request pass: the requests cleared by a copy of zeros, the dispatch over the depth, the requests copied into a host
+        // ring slot read frames later (a side-effect root: nothing on the GPU reads it)
+        void DeclareRequests( rg::graph& G, const char* pReq, const char* pFrames, const char* pReadback, const char* pDispatch ) noexcept
+        {
+            const int Req = G.Resource(pReq, rg::lifetime::FRAME);
+            int S = G.Begin(std::string(pReq) + " cleared", "copy Shadows: VSM zeros");
+            G.Read(S, G.Resource("Shadows: VSM zeros", rg::lifetime::STATIC), rg::usage::TRANSFER_SRC);
+            G.Write(S, Req, rg::usage::TRANSFER_DST, rg::policy::CLEAR);
+            S = G.Begin(std::string(pReq) + " made", pDispatch);
+            for( const char* p : { "Render target: depth", "Lights: cell ring", pFrames } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE);
+            G.Write(S, Req, rg::usage::STORAGE, rg::policy::PARTIAL);
+            S = G.Begin(std::string(pReq) + " read back", std::string("copy ") + pReq);
+            G.Read(S, Req, rg::usage::TRANSFER_SRC);
+            G.Write(S, G.Resource(pReadback, rg::lifetime::RETAINED), rg::usage::TRANSFER_DST, rg::policy::PARTIAL);
+        }
+    }
+
     void instance::localRequestPass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept
     {
         const int Slot = int(m_Device.getFrameIndex() % ring_frames_v), nBits = localBitUints(), nReq = nBits + 32;
@@ -888,6 +907,7 @@ namespace xlionrender
         const xgpu::buffer::copy C{ 0, Slot * nReq, nReq };
         Window.CopyBuffer(m_LocalReq, m_LocalReqHost, std::span{ &C, 1 });
         m_LocalReqValid[Slot] = true;
+        DeclareRequests(View.m_Graph, "Shadows: local light requests", "Shadows: local light frames", "Shadows: local light requests readback", "instance: m_LocalRequest");
     }
 
     // The sun's virtual pages: the request pass over the main view's depth (shaders/xlionrender_vsm_request_comp.glsl), after the scene
@@ -919,6 +939,7 @@ namespace xlionrender
         const xgpu::buffer::copy C{ 0, Slot * nReq, nReq };
         Window.CopyBuffer(m_VSMReq, m_VSMReqHost, std::span{ &C, 1 });
         m_VSMSnap[Slot] = m_VSM.Snapshot();
+        DeclareRequests(View.m_Graph, "Shadows: VSM requests", "Shadows: VSM frames", "Shadows: VSM requests readback", "instance: m_VSMRequest");
     }
 
     // The local lights and the captured reflection probes for this render: into this frame's region of the light buffer, and in
@@ -2792,6 +2813,19 @@ namespace xlionrender
             if( pVox && s_DirsTrace[0] > 0.0f && !s_bReflPT ) { if( !bPlanar ) std::memcpy(Push.m_Plane, s_DirsTrace.data(), sizeof(Push.m_Plane)); MaxRoughOut = std::max(MaxRoughOut, s_DirsTrace[3]); }
             auto Buffers  = std::array<xgpu::buffer*, 16>{ Bc(BvhR.m_pNodes), Bc(BvhR.m_pTri4), Bc(BvhR.m_pInstances), Bc(BvhR.m_pTlas), Bc(BvhR.m_pData), &m_TailFrames, &m_ReflStats, &View.m_TailResult, &m_PlanarMipsBuffer, &m_PlanarParams, bHits ? &m_HitList : &m_ReflStats, pVox ? pVox : &m_ReflStats, bSdf ? &m_WorldSdfB : &m_ReflStats, bSdf ? &m_WorldSdfSurfB : &m_ReflStats, m_bBakedSdf ? &m_BakedSdfB : &m_ReflStats, s_bReflPT && m_ReflPTAccum.m_Private ? &m_ReflPTAccum : &m_ReflSharpList };
             auto Textures = std::array<const xgpu::texture*, 6>{ &View.m_TailGColor, &View.m_TailGDepth, &m_EnvAtlas, bPlanar ? &m_PlanarView.m_HDR : bSdf ? &View.m_HDR : &View.m_TailGColor, bPlanar ? &m_PlanarView.m_Depth : &View.m_TailGDepth, &View.m_TailGMotion };
+            // (R0b: each trace dispatch declared as it records - a legacy group: its internal order stays the code's)
+            const auto DeclareTrace = [&](bool bSharpPass)
+            {
+                auto& G = View.m_Graph;
+                const int S = G.Begin(bSharpPass ? "reflections: sharp rays" : "reflections: rays", "instance: m_ReflTrace", false);
+                for( const char* p : { "Rays: BVH nodes", "Rays: Tri4 rows", "Rays: instances", "Rays: TLAS leaves", "GI: world data", "Frame: tail frames", "Frame: planar reflection parameters", "Probes: environment atlas" } )
+                    G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
+                if( m_bVoxOn && m_pGITrace && m_pGITrace->VoxBuffer() ) G.Read(S, G.Resource("GI: voxel store", rg::lifetime::RETAINED), rg::usage::STORAGE);
+                for( const char* p : { "Render target: sharp colour", "Render target: sharp depth", "Render target: sharp motion", "Render target: tail colour", "Render target: tail depth", "Render target: tail motion" } )
+                    G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);      // (a legacy group: its conservative set - which of them a dispatch binds varies)
+                for( const char* p : { "Render target: tail records", "Debug: reflection stats", "Probes: hit list", "Reflections: the sharp receivers' list", "Render target: planar reflection mips" } )
+                    G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
+            };
             // the sharp receivers at full size first (their records after the half-size ones, 2 pixels a record): mirrors take the hits
             // list's places before the glossy ones
             Window.WriteTimestamp(m_ReflTimes, 0);
@@ -2813,13 +2847,16 @@ namespace xlionrender
                     Window.WriteTimestamp(s_SharpTS, 0);
                 }
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), (View.m_SharpWidth + 7) / 8, (View.m_SharpHeight + 7) / 8);
+                DeclareTrace(true);
                 if( s_bSharpSplit && s_bSharpTS ) Window.WriteTimestamp(s_SharpTS, 1);
                 P2.m_Full[0] = -P2.m_Full[0];      // (the list: 64 a group, every lane busy)
                 Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), 262144 / 64, 1);
+                DeclareTrace(true);
                 if( s_bSharpSplit && s_bSharpTS ) Window.WriteTimestamp(s_SharpTS, 2);
             }
             Window.WriteTimestamp(m_ReflTimes, 1);
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
+            DeclareTrace(false);
             Window.WriteTimestamp(m_ReflTimes, 2);
             if( bHits ) shadeReflectionHits(Window, Scene, View, BvhR, Slot, HalfKeys, std::uint32_t(2 * W * H));
             Window.WriteTimestamp(m_ReflTimes, 3);
@@ -2829,25 +2866,6 @@ namespace xlionrender
         }
         if( bTraced || bScreen )
         {
-            // (R0b: the trace's dispatches declared after they record - a legacy group: their internal order stays the code's)
-            if( bTraced )
-            {
-                auto& G = View.m_Graph;
-                const auto Trace = [&](bool bSharpPass)
-                {
-                    const int S = G.Begin(bSharpPass ? "reflections: sharp rays" : "reflections: rays", "instance: m_ReflTrace", false);
-                    for( const char* p : { "Rays: BVH nodes", "Rays: Tri4 rows", "Rays: instances", "Rays: TLAS leaves", "GI: world data", "Frame: tail frames", "Frame: planar reflection parameters", "Probes: environment atlas" } )
-                        G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
-                    if( m_bVoxOn && m_pGITrace && m_pGITrace->VoxBuffer() ) G.Read(S, G.Resource("GI: voxel store", rg::lifetime::RETAINED), rg::usage::STORAGE);
-                    for( const char* p : bSharpPass ? std::initializer_list<const char*>{ "Render target: sharp colour", "Render target: sharp depth", "Render target: sharp motion", "Render target: tail colour", "Render target: tail depth" }
-                                                    : std::initializer_list<const char*>{ "Render target: tail colour", "Render target: tail depth", "Render target: tail motion" } )
-                        G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::SAMPLED);
-                    for( const char* p : { "Render target: tail records", "Debug: reflection stats", "Probes: hit list", "Reflections: the sharp receivers' list", "Render target: planar reflection mips" } )
-                        G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
-                };
-                if( bSharp ) { Trace(true); Trace(true); }
-                Trace(false);
-            }
             // the reconstruction (milestone D: xlionrender_refl_denoise_comp.glsl): temporal by the reflection's virtual motion, then spatial;
             // the half-size records it leaves are what the materials read (REFLSPLIT's reconstruction includes the screen trace when both run)
             if( bReconstruct )
@@ -2945,10 +2963,20 @@ namespace xlionrender
         auto Textures = std::array<const xgpu::texture*, 1>{ &m_HitShadeTex };
         struct { std::uint32_t m_Pass, m_Keys, m_Half, m_FullBase, m_Bins, m_Cap, m_Drawn, m_Slot, m_Width, m_TableBase; float m_TexMax; std::uint32_t m_Parity, m_Debug; } Push
             { 0, hit_cap_v, HalfKeys, FullBase, nBins, hit_cap_v, DrawnAt, std::uint32_t(Slot), hit_width_v, std::uint32_t(Slot) * m_HitTableCap, Scene.m_ReflectionTextureMinReflectance, (View.m_TailFrame & 1023u) & 1u, xlionrender::Env("XLION_REFL_HITS_ALBEDO") ? std::uint32_t(std::atoi(xlionrender::Env("XLION_REFL_HITS_ALBEDO"))) : 0u };
+        const auto DeclareHits = [&](const char* pName)
+        {
+            auto& G = View.m_Graph;
+            const int S = G.Begin(pName, "instance: m_ReflHits", false);
+            for( const char* p : { "GI: world data", "Probes: hit shading target", "Probes: hit tables", "Rays: BVH nodes", "Rays: TLAS leaves", "Rays: Tri4 rows", "Rays: instances" } )
+                G.Read(S, G.Resource(p, rg::lifetime::RETAINED), rg::usage::STORAGE);
+            for( const char* p : { "Probes: hit bins", "Probes: hit capture", "Probes: hit counts", "Probes: hit draw args", "Probes: hit list", "Render target: tail records" } )
+                G.Write(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::PARTIAL);
+        };
         for( std::uint32_t Pass = 0; Pass < 3; ++Pass )
         {
             Push.m_Pass = Pass;
             Window.Dispatch(m_ReflHits, Buffers, Textures, &Push, sizeof(Push), Pass == 1 ? 1 : int((hit_cap_v + 255) / 256));
+            DeclareHits(Pass == 0 ? "reflection hits: count" : Pass == 1 ? "reflection hits: scan" : "reflection hits: scatter");
         }
         Window.WriteTimestamp(m_ReflTimes, 5);
         // the drawn bins' hits, a pixel each, through their materials' capture variants (xlionrender_gi_capture_vert.glsl reads m_HitCapture)
@@ -2978,6 +3006,7 @@ namespace xlionrender
         Window.WriteTimestamp(m_ReflTimes, 6);
         Push.m_Pass = 3;
         Window.Dispatch(m_ReflHits, Buffers, Textures, &Push, sizeof(Push), int((hit_cap_v + 255) / 256));
+        DeclareHits("reflection hits: into the records");
     }
 
     // Reflections, the planar view (documentation/reflections_strategy.md sec. 8): the scene mirrored in scene::m_ReflectionPlane, at the
