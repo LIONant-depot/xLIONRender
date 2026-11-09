@@ -2,7 +2,8 @@
 // hand-written chain records (xlionrender_plan_forward.cpp, the Node* steps; xLION_Docs/render_graph_post_chain_inventory_2026-11-09.md) -
 // scope names, bindings, targets, sizes, dispatches, the render graph's reads and writes, in order - at several sizes, odd ones too;
 // a bad description is refused with the node it is about.
-#include "xlionrender_post_graph.h"
+#include "xlionrender_post_graph_text.h"
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 
@@ -91,6 +92,26 @@ int main()
     Refused({ { { post::node_type::BLOOM }, { post::node_type::TAA }, { post::node_type::TONE_MAP } } }, "node 1: TAA must come first", "TAA not first");
     Refused({ { { post::node_type::BLOOM }, { post::node_type::BLOOM }, { post::node_type::TONE_MAP } } }, "node 1: a second one", "two blooms");
     { const auto P = post::Lower(post::desc::Default(), 0, 1080); CHECK(!P.m_Error.empty(), "a 0-wide view is refused"); }
+    // P2: the description as text - written and read back it is the same description, and lowers to the same plan; an unknown type names its row
+    {
+        const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_post_graph.txt").wstring();
+        auto D = post::desc::Default(); std::string Problem;
+        { xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT), "the description's file opens for writing"); CHECK(!post::Serialize(F, D, Problem), "written"); }
+        post::desc R;
+        { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT), "the description's file opens for reading"); CHECK(!post::Serialize(F, R, Problem) && Problem.empty(), "read: " + Problem); }
+        CHECK(R == D, "read back: the same description");
+        const auto A = post::Lower(D, 3218, 1512), B = post::Lower(R, 3218, 1512);
+        CHECK(A.m_Passes.size() == B.m_Passes.size(), "the same plan");
+        for( std::size_t i = 0; i < A.m_Passes.size(); ++i ) CHECK(A.m_Passes[i].m_Source == B.m_Passes[i].m_Source, "the same plan: " + A.m_Passes[i].m_Source);
+        {
+            std::FILE* f = _wfopen(Path.c_str(), L"w"); CHECK(f, "a bad file");
+            std::fputs("[ PostGraph : 3 ]\n{ Type:s }\n  \"post.taa\"\n  \"post.blom\"\n  \"post.tonemap\"\n", f); std::fclose(f);
+            xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT), "the bad file opens");
+            post::desc X; Problem.clear();
+            CHECK(!post::Serialize(F, X, Problem) && Problem.find("row 1: no node type 'post.blom'") != std::string::npos && X.m_Nodes.empty(), "an unknown type names its row: " + Problem);
+        }
+        std::filesystem::remove(Path);
+    }
     std::printf("post graph plan: ok\n");
     return 0;
 }

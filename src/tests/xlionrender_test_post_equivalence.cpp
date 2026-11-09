@@ -1,11 +1,15 @@
 // The post chain's equivalence harness (render graph P1c; xLION_Docs/render_graph_design_v3_2026-11-09.md 11.4): two views of the same
-// scene and camera, each with its own TAA / exposure / bloom state, one through the hand-written steps and one through the plan
-// (render_view::m_PostPath), the auto exposure's step fixed (m_PostFixedDt) so the two adapt alike. Every frame the TAA images, the
-// exposure, every bloom level and the output are read back from both and must be equal, bit for bit; the first that differs is named.
-// First the hand-written chain against itself: if two views of it differ, the harness is not trusted (the inputs are not the same).
+// scene and camera, each with its own TAA / exposure / bloom state, view B's chain from view A's lit image (m_pPostInputs), the auto
+// exposure's step fixed (m_PostFixedDt) so the two adapt alike. Every frame the TAA images, the exposure, every bloom level and the
+// output are read back from both and must be equal, bit for bit; the first that differs is named. (P1c ran it hand-written steps
+// against the plan - identical, 5ec9dc2 - before the steps were removed.) First the chain against itself: if two views of it differ,
+// the harness is not trusted (the inputs are not the same).
+// Then the same with view B's description read from its text form (P2: same output).
 // Cases: TAA, bloom, auto exposure on and off; an odd size (805 x 377) and the inventory's 3218 x 1512; a moving camera (reprojection).
 //   xlionrender_test_post_equivalence [frames]       (XLION_PE_ONLY=<case index>: one case)
 #include "xlionrender_test_common.h"
+#include "xlionrender_post_graph_text.h"
+#include <filesystem>
 #include <cstring>
 
 using namespace xlionrender::test;
@@ -79,6 +83,15 @@ int main( int argc, char** argv )
         { "all on, 3218 x 1512",        true,  true,  true,  3218, 1512 },
         { "all on, 64 x 64",            true,  true,  true,  64, 64 },
     };
+    // (P2) The description as text: the default written to a file and read back - view B's chain from it
+    xlionrender::post::desc FromFile;
+    {
+        const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_post_equivalence.txt").wstring();
+        auto D = xlionrender::post::desc::Default(); std::string Problem;
+        { xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !xlionrender::post::Serialize(F, D, Problem), "the description written"); }
+        { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !xlionrender::post::Serialize(F, FromFile, Problem) && Problem.empty(), "the description read"); }
+        std::filesystem::remove(Path);
+    }
     const char* pOnly = xlionrender::Env("XLION_PE_ONLY");
     int nFail = 0;
     for( int Control = 1; Control >= 0; --Control )         // 1: hand-written against itself (the harness's own check), 0: against the plan
@@ -90,7 +103,8 @@ int main( int argc, char** argv )
         xlionrender::render_view A, B;
         CHECK(!Renderer.CreateView(A, { .m_Width = C.m_W, .m_Height = C.m_H }) && !Renderer.CreateView(B, { .m_Width = C.m_W, .m_Height = C.m_H }), "CreateView");
         A.m_PostFixedDt = B.m_PostFixedDt = 1.0f / 30.0f;
-        B.m_pPostInputs = &A;       // (the scene passes are not the same twice - frame-indexed noise: B's chain starts from A's lit image)
+        B.m_pPostInputs = &A;
+        if( !Control ) B.m_PostDesc = FromFile;       // (the scene passes are not the same twice - frame-indexed noise: B's chain starts from A's lit image)
         std::string Why;
         int Frame = 0;
         for( ; Frame < nFrames && Why.empty(); ++Frame )

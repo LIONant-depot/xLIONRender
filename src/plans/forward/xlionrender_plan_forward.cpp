@@ -5237,10 +5237,10 @@ namespace xlionrender
             // the size changes, walked as a flat list of passes. (It replaced the hand-written steps after the equivalence harness showed the
             // two bit-identical: xLIONRender 5ec9dc2, xlionrender_test_post_equivalence)
             {
-                if( View.m_PostPlanW != View.m_Width || View.m_PostPlanH != View.m_Height )
+                if( View.m_PostPlanW != View.m_Width || View.m_PostPlanH != View.m_Height || View.m_PostPlanDesc != View.m_PostDesc )
                 {
-                    View.m_PostPlan = post::Lower(post::desc::Default(), View.m_Width, View.m_Height);
-                    View.m_PostPlanW = View.m_Width; View.m_PostPlanH = View.m_Height;
+                    View.m_PostPlan = post::Lower(View.m_PostDesc, View.m_Width, View.m_Height);
+                    View.m_PostPlanW = View.m_Width; View.m_PostPlanH = View.m_Height; View.m_PostPlanDesc = View.m_PostDesc;
                     if( !View.m_PostPlan.m_Error.empty() )      // (an invalid description: the lit image tone mapped, nothing else)
                     {
                         std::printf("Post chain: %s - tone map only\n", View.m_PostPlan.m_Error.c_str()); std::fflush(stdout);
@@ -5337,7 +5337,8 @@ namespace xlionrender
                 if( Plan.m_Error.empty() )
                 {
                     // Lifecycle: the TAA's images when first on (made, each zeroed), the bloom levels and the exposure once a view
-                    if( bTAA && !View.m_TAA[0].m_Private )
+                    const bool bPlanTAA = std::any_of(Plan.m_Inits.begin(), Plan.m_Inits.end(), [](const post::pass& P) { return P.m_When == post::when::TAA_ON; });
+                    if( bTAA && bPlanTAA && !View.m_TAA[0].m_Private )      // (a chain without TAA: its images are never made)
                     {
                         bool bOk = true;
                         for( int i = 0; i < 2 && bOk; ++i )

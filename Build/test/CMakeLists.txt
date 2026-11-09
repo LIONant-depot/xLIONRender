@@ -91,6 +91,11 @@ foreach(TEST xlionrender_test_forward xlionrender_test_static_geom xlionrender_t
   target_link_libraries(${TEST} PRIVATE xlionrender_new)
   add_test(NAME ${TEST} COMMAND ${TEST})
 endforeach()
+# The post chain description as text (xlionrender_post_graph_text.h) needs xtextfile: the tests that read it build it in
+foreach(TEST xlionrender_test_post_graph xlionrender_test_post_equivalence)
+  target_sources(${TEST} PRIVATE "${XLION_ROOT}/dependencies/xtextfile/source/xtextfile.cpp")
+  target_include_directories(${TEST} PRIVATE "${XLION_ROOT}/dependencies/xerr" "${XLION_ROOT}/dependencies/xtextfile")
+endforeach()
 
 # The stress scene (src/tools/stress): a windowed, scripted benchmark - not a test (ctest does not run it)
 #   Build/test/vs2022/Release/xlionrender_stress.exe [--scenario flyover|street|moving_lights|all] [--lights N] [--mode exact|cells|sampled]

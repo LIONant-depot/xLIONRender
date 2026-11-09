@@ -20,11 +20,12 @@ namespace xlionrender::post
     // The authored effects. Bloom is one node: lowering expands it into its levels. The initialisations (TAA history, bloom levels and
     // exposure zeroed) are the nodes' lifecycle, never wired by a user
     enum class node_type : std::uint8_t { TAA, BLOOM, EXPOSURE, TONE_MAP };
-    struct node { node_type m_Type; };
+    struct node { node_type m_Type; bool operator==( const node& ) const = default; };
     struct desc
     {
         std::vector<node> m_Nodes;
         static desc Default( void ) { return { { { node_type::TAA }, { node_type::BLOOM }, { node_type::EXPOSURE }, { node_type::TONE_MAP } } }; }
+        bool operator==( const desc& ) const = default;
     };
 
     // The images a pass touches, resolved by the view each frame. CHAIN: the TAA's output when it ran this frame, else the lit image
