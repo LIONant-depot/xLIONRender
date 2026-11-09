@@ -69,7 +69,9 @@ namespace xlionrender
         bool                    m_bStageAO = true;
         stage::plan             m_GIReadPlan;           // the GI read (classify + a gather a GI buffer: render passes)
         bool                    m_bStageGIRead = true;
-        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon, ao, gi_read; the RenderGraph
+        stage::plan             m_VSMRequestPlan, m_LocalRequestPlan;      // the shadow request passes (the sun's pages, the local lights')
+        bool                    m_bStageVSMRequest = true, m_bStageLocalRequest = true;
+        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon, ao, gi_read, vsm_request, local_request; the RenderGraph
         // resource's, xlionrender_stage_graph_text.h): one that does not lower leaves its stage hand-written (and says why once)
         std::vector<std::pair<std::string, stage::desc>> m_StageDescs;
         std::vector<std::string> m_StagesOff;       // the stages bypassed (stage::bypassable_v: the frame takes its way without them)
@@ -78,13 +80,13 @@ namespace xlionrender
         {
             std::erase_if(m_StageDescs, [&]( const auto& P ) { return P.first == Name; });
             if( !D.m_Passes.empty() ) m_StageDescs.emplace_back(Name, std::move(D));
-            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {};
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {};
         }
         void SetStageDescs( std::vector<std::pair<std::string, stage::desc>> All ) noexcept      // (all of them at once: the RenderGraph bundle's; none: the built-in ones)
         {
             if( All == m_StageDescs ) return;
             m_StageDescs = std::move(All);
-            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {};
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {};
         }
         const stage::desc& StageDesc( std::string_view Name, const stage::desc& BuiltIn ) const noexcept
         {

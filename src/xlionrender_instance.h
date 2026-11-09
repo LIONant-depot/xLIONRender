@@ -921,6 +921,8 @@ namespace xlionrender
         int  localBitUints( void ) const noexcept { return (shadows::local_pages::max_faces_v * shadows::local_pages::face_entries_v + 31) / 32; }
         int  localTableBase( void ) noexcept;
         void localRequestPass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
+        bool requestStage( render_view& View, stage::plan& Plan, const char* pStage, const stage::desc& BuiltIn, const char* pKernel, xgpu::compute& Kernel, const char* pRecorded
+                         , const std::array<xgpu::buffer*, 3>& Buffers, std::array<const char*, 3> Names, const std::uint32_t (&Push)[8] ) noexcept;      // (render graph: a shadow request pass as a stage)
         struct prev_caster { xmath::fbbox m_World; std::uint64_t m_First; };       // (m_First: the shadow pass the key first appeared in)
         std::unordered_map<std::uint64_t, prev_caster> m_PrevCasters;   // last frame's casters (key -> world bounds), to find what changed
         int                                     m_nShadowTilesRendered = 0;

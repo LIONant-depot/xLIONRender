@@ -313,6 +313,28 @@ namespace xlionrender::details
         return D;
     }
 
+    // The shadow request passes as stages (xlionrender_vsm_request_comp.glsl, xlionrender_local_request_comp.glsl): over the main view's
+    // depth, the pages each pixel needs into the requests (cleared before, read back after by the code: the page systems are CPU side)
+    inline stage::pass RequestPass( const char* pName, const char* pKernel, const char* pFrames, const char* pReq, std::vector<stage::word> Push )
+    {
+        return stage::pass{ .m_Name = pName, .m_Kernel = pKernel
+            , .m_Buffers  = { { pFrames }, { pReq, rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::PARTIAL }, { "Lights: cell ring" } }
+            , .m_Textures = { { "Render target: depth", rg::lifetime::FRAME, rg::usage::STORAGE } }      // (declared as the code always did: a storage read)
+            , .m_Push     = std::move(Push) };
+    }
+    inline const stage::desc& VSMRequestStage( void ) noexcept
+    {
+        static const stage::desc D{ { RequestPass("Shadows: VSM requests made", "vsm_request", "Shadows: VSM frames", "Shadows: VSM requests"
+            , { { "shadow.slot" }, { "", 0u }, { "vsm.table_base" }, { "view.width" }, { "view.height" }, { "vsm.bit_uints" }, { "vsm.soft_levels" }, { "vsm.level_band" } }) } };
+        return D;
+    }
+    inline const stage::desc& LocalRequestStage( void ) noexcept
+    {
+        static const stage::desc D{ { RequestPass("Shadows: local light requests made", "local_request", "Shadows: local light frames", "Shadows: local light requests"
+            , { { "shadow.slot" }, { "", 0u }, { "view.width" }, { "view.height" }, { "local.bit_uints" }, { "", 0u }, { "", 0u }, { "", 0u } }) } };
+        return D;
+    }
+
     // The reflections' screen trace as a stage (xlionrender_refl_ssr_comp.glsl): last frame's lit image at the ray's hit in this frame's
     // thin G-buffer, into the tail's records (last frame's image declared on the frames there is one: else the view's own HDR, cleared)
     inline const stage::desc& ReflScreenStage( void ) noexcept

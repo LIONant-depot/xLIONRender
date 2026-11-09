@@ -68,7 +68,7 @@ int main( int argc, char** argv )
     stage::library FromText;
     {
         const auto Path = (std::filesystem::temp_directory_path() / "xlionrender_test_stage_graph.txt").wstring();
-        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() }, { "ao", xlionrender::details::AOStage() }, { "gi_read", xlionrender::details::GIReadStage() } };
+        stage::library BuiltIn = { { "light_tiles", xlionrender::details::LightTilesStage() }, { "refl_ssr", xlionrender::details::ReflScreenStage() }, { "refl_recon", xlionrender::details::ReflReconStage() }, { "ao", xlionrender::details::AOStage() }, { "gi_read", xlionrender::details::GIReadStage() }, { "vsm_request", xlionrender::details::VSMRequestStage() }, { "local_request", xlionrender::details::LocalRequestStage() } };
         std::string Problem;
         { auto L = BuiltIn; xtextfile::stream F; CHECK(!F.Open(false, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, L, Problem), "the library written"); }
         { xtextfile::stream F; CHECK(!F.Open(true, Path, xtextfile::file_type::TEXT) && !stage::Serialize(F, FromText, Problem) && Problem.empty(), "the library read: %s", Problem.c_str()); }
@@ -174,7 +174,8 @@ int main( int argc, char** argv )
         std::function<std::vector<output>(xlionrender::render_view&)> m_Outputs;
         std::function<const stage::plan&(xlionrender::render_view&)> m_Plan;
         std::vector<const char*>                                    m_OutNames;
-        bool                                                        m_bScopes = true;      // (its Frame graph scopes as the hand-written ones; false: the stage declares more exactly)
+        bool                                                        m_bScopes = true;
+        int                                                         m_MaxFrames = 1000;    // (fewer: the instance's state moves on between renders past them - four hand-written views disagree there too)      // (its Frame graph scopes as the hand-written ones; false: the stage declares more exactly)
     };
     std::vector<test_case> Cases;
     {
@@ -202,6 +203,17 @@ int main( int argc, char** argv )
     {
         auto S = Base;
         S.m_GI.m_bAO = true;
+        {   // the shadow request passes: the sun's pages and a shadowed local light's (the requests are the instance's: found by name in the view's stage registry)
+            auto SR = Base;
+            SR.m_Sun.m_bCastShadows = true;
+            SR.m_LocalLights.push_back({ .m_Type = xlionrender::local_light::type::POINT, .m_Position = { -0.6f, 0.8f, -0.6f }, .m_Radius = 3.0f, .m_Intensity = 4.0f, .m_bCastShadows = true });
+            const auto Req = []( xlionrender::render_view& V ) {
+                std::vector<output> O;
+                for( const char* p : { "Shadows: VSM requests", "Shadows: local light requests" } ) if( const int i = V.m_Stages.m_Buffers.Find(p); i >= 0 ) O.push_back({ V.m_Stages.m_Buffers.m_Items[std::size_t(i)], 4 });
+                return O; };
+            Cases.push_back({ "shadow requests", SR, { "Shadows: VSM requests made", "Shadows: local light requests made" }, []( xlionrender::render_view& V, bool b ) { V.m_bStageVSMRequest = V.m_bStageLocalRequest = b; }
+                            , Req, []( xlionrender::render_view& V ) -> const stage::plan& { return V.m_VSMRequestPlan; }, { "the sun's page requests", "the local light's page requests" }, true, 4 });      // (frame 5: the sun's page windows move between renders - hand-written views a pair apart differ)
+        }
         auto SG = S;
         SG.m_GI.m_bEnable = true;
         SG.m_Draws = { { .m_Mesh = BoxG, .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.55f, 0 }) * xmath::fmat4::fromScale({ 10.0f, 0.1f, 10.0f }), .m_Material = { .m_BaseColor = { 0.5f, 0.5f, 0.5f } }, .m_Instance = 101 }
@@ -227,7 +239,7 @@ int main( int argc, char** argv )
         for( auto& v : V ) Ca.m_Stage(v, false); { const bool bAllHand = std::getenv("XLION_SG_ALLHAND") != nullptr; Ca.m_Stage(V[3], !bAllHand); Ca.m_Stage(V[5], !bAllHand); }      // (XLION_SG_ALLHAND: a check of the harness - four hand-written views)
         for( const auto& [N, D] : FromText ) V[5].SetStageDesc(N, D);
         std::string Why[3];
-        for( int f = 0; f < nFrames; ++f )
+        for( int f = 0; f < std::min(nFrames, Ca.m_MaxFrames); ++f )
         {
             xgpu::tools::view Camera;
             Camera.setFov(xmath::radian{ 1.0f });
@@ -278,7 +290,7 @@ int main( int argc, char** argv )
         for( auto& v : V ) Renderer.DestroyView(v);
         for( int k = 0; k < 3; ++k )
         {
-            if( Why[k].empty() ) { std::printf("same: %s, %s, %d frames\n", Ca.m_pName, pNames[k], nFrames); continue; }
+            if( Why[k].empty() ) { std::printf("same: %s, %s, %d frames\n", Ca.m_pName, pNames[k], std::min(nFrames, Ca.m_MaxFrames)); continue; }
             std::printf("DIFFERENT: %s, %s - %s\n", Ca.m_pName, pNames[k], Why[k].c_str()); ++nFail;
             if( k == 0 ) { std::printf("  (the harness is not trusted for this stage)\n"); break; }
         }

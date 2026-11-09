@@ -863,19 +863,52 @@ namespace xlionrender
         void DeclareBlended( rg::graph& G ) noexcept;
         // (R0b) A shadow request pass: the requests cleared by a copy of zeros, the dispatch over the depth, the requests copied into a host
         // ring slot read frames later (a side-effect root: nothing on the GPU reads it)
-        void DeclareRequests( rg::graph& G, const char* pReq, const char* pFrames, const char* pReadback, const char* pDispatch ) noexcept
+        // (Part: 0 all three, 1 the clear only, 2 the read back only - the dispatch between is a stage's, declared by its executor)
+        void DeclareRequests( rg::graph& G, const char* pReq, const char* pFrames, const char* pReadback, const char* pDispatch, int Part = 0 ) noexcept
         {
             const int Req = G.Resource(pReq, rg::lifetime::FRAME);
-            int S = G.Begin(std::string(pReq) + " cleared", "copy Shadows: VSM zeros");
-            G.Read(S, G.Resource("Shadows: VSM zeros", rg::lifetime::STATIC), rg::usage::TRANSFER_SRC);
-            G.Write(S, Req, rg::usage::TRANSFER_DST, rg::policy::CLEAR);
-            S = G.Begin(std::string(pReq) + " made", pDispatch);
-            for( const char* p : { "Render target: depth", "Lights: cell ring", pFrames } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE);
-            G.Write(S, Req, rg::usage::STORAGE, rg::policy::PARTIAL);
+            int S;
+            if( Part != 2 )
+            {
+                S = G.Begin(std::string(pReq) + " cleared", "copy Shadows: VSM zeros");
+                G.Read(S, G.Resource("Shadows: VSM zeros", rg::lifetime::STATIC), rg::usage::TRANSFER_SRC);
+                G.Write(S, Req, rg::usage::TRANSFER_DST, rg::policy::CLEAR);
+            }
+            if( Part == 1 ) return;
+            if( Part == 0 )
+            {
+                S = G.Begin(std::string(pReq) + " made", pDispatch);
+                for( const char* p : { "Render target: depth", "Lights: cell ring", pFrames } ) G.Read(S, G.Resource(p, rg::lifetime::FRAME), rg::usage::STORAGE);
+                G.Write(S, Req, rg::usage::STORAGE, rg::policy::PARTIAL);
+            }
             S = G.Begin(std::string(pReq) + " read back", std::string("copy ") + pReq);
             G.Read(S, Req, rg::usage::TRANSFER_SRC);
             G.Write(S, G.Resource(pReadback, rg::lifetime::RETAINED), rg::usage::TRANSFER_DST, rg::policy::PARTIAL);
         }
+    }
+
+    // A shadow request pass's stage (render graph): its kernel, buffers, depth and push words registered by name (the push: the code's own
+    // 8 words, by their names - VSMRequestStage, LocalRequestStage), lowered the first time; false: the code dispatches (the stage did not lower)
+    bool instance::requestStage( render_view& View, stage::plan& Plan, const char* pStage, const stage::desc& BuiltIn, const char* pKernel, xgpu::compute& Kernel, const char* pRecorded
+                               , const std::array<xgpu::buffer*, 3>& Buffers, std::array<const char*, 3> Names, const std::uint32_t (&Push)[8] ) noexcept
+    {
+        auto& R = View.m_Stages;
+        R.m_Kernels.Add(pKernel, { &Kernel, 3, 1, 0, 32, pRecorded });
+        for( int b = 0; b < 3; ++b ) R.m_Buffers.Add(Names[std::size_t(b)], Buffers[std::size_t(b)]);
+        R.m_Textures.Add("Render target: depth", &View.m_Depth);
+        const bool bVSM = std::string_view(pKernel) == "vsm_request";
+        R.SetU32(R.Value("shadow.slot"), Push[0]);
+        R.SetU32(R.Value("view.width"), bVSM ? Push[3] : Push[2]);
+        R.SetU32(R.Value("view.height"), bVSM ? Push[4] : Push[3]);
+        if( bVSM ) { R.SetU32(R.Value("vsm.table_base"), Push[2]); R.SetU32(R.Value("vsm.bit_uints"), Push[5]); R.SetU32(R.Value("vsm.soft_levels"), Push[6]); R.SetU32(R.Value("vsm.level_band"), Push[7]); }
+        else       R.SetU32(R.Value("local.bit_uints"), Push[4]);
+        R.SetSize(R.Value("view.size"), View.m_Width, View.m_Height);
+        if( Plan.m_Passes.empty() && Plan.m_Error.empty() )
+        {
+            Plan = stage::Lower(View.StageDesc(pStage, BuiltIn), R);
+            if( !Plan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: %s stage: %s\n", pStage, Plan.m_Error.c_str());
+        }
+        return Plan.m_Error.empty();
     }
 
     void instance::localRequestPass( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept
@@ -906,11 +939,17 @@ namespace xlionrender
         const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), 0u, 0u, 0u };
         auto Buffers  = std::array<xgpu::buffer*, 3>{ &m_LocalFrames, &m_LocalReq, &m_CellRing };
         auto Textures = std::array<const xgpu::texture*, 1>{ &View.m_Depth };
-        Window.Dispatch(m_LocalRequest, Buffers, Textures, Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
+        if( requestStage(View, View.m_LocalRequestPlan, "local_request", details::LocalRequestStage(), "local_request", m_LocalRequest, "instance: m_LocalRequest"
+                                                    , Buffers, { "Shadows: local light frames", "Shadows: local light requests", "Lights: cell ring" }, Push) && View.m_bStageLocalRequest )      // (registered either way: the names reach the buffers)
+        {
+            DeclareRequests(View.m_Graph, "Shadows: local light requests", "Shadows: local light frames", "Shadows: local light requests readback", "instance: m_LocalRequest", 1);
+            stage::Run(View.m_LocalRequestPlan, View.m_Stages, Window, View.m_Graph);
+        }
+        else Window.Dispatch(m_LocalRequest, Buffers, Textures, Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
         const xgpu::buffer::copy C{ 0, Slot * nReq, nReq };
         Window.CopyBuffer(m_LocalReq, m_LocalReqHost, std::span{ &C, 1 });
         m_LocalReqValid[Slot] = true;
-        DeclareRequests(View.m_Graph, "Shadows: local light requests", "Shadows: local light frames", "Shadows: local light requests readback", "instance: m_LocalRequest");
+        DeclareRequests(View.m_Graph, "Shadows: local light requests", "Shadows: local light frames", "Shadows: local light requests readback", "instance: m_LocalRequest", View.m_bStageLocalRequest && View.m_LocalRequestPlan.m_Error.empty() ? 2 : 0);
     }
 
     // The sun's virtual pages: the request pass over the main view's depth (shaders/xlionrender_vsm_request_comp.glsl), after the scene
@@ -937,12 +976,19 @@ namespace xlionrender
         const std::uint32_t Push[8] = { std::uint32_t(Slot), 0u, std::uint32_t(vsmTableBase()), std::uint32_t(View.m_Width), std::uint32_t(View.m_Height), std::uint32_t(nBits), std::uint32_t(m_VSMSoftLevels), std::bit_cast<std::uint32_t>(m_VSMLevelBand) };     // (m_Pad1: the levels' blend)
         auto Buffers  = std::array<xgpu::buffer*, 3>{ &m_VSMFrames, &m_VSMReq, &m_CellRing };
         auto Textures = std::array<const xgpu::texture*, 1>{ &View.m_Depth };
-        Window.Dispatch(m_VSMRequest, Buffers, Textures, Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
+        const bool bStage = requestStage(View, View.m_VSMRequestPlan, "vsm_request", details::VSMRequestStage(), "vsm_request", m_VSMRequest, "instance: m_VSMRequest"
+                                                                   , Buffers, { "Shadows: VSM frames", "Shadows: VSM requests", "Lights: cell ring" }, Push) && View.m_bStageVSMRequest;
+        if( bStage )
+        {
+            DeclareRequests(View.m_Graph, "Shadows: VSM requests", "Shadows: VSM frames", "Shadows: VSM requests readback", "instance: m_VSMRequest", 1);
+            stage::Run(View.m_VSMRequestPlan, View.m_Stages, Window, View.m_Graph);
+        }
+        else Window.Dispatch(m_VSMRequest, Buffers, Textures, Push, sizeof(Push), (View.m_Width + 7) / 8, (View.m_Height + 7) / 8);
         Window.WriteTimestamp(m_VSMTimes, 1);
         const xgpu::buffer::copy C{ 0, Slot * nReq, nReq };
         Window.CopyBuffer(m_VSMReq, m_VSMReqHost, std::span{ &C, 1 });
         m_VSMSnap[Slot] = m_VSM.Snapshot();
-        DeclareRequests(View.m_Graph, "Shadows: VSM requests", "Shadows: VSM frames", "Shadows: VSM requests readback", "instance: m_VSMRequest");
+        DeclareRequests(View.m_Graph, "Shadows: VSM requests", "Shadows: VSM frames", "Shadows: VSM requests readback", "instance: m_VSMRequest", bStage ? 2 : 0);
     }
 
     // The local lights and the captured reflection probes for this render: into this frame's region of the light buffer, and in
