@@ -33,6 +33,7 @@ layout(std430, set = 0, binding = 14) readonly buffer baked_sdf_b { uint BakedSD
 // (The sparse sharp texels had cost a group each: 35000 rays 1.9 ms on Bistro against 74000 half size ones 2.2)
 layout(std430, set = 0, binding = 15) buffer sharp_list_b { uint SharpList[]; };
 const uint refl_sharp_cap_v = 262144u;
+const uint refl_sharp_args_v = 2u + refl_sharp_cap_v;      // (the list's dispatch, per parity: groups, 1, 1, 0 - each 64th entry adds a group: instance::m_ReflSharpList)
 // XLION_REFL_PT (A12, m_Full.w 5): the reflections' ground truth with the real materials - each half size texel's ray from its own
 // roughness and mapped normal, its hit lit by a path (cosine bounces, the GI reference's: Direct at each, SkyAt past the last)
 // instead of the store, the mean kept over frames while the point holds (PTAccum: sum by w, w; the point) - no reconstruction.
@@ -228,7 +229,7 @@ void main()
     const int   FullXY = bList ? -Push.m_Full.x : Push.m_Full.x;
     const ivec2 Size = bFull ? ivec2(FullXY & 0xFFFF, FullXY >> 16) : ivec2(F[Push.m_Slot].Params.xy);
     const uint  Par  = Push.m_Frame & 1u;      // (the plan alternates it each run of the sharp pass)
-    if (bFull && !bList && gl_GlobalInvocationID.xy == uvec2(0u)) SharpList[1u - Par] = 0u;      // (the next run's count: nothing reads it in this one)
+    if (bFull && !bList && gl_GlobalInvocationID.xy == uvec2(0u)) { SharpList[1u - Par] = 0u; SharpList[refl_sharp_args_v + 4u * (1u - Par)] = 0u; }      // (the next run's count and groups: nothing reads them in this one)
     const uint  ListI = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
     // (E1, measurement: XLION_REFL_LIST_KEEP - m_Full.z's bits 24-31 in the list's dispatch: a stratified Keep / 256 of the list, lane i the entry i * 256 / Keep)
     const uint  Keep  = bList ? (uint(Push.m_Full.z) >> 24) : 0u;
@@ -264,7 +265,7 @@ void main()
         // (a sharp receiver seen, whether or not the full size runs: Stats' top bit: an empty full size dispatch cost 2 ms on Bistro)
         if (Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpSeen) s_SharpSeen = 1u;      // (one global atomic a group, at the end)
         bool bListed = false;
-        if (bFull && !bList && bSharpHere) { const uint a = atomicAdd(SharpList[Par], 1u); if (a < refl_sharp_cap_v) { SharpList[2u + a] = uint(p.x) | (uint(p.y) << 16); bListed = true; s_Listed[gl_LocalInvocationIndex] = 1u; } }
+        if (bFull && !bList && bSharpHere) { const uint a = atomicAdd(SharpList[Par], 1u); if (a < refl_sharp_cap_v) { if ((a & 63u) == 0u) atomicAdd(SharpList[refl_sharp_args_v + 4u * Par], 1u); SharpList[2u + a] = uint(p.x) | (uint(p.y) << 16); bListed = true; s_Listed[gl_LocalInvocationIndex] = 1u; } }
         if (bFull && (!bSharpHere || bListed)) { }      // (the full-size dispatch: the sharp ones only; the rest: none - the half-size records serve them)
         else if (!bFull && bSharpHere) { }  // (the half-size dispatch leaves the sharp ones to the full-size one)
         else if (bPlanarHere)

@@ -2960,7 +2960,9 @@ namespace xlionrender
                 static const int s_ListKeep = [] { const char* p = xlionrender::Env("XLION_REFL_LIST_KEEP"); return p ? std::clamp(std::atoi(p), 1, 255) : 0; }();      // (E1, measurement: a stratified k / 256 of the list traced)
                 if( s_ListKeep ) P2.m_Full[2] |= s_ListKeep << 24;
                 static const int s_ListGroups = [] { const char* p = xlionrender::Env("XLION_REFL_LIST_GROUPS"); return p ? std::clamp(std::atoi(p), 1, 262144 / 64) : 262144 / 64; }();      // (E1, measurement: fewer groups than the list's room)
-                Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), s_ListGroups, 1);
+                if( s_ListGroups != 262144 / 64 || s_ListKeep ) Window.Dispatch(m_ReflTrace, Buffers, T2, &P2, sizeof(P2), s_ListGroups, 1);
+                else      // (as many groups as the list has, 64 entries each: the classification counted them - not 4096 mostly empty, ~0.1 ms)
+                    Window.DispatchIndirect(m_ReflTrace, Buffers, T2, {}, &P2, sizeof(P2), m_ReflSharpList, std::uint32_t((2 + 262144 + 4 * (P2.m_Frame & 1u)) * 4));
                 DeclareTrace(true);
                 if( s_bSharpSplit && s_bSharpTS ) Window.WriteTimestamp(s_SharpTS, 2);
             }
