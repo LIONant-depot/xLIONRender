@@ -210,6 +210,9 @@ namespace xlionrender
         constexpr std::uint32_t s_NoiseLagsComp[] = {
             #include "xlionrender_noise_lags_comp.h"
         };
+        constexpr std::uint32_t s_TAAGodotComp[] = {
+            #include "xlionrender_taa_godot_comp.h"
+        };
         constexpr std::uint32_t s_TAAComp[] = {
             #include "xlionrender_taa_comp.h"
         };
@@ -920,7 +923,10 @@ namespace xlionrender
             if( auto Err = Device.Create(m_LightTilesCompute, { .m_pShader = &m_LightTilesShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 80, .m_pName = "instance: m_LightTilesCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 3, .m_nImages = 1, .m_PushConstantsSize = 80, .m_pName = "instance: m_TAACompute" }); Err ) return Err;
+            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 4, .m_nImages = 2, .m_PushConstantsSize = 128, .m_bLinear = true, .m_pName = "instance: m_TAACompute" }); Err ) return Err;
+            // (C22 diagnostic, XLION_TAA_GODOT=1: Godot's resolve on the same inputs - xlionrender_taa_godot_comp.glsl)
+            if( auto Err = Device.Create(m_TAAGodotShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAGodotComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_TAAGodotCompute, { .m_pShader = &m_TAAGodotShader, .m_nBuffers = 0, .m_nTextures = 4, .m_nImages = 2, .m_PushConstantsSize = 128, .m_bLinear = true, .m_pName = "instance: m_TAAGodotCompute" }); Err ) return Err;
             // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;
             // the G-buffer's depth and normal
             if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;

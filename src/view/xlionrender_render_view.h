@@ -128,6 +128,13 @@ namespace xlionrender
         const render_view*      m_pPostInputs = nullptr;    // the harness: the post chain starts from this view's lit image (copied in; same size), so two views' chains see the same input  // >= 0: the auto exposure's step in seconds instead of the wall clock (the harness: two views, the same adaptation)                // the render graph's declarations (R0b: the post chain's scopes; xlionrender_render_graph.h)
         xmath::fmat4            m_TAAPrevW2C{};         // without the jitter
         xmath::fvec3            m_TAAPrevEye{};
+        // (C22: this frame's jitter in clip space - W2C = T(m_JitterNdc) * the un-jittered one; the screen tail's last camera without it, for the
+        // histories accumulated over frames: XLION_JITTER_HISTORY_FIX)
+        xmath::fvec3            m_JitterNdc{ 0, 0, 0 };
+        xmath::fmat4            m_TailPrevW2CNoJit{};
+        xmath::fmat4            m_GIScreenPrevW2CNoJit{};
+        int                     m_SharpMotionFrame = -1;     // the TAA frame the full-size G-buffer's motion was drawn in (C22: the TAA reads it then)
+        xgpu::texture           m_TAADebug;             // XLION_TAA_DEBUG: the TAA's diagnostic, written beside its output (made the first time it is on)
         // XLION_HEAT (measurement): the GI gather's clock a pixel (4-uint header, then the gather's grid), its colours (xlionrender_heat_comp.glsl),
         // the header a ring slot for the HEAT line, the tone mapper over m_HDR with the colours in the bloom's slot; made the first time it is on
         xgpu::buffer            m_HeatBuffer, m_HeatStats;
@@ -157,7 +164,8 @@ namespace xlionrender
             Fn("Render target: tail motion", m_TailGMotion);      Fn("Render target: tail diffuse", m_TailDiffuse);
             Fn("Render target: tail specular", m_TailSpecular);   Fn("Render target: sharp colour", m_SharpGColor);
             Fn("Render target: sharp depth", m_SharpGDepth);      Fn("Render target: sharp motion", m_SharpGMotion);
-            Fn("Render target: bloom", m_Bloom[0]);               Fn("Render target: TAA", m_TAA[0]);
+            Fn("Render target: bloom", m_Bloom[0]);               Fn("Render target: TAA", m_TAA[(m_TAAFrame + 1) & 1]);      /* (the one this frame wrote: m_TAAFrame moved on after it - DebugView runs after the post chain) */
+            Fn("Render target: TAA debug", m_TAADebug);
             Fn("GI: screen colour", m_GIScreenColor);             Fn("GI: screen depth", m_GIScreenDepth);
         }
         // The selection's outline (instance::renderOutline), made the first time something is selected: the mask (R: covered, G: in plain sight) with a

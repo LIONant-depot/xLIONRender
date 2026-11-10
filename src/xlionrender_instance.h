@@ -508,6 +508,8 @@ namespace xlionrender
         xgpu::compute               m_PostCompute;
         xgpu::shader                m_TAAShader;                    // xlionrender_taa_comp.glsl
         xgpu::compute               m_TAACompute;
+        xgpu::shader                m_TAAGodotShader;               // C22 diagnostic: Godot's resolve (xlionrender_taa_godot_comp.glsl, XLION_TAA_GODOT=1)
+        xgpu::compute               m_TAAGodotCompute;
         xgpu::buffer                m_TailFrames;                   // the denoiser's frame (host visible, a slot a ring frame)
         xgpu::timestamps            m_TailTimes;                    // the screen tail's passes: start, G-buffer, tail, denoiser
         // The sun's shadow mask (XLION_SUN_MASK, xLION_Docs shadows_gpu_plan.md S1a): 3 the materials read it (UBOLight.ShadowLevels[0].x 1),

@@ -13,6 +13,7 @@
 #include <map>
 #include <chrono>
 #include <optional>
+#include <filesystem>
 
 namespace xlionrender
 {
@@ -2661,6 +2662,7 @@ namespace xlionrender
         // the half-size G-buffer: taken from the full-size one when that one is drawn (one scene draw, not two: 11,270 draws a frame on Bistro
         // Game, 2026-11-08); XLION_TAIL_DRAW=1 draws it again (comparison)
         static const bool s_bTailDraw = xlionrender::Env("XLION_TAIL_DRAW") != nullptr;
+        if( bSharp ) View.m_SharpMotionFrame = View.m_TAAFrame;      // (C22: this frame's full-size motion - the TAA reads it for what moves on its own)
         if( bSharp && !s_bTailDraw && View.m_TailFromSharp.m_Private )
         {
             DrawGBuffer(View.m_SharpGPass);
@@ -2703,7 +2705,11 @@ namespace xlionrender
             // frame's (the eye's move between: the camera's reprojection, where the G-buffer has no motion), the size, whether last frame's
             // is there, the frame's number
             const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
-            const xmath::fmat4 Reproject = View.m_bTailPrev ? View.m_TailPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) * C2W : xmath::fmat4::fromIdentity();
+            // (C22, XLION_JITTER_HISTORY_FIX: a history accumulated over jittered frames is in no jitter's space - last frame's camera without its
+            // jitter, this frame's jitter put back: the history read at the pixel plus its motion, as the TAA's)
+            static const bool s_bJitFix = xlionrender::Env("XLION_JITTER_HISTORY_FIX") != nullptr;
+            const xmath::fmat4 PrevForHistory = s_bJitFix ? xmath::fmat4::fromTranslation(View.m_JitterNdc) * View.m_TailPrevW2CNoJit : View.m_TailPrevW2C;
+            const xmath::fmat4 Reproject = View.m_bTailPrev ? PrevForHistory * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) * C2W : xmath::fmat4::fromIdentity();
             const xmath::fvec4 Params{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
             (void)m_TailFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
             {
@@ -2740,7 +2746,9 @@ namespace xlionrender
         {
             if( bScreen || bReconstruct )
             {
-                const xmath::fmat4 ToPrev = View.m_bTailPrev ? View.m_TailPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) : xmath::fmat4::fromIdentity();
+                static const bool s_bJitFixR = xlionrender::Env("XLION_JITTER_HISTORY_FIX") != nullptr;      // (C22: as the tail's, for the reflections' accumulated history)
+                const xmath::fmat4 PrevR  = s_bJitFixR ? xmath::fmat4::fromTranslation(View.m_JitterNdc) * View.m_TailPrevW2CNoJit : View.m_TailPrevW2C;
+                const xmath::fmat4 ToPrev = View.m_bTailPrev ? PrevR * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) : xmath::fmat4::fromIdentity();
                 const xmath::fvec4 RP{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
                 (void)m_ReflFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
                 {
@@ -3030,6 +3038,7 @@ namespace xlionrender
             if( bTraced ) Window.WriteTimestamp(m_ReflTimes, 4);
         }
         View.m_TailPrevC2W = C2W; View.m_TailPrevW2C = W2C; View.m_TailPrevEye = Eye; View.m_bTailPrev = true; ++View.m_TailFrame;
+        View.m_TailPrevW2CNoJit = xmath::fmat4::fromTranslation(-View.m_JitterNdc) * W2C;
         m_pTailRecords = &View.m_TailResult;
     }
 
@@ -3492,7 +3501,9 @@ namespace xlionrender
                         pH[0] = std::uint32_t(View.m_GIScreenWidth); pH[1] = std::uint32_t(View.m_GIScreenHeight);
                         pH[2] = View.m_GIScreenFrame; pH[3] = (bTemporal && View.m_bGIScreenPrev ? 1u : 0u) | (RateLog2 << 1);
                         pH[28] = std::uint32_t(GIScreenDivisor());      // (entry 7.x: the read's resolution divisor - the upsample's, mb_standard_pbr.frag)
-                        std::memcpy(pH + 4, &View.m_GIScreenPrevW2C, sizeof(float) * 16);        // (entries 1-4: its columns, as the UBO's mat4)
+                        static const bool s_bJitFixG = xlionrender::Env("XLION_JITTER_HISTORY_FIX") != nullptr;      // (C22: the GI screen's and AO's accumulated histories - last camera without its jitter, this frame's put back)
+                        const xmath::fmat4 PrevG = s_bJitFixG ? xmath::fmat4::fromTranslation(View.m_JitterNdc) * View.m_GIScreenPrevW2CNoJit : View.m_GIScreenPrevW2C;
+                        std::memcpy(pH + 4, &PrevG, sizeof(float) * 16);        // (entries 1-4: its columns, as the UBO's mat4)
                         const float M[3] = { Move[0], Move[1], Move[2] };
                         std::memcpy(pH + 20, M, sizeof(M));
                     });
@@ -3501,6 +3512,7 @@ namespace xlionrender
                     { auto& G = View.m_Graph; const int S = G.Begin("GI screen header", "copy GI: screen header"); G.Read(S, G.Resource("GI: screen header", rg::lifetime::FRAME), rg::usage::TRANSFER_SRC); G.Write(S, G.Resource("GI: screen buffer*", rg::lifetime::FRAME), rg::usage::TRANSFER_DST, rg::policy::PARTIAL); }
                 }
                 View.m_GIScreenPrevW2C = W2C; View.m_GIScreenPrevEye = Eye; View.m_bGIScreenPrev = true; ++View.m_GIScreenFrame;
+                View.m_GIScreenPrevW2CNoJit = xmath::fmat4::fromTranslation(-View.m_JitterNdc) * W2C;
                 {
                     // The gather's table (xlionrender_gi_gather_common.glsl): every visible rigid GI instance's clusters - their GI reference
                     // and GI buffer, the passes' list of buffers (GatherBuffers); the passes run after the G-buffer prepass, below
@@ -5374,6 +5386,39 @@ namespace xlionrender
         // The render target's viewport is for this render: on a copy. The host's own view keeps the viewport it has (the editor's panel, in screen
         // coordinates): its click-pick of the same frame builds its ray from it (it used to get the target's: every click missed)
         xgpu::tools::view Camera = CameraIn;
+        {   // (C22, a deterministic camera: XLION_CAMERA_RECORD=<file> appends the main view's camera each render while <file>.go exists (removed by
+            // whoever stops it); XLION_CAMERA_REPLAY=<file> replays it, one entry a render, from when <file>.go appears - the same path for every
+            // variant (TAA on / off, jitter on / off), by render index, not by time)
+            static_assert(std::is_trivially_copyable_v<xgpu::tools::view>);
+            static const char* s_pRec = xlionrender::Env("XLION_CAMERA_RECORD");
+            static const char* s_pPlay = xlionrender::Env("XLION_CAMERA_REPLAY");
+            if( (s_pRec || s_pPlay) && View.m_Width * View.m_Height > 200000 )
+            {
+                std::error_code Ec;
+                if( s_pRec && std::filesystem::exists(std::string(s_pRec) + ".go", Ec) )
+                {
+                    FILE* f = nullptr;
+                    if( fopen_s(&f, s_pRec, "ab") == 0 && f ) { std::fwrite(&CameraIn, sizeof(CameraIn), 1, f); std::fclose(f); }
+                }
+                static std::vector<xgpu::tools::view> s_Path; static std::size_t s_At = 0; static bool s_bPlaying = false;
+                if( s_pPlay && !s_bPlaying && std::filesystem::exists(std::string(s_pPlay) + ".go", Ec) && std::filesystem::remove(std::string(s_pPlay) + ".go", Ec) )
+                {
+                    s_Path.clear(); s_At = 0;
+                    if( FILE* f = nullptr; fopen_s(&f, s_pPlay, "rb") == 0 && f )
+                    {
+                        xgpu::tools::view V; while( std::fread(&V, sizeof(V), 1, f) == 1 ) s_Path.push_back(V);
+                        std::fclose(f);
+                    }
+                    s_bPlaying = !s_Path.empty();
+                    std::printf("CAMREPLAY %zu renders\n", s_Path.size()); std::fflush(stdout);
+                }
+                if( s_bPlaying )
+                {
+                    Camera = s_Path[s_At];
+                    if( ++s_At >= s_Path.size() ) { s_bPlaying = false; std::printf("CAMREPLAY done\n"); std::fflush(stdout); }
+                }
+            }
+        }
         Camera.setViewport({ 0, 0, View.m_Width, View.m_Height });
 
         // Camera-centered world (same as the editors): precision stays near the eye in large worlds
@@ -5406,6 +5451,12 @@ namespace xlionrender
             const int k = (View.m_TAAFrame % 8) + 1;
             return xmath::fmat4::fromTranslation(xmath::fvec3{ (Halton(k, 2) - 0.5f) * 2.0f / float(View.m_Width), (Halton(k, 3) - 0.5f) * 2.0f / float(View.m_Height), 0.0f }) * W2CNoJitter;
         }();
+        {   // (the jitter W2C carries, for the passes that need it apart: XLION_JITTER_HISTORY_FIX)
+            const auto Halton = [](int i, int b) { float f = 1.0f, r = 0.0f; for( ; i > 0; i /= b ) { f /= float(b); r += f * float(i % b); } return r; };
+            static const bool s_bNoJit = xlionrender::Env("XLION_TAA_NO_JITTER") != nullptr;
+            const int k = (View.m_TAAFrame % 8) + 1;
+            View.m_JitterNdc = bTAA && !s_bNoJit ? xmath::fvec3{ (Halton(k, 2) - 0.5f) * 2.0f / float(View.m_Width), (Halton(k, 3) - 0.5f) * 2.0f / float(View.m_Height), 0.0f } : xmath::fvec3{ 0, 0, 0 };
+        }
 
         const float ProjScale = float(View.m_Height) / (2.0f * xmath::Tan(xmath::radian{ Camera.getFov().m_Value * 0.5f }));    // pixels per unit at distance 1
         m_LODProjScale = ProjScale;                             // (the main view's LOD pick: renderScenePass)
@@ -5752,12 +5803,53 @@ namespace xlionrender
                     }
                     if( P.m_Kernel == post::kernel::TAA )
                     {
-                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, 0.0f, View.m_bTAAHistory ? 1.0f : 0.0f };
+                        // (C22, Fable: a pixel's depth is where its JITTERED sample landed - the surface at the pixel's centre minus the jitter. Its motion is that point's
+                        // (unprojected with the jittered camera), and the history is read at the pixel plus that motion: the jitter cancels. Unprojected at the
+                        // centre with the un-jittered camera (as before), the floor at a grazing angle got a motion error that grew with the speed and repeated
+                        // with the jitter's 3-frame vertical pattern - the shake. XLION_TAA_OLD_UNPROJECT: the old way)
+                        static const bool s_bTAAOldUnproject = xlionrender::Env("XLION_TAA_OLD_UNPROJECT") != nullptr;
+                        const auto HaltonT = [](int i, int b) { float f = 1.0f, r = 0.0f; for( ; i > 0; i /= b ) { f /= float(b); r += f * float(i % b); } return r; };
+                        const int  kT = (View.m_TAAFrame % 8) + 1;      // (W2C's jitter step this frame)
+                        static const bool s_bTAANoJit = xlionrender::Env("XLION_TAA_NO_JITTER") != nullptr; const bool bJit = !s_bTAANoJit && !s_bTAAOldUnproject;      // (TAA runs: W2C is jittered unless XLION_TAA_NO_JITTER)
+                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; float m_JitterU, m_JitterV, m_GammaSlow, m_GammaFast; std::int32_t m_Debug, m_Pad0, m_Pad1, m_Pad2; float m_PrevJitterU, m_PrevJitterV, m_bMotion, m_Pad3; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * (bJit ? W2C : W2CNoJitter).Inverse()
+                                , View.m_Width, View.m_Height, 0.0f, View.m_bTAAHistory ? 1.0f : 0.0f, bJit ? (HaltonT(kT, 2) - 0.5f) / float(View.m_Width) : 0.0f, bJit ? (HaltonT(kT, 3) - 0.5f) / float(View.m_Height) : 0.0f, 1.25f, 1.25f };
+                        static const std::array<float, 2> s_Gamma = [] { std::array<float, 2> G{ 3.0f, 1.25f }; if( const char* p = xlionrender::Env("XLION_TAA_GAMMA") ) (void)xlionrender::Scan(p, "%f %f", &G[0], &G[1]); return G; }();
+                        Push.m_GammaSlow = s_Gamma[0]; Push.m_GammaFast = s_Gamma[1];
+                        static const int s_TAADebug = [] { const char* p = xlionrender::Env("XLION_TAA_DEBUG"); return p ? std::atoi(p) : 0; }();      // (C22 diagnostics: xlionrender_taa_comp.glsl's debug outputs)
+                        Push.m_Debug = s_TAADebug;
+                        static const bool s_bBoxCentred = [] { const char* p = xlionrender::Env("XLION_TAA_BOX"); return p && std::string_view(p) == "centred"; }();      // (C22: the clip box's statistics centred on the pixel, not on the jittered samples)
+                        Push.m_Pad0 = s_bBoxCentred ? 1 : 0;
+                        static const bool s_bCurFiltered = [] { const char* p = xlionrender::Env("XLION_TAA_CURRENT"); return p && std::string_view(p) == "filtered"; }();      // (C22: this frame filtered to the pixel's centre)
+                        Push.m_Pad1 = s_bCurFiltered ? 1 : 0;
+                        // (C22, the missing input: per-pixel motion. The full-size G-buffer's motion (mb_standard_pbr.frag OutGMotion: last frame's NDC from
+                        // each vertex's last position - skinned and moved objects too) when it was drawn this frame; its last-frame NDC carries last frame's
+                        // jitter, taken off here. XLION_TAA_CAMERA_ONLY: the camera's reprojection everywhere, as before)
+                        // Off unless XLION_TAA_VERTEX_MOTION (2026-11-10): the full-size G-buffer is drawn only on the sharp reflections' pixels, the rest keeps
+                        // older frames' motion - a still camera read stale motion as half the screen moving (debug 11: stripes), the history thrown away
+                        static const bool s_bCameraOnly = xlionrender::Env("XLION_TAA_VERTEX_MOTION") == nullptr;
+                        const bool bMotion = !s_bCameraOnly && View.m_SharpMotionFrame == View.m_TAAFrame && View.m_SharpGMotion.m_Private && View.m_SharpWidth == View.m_Width;
+                        const int  kP = ((View.m_TAAFrame + 7) % 8) + 1;      // (last frame's Halton step)
+                        Push.m_PrevJitterU = bJit ? (HaltonT(kP, 2) - 0.5f) / float(View.m_Width) : 0.0f;
+                        Push.m_PrevJitterV = bJit ? (HaltonT(kP, 3) - 0.5f) / float(View.m_Height) : 0.0f;
+                        Push.m_bMotion = bMotion ? 1.0f : 0.0f;
+                        static const float s_FracShare = [] { const char* p = xlionrender::Env("XLION_TAA_FRAC_SHARE"); return p ? float(std::atof(p)) : 0.0f; }();      // (C22, Fable's test a: the share raised where the history lookup blurs)
+                        Push.m_Pad3 = s_FracShare;
+                        static const std::int32_t s_Flags = (xlionrender::Env("XLION_TAA_NO_CR_CLAMP") ? 1 : 0) | (xlionrender::Env("XLION_TAA_MOTION_SHARE") ? 2 : 0);
+                        Push.m_Pad2 = s_Flags;
                         static_assert(offsetof(decltype(Push), m_Blend) == 18 * 4);     // (the plan's TAA slot: word 18)
                         static const bool s_bTAABilinear = [] { const char* p = xlionrender::Env("XLION_TAA_FILTER"); return p && std::string_view(p) == "bilinear"; }();      // (C22, measurement)
                         if( s_bTAABilinear && Push.m_bHistory > 0.5f ) Push.m_bHistory = 2.0f;
+                        static const bool s_bTAANearest = [] { const char* p = xlionrender::Env("XLION_TAA_FILTER"); return p && std::string_view(p) == "nearest"; }();      // (C22, measurement: no history resampling)
+                        if( s_bTAANearest && Push.m_bHistory > 0.5f ) Push.m_bHistory = 5.0f;
+                        static const bool s_bTAANoClip = xlionrender::Env("XLION_TAA_NO_CLIP") != nullptr;      // (C22, measurement: the history not clipped to the neighbourhood)
+                        if( s_bTAANoClip && Push.m_bHistory > 0.5f ) Push.m_bHistory = 4.0f;
                         post::FillSlots(P, Snap, 0.0f, View.m_Exposure, &Push);
-                        Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, Ts, I, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
+                        static const bool s_bTAAGodot = xlionrender::Env("XLION_TAA_GODOT") != nullptr; static_assert(sizeof(Push) == 128);
+                        // (the diagnostics go to an image of their own - the TAA's output stays its history: "Render target: TAA debug" in DebugView)
+                        if( s_TAADebug && !View.m_TAADebug.m_Private ) (void)m_Device.Create(View.m_TAADebug, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: TAA debug" });
+                        const xgpu::texture* I2[] = { I[0], View.m_TAADebug.m_Private ? &View.m_TAADebug : I[0] };
+                        const xgpu::texture* T4[] = { T[0], T[1], T[2], bMotion ? &View.m_SharpGMotion : T[1] };      // (no motion this frame: a stand-in, not read)
+                        Window.Dispatch(s_bTAAGodot ? m_TAAGodotCompute : m_TAACompute, std::span<xgpu::buffer* const>{}, std::span<const xgpu::texture* const>(T4, 4), I2, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
                         return;
                     }
                     struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{ P.m_W, P.m_H, P.m_Mode };     // (words 3..7: the plan's slots)
