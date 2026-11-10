@@ -19,6 +19,9 @@ bool GISeeThrough(int Inst, int Tri) { return false; }
 #endif
 
 const int gi_bvh_stack_v = 128;       // (measured on Bistro, hit or miss, 1M rays: 32 entries 38 ms, 64 28.6, 128 21.4, and no stored distances 19.6: the deepest is 27. Under 128 the driver reports 168 registers against 128, and bigger code: XGPU_PIPELINE_STATS)
+// A walk's most nodes and leaves (C30, 2026-11-10: a BVH whose nodes form a cycle - its data rewritten while a frame reads it - walked
+// forever: the GPU never finished the frame and nothing reset it). Far above any real walk (Bistro: 58 a ray on average, the deepest few hundred)
+const int gi_bvh_max_visits_v = 1 << 14;
 int g_GIBvhVisits = 0;              // (diagnostics) the nodes and leaves the walks popped
 int g_GIBvhTlasVisits = 0, g_GIBvhLeaves = 0;      // (diagnostics, wide_blas_design_2026-11-09.md: of those, the TLAS's nodes and leaves; the meshes' Tri4 leaves)
 
@@ -106,8 +109,10 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
     int   Code[gi_bvh_stack_v];
     int   n = 0, Base = -1, Inst = -1, Next = 0, End = 0;     // (Base: the stack's height under the mesh being walked, -1 in the TLAS; Next, End: a TLAS leaf's instances left)
     Code[n] = g_GIBvhTlasRoot; ++n;
+    int Guard = 0;
     while (true)
     {
+        if (++Guard > gi_bvh_max_visits_v) break;
         if (Base >= 0 && n == Base) { Base = -1; Ro = O; Rd = D; Inv = WInv; Near = WNear; }
         if (Base < 0 && Next < End)
         {
@@ -155,7 +160,8 @@ void GIWalkMesh(int Root, vec3 O, vec3 D, int Inst, inout gi_hit H)
     int   Code[gi_bvh_stack_v];
     int n = 0;
     Code[n] = Root; ++n;
-    while (n > 0)
+    int Guard = 0;
+    while (n > 0 && ++Guard <= gi_bvh_max_visits_v)
     {
         --n;
         const int c = Code[n];
@@ -182,7 +188,8 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
     int   Code[gi_bvh_stack_v];
     int n = 0;
     Code[n] = g_GIBvhTlasRoot; ++n;
-    while (n > 0)
+    int Guard = 0;
+    while (n > 0 && ++Guard <= gi_bvh_max_visits_v)
     {
         --n;
         const int c = Code[n];
@@ -190,7 +197,7 @@ gi_hit GICast(vec3 O, vec3 D, float TMax)
         if (c < 0)
         {
             const int First = GIBvhTlasLeaves[2 * (~c)], Count = GIBvhTlasLeaves[2 * (~c) + 1];
-            for (int k = 0; k < Count; ++k)
+            for (int k = 0; k < min(Count, gi_bvh_max_visits_v); ++k)
             {
                 const int p = GIBvhTlasLeaves[g_GIBvhPrimOffset + First + k];
                 const vec4 R0 = GIBvhInstances[p].m_W2L[0], R1 = GIBvhInstances[p].m_W2L[1], R2 = GIBvhInstances[p].m_W2L[2];
