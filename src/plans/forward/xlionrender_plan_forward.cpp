@@ -5377,6 +5377,19 @@ namespace xlionrender
         // Camera-centered world (same as the editors): precision stays near the eye in large worlds
         const xmath::fvec3 Eye     = Camera.getPosition();
         const xmath::fmat4 W2CNoJitter = Camera.getW2C() * xmath::fmat4::fromTranslation(Eye);
+        {   // (C22, measurement: XLION_TAA_LOG - the camera each render: its eye, the view's own position (V2W), a point 6 m ahead on the ground in this and last TAA frame's clip)
+            static const bool s_bTAALog = xlionrender::Env("XLION_TAA_LOG") != nullptr;
+            if( s_bTAALog && View.m_Width * View.m_Height > 200000 )
+            {
+                const auto& V2W = Camera.getV2W();
+                static xmath::fvec3 s_P{ 0, 0, 0 }; static bool s_bP = false;
+                if( !s_bP ) { s_P = Eye + xmath::fvec3{ 0, -1.5f, 0 } + Camera.getV2W().RotateVector(xmath::fvec3{ 0, 0, -6 }); s_bP = true; }
+                const auto Clip = [](const xmath::fmat4& M, const xmath::fvec3& p) { const auto c = M * xmath::fvec4(p, 1.0f); return xmath::fvec2{ c.m_X / c.m_W, c.m_Y / c.m_W }; };
+                const auto Cn = Clip(W2CNoJitter, s_P - Eye), Cp = View.m_bTAAHistory ? Clip(View.m_TAAPrevW2C, s_P - View.m_TAAPrevEye) : Cn;
+                std::printf("TAALOG %llu taa %d eye %.5f %.5f %.5f v2w %.5f %.5f %.5f clip %.6f %.6f prev %.6f %.6f\n", static_cast<unsigned long long>(m_Device.getFrameIndex()), View.m_TAAFrame, Eye.m_X, Eye.m_Y, Eye.m_Z
+                           , V2W(0, 3), V2W(1, 3), V2W(2, 3), Cn.m_X, Cn.m_Y, Cp.m_X, Cp.m_Y);
+            }
+        }
         static const int s_EnvTAA = [] { const char* p = xlionrender::Env("XLION_TAA"); return p ? (p[0] != '0' ? 1 : 0) : -1; }();      // (measurement: 0 off, else on)
         // (the path tracers accumulate while each texel's point holds: TAA's sub-pixel jitter moved it every frame and they never converged - Tomas, 2026-11-06: off with them, always)
         static const bool s_bPTRefl = xlionrender::Env("XLION_REFL_PT") != nullptr || xlionrender::Env("XLION_GI_REF") != nullptr;
@@ -5738,6 +5751,8 @@ namespace xlionrender
                     {
                         struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; } Push{ View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2CNoJitter.Inverse(), View.m_Width, View.m_Height, 0.0f, View.m_bTAAHistory ? 1.0f : 0.0f };
                         static_assert(offsetof(decltype(Push), m_Blend) == 18 * 4);     // (the plan's TAA slot: word 18)
+                        static const bool s_bTAABilinear = [] { const char* p = xlionrender::Env("XLION_TAA_FILTER"); return p && std::string_view(p) == "bilinear"; }();      // (C22, measurement)
+                        if( s_bTAABilinear && Push.m_bHistory > 0.5f ) Push.m_bHistory = 2.0f;
                         post::FillSlots(P, Snap, 0.0f, View.m_Exposure, &Push);
                         Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, Ts, I, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
                         return;

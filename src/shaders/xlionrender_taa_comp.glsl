@@ -24,7 +24,13 @@ vec3 SampleHistory(in const vec2 uv)
              + textureLod(History, vec2(t3.x, t12.y), 0.0).rgb * (w3.x * w12.y)
              + textureLod(History, vec2(t12.x, t3.y), 0.0).rgb * (w12.x * w3.y);
     const float W = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
-    return max(Sum / W, vec3(0.0));
+    // Kept inside the 2 x 2 history texels around the point (C22, 2026-11-10): Catmull-Rom's negative lobes overshoot, and resampled again every
+    // frame at a fraction of a pixel - a slowing camera, the history 95 % of the result - the overshoot piled up: jagged, crawling cobbles
+    // and stepped highlights until the camera stopped. The clamp removes the overshoot, not the sharpness
+    const ivec2 q = ivec2(floor(Pos - 0.5)), Mx = ivec2(Push.m_W, Push.m_H) - 1;
+    const vec3 a = texelFetch(History, clamp(q, ivec2(0), Mx), 0).rgb, b = texelFetch(History, clamp(q + ivec2(1, 0), ivec2(0), Mx), 0).rgb;
+    const vec3 c = texelFetch(History, clamp(q + ivec2(0, 1), ivec2(0), Mx), 0).rgb, d = texelFetch(History, clamp(q + ivec2(1, 1), ivec2(0), Mx), 0).rgb;
+    return clamp(Sum / W, min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
 }
 void main()
 {
@@ -45,7 +51,8 @@ void main()
             for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x) { const vec3 s = ToYCoCg(Fetch(p + ivec2(x, y))); M1 += s; M2 += s * s; }
             M1 /= 9.0; const vec3 Sd = sqrt(max(M2 / 9.0 - M1 * M1, vec3(0.0)));
             const vec3 Lo = M1 - 1.25 * Sd, Hi = M1 + 1.25 * Sd;
-            const vec3 H = FromYCoCg(clamp(ToYCoCg(SampleHistory(puv)), Lo, Hi));
+            const vec3 Hs = Push.m_bHistory > 1.5 ? textureLod(History, puv, 0.0).rgb : SampleHistory(puv);      // (C22, measurement: m_bHistory 2 - bilinear, XLION_TAA_FILTER=bilinear)
+            const vec3 H = FromYCoCg(clamp(ToYCoCg(Hs), Lo, Hi));
             // (this frame's share by how far the pixel moved: still, half of it - the jitter's difference times the share was a shimmer with its 8-frame cycle,
             // noise by lag 1 frame .87 at .1, .77 at .05; moving, the full share and a little more: no added ghosting)
             const float Moved = length(puv * vec2(Push.m_W, Push.m_H) - (vec2(p) + 0.5));
