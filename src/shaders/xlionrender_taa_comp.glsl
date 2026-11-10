@@ -37,19 +37,22 @@ vec3 SampleHistory(in const vec2 uv)
     const vec3 c = texelFetch(History, clamp(q + ivec2(0, 1), ivec2(0), Mx), 0).rgb, d = texelFetch(History, clamp(q + ivec2(1, 1), ivec2(0), Mx), 0).rgb;
     return clamp(Sum / W, min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
 }
+shared vec3 s_Tile[100];      // (this frame's 10 x 10 around the group's 8 x 8: each texel read once, not 9 times - Intel's TAA)
 void main()
 {
-    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy), Base = ivec2(gl_WorkGroupID.xy) * 8 - 1;
+    for (uint i = gl_LocalInvocationIndex; i < 100u; i += 64u) s_Tile[i] = Fetch(Base + ivec2(int(i % 10u), int(i / 10u)));
+    barrier();
     if (p.x >= Push.m_W || p.y >= Push.m_H) return;
     const vec2 Sz = vec2(Push.m_W, Push.m_H);
     // This frame's 3 x 3: the pixel and the clip box's statistics (variance clipping, Salvi)
-    vec3 C = vec3(0.0), M1 = vec3(0.0), M2 = vec3(0.0);
+    const ivec2 l = ivec2(gl_LocalInvocationID.xy) + 1;
+    const vec3 C0 = s_Tile[l.y * 10 + l.x];
+    vec3 C = C0, M1 = vec3(0.0), M2 = vec3(0.0);
     float Sharp = 0.0;
     for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x)
     {
-        const vec3 c = Fetch(p + ivec2(x, y));
-        if (x == 0 && y == 0) C = c;
-        const vec3 s = ToYCoCg(c);
+        const vec3 s = ToYCoCg(s_Tile[(l.y + y) * 10 + l.x + x]);
         M1 += s; M2 += s * s;
     }
     if (Push.m_bHistory > 0.5)
