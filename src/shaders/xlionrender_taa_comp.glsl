@@ -12,7 +12,7 @@ layout(set = 2, binding = 1, rgba16f) writeonly uniform image2D Dbg;      // (XL
 // Reproject: this frame's clip (jittered) to last frame's (un-jittered); Blend: this frame's share; Jitter / PrevJitter: this / last frame's, in uv; Gamma: the clip box's
 // width in standard deviations, still / moving 8 px or more; Debug (XLION_TAA_DEBUG): 1 the motion, px (|m| x 0.25 red, x / y signed in green / blue around 0.5),
 // 3 this frame's share x 4, 11 the camera's reprojection against the vertices' motion (|difference| x 4 red, x / y signed)
-layout(push_constant) uniform push_t { mat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; vec2 m_Jitter; float m_GammaSlow, m_GammaFast; vec2 m_PrevJitter; float m_bMotion; int m_Debug; } Push;
+layout(push_constant) uniform push_t { mat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; vec2 m_Jitter; float m_GammaSlow, m_GammaFast; vec2 m_PrevJitter; float m_bMotion; int m_Debug; float m_MovingShare, m_Sharpen; } Push;
 
 vec3 ToYCoCg(in const vec3 c) { return vec3(dot(c, vec3(0.25, 0.5, 0.25)), dot(c, vec3(0.5, 0.0, -0.5)), dot(c, vec3(-0.25, 0.5, -0.25))); }
 vec3 FromYCoCg(in const vec3 c) { return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
@@ -44,6 +44,7 @@ void main()
     const vec2 Sz = vec2(Push.m_W, Push.m_H);
     // This frame's 3 x 3: the pixel and the clip box's statistics (variance clipping, Salvi)
     vec3 C = vec3(0.0), M1 = vec3(0.0), M2 = vec3(0.0);
+    float Sharp = 0.0;
     for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x)
     {
         const vec3 c = Fetch(p + ivec2(x, y));
@@ -74,11 +75,14 @@ void main()
             const float Gamma = mix(Push.m_GammaSlow, Push.m_GammaFast, smoothstep(1.0, 8.0, Moved));      // (wide while slow: the jitter's own change isn't clipped; narrow when fast)
             const vec3 H = max(FromYCoCg(clamp(ToYCoCg(SampleHistory(puv)), M1 - Gamma * Sd, M1 + Gamma * Sd)), vec3(0.0));
             // This frame's share by how far the pixel moved: still, half of it (the jitter's difference times the share was a shimmer with its 8-frame cycle); moving, a little more
-            const float Share = Push.m_Blend * mix(0.5, 1.5, clamp(Moved / 2.0, 0.0, 1.0));
+            const float Share = mix(Push.m_Blend * 0.5, Push.m_MovingShare, clamp(Moved / 2.0, 0.0, 1.0));
+            // The display sharpened where the history blurs - moving (TFAA's idea): an amount for the tone map, in the alpha above 1 - never in the history's colour
+            Sharp = Push.m_Sharpen * clamp(Moved / 2.0, 0.0, 1.0);
             if (Push.m_Debug == 3) imageStore(Dbg, p, vec4(vec3(Share * 4.0), 1.0));
             const float Wc = Share / (1.0 + Luma(C)), Wh = (1.0 - Share) / (1.0 + Luma(H));      // (by the displayed brightness: a bright pixel doesn't flash)
             C = (C * Wc + H * Wh) / (Wc + Wh);
         }
     }
-    imageStore(Dst, p, vec4(C, texelFetch(HDR, p, 0).a));
+    const float A = texelFetch(HDR, p, 0).a;      // (coverage: 0 nothing drawn, 1 geometry)
+    imageStore(Dst, p, vec4(C, A > 0.5 ? 1.0 + 0.99 * clamp(Sharp, 0.0, 1.0) : A));
 }

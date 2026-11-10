@@ -18,7 +18,14 @@ layout(location = 0) out vec4 outColor;
 
 void main()
 {
-    const vec4 HDR = texture(SamplerHDR, in_UV);
+    vec4 HDR = texture(SamplerHDR, in_UV);
+    if (HDR.a > 1.0)
+    {   // (the TAA's sharpening amount, above 1 in the alpha: this pixel against its cross, kept inside the cross's range - no halo)
+        const vec3 N = textureOffset(SamplerHDR, in_UV, ivec2(0, -1)).rgb, S = textureOffset(SamplerHDR, in_UV, ivec2(0, 1)).rgb;
+        const vec3 E = textureOffset(SamplerHDR, in_UV, ivec2(1, 0)).rgb,  W = textureOffset(SamplerHDR, in_UV, ivec2(-1, 0)).rgb;
+        const vec3 Lo = min(min(min(N, S), min(E, W)), HDR.rgb), Hi = max(max(max(N, S), max(E, W)), HDR.rgb);
+        HDR.rgb = clamp(HDR.rgb + (HDR.a - 1.0) * (HDR.rgb - 0.25 * (N + S + E + W)), Lo, Hi);
+    }
     vec3 C   = (push.Params.y > 0.0 && push.Params.w == 0.0 ? HDR.rgb + texture(SamplerBloom, in_UV).rgb * push.Params.y : HDR.rgb) * push.Params.x;       // (added: what is under the threshold isn't in the bloom, a mix would dim it)
     if (push.Params.z > 0.0) C *= texelFetch(SamplerExposure, ivec2(0), 0).r;
     C        = clamp(ToneMapper_lion(max(C, vec3(1e-10))), 0.0, 1.0);

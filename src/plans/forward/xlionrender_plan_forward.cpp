@@ -5815,11 +5815,16 @@ namespace xlionrender
                         // detector unchanged with it on, 2026-11-10. XLION_TAA_CAMERA_ONLY: the camera's reprojection everywhere)
                         static const bool s_bVertexMotion = xlionrender::Env("XLION_TAA_CAMERA_ONLY") == nullptr;
                         const bool bMotion = s_bVertexMotion && View.m_SharpMotionFrame == View.m_TAAFrame && View.m_SharpGMotion.m_Private && View.m_SharpWidth == View.m_Width;
-                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; float m_JitterU, m_JitterV, m_GammaSlow, m_GammaFast, m_PrevJitterU, m_PrevJitterV, m_bMotion; std::int32_t m_Debug; } Push
+                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; float m_JitterU, m_JitterV, m_GammaSlow, m_GammaFast, m_PrevJitterU, m_PrevJitterV, m_bMotion; std::int32_t m_Debug; float m_MovingShare, m_Sharpen; } Push
                         { View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2C.Inverse(), View.m_Width, View.m_Height, 0.0f, View.m_bTAAHistory ? 1.0f : 0.0f
-                        , J(kT, 2, View.m_Width), J(kT, 3, View.m_Height), s_Gamma[0], s_Gamma[1], J(kP, 2, View.m_Width), J(kP, 3, View.m_Height), bMotion ? 1.0f : 0.0f, s_TAADebug };
-                        static_assert(offsetof(decltype(Push), m_Blend) == 18 * 4 && sizeof(Push) == 112);     // (the plan's TAA slot: word 18)
+                        , J(kT, 2, View.m_Width), J(kT, 3, View.m_Height), s_Gamma[0], s_Gamma[1], J(kP, 2, View.m_Width), J(kP, 3, View.m_Height), bMotion ? 1.0f : 0.0f, s_TAADebug, 0.0f, 0.0f };
+                        static_assert(offsetof(decltype(Push), m_Blend) == 18 * 4 && sizeof(Push) == 128);      // (fmat4 is 16-aligned: the struct rounds up)     // (the plan's TAA slot: word 18)
                         post::FillSlots(P, Snap, 0.0f, View.m_Exposure, &Push);
+                        static const float s_Blend = [] { const char* p = xlionrender::Env("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : -1.0f; }();      // (measurement: the scene's m_TAABlend replaced)
+                        if( s_Blend >= 0.0f ) Push.m_Blend = s_Blend;
+                        // (moving: this frame's share (still: half the blend); the display's sharpening while moving, in the tone map - XLION_TAA_MOVING "share sharpen")
+                        static const std::array<float, 2> s_Moving = [] { std::array<float, 2> M{ -1.0f, 0.5f }; if( const char* p = xlionrender::Env("XLION_TAA_MOVING") ) (void)xlionrender::Scan(p, "%f %f", &M[0], &M[1]); return M; }();
+                        Push.m_MovingShare = s_Moving[0] >= 0.0f ? s_Moving[0] : Push.m_Blend * 2.5f;      /* (2026-11-11 detector: share 0.25 + sharpen 0.5 kept 0.685 of TAA-off detail moving, 0.605 before; waves 0.025 / 0.022) */ Push.m_Sharpen = s_Moving[1];
                         // (the diagnostics go to an image of their own - the TAA's output stays its history: "Render target: TAA debug" in DebugView)
                         if( s_TAADebug && !View.m_TAADebug.m_Private ) (void)m_Device.Create(View.m_TAADebug, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: TAA debug" });
                         const xgpu::texture* I2[] = { I[0], View.m_TAADebug.m_Private ? &View.m_TAADebug : I[0] };
