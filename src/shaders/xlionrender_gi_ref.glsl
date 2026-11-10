@@ -134,6 +134,7 @@ void VoxBrickMark(in const int L, in const ivec3 q, in const uint Face)
     atomicOr(ConnU[4u + 131072u + (h2 >> 5)], 1u << (h2 & 31u));
 }
 #endif
+const uint vox_busy_v = 0xFFFFFFFFu;      // (a face slot's tag while its new owner writes it: a NaN, equal to no tag)
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
 {
     VoxStoreDir(L, Org, g, N, Sample);
@@ -157,10 +158,15 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     // across the normals that fed this face, so a sphere's bottom isn't read as its side. Halves in the spare words: e+1.w (variance, mean l.l), e+2.z (L.lu, L.lv; low bit
     // set: never the direction bins' 1.0 marker), e+2.w (lu, lv))
     vec2 Pv = unpackHalf2x16(dU.w), PL = unpackHalf2x16(dU.y & ~1u), Pl = unpackHalf2x16(dU.z);
+    if (dU.x == vox_busy_v) return;      // (another lane is taking this slot over: its payload isn't whole yet)
+    bool bTaken = false;
     if (d.x != Tag)
     {
         // someone else's: taken only if nobody has fed it for 2 seconds or so: a face in use keeps its slot and its history (a face that finds no room waits)
         if (d.x != 0.0 && abs(Now - d.y) < 120.0) return;
+        // (C31: taken by compare-and-swap to a busy tag - one owner wins, the others leave; readers see the busy tag as a miss until the payload is whole)
+        if (atomicCompSwap(GIRefAccumU[e + 1u].x, dU.x, vox_busy_v) != dU.x) return;
+        bTaken = true;
         v = vec4(0.0); m = vec4(0.0); Pv = PL = Pl = vec2(0.0);
     }
     m.w = Pv.x;
@@ -182,9 +188,11 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     if (v.w >= float(abs(Push.m_Epoch))) v *= 0.5 * float(abs(Push.m_Epoch)) / v.w;       // (ponytail: another lane's write to this face in this frame can be lost: samples, not light)
     const float Al = max(1.0 / v.w, 1.0 / 256.0);
     Pv.y += (dot(Ln, Ln) - Pv.y) * Al; PL += (clamp(Ls, 0.0, 60000.0) * Ln - PL) * Al; Pl += (Ln - Pl) * Al;
+    // (C31: a taken slot publishes payload first, then its tag - a reader that sees the tag sees a whole record)
     GIRefAccum[e] = v;
-    GIRefAccumU[e + 1u] = uvec4(floatBitsToUint(Tag), packHalf2x16(PL) | 1u, packHalf2x16(Pl), packHalf2x16(vec2(min(m.w, 60000.0), Pv.y)));
     GIRefAccumU[VoxX2Of(e)] = uvec4(floatBitsToUint(m.rgb), floatBitsToUint(Now));
+    if (bTaken) memoryBarrierBuffer();
+    GIRefAccumU[e + 1u] = uvec4(floatBitsToUint(Tag), packHalf2x16(PL) | 1u, packHalf2x16(Pl), packHalf2x16(vec2(min(m.w, 60000.0), Pv.y)));
 }
 // The emitters' light by light sampling at a budget: EmitterIrradianceAt, but over a few of the table picked at random, not all of it per ray (Bistro's table: 3 ms a frame at any
 // number of rays). The pick's weight scaled up by the table over the few. As noisy as it needs; a face averages it
@@ -262,9 +270,13 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
     if ((Push.m_First & 1) == 0 && c.w >= 1.0 && ((Push.m_First & 16) != 0 || Rnd() >= 0.125)) return c.rgb / c.w;      // (m_First's bit 4, XLION_VOX_HIT_CACHED, measurement: a hit with a kept direct never casts its shadow rays again: the best case of hits reading a cache)
     const vec3 E = VoxDirect(P, N);
     if (!bMine && d.x != 0.0 && abs(Now - d.y) < 120.0) return E;
+    const uint T0 = floatBitsToUint(d.x);      // (C31: a takeover by compare-and-swap to the busy tag, the tag published last)
+    if (T0 == vox_busy_v || (!bMine && atomicCompSwap(GIRefAccumU[e + 1u].x, T0, vox_busy_v) != T0)) return E;
     c += vec4(E, 1.0);
     if (c.w >= ((Push.m_First & 1) != 0 ? 4.0 : 32.0)) c *= 0.5;
-    GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(Tag, 0.0, 0.0, 0.0); GIRefAccum[VoxX2Of(e)] = vec4(0.0, 0.0, 0.0, Now);
+    GIRefAccum[e] = c; GIRefAccum[VoxX2Of(e)] = vec4(0.0, 0.0, 0.0, Now);
+    if (!bMine) memoryBarrierBuffer();
+    GIRefAccum[e + 1u] = vec4(Tag, 0.0, 0.0, 0.0);
     return E;
 }
 // A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
@@ -339,9 +351,13 @@ void VoxMain()
         const vec2 d = vec2(GIRefAccum[e + 1u].x, GIRefAccum[VoxX2Of(e)].w);
         vec4 c = d.x == Tag ? GIRefAccum[e] : vec4(0.0);
         if (d.x != Tag && d.x != 0.0 && abs(Now - d.y) < 120.0) return;
+        const uint T0 = floatBitsToUint(d.x);      // (C31: as VoxStore - taken by compare-and-swap, the tag published last)
+        if (T0 == vox_busy_v || (d.x != Tag && atomicCompSwap(GIRefAccumU[e + 1u].x, T0, vox_busy_v) != T0)) return;
         c += vec4(min(Lit, vec3(4000.0)), 1.0);
         if (c.w >= 64.0) c *= 0.5;
-        GIRefAccum[e] = c; GIRefAccum[e + 1u] = vec4(Tag, 0.0, 0.0, 0.0); GIRefAccum[VoxX2Of(e)] = vec4(0.0, 0.0, 0.0, Now);
+        GIRefAccum[e] = c; GIRefAccum[VoxX2Of(e)] = vec4(0.0, 0.0, 0.0, Now);
+        if (d.x != Tag) memoryBarrierBuffer();
+        GIRefAccum[e + 1u] = vec4(Tag, 0.0, 0.0, 0.0);
         return;
     }
     if (Push.m_Bounces == -6) { if (gl_GlobalInvocationID.x == 0u) ConnHeader = uvec4(0u); for (uint k = 0u; k < 16u; ++k) { const uint i = gl_GlobalInvocationID.x * 16u + k; if (i < uint(Conn.length())) Conn[i] = vec4(0.0); } return; }

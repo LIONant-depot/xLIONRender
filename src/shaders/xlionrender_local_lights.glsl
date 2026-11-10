@@ -606,6 +606,13 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         const ivec2 Px = ivec2(gl_FragCoord.xy);
         const uint  t  = 16u + 16u * (uint(Px.y >> 3) * LightTiles[0] + uint(Px.x >> 3)), n = LightTiles[t];
         if (n != 0xFFFFu) { LOCAL_COUNT(0u) LOCAL_COUNT(1u) Src = 0; nList = n; ListAt = t; }
+        if (((g_Tile.m_Graph >> 16u) & 8u) != 0u)
+        {   // (C0's census, render_leap_plan: the pixel's class by its tile's list - 9 no lamp, 10 lamps none shadowed, 11 a shadowed lamp, 12 overflow)
+            uint Cls = n == 0xFFFFu ? 12u : n == 0u ? 9u : 10u;
+            for (uint k = 0u; Cls == 10u && k < n; ++k)
+                if (LocalLightList[int(UBOLight.LocalBase.x) + int((LightTiles[t + 1u + (k >> 1)] >> ((k & 1u) * 16u)) & 0xFFFFu)].Shadow.z > 0.0) Cls = 11u;
+            atomicAdd(TileCount[Cls], 1u);
+        }
     }
 #endif
     uint EntryBase = 0u, First = 0u, Count = 0u, Head = 0u;

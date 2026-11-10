@@ -473,7 +473,7 @@ namespace xlionrender
         struct tile_graph { xgpu::shader m_Frag; xgpu::pipeline m_Pipeline; };
         std::vector<tile_graph>     m_TileGraphs;
         xgpu::buffer                m_TileCount, m_TileCountStats;      // (XLION_TILE_ABLATE bit 8: the light funnel's counters, a ring for the TILECOUNT line)
-        double                      m_TileCountSum[9] = {};
+        double                      m_TileCountSum[13] = {};
         int                         m_TileCountN = 0;
         xgpu::shader                m_TileVert;
         // A5.2: the tile pass's draws tested EQUAL against a classification of each pixel's graph (XLION_TILE_CLASSIFY=0: off)

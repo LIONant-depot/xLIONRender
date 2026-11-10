@@ -4377,12 +4377,14 @@ namespace xlionrender
                     const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
                     std::uint32_t C[16] = {};
                     (void)m_TileCountStats.MemoryMap(4 * Slot, 4, [&](void* p) { std::memcpy(C, p, sizeof(C)); });
-                    if( C[0] ) { for( int k = 0; k < 9; ++k ) m_TileCountSum[k] += C[k]; ++m_TileCountN; }
+                    if( C[0] ) { for( int k = 0; k < 13; ++k ) m_TileCountSum[k] += C[k]; ++m_TileCountN; }
                     if( m_TileCountN == 120 )
                     {
                         const double* S = m_TileCountSum; const double px = S[0] / 120.0;
                         std::printf("TILECOUNT a frame: %.0f pixels lit by locals (%.0f in a cell); a pixel: %.2f candidates, %.2f in range, %.2f in range and cone, %.2f lit side (shadow entered), %.2f fully shadowed, %.2f contributing; outside the cells %.1f lights walked\n",
                             px, S[1] / 120.0, S[2] / S[0], S[3] / S[0], S[4] / S[0], S[5] / S[0], S[6] / S[0], S[7] / S[0], S[8] / 120.0);
+                        const double Ct = S[9] + S[10] + S[11] + S[12];      // (C0's census: the tile-list pixels by class)
+                        if( Ct > 0 ) std::printf("TILECLASS of %.0f tile-list pixels a frame: no lamp %.1f %%, lamps none shadowed %.1f %%, a shadowed lamp %.1f %%, overflow %.1f %%\n", Ct / 120.0, 100.0 * S[9] / Ct, 100.0 * S[10] / Ct, 100.0 * S[11] / Ct, 100.0 * S[12] / Ct);
                         std::fflush(stdout); for( auto& v : m_TileCountSum ) v = 0; m_TileCountN = 0;
                     }
                     const xgpu::buffer::copy Zc{ 0, 0, 4 };
