@@ -230,8 +230,12 @@ void main()
     const uint  Par  = Push.m_Frame & 1u;      // (the plan alternates it each run of the sharp pass)
     if (bFull && !bList && gl_GlobalInvocationID.xy == uvec2(0u)) SharpList[1u - Par] = 0u;      // (the next run's count: nothing reads it in this one)
     const uint  ListI = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
-    const uint  ListN = bList ? min(SharpList[Par], refl_sharp_cap_v) : 0u;
-    const uint  ListP = bList && ListI < ListN ? SharpList[2u + ListI] : 0u;     // (the full size: width | height << 16; m_Full.y is XLION_SDF's mode in both: the height there made the sharp pass a baked-field cast, mostly misses)
+    // (E1, measurement: XLION_REFL_LIST_KEEP - m_Full.z's bits 24-31 in the list's dispatch: a stratified Keep / 256 of the list, lane i the entry i * 256 / Keep)
+    const uint  Keep  = bList ? (uint(Push.m_Full.z) >> 24) : 0u;
+    const uint  ListAll = bList ? min(SharpList[Par], refl_sharp_cap_v) : 0u;
+    const uint  ListN = Keep == 0u ? ListAll : (ListAll * Keep) >> 8;
+    const uint  ListE = Keep == 0u ? ListI : (ListI << 8) / Keep;
+    const uint  ListP = bList && ListI < ListN ? SharpList[2u + ListE] : 0u;     // (the full size: width | height << 16; m_Full.y is XLION_SDF's mode in both: the height there made the sharp pass a baked-field cast, mostly misses)
     const ivec2 p    = bList ? ivec2(int(ListP & 0xFFFFu), int(ListP >> 16)) : ivec2(gl_GlobalInvocationID.xy);
     const bool  bIn  = (!bList || ListI < ListN) && p.x < Size.x && p.y < Size.y;
     const uint  i    = uint(Size.x * Size.y) + uint(p.y * Size.x + p.x);
@@ -544,7 +548,7 @@ void main()
         const uvec2 v = Conf > 0.0 ? uvec2(Rec.x, packHalf2x16(vec2(unpackHalf2x16(Rec.y).x, Depth))) : uvec2(0u);
         const uint  k = uint(p.y * ((Size.x + 1) & ~1) + p.x);
         // (a short history, the camera still - the same view depth within 1 %: a fresh ray each frame shimmered on glass, Tomas; a quarter new)
-        const uint  At = uint(Push.m_Full.z) + k / 2u;
+        const uint  At = (uint(Push.m_Full.z) & 0xFFFFFFu) + k / 2u;
         const uvec2 Old = (k & 1u) == 0u ? Records[At].xy : Records[At].zw;
         uvec2 w = v;
         if (v != uvec2(0u) && Old != uvec2(0u))
