@@ -2547,8 +2547,11 @@ namespace xlionrender
     // left out: its pixels find no texel of theirs and shade their tail inline) -, the tail pass over it (demodulated diffuse and specular),
     // the denoiser (temporal, spatial) into the records the scene pass's materials read (binding 14). Sets the lighting block's mode 3 and
     // the tail's parameters; anything missing: mode 2 (the inline sampled tail)
+    static void C30Drain( xgpu::device& Device, const char* pWhere ) noexcept;      // (below, by instance::Render)
+
     void instance::renderTail( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, details::ubo_lighting& Light, bool bPlan ) noexcept
     {
+        C30Drain(m_Device, "tail");
         if( createTailTargets(View) ) { Light.m_LocalCount.m_Y = float(int(light_mode::CELLS)); return; }      // (no targets: the split lists exactly)
         const bool bLights = m_LightModeUsed == light_mode::SCREEN;      // (else only the G-buffer, for the reflections)
         const int W = View.m_TailWidth, H = View.m_TailHeight;
@@ -2616,6 +2619,7 @@ namespace xlionrender
                     pBound = nullptr; ++nDraws;
                     continue;
                 }
+                C30Drain(m_Device, "t0");
                 const std::uint32_t Slot = m_DrawSlot[iDraw];
                 if( Slot == instance_slots::none_v || (bPlan && m_bBoxesOnly) ) continue;
                 const auto& G     = pMesh->m_Geom;
@@ -2704,6 +2708,7 @@ namespace xlionrender
             // the denoiser's frame (shaders/xlionrender_tail_denoise_comp.glsl frame_t): this frame's clip -> world, this frame's clip -> last
             // frame's (the eye's move between: the camera's reprojection, where the G-buffer has no motion), the size, whether last frame's
             // is there, the frame's number
+            C30Drain(m_Device, "t1");
             const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
             // (C22, XLION_JITTER_HISTORY_FIX: a history accumulated over jittered frames is in no jitter's space - last frame's camera without its
             // jitter, this frame's jitter put back: the history read at the pixel plus its motion, as the TAA's)
@@ -2750,6 +2755,7 @@ namespace xlionrender
                 const xmath::fmat4 PrevR  = s_bJitFixR ? xmath::fmat4::fromTranslation(View.m_JitterNdc) * View.m_TailPrevW2CNoJit : View.m_TailPrevW2C;
                 const xmath::fmat4 ToPrev = View.m_bTailPrev ? PrevR * xmath::fmat4::fromTranslation(Eye - View.m_TailPrevEye) : xmath::fmat4::fromIdentity();
                 const xmath::fvec4 RP{ float(W), float(H), View.m_bTailPrev ? 1.0f : 0.0f, float(View.m_TailFrame & 1023u) };
+                C30Drain(m_Device, "t2");
                 (void)m_ReflFrames.MemoryMapFrameRegion(Slot, 1, [&](void* p)
                 {
                     auto* pB = static_cast<std::byte*>(p);
@@ -2877,6 +2883,7 @@ namespace xlionrender
                     }
                     Boxes.push_back(xmath::fvec4(Lo, 0)); Boxes.push_back(xmath::fvec4(Hi, 0));
                 }
+                C30Drain(m_Device, "t3");
                 (void)m_PlanarParams.MemoryMapFrameRegion(Slot, 1, [&](void* p)
                 {
                     auto* pB = static_cast<std::byte*>(p) + 64 + 16 + 8 * 16;
@@ -2953,6 +2960,7 @@ namespace xlionrender
                 P2.m_Frame = (P2.m_Frame & ~1u) | (m_ReflSharpRuns++ & 1u);      // (the list's parity: alternates each run, gaps or not)
                 static const bool s_bSharpSplit = xlionrender::Env("XLION_GPU_TIMES") != nullptr;      // (measurement: the sharp pass's classification and its list's rays apart - SHARPSPLIT)
                 static xgpu::timestamps s_SharpTS; static bool s_bSharpTS = false;
+                C30Drain(m_Device, "t4");
                 if( s_bSharpSplit && !s_bSharpTS ) s_bSharpTS = m_Device.Create(s_SharpTS, { .m_Count = 3 }) == nullptr;
                 if( s_bSharpSplit && s_bSharpTS )
                 {
@@ -2975,6 +2983,7 @@ namespace xlionrender
                 if( s_bSharpSplit && s_bSharpTS ) Window.WriteTimestamp(s_SharpTS, 2);
             }
             Window.WriteTimestamp(m_ReflTimes, 1);
+            C30Drain(m_Device, "t6");
             Window.Dispatch(m_ReflTrace, Buffers, Textures, &Push, sizeof(Push), (W + 7) / 8, (H + 7) / 8);
             DeclareTrace(false);
             Window.WriteTimestamp(m_ReflTimes, 2);
@@ -3033,6 +3042,7 @@ namespace xlionrender
                     if( Pass == 0 && View.m_bTailPrev ) G.Read(S, Hist, rg::usage::STORAGE);
                     if( Pass == 1 ) G.Write(S, Hist, rg::usage::STORAGE, rg::policy::FULL_OVERWRITE);
                 }
+            C30Drain(m_Device, "t7");
             }
             if( bScreen ) Window.WriteTimestamp(m_ReflSSRTimes, 1);     // (SSRGPU: the screen trace and the reconstruction)
             if( bTraced ) Window.WriteTimestamp(m_ReflTimes, 4);
@@ -3049,6 +3059,7 @@ namespace xlionrender
     void instance::shadeReflectionHits( xgpu::window& Window, const scene& Scene, render_view& View, const gi::gpu_trace::bvh_view& BvhR, int Slot, std::uint32_t HalfKeys, std::uint32_t FullBase ) noexcept
     {
         // this frame's bins
+        C30Drain(m_Device, "t8");
         std::unordered_map<std::uint64_t, std::uint32_t> BinOf;
         const auto KeyOf = [](material_id M, std::uint32_t DrawSlot) { std::uint64_t k = 0; std::memcpy(&k, &M, std::min(sizeof(M), sizeof(k))); return (k << 20) ^ DrawSlot; };
         m_HitBinKeys.clear();
@@ -3888,8 +3899,10 @@ namespace xlionrender
 
             if( pPre ) Window.WriteTimestamp(*pPre, 3);
             // The screen tail (light_mode::SCREEN): the thin G-buffer, the tail pass and the denoiser, before the scene pass reads them
-            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || ReflectionScreen(Scene)) ) { XPROFILE_SCOPE("Scene: tail and reflections"); renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan); }     // (reflections: its G-buffer)
+            if( bMain && pLight && (m_LightModeUsed == light_mode::SCREEN || Scene.m_ReflectionMaxRoughness > 0 || m_ReflTraceBench > 0 || ReflectionScreen(Scene)) ) { XPROFILE_SCOPE("Scene: tail and reflections"); renderTail(Window, Scene, View, W2C, Eye, *pLight, bPlan); }
+     // (reflections: its G-buffer)
             else if( bMain ) m_TailReport.m_bOn = false;
+            C30Drain(m_Device, "aftertail");
             if( pPre ) Window.WriteTimestamp(*pPre, 4);
 
             // The GI gather (bScreen), between the G-buffer prepass and the scene pass: at half size, the classification (each pixel's GI
@@ -4020,6 +4033,7 @@ namespace xlionrender
                 }
                 // XLION_HEAT (measurement, 2026-11-08): the gather's clock a pixel, shown as colours over a grey image (xlionrender_heat_comp.glsl), a HEAT
                 // line with its mean every 120 frames; its buffers made the first time (the gather built timed: instance.cpp)
+                C30Drain(m_Device, "giread");
                 static const bool s_bHeat = xlionrender::Env("XLION_HEAT") != nullptr;
                 const int HeatW = View.m_GIScreenWidth, HeatH = View.m_GIScreenHeight;
                 if( s_bHeat && !View.m_HeatBuffer.m_Private )
@@ -4308,6 +4322,7 @@ namespace xlionrender
                 int nTileDraws = 0;
                 // A5.3 (XLION_LIGHT_TILES=0: off): the local lights each 8 x 8 tile can see, from the prepass's depth - the tile pass reads them
                 // instead of its world cell's list (xlionrender_light_tiles_comp.glsl); the lights' count and base, the mode: this render's block
+                C30Drain(m_Device, "lighttiles");
                 static const bool s_bLightTiles = [] { const char* p = xlionrender::Env("XLION_LIGHT_TILES"); return !(p && p[0] == '0'); }();
                 const int  nLocal = pLight ? int(pLight->m_LocalCount.m_X) : 0;
                 bool bLightTiles = s_bLightTiles && pLight && nLocal > 0 && nLocal < 65536 && pLight->m_LocalCount.m_Y < 1.5f && View.StageOn("light_tiles");
@@ -4542,6 +4557,7 @@ namespace xlionrender
             const xgpu::buffer*            pBoundGIBuf = nullptr;     // (GI sections: its section's buffer)
 
             // A cluster mesh's submesh with its material (null: the constant one)
+            C30Drain(m_Device, "maindraw");
             const auto DrawSubmesh = [&]( std::size_t iDraw, const cluster_geom::submesh& Sub, material_slot* pMat )
             {
                 const auto& D     = Scene.m_Draws[iDraw];
@@ -4598,6 +4614,19 @@ namespace xlionrender
                         const auto [pBuf, Push] = GIOf(c, Slot, MaterialBase);
                         if( pBuf != pBoundGIBuf ) Bind(pBuf);       // (GI sections: the cluster's section's buffer)
                         Cmd.setPushConstants(Push);
+                    }
+                    {   // (C30 measurement, XLION_DRAW_PROBE="<first vertex> <last vertex>": a draw whose cluster starts there, named once - entity, mesh, material)
+                        static const std::array<std::uint32_t, 2> s_Probe = [] { std::array<std::uint32_t, 2> A{ 1u, 0u }; if( const char* p = xlionrender::Env("XLION_DRAW_PROBE") ) (void)xlionrender::Scan(p, "%u %u", &A[0], &A[1]); return A; }();
+                        static int s_nProbed = 0;
+                        if( C.m_iVertex >= s_Probe[0] && C.m_iVertex <= s_Probe[1] && s_nProbed < 8 )
+                        {
+                            ++s_nProbed;
+                            const float* pT = reinterpret_cast<const float*>(&D.m_L2W);
+                            std::printf("DRAWPROBE draw %zu cluster %u vtx %u idx %u x%u: entity %016llx, mesh %u/%u, material slot %u (%u ids: %u ...), tile graph %d, at %.2f %.2f %.2f\n", iDraw, c, C.m_iVertex, C.m_iIndex, C.m_nIndices
+                                , static_cast<unsigned long long>(D.m_UserID), D.m_Mesh.m_Index, D.m_Mesh.m_Generation, Sub.m_iMaterial, unsigned(D.m_Materials.size()), Sub.m_iMaterial < D.m_Materials.size() ? D.m_Materials[Sub.m_iMaterial].m_Index : ~0u
+                                , pMat ? pMat->m_TileGraph : -2, pT[12], pT[13], pT[14]);
+                            std::fflush(stdout);
+                        }
                     }
                     { const auto TD = std::chrono::steady_clock::now(); Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex)); g_DrawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TD).count(); }
                     ++g_nSceneDraws;
@@ -5368,9 +5397,21 @@ namespace xlionrender
         if( bAsync ) { Window.EndAsyncCompute(); m_bAsyncVoxThisFrame = true; }
     }
 
+    // (C30 diagnostic, XLION_C30_DRAIN=<point>: the frame in flight waited for at that point of this frame's recording - a drain before the
+    // racing write hides the hang, one after it does not; points: start, instances, capture, tail, post)
+    static void C30Drain( xgpu::device& Device, const char* pWhere ) noexcept
+    {
+        static const char* s_p = xlionrender::Env("XLION_C30_DRAIN");
+        if( s_p == nullptr || std::strcmp(s_p, pWhere) ) return;
+        static xgpu::buffer s_B;
+        if( !s_B.m_Private ) (void)Device.Create(s_B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = 1, .m_pName = "C30 drain" });
+        (void)s_B.MemoryMap(0, 1, [](void*) {});
+    }
+
     void instance::Render( xgpu::window& Window, const scene& Scene, render_view& View, xgpu::tools::view& CameraIn, const overlay_fn& Overlay ) noexcept
     {
         assert(m_bReady && View.m_Width > 0);
+        C30Drain(m_Device, "start");
         View.m_Graph.BeginFrame();             // (R0b: the frame's declarations, from its first work)
         static const bool s_bNoStages = xlionrender::Env("XLION_NO_STAGES") != nullptr;      // (measurement: every stage hand-written - the stages' cost)
         if( s_bNoStages ) View.m_bStageLightTiles = View.m_bStageReflSSR = View.m_bStageReflRecon = View.m_bStageAO = View.m_bStageGIRead = View.m_bStageVSMRequest = View.m_bStageLocalRequest = View.m_bStageTile = View.m_bStageShadowPages = View.m_bStageGIUpdate = View.m_bStageVoxRays = false;
@@ -5563,6 +5604,7 @@ namespace xlionrender
         { XPROFILE_SCOPE("Render: environment"); XPROFILE_GPU_SCOPE(Window, "Render: environment"); updateEnvironment(Window, Scene); }
         if( pTS ) Window.WriteTimestamp(*pTS, 1);
         { XPROFILE_SCOPE("Render: instances"); XPROFILE_GPU_SCOPE(Window, "Render: instances"); updateInstances(Window, Scene, Eye); }
+        C30Drain(m_Device, "instances");
         if( pTS ) Window.WriteTimestamp(*pTS, 2);
         {
             // the GI's own update: a recorded step of the stage gi_update (render graph: its dispatches stay the GI's code, the stage declares them)
@@ -5591,6 +5633,7 @@ namespace xlionrender
         {
             XPROFILE_SCOPE("Render: GI capture"); XPROFILE_GPU_SCOPE(Window, "Render: GI capture");
             const auto TCapture = std::chrono::steady_clock::now();
+            C30Drain(m_Device, "capture");
             processGICapture(Window);                           // the surfels' material colors (one mesh at a time)
             if( !m_GIFrames.empty() ) m_GIFrames.back().m_Stats.m_CaptureMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - TCapture).count();
         }
@@ -5805,6 +5848,7 @@ namespace xlionrender
                     }
                     if( P.m_Kernel == post::kernel::TAA )
                     {
+                        C30Drain(m_Device, "post");
                         // (C22, Fable: a pixel's depth is where its JITTERED sample landed - the surface at the pixel's centre minus the jitter. Its motion is that point's
                         // (unprojected with the jittered camera), and the history is read at the pixel plus that motion: the jitter cancels)
                         const auto HaltonT = [](int i, int b) { float f = 1.0f, r = 0.0f; for( ; i > 0; i /= b ) { f /= float(b); r += f * float(i % b); } return r; };
