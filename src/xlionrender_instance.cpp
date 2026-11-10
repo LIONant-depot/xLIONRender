@@ -210,9 +210,6 @@ namespace xlionrender
         constexpr std::uint32_t s_NoiseLagsComp[] = {
             #include "xlionrender_noise_lags_comp.h"
         };
-        constexpr std::uint32_t s_TAAGodotComp[] = {
-            #include "xlionrender_taa_godot_comp.h"
-        };
         constexpr std::uint32_t s_TAAComp[] = {
             #include "xlionrender_taa_comp.h"
         };
@@ -908,7 +905,10 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TailDenoiseComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_TailDenoise, { .m_pShader = &m_TailDenoiseShader, .m_nBuffers = 3, .m_nTextures = 5, .m_PushConstantsSize = 32, .m_pName = "instance: m_TailDenoise" }); Err ) return Err;
             if( auto Err = Device.Create(m_PostShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_PostComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32, .m_pName = "instance: m_PostCompute" }); Err ) return Err;
+            // (2026-11-10, C22: their textureLod reads between texels - bloom taps, the SSR / planar / environment lookups - blend bilinear; xGPU's
+            // compute default is nearest. XLION_COMPUTE_NEAREST=1: as before, for an A/B)
+            static const bool s_bComputeNearest = xlionrender::Env("XLION_COMPUTE_NEAREST") != nullptr;
+            if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32, .m_bLinear = !s_bComputeNearest, .m_pName = "instance: m_PostCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ContactComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_NoiseLagsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_NoiseLagsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_NoiseLagsCompute, { .m_pShader = &m_NoiseLagsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 16, .m_pName = "instance: m_NoiseLagsCompute" }); Err ) return Err;
@@ -923,10 +923,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_LightTilesCompute, { .m_pShader = &m_LightTilesShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 80, .m_pName = "instance: m_LightTilesCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 4, .m_nImages = 2, .m_PushConstantsSize = 128, .m_bLinear = true, .m_pName = "instance: m_TAACompute" }); Err ) return Err;
-            // (C22 diagnostic, XLION_TAA_GODOT=1: Godot's resolve on the same inputs - xlionrender_taa_godot_comp.glsl)
-            if( auto Err = Device.Create(m_TAAGodotShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAGodotComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_TAAGodotCompute, { .m_pShader = &m_TAAGodotShader, .m_nBuffers = 0, .m_nTextures = 4, .m_nImages = 2, .m_PushConstantsSize = 128, .m_bLinear = true, .m_pName = "instance: m_TAAGodotCompute" }); Err ) return Err;
+            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 4, .m_nImages = 2, .m_PushConstantsSize = 112, .m_bLinear = true, .m_pName = "instance: m_TAACompute" }); Err ) return Err;
             // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;
             // the G-buffer's depth and normal
             if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;
@@ -935,7 +932,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_TailTimes, { .m_Count = 5 }); Err ) return Err;
             // the reflection trace's benchmark (reflections milestone A)
             if( auto Err = Device.Create(m_ReflTraceShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflTraceComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 16, .m_nTextures = 6, .m_PushConstantsSize = 128, .m_pName = "instance: m_ReflTrace" }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflTrace, { .m_pShader = &m_ReflTraceShader, .m_nBuffers = 16, .m_nTextures = 6, .m_PushConstantsSize = 128, .m_bLinear = !s_bComputeNearest, .m_pName = "instance: m_ReflTrace" }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdfShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_WorldSdfComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_WorldSdf, { .m_pShader = &m_WorldSdfShader, .m_nBuffers = 7, .m_PushConstantsSize = 40, .m_pName = "instance: m_WorldSdf" }); Err ) return Err;
             if( xlionrender::Env("XLION_SDF") )
@@ -946,9 +943,9 @@ namespace xlionrender
                 if( auto Err = Device.Create(m_WorldSdfSurfB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 8, .m_EntryCount = int(ZeroS.size() / 2), .m_pData = const_cast<std::uint32_t*>(ZeroS.data()), .m_pName = "World SDF: surfaces" }); Err ) return Err;
             }
             if( auto Err = Device.Create(m_ReflDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflDenoiseComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflDenoise, { .m_pShader = &m_ReflDenoiseShader, .m_nBuffers = 4, .m_nTextures = 3, .m_PushConstantsSize = 16, .m_pName = "instance: m_ReflDenoise" }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflDenoise, { .m_pShader = &m_ReflDenoiseShader, .m_nBuffers = 4, .m_nTextures = 3, .m_PushConstantsSize = 16, .m_bLinear = !s_bComputeNearest, .m_pName = "instance: m_ReflDenoise" }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflSSRShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflSSRComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_ReflSSR, { .m_pShader = &m_ReflSSRShader, .m_nBuffers = 2, .m_nTextures = 3, .m_PushConstantsSize = 32, .m_pName = "instance: m_ReflSSR" }); Err ) return Err;
+            if( auto Err = Device.Create(m_ReflSSR, { .m_pShader = &m_ReflSSRShader, .m_nBuffers = 2, .m_nTextures = 3, .m_PushConstantsSize = 32, .m_bLinear = !s_bComputeNearest, .m_pName = "instance: m_ReflSSR" }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflSSRTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflHitsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ReflHitsComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_ReflHits, { .m_pShader = &m_ReflHitsShader, .m_nBuffers = 12, .m_nTextures = 1, .m_PushConstantsSize = 52, .m_pName = "instance: m_ReflHits" }); Err ) return Err;
