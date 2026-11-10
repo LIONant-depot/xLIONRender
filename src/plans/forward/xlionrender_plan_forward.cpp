@@ -5399,7 +5399,8 @@ namespace xlionrender
         const bool bTAA = !bPathTracing && (s_EnvTAA >= 0 ? s_EnvTAA == 1 : Scene.m_Post.m_bTAA);
         const xmath::fmat4 W2C = [&]
         {
-            if( !bTAA ) return W2CNoJitter;
+            static const bool s_bNoJitter = xlionrender::Env("XLION_TAA_NO_JITTER") != nullptr;      // (C22, measurement: TAA without its sub-pixel jitter)
+            if( !bTAA || s_bNoJitter ) return W2CNoJitter;
             // A sub-pixel a frame: Halton 2, 3 over 8 frames
             const auto Halton = [](int i, int b) { float f = 1.0f, r = 0.0f; for( ; i > 0; i /= b ) { f /= float(b); r += f * float(i % b); } return r; };
             const int k = (View.m_TAAFrame % 8) + 1;
