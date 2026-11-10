@@ -137,6 +137,29 @@ namespace xlionrender
         double                  m_HeatSum = 0.0, m_HeatN = 0.0, m_HeatLanes = 0.0, m_HeatGroups = 0.0;
         int                     m_HeatFrames = 0;
         xgpu::pipeline_instance m_BlitInstance;         // samples m_Output, for instance::Blit
+        // DebugView (xlionrender_debug_view_frag.glsl): one of the images below, by its render graph name, in place of the frame ("" off).
+        // Mode -1: by its format (depth 3, else 0 colour); Error says why nothing is shown (no such image, not made yet, integer data)
+        std::string             m_DebugImage;
+        int                     m_DebugMode = -1, m_DebugChannel = 0, m_DebugMip = 0;
+        float                   m_DebugScale = 1.0f, m_DebugBias = 0.0f;
+        std::string             m_DebugError;
+        xgpu::pipeline_instance m_DebugInstance;        // samples the shown image (made again when it changes)
+        const void*             m_pDebugBound = nullptr;
+        // The images DebugView can show, by the names the frame's passes declare them with (rg::graph; their xGPU m_pName). Images made
+        // only for some switches are listed even when not made (m_Private null: "not made")
+        template< typename T_FN > void ForEachImage( T_FN&& Fn ) noexcept
+        {
+            Fn("Render target: HDR colour", m_HDR);               Fn("Render target: last frame's HDR", m_HDRPrev);
+            Fn("Render target: depth", m_Depth);                  Fn("Render target: prepass normals", m_GPreNormal);
+            Fn("Render target: prepass ids", m_GPreId);           Fn("Render target: tile attributes", m_TileColor);
+            Fn("Render target: tile graphs", m_TileGraphDepth);   Fn("Render target: exposure", m_ExposureTex);
+            Fn("Render target: tail colour", m_TailGColor);       Fn("Render target: tail depth", m_TailGDepth);
+            Fn("Render target: tail motion", m_TailGMotion);      Fn("Render target: tail diffuse", m_TailDiffuse);
+            Fn("Render target: tail specular", m_TailSpecular);   Fn("Render target: sharp colour", m_SharpGColor);
+            Fn("Render target: sharp depth", m_SharpGDepth);      Fn("Render target: sharp motion", m_SharpGMotion);
+            Fn("Render target: bloom", m_Bloom[0]);               Fn("Render target: TAA", m_TAA[0]);
+            Fn("GI: screen colour", m_GIScreenColor);             Fn("GI: screen depth", m_GIScreenDepth);
+        }
         // The selection's outline (instance::renderOutline), made the first time something is selected: the mask (R: covered, G: in plain sight) with a
         // depth of its own, its pass, the casters' pipelines with the mask's fragment (they sample m_Depth), and the composite over m_Output (it samples m_Mask)
         xgpu::texture           m_Mask;                 // R8G8B8A8_UNORM

@@ -431,6 +431,7 @@ namespace xlionrender
         void                        renderScenePass ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye, bool bMain ) noexcept;
         // The selection's outline (Scene.m_SelectedUser's draw): its triangles into the view's mask, then the outline over m_Output (before the overlays)
         void                        renderOutline   ( xgpu::window& Window, const scene& Scene, render_view& View, const xmath::fmat4& W2C, const xmath::fvec3& Eye ) noexcept;
+        void                        renderDebugView ( xgpu::window& Window, render_view& View, bool bAutoExposure ) noexcept;      // View.m_DebugImage over m_Output (before the overlays)
         xgpu::device::error*        createOutlineTargets( render_view& View ) noexcept;
         void                        destroyOutlineTargets( render_view& View ) noexcept;
         xgpu::device::error*        createGIScreenTargets( render_view& View ) noexcept;
@@ -953,6 +954,7 @@ namespace xlionrender
         xgpu::pipeline_instance     m_EnvCubemapInstance;
         xgpu::pipeline              m_MaskPipeline[3];                      // the selection's mask: the casters' vertex paths with the mask's fragment (renderOutline)
         xgpu::pipeline              m_OutlineCompositePipeline;             // the outline over the tone-mapped image
+        xgpu::pipeline              m_DebugViewPipeline;                    // DebugView: an image in place of the frame (xlionrender_debug_view_frag.glsl)
         bool                        m_bOutlineReady = false;
         xgpu::vertex_descriptor     m_OutlineVD;                            // the outline mesh: position and normal
         xgpu::pipeline              m_OutlinePipeline;                      // the editor's outline shader (xlionrender_outline_obb_*), drawn over the scene after it

@@ -5301,6 +5301,44 @@ namespace xlionrender
 
     //------------------------------------------------------------------------------------------------
 
+    void instance::renderDebugView( xgpu::window& Window, render_view& View, bool bAutoExposure ) noexcept
+    {
+        xgpu::texture* pTex = nullptr;
+        View.ForEachImage([&]( const char* pName, xgpu::texture& T ) { if( !pTex && View.m_DebugImage == pName ) pTex = &T; });
+        using fmt = xgpu::texture::format;
+        const fmt F = pTex && pTex->m_Private ? pTex->getFormat() : fmt::INVALID;
+        View.m_DebugError = !pTex ? "no image '" + View.m_DebugImage + "' (DebugView lists them)"
+                          : !pTex->m_Private ? "'" + View.m_DebugImage + "' is not made (its switch is off)"
+                          : (F == fmt::R32_UINT || F == fmt::R32G32_UINT) ? "'" + View.m_DebugImage + "' holds integers (not shown yet)" : std::string();
+        if( !View.m_DebugError.empty() ) return;
+        auto& ExposureTex = View.m_ExposureTex.m_Private ? View.m_ExposureTex : *pTex;     // (no auto exposure yet: a stand-in, never read)
+        const void* pKey = reinterpret_cast<const char*>(pTex->m_Private.get()) + (View.m_ExposureTex.m_Private ? 1 : 0);
+        if( View.m_pDebugBound != pKey )
+        {
+            if( View.m_DebugInstance.m_Private ) m_Device.Destroy(std::move(View.m_DebugInstance));
+            auto Bindings = std::array{ xgpu::pipeline_instance::sampler_binding{ *pTex }, xgpu::pipeline_instance::sampler_binding{ ExposureTex } };
+            if( auto Err = m_Device.Create(View.m_DebugInstance, { .m_PipeLine = m_DebugViewPipeline, .m_SamplersBindings = Bindings }); Err ) { View.m_DebugError = "its pipeline instance failed"; View.m_pDebugBound = nullptr; return; }
+            View.m_pDebugBound = pKey;
+        }
+        const int Mode = View.m_DebugMode >= 0 ? View.m_DebugMode : xgpu::texture::isDepth(F) ? 3 : 0;
+        const int Mip  = std::clamp(View.m_DebugMip, 0, std::max(pTex->getMipCount() - 1, 0));
+        // an HDR image in auto: exposed as the frame is (the view's exposure, times the adapted one when it adapts) - else it shows near black
+        const bool bHDR = View.m_DebugMode < 0 && (F == fmt::R16G16B16A16_SFLOAT || F == fmt::R32G32B32A32_SFLOAT || F == fmt::B10G11R11_UFLOAT || F == fmt::R32G32B32_SFLOAT) && pTex != &View.m_ExposureTex;
+        const bool bAuto = bHDR && bAutoExposure && View.m_ExposureTex.m_Private;
+        struct { float m_Scale, m_Bias, m_W, m_H; std::int32_t m_Mode, m_Channel, m_Mip, m_Exposure; } Push{ View.m_DebugScale * (bHDR ? View.m_Exposure : 1.0f), View.m_DebugBias, float(View.m_Width), float(View.m_Height), Mode, View.m_DebugChannel, Mip, bAuto ? 2 : 0 };
+        {   auto& G = View.m_Graph; const int S = G.Begin("debug view", "Render target: tone-mapped output", false);
+            G.Read(S, G.Resource(View.m_DebugImage, rg::lifetime::FRAME), rg::usage::SAMPLED);
+            G.Write(S, G.Resource("Render target: tone-mapped output", rg::lifetime::EXTERNAL), rg::usage::COLOR_ATTACHMENT, rg::policy::FULL_OVERWRITE); }
+        auto Cmd = Window.StartRenderPass(View.m_OutputPass);
+        Cmd.setPipelineInstance(View.m_DebugInstance);
+        Cmd.setPushConstants(&Push, sizeof(Push));
+        Cmd.setBuffer(m_FullscreenVB);
+        Cmd.setBuffer(m_FullscreenIB);
+        Cmd.Draw(3);
+    }
+
+    //------------------------------------------------------------------------------------------------
+
     // the deferred voxel rays (m_DeferredVox): after the GI gather, on the second queue when there is one
     void instance::runDeferredVox( xgpu::window& Window ) noexcept
     {
@@ -5798,6 +5836,8 @@ namespace xlionrender
                 }
             }
         }
+
+        if( !View.m_DebugImage.empty() ) renderDebugView(Window, View, Scene.m_Post.m_bAutoExposure);     // (in place of the frame; the overlays and the outline still on top)
 
         // Editor overlays over the tone-mapped image, depth-tested against the scene
         if( Overlay )

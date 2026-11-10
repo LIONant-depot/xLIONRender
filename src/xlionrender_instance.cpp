@@ -106,6 +106,9 @@ namespace xlionrender
         constexpr std::uint32_t s_OutlineCompositeFrag[] = {
             #include "xlionrender_outline_composite_frag.h"
         };
+        constexpr std::uint32_t s_DebugViewFrag[] = {
+            #include "xlionrender_debug_view_frag.h"
+        };
 #if 0       // The first attempt (the primitives' OBB outline shader over the scene): not used
         constexpr std::uint32_t s_OutlineObbVert[] = {
             #include "xlionrender_outline_obb_vert.h"
@@ -339,6 +342,7 @@ namespace xlionrender
         m_Device.Destroy(std::move(m_OutlinePipeline));
         for( auto& P : m_MaskPipeline ) m_Device.Destroy(std::move(P));
         m_Device.Destroy(std::move(m_OutlineCompositePipeline));
+        m_Device.Destroy(std::move(m_DebugViewPipeline));
         for( auto& I : m_EnvDownsampleInstance ) m_Device.Destroy(std::move(I));
         for( auto* p : { &m_EnvSkyPipeline, &m_EnvPrefilterPipeline, &m_EnvDFGPipeline, &m_EnvDownsamplePipeline, &m_EnvCubemapPipeline } ) m_Device.Destroy(std::move(*p));
         for( auto* p : { &m_EnvAtlasPass, &m_EnvDFGPass } )                                 m_Device.Destroy(std::move(*p));
@@ -1152,6 +1156,18 @@ namespace xlionrender
                 Setup.m_Blend.m_ColorSrcFactor = xgpu::pipeline::blend::factor::SRC_ALPHA; Setup.m_Blend.m_ColorDstFactor = xgpu::pipeline::blend::factor::ONE_MINUS_SRC_ALPHA;
                 Setup.m_Blend.m_AlphaSrcFactor = xgpu::pipeline::blend::factor::ONE;       Setup.m_Blend.m_AlphaDstFactor = xgpu::pipeline::blend::factor::ONE_MINUS_SRC_ALPHA;
                 if( auto Err = Device.Create(m_OutlineCompositePipeline, Setup); Err ) return Err;
+            }
+            // DebugView: one image in place of the frame (render_view::m_DebugImage), opaque, no depth
+            {
+                xgpu::shader Frag;
+                if( auto Err = Device.Create(Frag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_DebugViewFrag) }); Err ) return Err;
+                auto Shaders  = std::array<const xgpu::shader*, 2>{ &Frag, &ClearVert2 };
+                auto Samplers = std::array{ xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true }, xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true } };     // (the image, the adapted exposure)
+                xgpu::pipeline::setup Setup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = Shaders, .m_PushConstantsSize = 32, .m_Samplers = Samplers };
+                Setup.m_Primitive.m_Cull                 = xgpu::pipeline::primitive::cull::NONE;
+                Setup.m_DepthStencil.m_bDepthTestEnable  = false;
+                Setup.m_DepthStencil.m_bDepthWriteEnable = false;
+                if( auto Err = Device.Create(m_DebugViewPipeline, Setup); Err ) return Err;
             }
             if( auto Err = Device.Create(m_EnvSkyInstance, { .m_PipeLine = m_EnvSkyPipeline }); Err ) return Err;
             if( auto Err = Device.Create(m_EnvDFGInstance, { .m_PipeLine = m_EnvDFGPipeline }); Err ) return Err;
@@ -2169,6 +2185,8 @@ namespace xlionrender
         }
         if( View.m_ExposureTex.m_Private ) m_Device.Destroy(std::move(View.m_ExposureTex));
         if( View.m_BlitInstance.m_Private )    m_Device.Destroy(std::move(View.m_BlitInstance));
+        if( View.m_DebugInstance.m_Private )   m_Device.Destroy(std::move(View.m_DebugInstance));
+        View.m_pDebugBound = nullptr;
         if( View.m_ScenePass.m_Private )       m_Device.Destroy(std::move(View.m_ScenePass));
         if( View.m_ScenePassLoad.m_Private )   m_Device.Destroy(std::move(View.m_ScenePassLoad));
         if( View.m_GPrePass.m_Private )        m_Device.Destroy(std::move(View.m_GPrePass));

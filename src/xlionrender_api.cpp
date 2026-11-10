@@ -206,6 +206,35 @@ namespace xlionrender
                     if (!pP) Reply = "param <name> [value]: ao.radius, ao.thickness, refl.ssr_steps, refl.ssr_max_dist, refl.ssr_thickness";
                     else { std::erase_if(Ov, [&](const auto& P) { return P.first == Name; }); if (n == 2) Ov.emplace_back(Name, stage::param{ Name, std::string(pP->m_Type), Value }.Word()); Reply = "ok"; bOk = true; }
                 }
+                else if (E == "view" || E.starts_with("view "))     // DebugView: "view" lists the images, "view off", "view <name> [| auto|colour|channel|normal|depth [scale [bias [channel [mip]]]]]"
+                {
+                    auto& V = pSystem->m_pScene->m_View;
+                    std::string_view A = E.size() > 5 ? E.substr(5) : std::string_view();
+                    if (A.empty())
+                    {
+                        Reply = V.m_DebugImage.empty() ? "showing: the frame" : "showing: " + V.m_DebugImage + (V.m_DebugError.empty() ? "" : " (" + V.m_DebugError + ")");
+                        V.ForEachImage([&](const char* pName, const xgpu::texture& T) { Reply += std::string("\n") + pName + (T.m_Private ? "" : "  (not made)"); });
+                        bOk = true;
+                    }
+                    else if (A == "off") { V.m_DebugImage.clear(); V.m_DebugError.clear(); Reply = "ok"; bOk = true; }
+                    else
+                    {
+                        const auto Bar = A.find('|');
+                        std::string Name(A.substr(0, Bar)); while (!Name.empty() && Name.back() == ' ') Name.pop_back();
+                        bool bKnown = false; V.ForEachImage([&](const char* pName, const xgpu::texture&) { bKnown |= Name == pName; });
+                        char Mode[16] = "auto"; float Scale = 1, Bias = 0; int Channel = 0, Mip = 0;
+                        if (Bar != std::string_view::npos) (void)std::sscanf(std::string(A.substr(Bar + 1)).c_str(), "%15s %f %f %d %d", Mode, &Scale, &Bias, &Channel, &Mip);
+                        static constexpr std::array<std::string_view, 5> modes_v{ "auto", "colour", "channel", "normal", "depth" };
+                        const auto It = std::find(modes_v.begin(), modes_v.end(), std::string_view(Mode));
+                        if (!bKnown) Reply = "no image '" + Name + "' ('view' lists them)";
+                        else if (It == modes_v.end()) Reply = "mode: auto, colour, channel, normal or depth";
+                        else
+                        {
+                            V.m_DebugImage = Name; V.m_DebugMode = int(It - modes_v.begin()) - 1; V.m_DebugScale = Scale; V.m_DebugBias = Bias; V.m_DebugChannel = Channel; V.m_DebugMip = Mip;
+                            V.m_DebugError.clear(); Reply = "ok"; bOk = true;
+                        }
+                    }
+                }
                 else bOk = post::Edit(pSystem->m_pScene->m_View.m_PostDesc, E, Reply);
                 if (pOut && Capacity > 0) { const std::size_t n = std::min<std::size_t>(Reply.size(), static_cast<std::size_t>(Capacity - 1)); std::memcpy(pOut, Reply.data(), n); pOut[n] = 0; }
                 return bOk;
