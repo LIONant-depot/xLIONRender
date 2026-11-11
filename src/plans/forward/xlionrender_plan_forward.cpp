@@ -3138,6 +3138,9 @@ namespace xlionrender
         Window.WriteTimestamp(m_ReflTimes, 5);
         // the drawn bins' hits, a pixel each, through their materials' capture variants (xlionrender_gi_capture_vert.glsl reads m_HitCapture)
         static const bool s_bHitsNoDraw = xlionrender::Env("XLION_REFL_HITS_NO_DRAW") != nullptr;      // (measurement, C30: the bins' capture draws skipped)
+        // (measurement, C30: XLION_REFL_HITS_SPIN_US=<n>: the CPU held n microseconds here - the recording's timing moved, no commands added)
+        static const int s_HitsSpinUs = [] { const char* p = xlionrender::Env("XLION_REFL_HITS_SPIN_US"); return p ? std::atoi(p) : 0; }();
+        if( s_HitsSpinUs > 0 ) { const auto T0 = std::chrono::steady_clock::now(); while( std::chrono::steady_clock::now() - T0 < std::chrono::microseconds(s_HitsSpinUs) ) {} }
         if( !Drawn.empty() && !s_bHitsNoDraw )
         {
             // (the UBOs as they are: the main pass's entries - the capture variant reads neither; a new entry here would be the one the
@@ -3147,6 +3150,19 @@ namespace xlionrender
               DeclareLitReads(G, S); G.Read(S, G.Resource("Probes: hit capture", rg::lifetime::FRAME), rg::usage::STORAGE);
               G.Write(S, G.Resource("Probes: hit shading target", rg::lifetime::FRAME), rg::usage::COLOR_ATTACHMENT, rg::policy::CLEAR); }
             std::array<xgpu::buffer*, 10> CBuffers{ &m_HitCapture, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+            // (measurement, C30: under XGPU_WAIT_LOG, how many bins each 16 material ids draw; XLION_REFL_HITS_REPEAT=<n>: the list drawn n times - more draws, no more pipelines)
+            if( static int s_nBinLog = 0; xlionrender::Env("XGPU_WAIT_LOG") && (s_nBinLog++ % 600) == 0 )
+            {
+                std::array<int, 16> H{};
+                for( const std::uint32_t b : Drawn ) ++H[std::min<std::size_t>(m_HitBinKeys[b].first.m_Index / 16, 15)];
+                std::printf("CAPTUREBINS %zu:", Drawn.size());
+                for( const int n : H ) std::printf(" %d", n);
+                std::printf("\n"); std::fflush(stdout);
+            }
+            static const int s_HitsRepeat = [] { const char* p = xlionrender::Env("XLION_REFL_HITS_REPEAT"); return p ? std::atoi(p) : 1; }();
+            if( s_HitsRepeat > 1 ) { const auto One = Drawn; for( int r = 1; r < s_HitsRepeat; ++r ) Drawn.insert(Drawn.end(), One.begin(), One.end()); }
+            static const bool s_bHitsEmptyPass = xlionrender::Env("XLION_REFL_HITS_EMPTY_PASS") != nullptr;      // (measurement, C30: the render pass begun and ended, nothing drawn in it)
+            if( s_bHitsEmptyPass ) Drawn.clear();
             for( const std::uint32_t b : Drawn )
             {
                 // (measurement, C30: XLION_REFL_HITS_ONLY_MAT=<material id> draws only that material's bins, XLION_REFL_HITS_SKIP_MAT=<id> all but its)
@@ -3158,7 +3174,8 @@ namespace xlionrender
                 if( s_HitsMaxMat >= 0 && int(m_HitBinKeys[b].first.m_Index) >= s_HitsMaxMat ) continue;
                 static const int s_HitsMinMat = [] { const char* p = xlionrender::Env("XLION_REFL_HITS_MIN_MAT"); return p ? std::atoi(p) : -1; }();
                 if( s_HitsMinMat >= 0 && int(m_HitBinKeys[b].first.m_Index) < s_HitsMinMat ) continue;
-                auto* pMat  = findMaterial(m_HitBinKeys[b].first);
+                static const bool s_bHitsOnePipe = xlionrender::Env("XLION_REFL_HITS_ONE_PIPE") != nullptr;      // (measurement, C30: every bin through the first bin's pipeline - as many draws, no pipeline changes; use with _ZERO_ARGS)
+                auto* pMat  = findMaterial(m_HitBinKeys[s_bHitsOnePipe ? Drawn[0] : b].first);
                 static const bool s_bHitsSkipMasked = xlionrender::Env("XLION_REFL_HITS_SKIP_MASKED") != nullptr;      // (measurement, C30: Tomas's lead - the masked materials' bins skipped)
                 if( s_bHitsSkipMasked && pMat->m_State.m_Blend == material_state::blend::MASKED ) continue;
                 auto* pInst = getCaptureInstance(*pMat);

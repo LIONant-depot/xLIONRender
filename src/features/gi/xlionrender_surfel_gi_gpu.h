@@ -150,8 +150,8 @@ namespace xlionrender::gi
                     for (std::size_t k = 0; k < G.size(); ++k) { const auto& r = m_Ranges[k]; G[k] = { r.m_Inst, r.m_Level, r.m_First, r.m_Count, r.m_Flags, r.m_History, int(r.m_Seed), r.m_Start }; }
                     std::vector<world::gpu_range_stats> Zeros(m_Ranges.size());
                     // (no slice out reads them: a new batch waits for the last one's stats, two frames on)
-                    if (!Fit(m_RangeB, int(sizeof(G[0])), G.size()) || m_RangeB.MemoryMapFrameRegion(0, int(G.size()), [&](void* p) { std::memcpy(p, G.data(), G.size() * sizeof(G[0])); })) return false;
-                    if (!Fit(m_StatsB, int(sizeof(world::gpu_range_stats)), Zeros.size()) || m_StatsB.MemoryMapFrameRegion(0, int(Zeros.size()), [&](void* p) { std::memcpy(p, Zeros.data(), Zeros.size() * sizeof(Zeros[0])); })) return false;
+                    if (!Fit(m_RangeB, int(sizeof(G[0])), G.size(), "GI: m_RangeB") || m_RangeB.MemoryMapFrameRegion(0, int(G.size()), [&](void* p) { std::memcpy(p, G.data(), G.size() * sizeof(G[0])); })) return false;
+                    if (!Fit(m_StatsB, int(sizeof(world::gpu_range_stats)), Zeros.size(), "GI: m_StatsB") || m_StatsB.MemoryMapFrameRegion(0, int(Zeros.size()), [&](void* p) { std::memcpy(p, Zeros.data(), Zeros.size() * sizeof(Zeros[0])); })) return false;
                     ++m_nBatches;
                 }
             }
@@ -167,7 +167,7 @@ namespace xlionrender::gi
                 const std::uint32_t Zero[4] = {};
                 auto& CountB = m_CountB2[m_nSlices % 2];                // (two: the slice before may still be running)
                 if (!FitLocal(m_ItemB, int(sizeof(world::gpu_item)), std::size_t(nThreads)) || !FitLocal(m_Results, int(sizeof(world::gpu_result)), std::size_t(nThreads))
-                    || !Fit(CountB, int(sizeof(std::uint32_t)), 4) || CountB.MemoryMapFrameRegion(0, 4, [&](void* p) { std::memcpy(p, Zero, sizeof(Zero)); })) return false;
+                    || !Fit(CountB, int(sizeof(std::uint32_t)), 4, "GI: CountB") || CountB.MemoryMapFrameRegion(0, 4, [&](void* p) { std::memcpy(p, Zero, sizeof(Zero)); })) return false;
                 const struct { int m_RangeFirst, m_nRanges, m_nThreads, m_StartBase; float m_Eye[4]; } EPush{ int(m_SliceFirst), int(m_SliceCount), nThreads, m_Ranges[m_SliceFirst].m_Start, { Eye.m_X, Eye.m_Y, Eye.m_Z, 0 } };
                 const struct { int m_nItems, m_TlasRoot, m_PrimOffset, m_First; } Push{ nThreads, m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0 };
                 const struct { int m_nItems, m_First, m_Count, m_Pad; } CPush{ nThreads, 0, nThreads, 0 };
@@ -201,7 +201,7 @@ namespace xlionrender::gi
             if (!Cubes.empty())
             {
                 auto& CubeB = m_CubeB2[m_nSubmits % 2];          // (two: the frame in flight may still read the other; mapped without a wait)
-                if (!Fit(CubeB, int(sizeof(Cubes[0])), Cubes.size()) || CubeB.MemoryMapFrameRegion(0, int(Cubes.size()), [&](void* p) { std::memcpy(p, Cubes.data(), Cubes.size() * sizeof(Cubes[0])); })) return false;
+                if (!Fit(CubeB, int(sizeof(Cubes[0])), Cubes.size(), "GI: CubeB") || CubeB.MemoryMapFrameRegion(0, int(Cubes.size()), [&](void* p) { std::memcpy(p, Cubes.data(), Cubes.size() * sizeof(Cubes[0])); })) return false;
                 xgpu::buffer* B[] = { &m_DataB, &CubeB };
                 const int Pad[4] = {};
                 Window.Dispatch(m_Cube, B, Pad, sizeof(Pad), int(Cubes.size()));
@@ -358,7 +358,7 @@ namespace xlionrender::gi
                 C[std::size_t(c)] = { int(probe_header_v * c), int(CascadeWords * c), int(probe_header_v) };
             }
             auto& HB = m_ProbeHdrB2[Frame % 2];          // (two: the frame in flight may still read the other; mapped without a wait)
-            if (!Fit(HB, int(sizeof(std::uint32_t)), Hs.size()) || HB.MemoryMapFrameRegion(0, int(Hs.size()), [&](void* p) { std::memcpy(p, Hs.data(), Hs.size() * 4); })) return false;
+            if (!Fit(HB, int(sizeof(std::uint32_t)), Hs.size(), "GI: HB") || HB.MemoryMapFrameRegion(0, int(Hs.size()), [&](void* p) { std::memcpy(p, Hs.data(), Hs.size() * 4); })) return false;
             Window.CopyBuffer(HB, m_ProbeB, std::span{ C.data(), std::size_t(nCascades) });
             const std::uint32_t* H = Hs.data() + probe_header_v * Cascade;
             if (Cascade != 0) { Focus = {}; FocusMax = 0; }
@@ -390,7 +390,7 @@ namespace xlionrender::gi
             for (int k = 0; k < Background; ++k) { List.push_back(std::uint32_t(Cursor)); Cursor = (Cursor + 1) % n; }
             if (List.empty()) return true;
             auto& LB = m_ProbeListB2[Frame % 2];
-            if (!Fit(LB, int(sizeof(std::uint32_t)), List.size()) || LB.MemoryMapFrameRegion(0, int(List.size()), [&](void* p) { std::memcpy(p, List.data(), List.size() * 4); })) return false;
+            if (!Fit(LB, int(sizeof(std::uint32_t)), List.size(), "GI: LB") || LB.MemoryMapFrameRegion(0, int(List.size()), [&](void* p) { std::memcpy(p, List.data(), List.size() * 4); })) return false;
             static const bool s_bFixedRays = xlionrender::Env("XLION_GI_PROBE_FIXED_RAYS") != nullptr;     // (experiment X1b: each probe's rays the same every frame - the temporal noise off)
             const struct { int m_nProbes, m_TlasRoot, m_PrimOffset, m_First, m_Frame, m_Count, m_Pad0, m_Pad1; } Push{ int(n), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, 0, s_bFixedRays ? 0 : int(Frame), int(List.size()), int(CascadeWords * Cascade), bHitsReadProbes ? 1 : 0 };
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_ProbeB, &LB };
@@ -525,7 +525,7 @@ namespace xlionrender::gi
             if (pMap) { std::memcpy(D.data(), &W2C, 64); D[16] = 1.0f; D[17] = Texel; D[18] = DepthPerMeter; }
             if (D == m_SunMapData && m_SunMapB.m_Private) return;
             m_SunMapData = D;
-            if (!Fit(m_SunMapB, int(sizeof(float)), D.size())) return;
+            if (!Fit(m_SunMapB, int(sizeof(float)), D.size(), "GI: sun map")) return;
             (void)m_SunMapB.MemoryMapFrameRegion(0, int(D.size()), [&](void* p) { std::memcpy(p, D.data(), sizeof(D)); });
         }
         void        SetRelightLatencyFloor(bool b) noexcept { m_bRelightLatencyFloor = b; }     // (tests: the budget alone, no latency floor)
@@ -834,7 +834,7 @@ namespace xlionrender::gi
             std::vector<int> P(Places.begin(), Places.end());
             P.resize(2 * std::size_t(std::max<std::uint32_t>(m_Data[1], 1)), -1);     // (per instance: its place, its mean or -1)
             auto& PlaceB = m_PlaceB2[m_nShows++ % 2];                  // (two: the frame before may still read its copy)
-            if (!Fit(PlaceB, int(sizeof(int)), P.size()) || PlaceB.MemoryMapFrameRegion(0, int(P.size()), [&](void* p) { std::memcpy(p, P.data(), P.size() * sizeof(int)); })) return false;
+            if (!Fit(PlaceB, int(sizeof(int)), P.size(), "GI: PlaceB") || PlaceB.MemoryMapFrameRegion(0, int(P.size()), [&](void* p) { std::memcpy(p, P.data(), P.size() * sizeof(int)); })) return false;
             // The shown light and its target, the last complete solution (xlionrender_gi_filter_comp.glsl mode 2): new ones when the surfels'
             // count changes (no history: the solution as it is). The target is this frame's solution unless a relight round is owed (its
             // surfels part old, part new: the target stays the last complete one); the shown light moves toward it by one fraction for
@@ -1116,13 +1116,13 @@ namespace xlionrender::gi
             return m_pDevice->Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = int(sizeof(T)), .m_EntryCount = int(Tmp.size()), .m_pData = static_cast<void*>(Tmp.data()), .m_pName = pName }) == nullptr;
         }
         // B holds at least n entries of Size bytes (made, or made larger: half again, nothing in flight reads it)
-        bool Fit(xgpu::buffer& B, int Size, std::size_t n) noexcept
+        bool Fit(xgpu::buffer& B, int Size, std::size_t n, const char* pName = "GI: host-visible data") noexcept
         {
             n = std::max<std::size_t>(n, 1);
             if (B.m_Private && std::size_t(B.getEntryCount()) >= n) return true;
             const int Count = int(Grown(std::size_t(Size), n));
             if (B.m_Private) return B.Resize(Count) == nullptr;
-            return m_pDevice->Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = Size, .m_EntryCount = Count, .m_pName = "GI: host-visible data" }) == nullptr;
+            return m_pDevice->Create(B, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = Size, .m_EntryCount = Count, .m_pName = pName }) == nullptr;
         }
 
         // B (device-local, the GPU's only) holds at least n entries of Size bytes (made larger: half again, nothing in flight reads it)
@@ -1402,7 +1402,7 @@ namespace xlionrender::gi
             // Two staging buffers, one a frame: the frame in flight may still read the other, so this one is mapped without a wait (MemoryMap
             // waited for the GPU's frame: 6 ms a frame on the Bistro, its whole scene)
             auto& StageB = m_StageB2[++m_nSubmits % 2];
-            if (!Fit(StageB, int(2 * sizeof(std::uint32_t)), std::size_t(nPairs))) return false;
+            if (!Fit(StageB, int(2 * sizeof(std::uint32_t)), std::size_t(nPairs), "GI: StageB")) return false;
             if (StageB.MemoryMapFrameRegion(0, nPairs, [&](void* p) { std::memcpy(p, m_Stage.data(), m_Stage.size() * sizeof(std::uint32_t)); })) return false;
             const struct { int m_nPairs, m_Pad0, m_Pad1, m_Pad2; } Push{ nPairs, 0, 0, 0 };
             xgpu::buffer* Bufs[] = { &m_DataB, &StageB };
@@ -1411,8 +1411,8 @@ namespace xlionrender::gi
             if (m_RunJobs.empty()) return true;
             // (two of each, as the staging: the emitter table's run goes up every frame - MemoryMap waited for the GPU's frame, 7 ms on the Bistro)
             auto& RunB = m_RunB2[m_nSubmits % 2]; auto& RunJobB = m_RunJobB2[m_nSubmits % 2];
-            if (!Fit(RunB, int(sizeof(std::uint32_t)), m_RunStage.size()) || RunB.MemoryMapFrameRegion(0, int(m_RunStage.size()), [&](void* p) { std::memcpy(p, m_RunStage.data(), m_RunStage.size() * sizeof(std::uint32_t)); })) return false;
-            if (!Fit(RunJobB, int(sizeof(m_RunJobs[0])), m_RunJobs.size()) || RunJobB.MemoryMapFrameRegion(0, int(m_RunJobs.size()), [&](void* p) { std::memcpy(p, m_RunJobs.data(), m_RunJobs.size() * sizeof(m_RunJobs[0])); })) return false;
+            if (!Fit(RunB, int(sizeof(std::uint32_t)), m_RunStage.size(), "GI: RunB") || RunB.MemoryMapFrameRegion(0, int(m_RunStage.size()), [&](void* p) { std::memcpy(p, m_RunStage.data(), m_RunStage.size() * sizeof(std::uint32_t)); })) return false;
+            if (!Fit(RunJobB, int(sizeof(m_RunJobs[0])), m_RunJobs.size(), "GI: RunJobB") || RunJobB.MemoryMapFrameRegion(0, int(m_RunJobs.size()), [&](void* p) { std::memcpy(p, m_RunJobs.data(), m_RunJobs.size() * sizeof(m_RunJobs[0])); })) return false;
             xgpu::buffer* RBufs[] = { &RunB, &m_DataB, &RunJobB };
             const int Pad[4] = {};
             Window.Dispatch(m_Migrate, RBufs, Pad, sizeof(Pad), int(m_RunJobs.size()));
@@ -1497,7 +1497,7 @@ namespace xlionrender::gi
         std::array<float, 20>               m_SunMapData{};
         std::array<xgpu::buffer*, 16> LinkBuffers(xgpu::buffer* const (&B)[15]) noexcept
         {
-            if (!m_SunMapB.m_Private) { (void)Fit(m_SunMapB, int(sizeof(float)), 20); (void)m_SunMapB.MemoryMapFrameRegion(0, 20, [&](void* p) { std::memset(p, 0, 80); }); }
+            if (!m_SunMapB.m_Private) { (void)Fit(m_SunMapB, int(sizeof(float)), 20, "GI: sun map");(void)m_SunMapB.MemoryMapFrameRegion(0, 20, [&](void* p) { std::memset(p, 0, 80); }); }
             std::array<xgpu::buffer*, 16> A{}; std::copy(B, B + 15, A.begin()); A[15] = &m_SunMapB; return A;
         }
         std::array<const xgpu::texture*, 1> LinkTextures() const noexcept { return { m_pSunMap ? m_pSunMap : &m_SunMapDummy }; }
