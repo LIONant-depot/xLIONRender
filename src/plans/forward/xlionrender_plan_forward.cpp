@@ -4728,6 +4728,8 @@ namespace xlionrender
                     {
                         // (with the G-buffer: its single-sided opaque submeshes into it - their AO and the gather's probe-grid read)
                         if( !(bGPre && Mode == 1) ) continue;
+                        static const bool s_bNoSkinPre = xlionrender::Env("XLION_NO_SKIN_PREPASS") != nullptr;      // (measurement, C30: the skinned meshes out of the G-buffer prepass)
+                        if( s_bNoSkinPre ) continue;
                         const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
                         for( const auto& Sub : G.m_Submeshes )
                         {
