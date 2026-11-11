@@ -2895,7 +2895,8 @@ namespace xlionrender
             const auto& Pl = m_PlanarPlane;
             // the hits to texture: the trace appends them to m_HitList (their keys: the half size's texels, then the full size's sharp ones)
             const std::uint32_t HalfKeys = std::uint32_t(W * H);
-            const bool bHits = m_ReflTraceBench == 0 && Scene.m_ReflectionTextureMaxRoughness > 0 && createHitTargets() == nullptr;
+            static const bool s_bNoHits = xlionrender::Env("XLION_REFL_NO_HITS") != nullptr;      // (measurement, C30: the hits' textures off - the rays' hits read untextured)
+            const bool bHits = !s_bNoHits && m_ReflTraceBench == 0 && Scene.m_ReflectionTextureMaxRoughness > 0 && createHitTargets() == nullptr;
             // (the voxels on: they are the hits' indirect light; the surfels hold nothing then)
             static const bool s_bReflNoVox = xlionrender::Env("XLION_REFL_NO_VOX") != nullptr;      // (measurement: the reflections without the voxels' light at their hits - compute_overlap_plan_2026-11-07.md option b)
             xgpu::buffer* pVox = m_bVoxOn && m_pGITrace && !s_bReflNoVox ? m_pGITrace->VoxBuffer() : nullptr;
