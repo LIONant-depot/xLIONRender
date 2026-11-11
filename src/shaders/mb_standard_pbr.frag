@@ -376,6 +376,8 @@ float g_CapRoughness = 1.0, g_CapF0 = 0.04;     // (the material's, for the capt
 // environment read, 2 no local lights, 4 no sun shadow lookup (lit)
 #ifdef XLION_TILE_PIXEL
 #define TILE_ABLATE(b) (((g_Tile.m_Graph >> 16u) & (b)) != 0u)
+#elif defined(XLION_CODE_ABLATE)     // (measurement: the same parts left out at compile time - how much of the compiled shader each one is)
+#define TILE_ABLATE(b) (((XLION_CODE_ABLATE) & (b)) != 0u)
 #else
 #define TILE_ABLATE(b) false
 #endif
