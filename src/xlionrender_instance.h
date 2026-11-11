@@ -482,6 +482,8 @@ namespace xlionrender
         const tile_graph*           m_pBuildTile = nullptr;         // (buildMaterialPipeline: that pipeline)
         xgpu::shader                m_NoiseLagsShader;              // XLION_NOISE_LAGS (xlionrender_noise_lags_comp.glsl): the noise by lag, at the real frame rate
         xgpu::compute               m_NoiseLagsCompute;
+        xgpu::shader                m_SlmPrimeShader;               // (C30 measurement, XLION_SLM_PRIME: xlionrender_slm_prime_comp.glsl)
+        xgpu::compute               m_SlmPrimeCompute;
         xgpu::buffer                m_NoiseLagsRing;
         std::vector<std::uint8_t>   m_NoiseLagsHist;
         int                         m_NoiseLagsN = 0;

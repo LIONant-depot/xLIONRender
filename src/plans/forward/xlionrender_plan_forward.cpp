@@ -4766,7 +4766,19 @@ namespace xlionrender
                         {
                             const auto& St = pMat->m_State;
                             if( !St.m_bDepthWrite || !St.m_bDepthTest || St.m_bWireframe ) continue;
-                            if( MaterialVisibilityOf(St).m_Opacity == material_visibility::opacity::MASKED )
+                            // (measurement, C30: XLION_PREPASS_MASKED_OPAQUE - the masked submeshes drawn by the opaque G-buffer pipeline: the same draws, no texture, no cut)
+                            static const bool s_bMaskedOpaque = xlionrender::Env("XLION_PREPASS_MASKED_OPAQUE") != nullptr;
+                            // (measurement, C30: XLION_PREPASS_CUT_IDS="<min> <max>" - only the masked materials whose id is in [min, max) take their cutout pipeline, the rest the opaque one;
+                            // the masked ids are listed once, CUTIDS)
+                            static const std::array<std::uint32_t, 2> s_CutIds = [] { std::array<std::uint32_t, 2> A{ 0u, ~0u }; if( const char* p = xlionrender::Env("XLION_PREPASS_CUT_IDS") ) (void)xlionrender::Scan(p, "%u %u", &A[0], &A[1]); return A; }();
+                            const std::uint32_t MatId = Sub.m_iMaterial < D.m_Materials.size() ? D.m_Materials[Sub.m_iMaterial].m_Index : ~0u;
+                            if( MaterialVisibilityOf(St).m_Opacity == material_visibility::opacity::MASKED && xlionrender::Env("XLION_PREPASS_CUT_IDS") )
+                            {
+                                static std::unordered_set<std::uint32_t> s_Listed;
+                                if( s_Listed.insert(MatId).second ) { std::printf("CUTIDS masked material id %u\n", MatId); std::fflush(stdout); }
+                            }
+                            const bool bCutOff = MatId < s_CutIds[0] || MatId >= s_CutIds[1];
+                            if( MaterialVisibilityOf(St).m_Opacity == material_visibility::opacity::MASKED && !s_bMaskedOpaque && !bCutOff )
                             {
                                 if( !s_bMaskedPrepass || pLight == nullptr || (pCut = getCutoutInstance(*pMat)) == nullptr ) continue;
                             }
@@ -4785,6 +4797,9 @@ namespace xlionrender
                             if( pCut->m_Private.get() != pPrepassBound || &G != pPrepassGeom )
                             {
                                 std::array<xgpu::buffer*, 10> Buffers{ G.m_pClusterData, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
+                                // (measurement, C30: XLION_CUT_DUMMIES - the cutout's buffers it never reads after its early return bound as the GI dummy: light and cell rings, GI rings, tail records)
+                                static const bool s_bCutDummies = xlionrender::Env("XLION_CUT_DUMMIES") != nullptr;
+                                if( s_bCutDummies ) for( const int k : { 2, 3, 5, 6, 9 } ) Buffers[std::size_t(k)] = &m_GIDummy;
                                 Cmd.setPipelineInstance(*pCut, std::span{ Buffers });
                                 Cmd.setDynamicUBO(m_LightUBO, 1);
                                 Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
@@ -4808,6 +4823,9 @@ namespace xlionrender
                             if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
                             const auto& C = G.m_Clusters[c];
                             Cmd.setPushConstants(details::push_static_geom{ c, Slot, 0u, 0xFFFFFFFFu, pCut ? pMat->m_ParamBase : TileBase(pMat) });       // (no GI: the vertex shader's read skipped)
+                            // (measurement, C30: XLION_PREPASS_DRAW_REPEAT=<n> - each of these draws n times: more draws in the pass, the same image)
+                            static const int s_DrawRepeat = [] { const char* p = xlionrender::Env("XLION_PREPASS_DRAW_REPEAT"); return p ? std::max(1, std::atoi(p)) : 1; }();
+                            for( int r = 0; r < s_DrawRepeat; ++r )
                             Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                         }
                     }
@@ -5473,6 +5491,14 @@ namespace xlionrender
             View.m_HDRPrevPendingW = View.m_HDRPrevPendingH = 0;
         }
         m_bAsyncVoxThisFrame = false;
+        // (measurement, C30: XLION_SLM_PRIME - one group of a shader needing more local memory per thread than any material shader, first in the
+        // frame: whether the driver's local memory sizing is what the hang needs)
+        if( static const bool s_bPrime = xlionrender::Env("XLION_SLM_PRIME") != nullptr; s_bPrime )
+        {
+            xgpu::buffer* B[] = { &m_GIDummy };
+            const std::uint32_t Push[4] = { 64u, std::uint32_t(m_Device.getFrameIndex() | 1u), 0u, 0u };
+            Window.Dispatch(m_SlmPrimeCompute, B, Push, sizeof(Push), 1);
+        }
         if( m_SunMaskTex.m_Private && !m_bSunMaskCleared ) { (void)Window.StartRenderPass(m_SunMaskClear); m_bSunMaskCleared = true; }      // (slot 11 sampled from the first draw)
         static const bool s_bNoBudget = xlionrender::Env("XLION_NO_FRAME_BUDGET") != nullptr;    // measurement only (GI review): every cluster drawn, whatever the host's budget
         if( s_bNoBudget ) m_FrameBudgetMs = 0;
