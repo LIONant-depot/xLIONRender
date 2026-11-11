@@ -1551,10 +1551,11 @@ namespace xlionrender
         return makeInstance(M, k, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, Kind, false, false, true); });
     }
 
-    xgpu::pipeline_instance* instance::getCutoutInstance( material_slot& M ) noexcept
+    xgpu::pipeline_instance* instance::getCutoutInstance( material_slot& M, geom_kind Kind ) noexcept
     {
-        if( M.m_Instance[cutout_path_v].m_Private ) return &M.m_Instance[cutout_path_v];
-        return makeInstance(M, cutout_path_v, true, [&](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, geom_kind::RIGID, false, false, false, true); });
+        const std::size_t k = Kind == geom_kind::SKIN ? skin_cutout_path_v : cutout_path_v;
+        if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
+        return makeInstance(M, k, true, [&, Kind](xgpu::pipeline& Pipeline) { return buildMaterialPipeline(Pipeline, M, Kind, false, false, false, true); });
     }
 
     xgpu::pipeline_instance* instance::getPairsCutInstance( material_slot& M ) noexcept
@@ -1646,14 +1647,14 @@ namespace xlionrender
     instance::pipeline_key instance::PipelineKey( const material_slot& M, std::size_t k ) noexcept
     {
         std::uint32_t State = 0;
-        if( k < capture_path_v || k == records_path_v || k == cutout_path_v )
+        if( k < capture_path_v || k == records_path_v || k == cutout_path_v || k == skin_cutout_path_v )
         {
             const auto& S = M.m_State;
             State = (S.isBlended() ? 1u + std::uint32_t(S.m_Blend) : 0u) | (S.m_bDoubleSided ? 1u << 4 : 0u) | (S.m_bWireframe ? 1u << 5 : 0u)
                   | (S.m_bDepthTest ? 1u << 6 : 0u) | (S.m_bDepthWrite ? 1u << 7 : 0u)
                   | (S.m_Blend == material_state::blend::MASKED ? 1u << 8 : 0u);      // (a masked one's shading writes no depth: buildMaterialPipeline)
         }
-        if( k >= gbuffer_path_v && k != cutout_path_v && k != pairs_cut_path_v ) return { M.m_GBufferFragment.m_Private.get(), M.m_State.m_bDoubleSided ? 1u << 4 : 0u, k };
+        if( k >= gbuffer_path_v && k != cutout_path_v && k != pairs_cut_path_v && k != skin_cutout_path_v ) return { M.m_GBufferFragment.m_Private.get(), M.m_State.m_bDoubleSided ? 1u << 4 : 0u, k };
         return { M.m_Fragment.m_Private.get(), State, k };
     }
 
@@ -1722,6 +1723,7 @@ namespace xlionrender
     {
         constexpr auto k = capture_path_v;
         if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
+        if( xlionrender::Env("XGPU_WAIT_LOG") ) { std::printf("CAPTUREMADE param base %u at device frame %llu\n", M.m_ParamBase, static_cast<unsigned long long>(m_Device.getFrameIndex())); std::fflush(stdout); }      // (C30 measurement)
         return makeInstance(M, k, true, [&](xgpu::pipeline& Pipeline) -> xgpu::device::error*
         {
             const auto Samplers = LitSamplers();

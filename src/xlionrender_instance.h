@@ -397,6 +397,7 @@ namespace xlionrender
         static constexpr std::size_t gbuffer_path_v = records_path_v + 1;                 // the screen tail's G-buffer, per vertex path (getGBufferInstance)
         static constexpr std::size_t cutout_path_v  = gbuffer_path_v + capture_path_v;    // a rigid masked material's depth prepass: its state, depth written (getCutoutInstance)
         static constexpr std::size_t pairs_cut_path_v = cutout_path_v + 1;               // a rigid masked material's cutout through the sun pairs' records (getPairsCutInstance)
+        static constexpr std::size_t skin_cutout_path_v = pairs_cut_path_v + 1;          // a skinned masked or double-sided material's depth prepass (getCutoutInstance): as the rigid one's
 
         struct material_slot
         {
@@ -407,7 +408,7 @@ namespace xlionrender
             std::vector<xgpu::texture*> TexturePointers() noexcept { std::vector<xgpu::texture*> P; for (auto& T : m_Textures) P.push_back(T.m_Private ? &T : nullptr); return P; }
             // Per vertex path (geom_kind), the GI capture, the shadow casters per vertex path, the records path: built on first use. Its own
             // textures; the pipeline is shared with every material of the same fragment and state (m_SharedPipelines)
-            std::array<xgpu::pipeline_instance, pairs_cut_path_v + 1> m_Instance;
+            std::array<xgpu::pipeline_instance, skin_cutout_path_v + 1> m_Instance;
             int                     m_TileGraph     = -1;           // SetMaterialTile: its graph in m_TileGraphs (-1: the raster path)
             xgpu::shader            m_GBufferFragment;              // SetMaterialGBuffer: its G-buffer variant (none: not in the thin G-buffer)
             std::uint32_t           m_Generation    = 0;
@@ -455,7 +456,7 @@ namespace xlionrender
         xgpu::pipeline_instance*    getCaptureInstance ( material_slot& Material )                              noexcept;
         xgpu::pipeline_instance*    getRecordsInstance ( material_slot& Material )                              noexcept;     // RIGID, the draw's push constants from its record (binding 12)
         xgpu::pipeline_instance*    getGBufferInstance ( material_slot& Material, geom_kind Kind )              noexcept;     // its G-buffer variant (nullptr: none)
-        xgpu::pipeline_instance*    getCutoutInstance  ( material_slot& Material )                              noexcept;     // a rigid masked one's depth prepass variant
+        xgpu::pipeline_instance*    getCutoutInstance  ( material_slot& Material, geom_kind Kind = geom_kind::RIGID )                              noexcept;     // a rigid masked one's depth prepass variant
         xgpu::pipeline_instance*    getPairsCutInstance( material_slot& Material )                              noexcept;     // a rigid masked one's shadow cutout through the pairs' records
         // The screen tail (light_mode::SCREEN, the main view): the thin G-buffer, the tail pass and the denoiser, before the scene pass
         xgpu::device::error*        createTailTargets  ( render_view& View )                                    noexcept;

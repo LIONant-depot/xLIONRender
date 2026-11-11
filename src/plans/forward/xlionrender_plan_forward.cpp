@@ -3137,7 +3137,8 @@ namespace xlionrender
         }
         Window.WriteTimestamp(m_ReflTimes, 5);
         // the drawn bins' hits, a pixel each, through their materials' capture variants (xlionrender_gi_capture_vert.glsl reads m_HitCapture)
-        if( !Drawn.empty() )
+        static const bool s_bHitsNoDraw = xlionrender::Env("XLION_REFL_HITS_NO_DRAW") != nullptr;      // (measurement, C30: the bins' capture draws skipped)
+        if( !Drawn.empty() && !s_bHitsNoDraw )
         {
             // (the UBOs as they are: the main pass's entries - the capture variant reads neither; a new entry here would be the one the
             // main pass binds, its lighting zeroed)
@@ -3148,7 +3149,18 @@ namespace xlionrender
             std::array<xgpu::buffer*, 10> CBuffers{ &m_HitCapture, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &m_MaterialParams, &m_EntityParams, TailBuffer() };
             for( const std::uint32_t b : Drawn )
             {
+                // (measurement, C30: XLION_REFL_HITS_ONLY_MAT=<material id> draws only that material's bins, XLION_REFL_HITS_SKIP_MAT=<id> all but its)
+                static const int s_HitsOnly = [] { const char* p = xlionrender::Env("XLION_REFL_HITS_ONLY_MAT"); return p ? std::atoi(p) : -1; }();
+                static const int s_HitsSkip = [] { const char* p = xlionrender::Env("XLION_REFL_HITS_SKIP_MAT"); return p ? std::atoi(p) : -1; }();
+                if( (s_HitsOnly >= 0 && int(m_HitBinKeys[b].first.m_Index) != s_HitsOnly) || (s_HitsSkip >= 0 && int(m_HitBinKeys[b].first.m_Index) == s_HitsSkip) ) continue;
+                // (measurement, C30: XLION_REFL_HITS_MAX_MAT=<n>: only materials with an id below n drawn - how many different capture pipelines a frame runs)
+                static const int s_HitsMaxMat = [] { const char* p = xlionrender::Env("XLION_REFL_HITS_MAX_MAT"); return p ? std::atoi(p) : -1; }();
+                if( s_HitsMaxMat >= 0 && int(m_HitBinKeys[b].first.m_Index) >= s_HitsMaxMat ) continue;
+                static const int s_HitsMinMat = [] { const char* p = xlionrender::Env("XLION_REFL_HITS_MIN_MAT"); return p ? std::atoi(p) : -1; }();
+                if( s_HitsMinMat >= 0 && int(m_HitBinKeys[b].first.m_Index) < s_HitsMinMat ) continue;
                 auto* pMat  = findMaterial(m_HitBinKeys[b].first);
+                static const bool s_bHitsSkipMasked = xlionrender::Env("XLION_REFL_HITS_SKIP_MASKED") != nullptr;      // (measurement, C30: Tomas's lead - the masked materials' bins skipped)
+                if( s_bHitsSkipMasked && pMat->m_State.m_Blend == material_state::blend::MASKED ) continue;
                 auto* pInst = getCaptureInstance(*pMat);
                 Cmd.setPipelineInstance(*pInst, std::span{ CBuffers });
                 if( pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);
@@ -3159,7 +3171,14 @@ namespace xlionrender
                 for( std::uint32_t Pass = 0; Pass < 2; ++Pass )      // (albedo x (1 - metal), emission: xlionrender_surfel_gi.glsl's capture flags)
                 {
                     Cmd.setPushConstants(details::push_static_geom{ 0u, m_HitBinKeys[b].second, (hit_width_v << 16) | (hit_cap_v / hit_width_v), (3u << 9) | (Pass ? 0x800u : 0u), pMat->m_ParamBase });
-                    Cmd.DrawIndexedIndirect(m_HitDraws, int(Pass * nBins + b), 1);
+                    static const bool s_bHitsBindOnly = xlionrender::Env("XLION_REFL_HITS_BIND_ONLY") != nullptr;      // (measurement, C30: the binds recorded, no draw)
+                    // (measurement, C30: XLION_REFL_HITS_ZERO_ARGS - the same calls, arguments of zero: the CPU's side of a draw without its GPU work)
+                    static const bool s_bHitsZero = xlionrender::Env("XLION_REFL_HITS_ZERO_ARGS") != nullptr;
+                    static xgpu::buffer s_ZeroDraws;
+                    if( s_bHitsZero && !s_ZeroDraws.m_Private ) { const std::vector<details::draw_indexed_indirect> Z(std::size_t(2 * hit_max_bins_v), details::draw_indexed_indirect{}); (void)m_Device.Create(s_ZeroDraws, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = sizeof(details::draw_indexed_indirect), .m_EntryCount = int(2 * hit_max_bins_v), .m_pData = const_cast<details::draw_indexed_indirect*>(Z.data()), .m_pName = "Probes: zero draw args" }); }
+                    static const bool s_bHitsDirect = xlionrender::Env("XLION_REFL_HITS_DIRECT0") != nullptr;      // (measurement, C30: a direct draw of no instances instead of the indirect one)
+                    if( s_bHitsDirect ) Cmd.DrawInstance(0, 6, 0, 0, 0);
+                    else if( !s_bHitsBindOnly ) Cmd.DrawIndexedIndirect(s_bHitsZero ? s_ZeroDraws : m_HitDraws, int(Pass * nBins + b), 1);
                 }
             }
         }
@@ -3434,6 +3453,15 @@ namespace xlionrender
                 if( pMat == nullptr ) return true;
                 const auto& St = pMat->m_State;
                 return !(St.m_Blend != material_state::blend::OFF || St.m_bDoubleSided || !St.m_bDepthWrite || !St.m_bDepthTest || St.m_bWireframe);
+            };
+            // A skinned masked or double-sided one: in the prepass through its cut, as a rigid one - the screen's buffers (the sun mask, contact shadows, AO, the GI's read)
+            // are built from the prepass, so without it they held what is behind it, and it shaded with them: Ren's hair with the characters behind printed on it
+            static const bool s_bMaskedPrepass = [] { const char* p = xlionrender::Env("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
+            const auto SkinCut = [&]( const material_slot* pMat )
+            {
+                if( pMat == nullptr || !s_bMaskedPrepass || pLight == nullptr ) return false;
+                const auto& St = pMat->m_State;
+                return (St.m_Blend == material_state::blend::MASKED || (St.m_Blend == material_state::blend::OFF && St.m_bDoubleSided)) && St.m_bDepthWrite && St.m_bDepthTest && !St.m_bWireframe;
             };
             // ... and a masked one too (the ivy): on the half-resolution read as if solid - its cutout is the full-resolution pass's, whose
             // upsample keeps the most alike of the 4 (never the per-pixel walk again: 5.9 of Bistro's 13.7 ms). XLION_GI_SCREEN_MASKED=0: off
@@ -4573,7 +4601,7 @@ namespace xlionrender
                     pInstance = &m_StaticGeomInstance;      // the constant material, read from the instance record
                 }
                 const std::uint32_t MaterialBase = pMat ? pMat->m_ParamBase : 0u;
-                const bool bSkinScreen = bSkin && bScreen && Opaque(pMat);      // (in the G-buffer: the screen buffer brings its GI - the gather's probe read - and its AO)
+                const bool bSkinScreen = bSkin && bScreen && (Opaque(pMat) || SkinCut(pMat));      // (in the G-buffer: the screen buffer brings its GI - the gather's probe read - and its AO)
                 xgpu::buffer* const SkinGI = bSkinScreen ? &View.m_GIScreenBuffer : bSkin && Probes ? Probes : &m_GIDummy;
                 const auto GIOf = RigidGI(iDraw, pMat);         // (rigid: a cluster's GI buffer and push constants)
                 const auto Bind = [&](xgpu::buffer* pGIBuffer)
@@ -4647,7 +4675,6 @@ namespace xlionrender
                 // A masked material (the ivy, the leaves): its own pipeline in its cutout mode (the shadow casters' flag, m_LightParams.w 1: the
                 // fragment stops after the cut) - its depth alpha-tested, as its shading's, so it too shades once a pixel (its per-pixel GI read
                 // ran for every leaf layer: 22 ms of Bistro's 32 ms scene pass). Its color is written over by its shading. XLION_PREPASS_MASKED=0: none
-                static const bool s_bMaskedPrepass = [] { const char* p = xlionrender::Env("XLION_PREPASS_MASKED"); return !(p && p[0] == '0'); }();
                 bool bCutLight = false;
                 const void* pPrepassBound = nullptr;
                 // (Mode 0: all of it; with the G-buffer prepass 1: all of it into the G-buffer - a masked one's cutout writes its normal and
@@ -4688,9 +4715,13 @@ namespace xlionrender
                         for( const auto& Sub : G.m_Submeshes )
                         {
                             auto* pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
-                            if( !Opaque(pMat) ) continue;
+                            // (Tomas: all masked materials work the same way - see SkinCut)
+                            xgpu::pipeline_instance* pSkinCut = SkinCut(pMat) ? getCutoutInstance(*pMat, geom_kind::SKIN) : nullptr;
+                            if( pSkinCut == nullptr && !Opaque(pMat) ) continue;
+                            if( pSkinCut && !bCutLight ) { auto& E = m_LightUBO.allocEntry<details::ubo_lighting>(); E = *pLight; E.m_LightParams.m_W = 1.0f; bCutLight = true; }
                             std::array<xgpu::buffer*, 12> Buffers{ G.m_pClusterData, G.m_pBones, &m_InstanceBuffer, &m_LightRing, &m_CellRing, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, G.m_pBoneMap ? G.m_pBoneMap : &m_GIDummy, &m_MaterialParams, &m_EntityParams, TailBuffer() };
-                            Cmd.setPipelineInstance(m_GPreSkinInstance, std::span{ Buffers });
+                            Cmd.setPipelineInstance(pSkinCut ? *pSkinCut : m_GPreSkinInstance, std::span{ Buffers });
+                            if( pSkinCut && pMat->m_bTable ) Cmd.setTextureTable(pMat->m_Table);
                             Cmd.setDynamicUBO(m_LightUBO, 1);
                             Cmd.setDynamicUBO(m_StaticGeomUBO, 0);
                             BindClusterStreams(Cmd, G);
@@ -4699,7 +4730,7 @@ namespace xlionrender
                             {
                                 if( SkipBase != ~0u && m_ClusterSkip[SkipBase + c] ) continue;
                                 const auto& C = G.m_Clusters[c];
-                                Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, 0u, G.m_PrevBones });
+                                Cmd.setPushConstants(details::push_skin_geom{ c, G.m_MaxInfluences, Slot, 0u, pSkinCut ? pMat->m_ParamBase : 0u, G.m_PrevBones });
                                 Cmd.Draw(static_cast<int>(C.m_nIndices), static_cast<int>(C.m_iIndex), static_cast<int>(C.m_iVertex));
                             }
                         }

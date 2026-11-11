@@ -127,6 +127,75 @@ int main()
         Renderer.DestroyMesh(Caster);
     }
 
+    // A masked skinned mesh goes through its material's cut in the depth prepass, as a rigid one (Ren's hair, 2026-11-11: the plain skinned prepass has no alpha
+    // test and culls back faces, so the depth it laid was wrong). Cut out everywhere and in front of a sphere, single and double sided: the image is the sphere alone
+    {
+        static constexpr std::uint32_t s_CutFrag[] = {
+            #include "xlionrender_test_cutout_frag.h"
+        };
+        xgpu::shader CutFrag;
+        CHECK(!Device.Create(CutFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xgpu::shader::setup::raw_data{ { reinterpret_cast<const std::int32_t*>(s_CutFrag), std::size(s_CutFrag) } } }), "cut out shader");
+        const auto Slots = std::array<xgpu::texture*, 1>{ nullptr };
+        const xmath::fmat4 Behind = xmath::fmat4::fromTranslation(xmath::fvec3{ -0.25f, -0.2f, 1.0f });      // (further along the view than the skinned sphere, overlapping it on the screen)
+        Scene.m_Sun = { .m_Direction = { -0.4f, -1.0f, 0.5f }, .m_Intensity = 3, .m_bCastShadows = false };      // (lit: the prepass's cut needs the lighting block)
+        const auto Compare = [&](bool bDoubleSided) -> int
+        {
+            xlionrender::material_id Cut;
+            CHECK(!Renderer.CreateMaterial(Cut, CutFrag, Slots, { .m_Blend = xlionrender::material_state::blend::MASKED, .m_bDoubleSided = bDoubleSided }), "cut out material");
+            std::vector<float> Alone, Masked;
+            Scene.m_Draws = { { .m_Mesh = RigidMesh, .m_L2W = Behind, .m_Materials = { Material } } };
+            for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "the sphere alone %d", f);
+            CHECK(ReadHDR(Device, View, Alone), "read the sphere alone");
+            Scene.m_Draws = { { .m_Mesh = RigidMesh, .m_L2W = Behind, .m_Materials = { Material } }, { .m_Mesh = SkinMesh, .m_Materials = { Cut } } };
+            for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "behind the cut out skin %d", f);
+            CHECK(ReadHDR(Device, View, Masked), "read behind the cut out skin");
+            // (the same with the skinned sphere solid: it must cover part of the one behind, or this proves nothing)
+            std::vector<float> Solid;
+            Scene.m_Draws[1].m_Materials = { Material };
+            for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "behind the solid skin %d", f);
+            CHECK(ReadHDR(Device, View, Solid), "read behind the solid skin");
+            int nHidden = 0;
+            for (std::size_t i = 0; i < Alone.size(); ++i) nHidden += std::abs(Alone[i] - Solid[i]) > 0.02f;
+            CHECK(nHidden > 100, "the skinned sphere does not overlap the one behind (%d values)", nHidden);
+            int nDiff = 0, nCoveredBehind = 0;
+            for (std::size_t i = 0; i < Alone.size(); ++i) { nDiff += std::abs(Alone[i] - Masked[i]) > 0.02f; nCoveredBehind += Alone[i] != 0.0f; }
+            std::printf("masked skin (%s sided): %d of %d values differ from the sphere alone (%d covered)\n", bDoubleSided ? "double" : "single", nDiff, int(Alone.size()), nCoveredBehind);
+            CHECK(nCoveredBehind > 100, "the sphere behind is not on the screen");
+            CHECK(nDiff <= int(Alone.size() / 2000), "a skinned mesh cut out everywhere hides or changes what is behind it: %d values", nDiff);
+            Scene.m_Draws.clear();
+            Renderer.DestroyMaterial(Cut);
+            return 0;
+        };
+        // A masked skinned mesh that draws hides what is behind it, whichever is drawn first and on either side (Ren's hair: the characters behind showed through)
+        const auto Occludes = [&](bool bDoubleSided, bool bSkinFirst) -> int
+        {
+            xlionrender::material_id Mask;
+            CHECK(!Renderer.CreateMaterial(Mask, Frag, Slots, { .m_Blend = xlionrender::material_state::blend::MASKED, .m_bDoubleSided = bDoubleSided }), "masked material");
+            const xlionrender::draw Far{ .m_Mesh = RigidMesh, .m_L2W = Behind, .m_Materials = { Material } };
+            std::vector<float> Want, Got;
+            const auto Render = [&](xlionrender::material_id M, std::vector<float>& Out) -> int
+            {
+                const xlionrender::draw Near{ .m_Mesh = SkinMesh, .m_Materials = { M } };
+                if( bSkinFirst ) Scene.m_Draws = { Near, Far }; else Scene.m_Draws = { Far, Near };
+                for (int f = 0; f < 3; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "frame %d", f);
+                CHECK(ReadHDR(Device, View, Out), "read");
+                return 0;
+            };
+            CHECK(Render(Material, Want) == 0, "solid");
+            CHECK(Render(Mask, Got) == 0, "masked");
+            int nDiff = 0;
+            for (std::size_t i = 0; i < Want.size(); ++i) nDiff += std::abs(Want[i] - Got[i]) > 0.02f;
+            std::printf("masked skin in front (%s sided, %s first): %d of %d values differ from solid\n", bDoubleSided ? "double" : "single", bSkinFirst ? "skin" : "rigid", nDiff, int(Want.size()));
+            CHECK(nDiff <= int(Want.size() / 500), "a masked skinned mesh does not hide what is behind it: %d values", nDiff);
+            Scene.m_Draws.clear();
+            Renderer.DestroyMaterial(Mask);
+            return 0;
+        };
+        for (const bool b2S : { false, true }) for (const bool bFirst : { false, true }) CHECK(Occludes(b2S, bFirst) == 0, "occlusion");
+        CHECK(Compare(false) == 0, "single sided");
+        CHECK(Compare(true) == 0, "double sided");
+    }
+
     Renderer.DestroyView(View);
     CHECK(g_nErrors == 0, "%d validation errors", g_nErrors);
     std::printf("PASS\n");
