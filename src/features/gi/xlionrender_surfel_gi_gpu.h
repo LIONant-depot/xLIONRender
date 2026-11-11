@@ -526,7 +526,9 @@ namespace xlionrender::gi
             if (D == m_SunMapData && m_SunMapB.m_Private) return;
             m_SunMapData = D;
             if (!Fit(m_SunMapB, int(sizeof(float)), D.size(), "GI: sun map")) return;
-            (void)m_SunMapB.MemoryMapFrameRegion(0, int(D.size()), [&](void* p) { std::memcpy(p, D.data(), sizeof(D)); });
+            // (MemoryMap, not a frame region: written only when it changes and read by every frame after - the frame in flight may still
+            // read the old matrix, and a region only waits for the frame that last wrote it, C30 2026-11-11)
+            (void)m_SunMapB.MemoryMap(0, int(D.size()), [&](void* p) { std::memcpy(p, D.data(), sizeof(D)); });
         }
         void        SetRelightLatencyFloor(bool b) noexcept { m_bRelightLatencyFloor = b; }     // (tests: the budget alone, no latency floor)
         // (tests: the relight's cost pinned, not measured - a small scene's measured latency was about one unit's cost some runs, the latency
