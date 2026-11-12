@@ -195,6 +195,15 @@ namespace xlionrender
         constexpr std::uint32_t s_GIPublishComp[] = {
             #include "xlionrender_gi_publish_comp.h"
         };
+        constexpr std::uint32_t s_GIBrickComp[] = {
+            #include "xlionrender_gi_brick_comp.h"
+        };
+        constexpr std::uint32_t s_GIBrickCheckComp[] = {
+            #include "xlionrender_gi_brick_check_comp.h"
+        };
+        constexpr std::uint32_t s_GIGatherFragBricks[] = {
+            #include "xlionrender_gi_gather_frag_bricks.h"
+        };
         constexpr std::uint32_t s_GIGatherFragHeat[] = {
             #include "xlionrender_gi_gather_frag_heat.h"
         };
@@ -756,10 +765,18 @@ namespace xlionrender
                 }
                 {   // the GI gather from it (xlionrender_gi_gather_common.glsl): full-screen at the half-size depth, the G-buffer in the material
                     // slots 1-3; set 1: the instances, a GI buffer (5) and the light rings (6, 7), the half-size buffer (11), last frame's (13), the table (19)
+                    // (XLION_GI_BRICKS, B0/B1 - xlionrender_gi_brick.glsl: the store's first levels as toroidal 3D textures, gi_brick_dim_v^3 a level: 6 faces
+                    // B10G11R11 + 2 validities RGBA8; the gather's variant reads them through 16 more samplers, wrapping; not with XLION_HEAT)
+                    static const bool s_bBricks = xlionrender::Env("XLION_GI_BRICKS") != nullptr && xlionrender::Env("XLION_HEAT") == nullptr;
+                    if( s_bBricks ) for( int L = 0; L < gi_brick_levels_v && !m_bGIBricksFailed; ++L ) for( int i = 0; i < 8 && !m_bGIBricksFailed; ++i )
+                        m_bGIBricksFailed = Device.Create(m_GIBricks[L][i], { .m_Format = i < 6 ? xgpu::texture::format::B10G11R11_UFLOAT : xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = gi_brick_dim_v, .m_Height = gi_brick_dim_v
+                                                                   , .m_Depth = gi_brick_dim_v, .m_isGamma = false, .m_bStorage = true, .m_pName = i < 6 ? "GI: brick light" : "GI: brick validity" }) != nullptr;
+                    if( s_bBricks && m_bGIBricksFailed ) { std::printf("GIBRICKS off: the textures could not be made (B10G11R11 storage?)\n"); std::fflush(stdout); }
+                    m_bGIBricksGather = s_bBricks && !m_bGIBricksFailed;
                     xgpu::shader GatherVert, ClassifyFrag, GatherFrag;
                     if( auto Err = Device.Create(GatherVert,   { .m_Type = xgpu::shader::type::bit::VERTEX,   .m_Sharer = SPIRV(s_GIGatherVert) }); Err ) return Err;
                     if( auto Err = Device.Create(ClassifyFrag, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_GIClassifyFrag) }); Err ) return Err;
-                    if( auto Err = Device.Create(GatherFrag,   { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xlionrender::Env("XLION_HEAT") ? SPIRV(s_GIGatherFragHeat) : SPIRV(s_GIGatherFrag) }); Err ) return Err;
+                    if( auto Err = Device.Create(GatherFrag,   { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = xlionrender::Env("XLION_HEAT") ? SPIRV(s_GIGatherFragHeat) : m_bGIBricksGather ? SPIRV(s_GIGatherFragBricks) : SPIRV(s_GIGatherFrag) }); Err ) return Err;
                     using ub = xgpu::pipeline::uniform_binds;
                     auto GatherBinds = std::array
                     { ub{ .m_BindIndex = 1,  .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }
@@ -799,6 +816,8 @@ namespace xlionrender
                         TC.m_DepthStencil.m_DepthCompare = xgpu::pipeline::depth_stencil::depth_compare::ALWAYS;
                         if( auto Err = Device.Create(m_TileClassifyPipeline, TC); Err ) return Err;
                     }
+                    std::vector<xgpu::pipeline::sampler> GatherSamplers(Samplers.begin(), Samplers.end());
+                    if( m_bGIBricksGather ) { GatherSamplers.resize(std::size_t(lit_samplers_v + 8 * gi_brick_levels_v), xgpu::pipeline::sampler{ .m_bDisableAnisotropy = true }); Gather.m_Samplers = GatherSamplers; }
                     if( auto Err = Device.Create(m_GIGatherPipeline, Gather); Err ) return Err;
                 }
             }
@@ -917,6 +936,10 @@ namespace xlionrender
             if( auto Err = Device.Create(m_GIDenoiseCompute, { .m_pShader = &m_GIDenoiseShader, .m_nBuffers = 4, .m_PushConstantsSize = 32, .m_pName = "instance: m_GIDenoiseCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_GIPublishShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIPublishComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_GIPublishCompute, { .m_pShader = &m_GIPublishShader, .m_nBuffers = 3, .m_PushConstantsSize = 16, .m_pName = "instance: m_GIPublishCompute" }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIBrickShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIBrickComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIBrickCompute, { .m_pShader = &m_GIBrickShader, .m_nBuffers = 2, .m_nImages = 8, .m_PushConstantsSize = 16, .m_pName = "instance: m_GIBrickCompute" }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIBrickCheckShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIBrickCheckComp) }); Err ) return Err;
+            if( auto Err = Device.Create(m_GIBrickCheckCompute, { .m_pShader = &m_GIBrickCheckShader, .m_nBuffers = 4, .m_nTextures = 8, .m_PushConstantsSize = 32, .m_bLinear = true, .m_bRepeat = true, .m_pName = "instance: m_GIBrickCheckCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_HeatShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_HeatComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_HeatCompute, { .m_pShader = &m_HeatShader, .m_nBuffers = 1, .m_nImages = 1, .m_PushConstantsSize = 16, .m_pName = "instance: m_HeatCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_LightTilesShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_LightTilesComp) }); Err ) return Err;
@@ -1981,7 +2004,9 @@ namespace xlionrender
             if( auto Err = m_Device.Create(View.m_GIClassifyInstance, { .m_PipeLine = m_GIClassifyPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
             if( m_TileClassifyPipeline.m_Private )
                 if( auto Err = m_Device.Create(View.m_TileClassifyInstance, { .m_PipeLine = m_TileClassifyPipeline, .m_SamplersBindings = Bindings }); Err ) return Err;
-            if( auto Err = m_Device.Create(View.m_GIGatherInstance,   { .m_PipeLine = m_GIGatherPipeline,   .m_SamplersBindings = Bindings }); Err ) return Err;
+            auto GatherBindings = Bindings;
+            if( m_bGIBricksGather ) for( auto& Level : m_GIBricks ) for( auto& T : Level ) GatherBindings.emplace_back(T);
+            if( auto Err = m_Device.Create(View.m_GIGatherInstance,   { .m_PipeLine = m_GIGatherPipeline,   .m_SamplersBindings = GatherBindings }); Err ) return Err;
             if( auto Err = m_Device.Create(View.m_GIGatherTable, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = ring_frames_v * gather_table_uints_v, .m_pName = "GI: gather table" }); Err ) return Err;
         }
         return createCullTargets(View);     // (the scene pass then loads the depth: m_ScenePassLoad)

@@ -502,6 +502,19 @@ namespace xlionrender
         xgpu::buffer                m_VoxPub, m_VoxPubStats, m_VoxPubFrameB;      // (FrameB: the frame a ring slot, copied into the buffer's [3] for the gather)
         xgpu::timestamps            m_VoxPubTimes;
         double                      m_VoxPubMs = 0; int m_VoxPubN = 0; std::uint32_t m_VoxPubFrame = 0;
+        // The GI bricks (XLION_GI_BRICKS, B0 - xlionrender_gi_brick.glsl): the store's first levels published as toroidal 3D textures, a level 6 faces
+        // (B10G11R11) and 2 validities (RGBA8) of gi_brick_dim_v^3 (the store's window, clip_dim_v); the publisher, the self-check against the
+        // store's read, its counts (8 uints a ring slot) and the publisher's GPU time
+        static constexpr int        gi_brick_levels_v = 2, gi_brick_dim_v = 64;
+        xgpu::shader                m_GIBrickShader, m_GIBrickCheckShader;
+        xgpu::compute               m_GIBrickCompute, m_GIBrickCheckCompute;
+        std::array<std::array<xgpu::texture, 8>, gi_brick_levels_v> m_GIBricks;
+        xgpu::buffer                m_GIBrickStats;
+        xgpu::timestamps            m_GIBrickTimes;
+        bool                        m_bGIBricksFailed = false, m_bGIBricksFull = true, m_bGIBricksGather = false;
+        int                         m_GIBrickSlab = 0, m_GIBrickN = 0;
+        double                      m_GIBrickMs = 0;
+        std::array<std::uint64_t, 2 * 8> m_GIBrickSum{};
         xgpu::texture               m_ContactTex;                   // R32_SFLOAT, sun_mask_w_v x sun_mask_h_v
         xgpu::timestamps            m_ContactTimes;
         bool                        m_bContactReady = false;

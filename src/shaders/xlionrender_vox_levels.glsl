@@ -15,7 +15,11 @@ uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = ui
 uint VoxEntryOf(in const uint h) { const uint s = h % vox_slots_v; return 3u * s + (s & 1u); }
 uint VoxX2Of(in const uint e) { return (e % 3u) == 0u ? e + 2u : e - 1u; }
 float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
+#ifndef VOX_LEAN_V
 const bool vox_lean_v = true;
+#else
+#define vox_lean_v VOX_LEAN_V      // (an includer's switch: the GI bricks' check, XLION_GI_BRICKS's flags)
+#endif
 // (A15, the lean moments the store keeps - xlionrender_gi_ref.glsl VoxStore: the light's slope across the normals that fed a face, by component, at this reader's normal; a ratio, clamped)
 float VoxLeanScale(in const vec4 v, in const uint Wv, in const uvec4 dU, in const vec3 n, in const int a)
 {

@@ -4031,6 +4031,61 @@ namespace xlionrender
                         Window.CopyBuffer(m_VoxPubFrameB, m_VoxPub, std::span{ &Fc, 1 });
                     }
                 }
+                // The GI bricks (XLION_GI_BRICKS=1 [<planes a frame> [<flags: 1 no lean>]], B0 - xlionrender_gi_brick.glsl): the store's first gi_brick_levels_v levels
+                // published into toroidal 3D textures, a slab of planes a frame (8: all in 8 frames; the first frame all), then checked against
+                // the store's read at 4096 surface points a level (GIBRICKS lines every 120 frames: points, none, mean error, over 10 %, bias)
+                static const std::array<int, 3> s_Bricks = [] { std::array<int, 3> A{ 0, 8, 0 }; if( const char* p = xlionrender::Env("XLION_GI_BRICKS") ) { A[0] = 1; (void)xlionrender::Scan(p, "%d %d %d", &A[0], &A[1], &A[2]); } A[1] = std::clamp(A[1] / 4 * 4, 4, gi_brick_dim_v); return A; }();
+                if( s_Bricks[0] != 0 && !m_bGIBricksFailed && m_GIBricks[0][0].m_Private && m_GatherTable.size() > 28 && m_GatherTable[20] == 3u && m_pGatherClip && m_pGatherRefS && bMain )
+                {
+                    if( !m_GIBrickStats.m_Private )      // (the textures: made with the instance - the gather's variant binds them)
+                    {
+                        std::vector<std::uint32_t> Z(std::size_t(ring_frames_v) * gi_brick_levels_v * 8, 0u);
+                        m_bGIBricksFailed = m_Device.Create(m_GIBrickStats, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4
+                                                                            , .m_EntryCount = int(Z.size()), .m_pData = Z.data(), .m_pName = "GI: brick check counts" }) != nullptr
+                                         || m_Device.Create(m_GIBrickTimes, { .m_Count = 2 }) != nullptr;
+                        std::printf("GIBRICKS on: %d levels of %d^3, %.1f MB, %d planes a frame, the gather reads them: %s\n", gi_brick_levels_v, gi_brick_dim_v
+                                   , double(gi_brick_levels_v) * 8.0 * 4.0 * gi_brick_dim_v * gi_brick_dim_v * gi_brick_dim_v / (1024.0 * 1024.0), s_Bricks[1], m_bGIBricksGather ? "yes" : "no"); std::fflush(stdout);
+                    }
+                    std::uint32_t* pSt = nullptr;
+                    if( !m_bGIBricksFailed && !m_GIBrickStats.getMappedVirtualMemory(pSt) && pSt )
+                    {
+                        // (this slot's counts were written ring_frames_v frames ago: done)
+                        const int Slot = int(m_Device.getFrameIndex() % ring_frames_v);
+                        for( int k = 0; k < gi_brick_levels_v * 8; ++k ) { m_GIBrickSum[std::size_t(k)] += pSt[Slot * gi_brick_levels_v * 8 + k]; pSt[Slot * gi_brick_levels_v * 8 + k] = 0u; }
+                        if( std::vector<std::uint64_t> Ns; m_GIBrickTimes.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] ) m_GIBrickMs += double(Ns[1] - Ns[0]) * 1e-6;
+                        if( ++m_GIBrickN >= 120 )
+                        {
+                            for( int L = 0; L < gi_brick_levels_v; ++L )
+                            {
+                                const auto* S = m_GIBrickSum.data() + L * 8;
+                                const double n = double(std::max<std::uint64_t>(S[0], 1));
+                                std::printf("GIBRICKS L%d points %llu: bricks none %.2f %%, mean error %.2f %%, over 10 %% %.2f %%, bias %+.2f %%, outside the window %llu\n", L, (unsigned long long)S[0], 100.0 * double(S[1]) / n
+                                           , 100.0 * double(S[2]) / 1000.0 / n, 100.0 * double(S[3]) / n, 100.0 * (double(S[5]) - double(S[4])) / double(std::max<std::uint64_t>(S[4], 1)), (unsigned long long)S[6]);
+                            }
+                            std::printf("GIBRICKS publish %.3f ms a frame (%d planes a level)\n", m_GIBrickMs / m_GIBrickN, s_Bricks[1]); std::fflush(stdout);
+                            m_GIBrickSum = {}; m_GIBrickMs = 0; m_GIBrickN = 0;
+                        }
+                        const int Planes = m_bGIBricksFull ? gi_brick_dim_v : s_Bricks[1];
+                        auto PB = std::array<xgpu::buffer*, 2>{ m_pGatherClip, &View.m_GIGatherTable };
+                        Window.WriteTimestamp(m_GIBrickTimes, 0);
+                        for( int L = 0; L < gi_brick_levels_v; ++L )
+                        {
+                            const std::array<const xgpu::texture*, 8> Img{ &m_GIBricks[L][0], &m_GIBricks[L][1], &m_GIBricks[L][2], &m_GIBricks[L][3], &m_GIBricks[L][4], &m_GIBricks[L][5], &m_GIBricks[L][6], &m_GIBricks[L][7] };
+                            const std::int32_t BPush[4] = { std::int32_t(m_GatherTableBase), L, m_bGIBricksFull ? 0 : m_GIBrickSlab * s_Bricks[1], s_Bricks[2] };
+                            Window.Dispatch(m_GIBrickCompute, PB, std::span<const xgpu::texture* const>{}, Img, BPush, sizeof(BPush), gi_brick_dim_v / 4, gi_brick_dim_v / 4, Planes / 4);
+                        }
+                        Window.WriteTimestamp(m_GIBrickTimes, 1);
+                        if( !m_bGIBricksFull ) m_GIBrickSlab = (m_GIBrickSlab + 1) % ((gi_brick_dim_v + s_Bricks[1] - 1) / s_Bricks[1]);
+                        m_bGIBricksFull = false;
+                        auto CB = std::array<xgpu::buffer*, 4>{ m_pGatherClip, &View.m_GIGatherTable, m_pGatherRefS, &m_GIBrickStats };
+                        for( int L = 0; L < gi_brick_levels_v; ++L )
+                        {
+                            const std::array<const xgpu::texture*, 8> Tex{ &m_GIBricks[L][0], &m_GIBricks[L][1], &m_GIBricks[L][2], &m_GIBricks[L][3], &m_GIBricks[L][4], &m_GIBricks[L][5], &m_GIBricks[L][6], &m_GIBricks[L][7] };
+                            const std::uint32_t CPush[8] = { m_GatherTableBase, std::uint32_t(L), std::uint32_t(View.m_GIScreenWidth * View.m_GIScreenHeight), std::uint32_t(m_Device.getFrameIndex()) * 2654435761u, std::uint32_t(Slot * gi_brick_levels_v + L), std::uint32_t(s_Bricks[2]), 0, 0 };
+                            Window.Dispatch(m_GIBrickCheckCompute, CB, Tex, CPush, sizeof(CPush), 4096 / 64);
+                        }
+                    }
+                }
                 // XLION_HEAT (measurement, 2026-11-08): the gather's clock a pixel, shown as colours over a grey image (xlionrender_heat_comp.glsl), a HEAT
                 // line with its mean every 120 frames; its buffers made the first time (the gather built timed: instance.cpp)
                 static const bool s_bHeat = xlionrender::Env("XLION_HEAT") != nullptr;

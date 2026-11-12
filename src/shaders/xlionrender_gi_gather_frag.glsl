@@ -110,6 +110,75 @@ vec4 VoxReadPublished(in const vec3 Pcam, in const vec3 n, out bool bMiss)
     return SumW > 0.0 ? vec4(Sum / SumW, 1.0) : vec4(0.0);
 }
 #endif
+#ifdef XLION_GI_BRICKS
+// B1 (XLION_GI_BRICKS, xlionrender_gi_brick.glsl): the store's first two levels read from their published 3D textures (bindings 13-28: level
+// 0's 8 volumes, then level 1's), 3 filtered samples a level instead of 8 hashed corners a face; the coarser levels from the store
+layout(binding = 13) uniform sampler3D GIBrick0;
+layout(binding = 14) uniform sampler3D GIBrick1;
+layout(binding = 15) uniform sampler3D GIBrick2;
+layout(binding = 16) uniform sampler3D GIBrick3;
+layout(binding = 17) uniform sampler3D GIBrick4;
+layout(binding = 18) uniform sampler3D GIBrick5;
+layout(binding = 19) uniform sampler3D GIBrick6;
+layout(binding = 20) uniform sampler3D GIBrick7;
+layout(binding = 21) uniform sampler3D GIBrick8;
+layout(binding = 22) uniform sampler3D GIBrick9;
+layout(binding = 23) uniform sampler3D GIBrick10;
+layout(binding = 24) uniform sampler3D GIBrick11;
+layout(binding = 25) uniform sampler3D GIBrick12;
+layout(binding = 26) uniform sampler3D GIBrick13;
+layout(binding = 27) uniform sampler3D GIBrick14;
+layout(binding = 28) uniform sampler3D GIBrick15;
+vec4 BrickTex(in const int L, in const uint i, in const vec3 u)
+{
+    switch (uint(L) * 8u + i)
+    {
+    case 0u: return textureLod(GIBrick0, u, 0.0);
+    case 1u: return textureLod(GIBrick1, u, 0.0);
+    case 2u: return textureLod(GIBrick2, u, 0.0);
+    case 3u: return textureLod(GIBrick3, u, 0.0);
+    case 4u: return textureLod(GIBrick4, u, 0.0);
+    case 5u: return textureLod(GIBrick5, u, 0.0);
+    case 6u: return textureLod(GIBrick6, u, 0.0);
+    case 7u: return textureLod(GIBrick7, u, 0.0);
+    case 8u: return textureLod(GIBrick8, u, 0.0);
+    case 9u: return textureLod(GIBrick9, u, 0.0);
+    case 10u: return textureLod(GIBrick10, u, 0.0);
+    case 11u: return textureLod(GIBrick11, u, 0.0);
+    case 12u: return textureLod(GIBrick12, u, 0.0);
+    case 13u: return textureLod(GIBrick13, u, 0.0);
+    case 14u: return textureLod(GIBrick14, u, 0.0);
+    default: return textureLod(GIBrick15, u, 0.0);
+    }
+}
+#include "xlionrender_gi_brick.glsl"
+const int gi_brick_levels_v = 2;        // (instance::gi_brick_levels_v)
+// VoxReadLevels with the bricks' levels: the same window test, the same blend by trust - a brick level's trust its filtered validity
+// (ponytail: trusted at 32 samples, the store's read at 256 - young records weigh more than there; a count volume if the grade asks)
+vec4 VoxReadBricks(in const vec3 Pcam, in const vec3 n)
+{
+    const vec3 EyeL = vec3(TF(22u), TF(23u), TF(24u)), Pw = Pcam + vec3(TF(25u), TF(26u), TF(27u));
+    vec3 Sum = vec3(0.0), Last = vec3(0.0); float Left = 1.0; bool bAny = false;
+    for (int L = 0; L < clip_levels_v && Left > 1e-3; ++L)
+    {
+        vec4 R;
+        if (L < gi_brick_levels_v)
+        {
+            const float Cell = TF(21u) * float(1 << L);
+            const vec3  g    = Pw / Cell - vec3(ivec3(floor(EyeL / Cell)) - ivec3(clip_dim_v / 2)) - 0.5;
+            if (any(lessThan(g, vec3(0.0))) || any(greaterThanEqual(g, vec3(clip_dim_v - 1)))) continue;
+            R = BrickRead(L, Pw, n);
+            const vec3 Inside = min(g, vec3(clip_dim_v - 1) - g);
+            g_ClipTrust = clamp(g_BrickV, 0.0, 1.0) * clamp(min(Inside.x, min(Inside.y, Inside.z)) / 4.0, 0.0, 1.0);
+        }
+        else R = ClipLevel(L, Pw, n, EyeL, TF(21u));
+        if (R.w <= 0.0) continue;
+        Sum += R.xyz * (Left * g_ClipTrust); Left *= 1.0 - g_ClipTrust;
+        Last = R.xyz; bAny = true;
+    }
+    return bAny ? vec4(Sum + Last * Left, 1.0) : vec4(0.0);
+}
+#endif
 // The light around the mirror direction, from the rays this place's own face sent that way (xlionrender_gi_ref_comp.glsl VoxStoreDir): the three axes R leans on, by their squares, as a face read.
 // Finest level that knows, the rest from its parent; what none vouches for: the place's irradiance (Fallback; EnvLighting then gives about its older ratio), so a new cell fades in
 vec4 VoxBin(in const uvec4 q) { return vec4(vec3(q.xyz) / 256.0, float(q.w) / 16.0); }     // (a direction bin's fixed point sum: xlionrender_gi_ref.glsl VoxStoreDir)
@@ -334,7 +403,11 @@ void main()
             bool bPubMiss = true;
             if (GITable[push.TableBase + 37u] == 2u) { E = vec4(0.5, 0.5, 0.5, 1.0); bPubMiss = false; }      // (measurement: no level read at all)
             else if (GITable[push.TableBase + 37u] != 0u) { E = VoxReadPublished(S.P, N, bPubMiss); g_ClipTrust = 1.0; }
+#ifdef XLION_GI_BRICKS
+            if (bPubMiss) E = VoxReadBricks(S.P, N);
+#else
             if (bPubMiss) E = VoxReadLevels(S.P, N);
+#endif
             if (GITable[push.TableBase + 37u] != 0u)
             {   // (statistics: pixels read published / fallen back)
                 const uvec2 Pc = subgroupAdd(uvec2(bPubMiss ? 0u : 1u, bPubMiss ? 1u : 0u));
