@@ -33,7 +33,8 @@ float VoxLean(in const uint e, in const vec4 v, in const vec3 n, in const int a)
     const vec2 EL = unpackHalf2x16(dU.x & ~1u), El = unpackHalf2x16(dU.y);
     if (Lm <= 1e-4 || v.w < 8.0) return 1.0;
     const float Var = max(0.5 * (El2 - dot(El, El)), 0.01);
-    return clamp(1.0 + dot((EL - Lm * El) / Var, vec2(n[u], n[w]) - El) / Lm, 0.25, 4.0);
+    vec2 Dn = vec2(n[u], n[w]) - El; const float Lim = 2.0 * sqrt(Var); if (dot(Dn, Dn) > Lim * Lim) Dn *= Lim / length(Dn);      // (as VoxLeanScale: no extrapolation, trusted with samples, 2x at most)
+    return mix(1.0, clamp(1.0 + dot((EL - Lm * El) / Var, Dn) / Lm, 0.5, 2.0), clamp((v.w - 8.0) / 248.0, 0.0, 1.0));
 }
 vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const float Cell0)
 {

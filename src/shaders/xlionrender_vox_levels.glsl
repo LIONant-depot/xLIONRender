@@ -30,7 +30,10 @@ float VoxLeanScale(in const vec4 v, in const uint Wv, in const uvec4 dU, in cons
     if (Lm <= 1e-4 || v.w < 8.0) return 1.0;
     const float Var = max(0.5 * (El2 - dot(El, El)), 0.01);      // (the leans' spread, one number for both: the spare words hold six)
     const vec2  S = (EL - Lm * El) / Var;
-    return clamp(1.0 + dot(S, vec2(n[u], n[w]) - El) / Lm, 0.25, 4.0);
+    // (2026-11-12, the flashing at thin edges and on young faces - 95 % of it was this lean: no extrapolation past the normals that fed the face (2 sigma of
+    // their spread), trusted as its samples build (8 -> 256), at most 2x either way; was 0.25-4x from 8 samples on)
+    vec2 Dn = vec2(n[u], n[w]) - El; const float Lim = 2.0 * sqrt(Var); if (dot(Dn, Dn) > Lim * Lim) Dn *= Lim / length(Dn);
+    return mix(1.0, clamp(1.0 + dot(S, Dn) / Lm, 0.5, 2.0), clamp((v.w - 8.0) / 248.0, 0.0, 1.0));
 }
 bool  g_ClipFloat = false;     // (experiment X1c: the faces hold floats)
 float g_ClipTrust = 0.0;       // (X1c: how much the last ClipLevel can be believed: its samples, how far from its edge)

@@ -19,6 +19,9 @@ layout(set = 1, binding = 0) uniform sampler2D SceneHDR;      // (XLION_VOX_SEEN
 #endif
 layout(std430, set = 0, binding = 6)          buffer accum_u_b { uvec4 GIRefAccumU[]; };    // (the same memory: a direction bin's fixed point sums, added atomically)
 layout(push_constant) uniform push_t { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push;
+#ifndef VOX_PICKS
+#define VOX_PICKS 4       // (the pixels a ray chooses its least-known face from; 16 tried 2026-11-12: no fewer flashes at thin edges, 10 s resolve 34.5 -> 41.1 % off)
+#endif
 #define XLION_GI_ALPHA_RAYS      // (the masked triangles' opacity: foliage_gi_occlusion_plan_2026-11-07.md)
 #include "xlionrender_gi_pass_common.glsl"
 
@@ -136,6 +139,7 @@ void VoxBrickMark(in const int L, in const ivec3 q, in const uint Face)
 // (measurement, XLION_VOX_DRIFT - gi_settled_stop_design_2026-11-12.md: the store-wide signed drift, running totals in 1/4096 fixed point (1/16 truncated the many small negative deviations: a false +.115) the CPU
 // reads as differences: the samples' luminance above and below their face's short mean, the short means, the stores. Noise cancels, propagation adds up)
 const uint vox_drift_mark_v = 0x44524654u;
+const uint vox_glide_mark_v = 0x474C4944u;     // (XLION_VOX_GLIDE: ConnU[1])
 void VoxDriftAdd(in const float Ds, in const float Lm)
 {
     const float d = clamp(Ds, -64.0, 64.0);
@@ -195,10 +199,17 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
         const float Lk = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w, Lm = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
         const float Noise = sqrt(max(m.w, 0.0) * vox_short_v / (2.0 - vox_short_v));       // (the short mean's own standard deviation)
         if (abs(Lm - Lk) > vox_sigmas_v * Noise && abs(Lm - Lk) > 0.1 * Lk)
+        {
+#ifdef GI_VOX_ONLY
+            if (ConnU[1] == vox_glide_mark_v) v *= max(0.5, 32.0 / v.w);                   // (XLION_VOX_GLIDE: its history halved, its mean kept - new samples move it faster, it glides: no jump to the short mean's noise)
+            else
+#endif
             v = vec4(m.rgb * 32.0, 32.0);                                                  // (it changed: the short mean is all it knows)
+        }
     }
     v += vec4(Sample, 1.0);
-    if (v.w >= float(abs(Push.m_Epoch))) v *= 0.5 * float(abs(Push.m_Epoch)) / v.w;       // (ponytail: another lane's write to this face in this frame can be lost: samples, not light)
+    const float Keep = float(abs(Push.m_Epoch) & 0xFFFF);      // (the high bits: XLION_VOX_CAP)
+    if (v.w >= Keep) v *= 0.5 * Keep / v.w;       // (ponytail: another lane's write to this face in this frame can be lost: samples, not light)
     const float Al = max(1.0 / v.w, 1.0 / 256.0);
     Pv.y += (dot(Ln, Ln) - Pv.y) * Al; PL += (clamp(Ls, 0.0, 60000.0) * Ln - PL) * Al; Pl += (Ln - Pl) * Al;
     // (C31: a taken slot publishes payload first, then its tag - a reader that sees the tag sees a whole record)
@@ -435,7 +446,7 @@ void VoxMain()
         const uint Run = RHash(gl_WorkGroupID.x * 2654435761u + uint(Push.m_Frame) * 97u);      // (a group of 64 shares a direction: more shared lost directions: 21.7 against 17.9 at roughness 0.3)
         g_CohU = float(Run & 0xFFFFu) / 65536.0; g_CohV = float(Run >> 16u) / 65536.0;
     }
-    for (int k = 0; k < (bCoh ? 1 : 4); ++k)
+    for (int k = 0; k < (bCoh ? 1 : VOX_PICKS); ++k)
     {
         const uint  px = bCoh ? (RHash(uint(Push.m_Frame)) + gl_GlobalInvocationID.x * 7u) % uint(Push.m_nPixels) : uint(Rnd() * float(Push.m_nPixels)) % uint(Push.m_nPixels);
         const vec4  Ps = GIRefSample[2u * px];
@@ -449,6 +460,10 @@ void VoxMain()
         if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; }
     }
     if (Least >= 1e30) return;
+    // (XLION_VOX_CAP, Tomas 2026-11-12: a face gets rays only until it holds this many samples - its window full, the rays go elsewhere or not at all;
+    // a change restarts it (VoxStore), the relight keeps the bounces moving without rays. m_Epoch's bits 16-30, 0: no cap)
+    const int VoxCap = (abs(Push.m_Epoch) >> 16) & 0x7FFF;
+    if (VoxCap > 0 && Least >= float(VoxCap)) return;
     const float BucketAO = uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
     vec3 Ph, Nh; bool bHit;
     // (one copy of VoxRay: the shader's compiled size goes with its copies. The second ray: the surface the first hit, seen yet or not: a sample of that surface's own

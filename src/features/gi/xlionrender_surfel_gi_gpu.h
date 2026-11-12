@@ -990,16 +990,17 @@ namespace xlionrender::gi
             // (measurement, XLION_VOX_DRIFT=<frames>: the connections' token is host-visible, marked; the store-wide signed drift printed every that many frames,
             // VOXDRIFT: R = (above - below) / short means, its noise band B = mean |d| / sqrt(stores) / mean short mean - gi_settled_stop_design_2026-11-12.md)
             static const int s_Drift = [] { const char* p = xlionrender::Env("XLION_VOX_DRIFT"); return p ? std::atoi(p) : 0; }();
-            if (s_Drift > 0 && s_Relight == 0 && s_Bricks == 0)
+            static const bool s_bGlide = xlionrender::Env("XLION_VOX_GLIDE") != nullptr;      // (a face whose light moved halves its history instead of restarting from its short mean: xlionrender_gi_ref.glsl VoxStore)
+            if ((s_Drift > 0 || s_bGlide) && s_Relight == 0 && s_Bricks == 0)
             {
                 if (!m_ConnB.m_Private)
                 {
-                    std::array<std::uint32_t, 32> W{}; W[2] = 0x44524654u;
+                    std::array<std::uint32_t, 32> W{}; W[2] = s_Drift > 0 ? 0x44524654u : 0u; W[1] = s_bGlide ? 0x474C4944u : 0u;
                     if (m_pDevice->Create(m_ConnB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4
                                                    , .m_EntryCount = int(W.size()), .m_pData = W.data(), .m_pName = "GI: vox drift counters" })) return false;
                 }
                 std::uint32_t* p = nullptr;
-                if ((Frame % std::uint64_t(s_Drift)) == 0 && !m_ConnB.getMappedVirtualMemory(p) && p)
+                if (s_Drift > 0 && (Frame % std::uint64_t(s_Drift)) == 0 &&!m_ConnB.getMappedVirtualMemory(p) && p)
                 {
                     const std::array<std::uint32_t, 4> Now{ p[4], p[5], p[6], p[7] };
                     const double Pos = double(Now[0] - m_DriftLast[0]) / 4096.0, Neg = double(Now[1] - m_DriftLast[1]) / 4096.0, Lm = double(Now[2] - m_DriftLast[2]) / 4096.0, n = double(Now[3] - m_DriftLast[3]);
@@ -1028,6 +1029,9 @@ namespace xlionrender::gi
                 return true;
             }
             static const bool s_bHits = xlionrender::Env("XLION_GI_VOX_HITS") != nullptr;     // (the rays' hits feed the voxels too)
+            // (XLION_VOX_CAP=<samples>, Tomas 2026-11-12: a face whose window holds that many gets no more rays - xlionrender_gi_ref.glsl VoxCap; m_Epoch's bits 16-30)
+            static const int s_Cap = [] { const char* p = xlionrender::Env("XLION_VOX_CAP"); return p ? std::clamp(std::atoi(p), 0, 0x7FFF) : 0; }();
+            Push.m_Epoch = (Push.m_Epoch & 0xFFFF) | (s_Cap << 16);
             if (s_bHits) Push.m_Epoch = -Push.m_Epoch;
             static const bool s_bKept = xlionrender::Env("XLION_VOX_NO_KEPT") == nullptr;     // (a hit's direct light from what its surface was found to have: xlionrender_gi_ref_comp.glsl VoxDirectKept)
             if (s_bKept) Push.m_Bounces = -3;
