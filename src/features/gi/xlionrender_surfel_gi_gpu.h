@@ -1029,9 +1029,10 @@ namespace xlionrender::gi
                 return true;
             }
             static const bool s_bHits = xlionrender::Env("XLION_GI_VOX_HITS") != nullptr;     // (the rays' hits feed the voxels too)
-            // (XLION_VOX_CAP=<samples>, Tomas 2026-11-12: a face whose window holds that many gets no more rays - xlionrender_gi_ref.glsl VoxCap; m_Epoch's bits 16-30)
-            static const int s_Cap = [] { const char* p = xlionrender::Env("XLION_VOX_CAP"); return p ? std::clamp(std::atoi(p), 0, 0x7FFF) : 0; }();
-            Push.m_Epoch = (Push.m_Epoch & 0xFFFF) | (s_Cap << 16);
+            // (XLION_VOX_INCON=<scale>, Tomas 2026-11-12, WickedEngine's rays by inconsistency: a known face takes a ray with probability its inconsistency x scale -
+            // xlionrender_gi_ref.glsl VoxIncon; x 100 in m_Epoch's bits 16-30; unset: the least-known pick)
+            static const int s_Incon = [] { const char* p = xlionrender::Env("XLION_VOX_INCON"); return p ? std::clamp(int(std::atof(p) * 100.0 + 0.5), 0, 0x7FFF) : 0; }();
+            Push.m_Epoch = (Push.m_Epoch & 0xFFFF) | (s_Incon << 16);
             if (s_bHits) Push.m_Epoch = -Push.m_Epoch;
             static const bool s_bKept = xlionrender::Env("XLION_VOX_NO_KEPT") == nullptr;     // (a hit's direct light from what its surface was found to have: xlionrender_gi_ref_comp.glsl VoxDirectKept)
             if (s_bKept) Push.m_Bounces = -3;

@@ -149,8 +149,9 @@ void VoxDriftAdd(in const float Ds, in const float Lm)
 }
 #endif
 const uint vox_busy_v = 0xFFFFFFFFu;      // (a face slot's tag while its new owner writes it: a NaN, equal to no tag)
-void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
+void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 SampleIn)
 {
+    vec3 Sample = SampleIn;
     VoxStoreDir(L, Org, g, N, Sample);
     const vec3  w = N * N;
     const float r = Rnd() * (w.x + w.y + w.z);
@@ -166,7 +167,11 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     vec4 v = GIRefAccum[e];
     const uvec4 dU = GIRefAccumU[e + 1u];
     const vec4 W2 = GIRefAccum[VoxX2Of(e)];
-    vec4 m = vec4(W2.xyz, 0.0);
+    // (X2: the short mean as halves (r g, b + the inconsistency), a spare word, the time - kajiya's / WickedEngine's estimator: how far the long mean
+    // is from the short one in the samples' own deviations, smoothed; the rays go where it is high, none where a face is resolved - Tomas 2026-11-12)
+    const vec2 W2b = unpackHalf2x16(floatBitsToUint(W2.y));
+    vec4 m = vec4(unpackHalf2x16(floatBitsToUint(W2.x)), W2b.x, 0.0);
+    float Incon = W2b.y;
     const vec2 d = vec2(uintBitsToFloat(dU.x), W2.w);       // (the tag, the time)
     // (the lean moments, A15: running means of the luminance against the normal's two other components and of those components - the read fits the light's slope
     // across the normals that fed this face, so a sphere's bottom isn't read as its side. Halves in the spare words: e+1.w (variance, mean l.l), e+2.z (L.lu, L.lv; low bit
@@ -181,9 +186,16 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
         // (C31: taken by compare-and-swap to a busy tag - one owner wins, the others leave; readers see the busy tag as a miss until the payload is whole)
         if (atomicCompSwap(GIRefAccumU[e + 1u].x, dU.x, vox_busy_v) != dU.x) return;
         bTaken = true;
-        v = vec4(0.0); m = vec4(0.0); Pv = PL = Pl = vec2(0.0);
+        v = vec4(0.0); m = vec4(0.0); Pv = PL = Pl = vec2(0.0); Incon = 1.0;
     }
     m.w = Pv.x;
+    // (fireflies, kajiya's / WickedEngine's MultiscaleMeanEstimator: a sample past the face's short mean + 8 sigma + 0.1 is cut there - one bright ray (the sun,
+    // a sky gap) jolted every face it landed on: the GI flickered everywhere while rays ran, Tomas 2026-11-12)
+    if (v.w >= 16.0)
+    {
+        const float Lt = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722)) + 8.0 * sqrt(max(m.w, 0.0)) + 0.1, Ls0 = dot(Sample, vec3(0.2126, 0.7152, 0.0722));
+        if (Ls0 > Lt) Sample *= Lt / Ls0;
+    }
     const float Ls = dot(Sample, vec3(0.2126, 0.7152, 0.0722));
     const int   ua = (a + 1) % 3, va = (a + 2) % 3;
     const vec2  Ln = vec2(N[ua], N[va]);
@@ -198,6 +210,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     {
         const float Lk = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w, Lm = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
         const float Noise = sqrt(max(m.w, 0.0) * vox_short_v / (2.0 - vox_short_v));       // (the short mean's own standard deviation)
+        Incon += (min(abs(Lm - Lk) / max(sqrt(max(m.w, 0.0)), 1e-4 + 1e-3 * Lk), 4.0) - Incon) * 0.08;
         if (abs(Lm - Lk) > vox_sigmas_v * Noise && abs(Lm - Lk) > 0.1 * Lk)
         {
 #ifdef GI_VOX_ONLY
@@ -214,7 +227,8 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     Pv.y += (dot(Ln, Ln) - Pv.y) * Al; PL += (clamp(Ls, 0.0, 60000.0) * Ln - PL) * Al; Pl += (Ln - Pl) * Al;
     // (C31: a taken slot publishes payload first, then its tag - a reader that sees the tag sees a whole record)
     GIRefAccum[e] = v;
-    GIRefAccumU[VoxX2Of(e)] = uvec4(floatBitsToUint(m.rgb), floatBitsToUint(Now));
+    if (v.w < 64.0) Incon = 1.0;
+    GIRefAccumU[VoxX2Of(e)] = uvec4(packHalf2x16(clamp(m.rg, vec2(0.0), vec2(60000.0))), packHalf2x16(vec2(clamp(m.b, 0.0, 60000.0), Incon)), 0u, floatBitsToUint(Now));
     if (bTaken) memoryBarrierBuffer();
     GIRefAccumU[e + 1u] = uvec4(floatBitsToUint(Tag), packHalf2x16(PL) | 1u, packHalf2x16(Pl), packHalf2x16(vec2(min(m.w, 60000.0), Pv.y)));
 }
@@ -446,6 +460,7 @@ void VoxMain()
         const uint Run = RHash(gl_WorkGroupID.x * 2654435761u + uint(Push.m_Frame) * 97u);      // (a group of 64 shares a direction: more shared lost directions: 21.7 against 17.9 at roughness 0.3)
         g_CohU = float(Run & 0xFFFFu) / 65536.0; g_CohV = float(Run >> 16u) / 65536.0;
     }
+    const float VoxIncon = float((abs(Push.m_Epoch) >> 16) & 0x7FFF) / 100.0;      // (XLION_VOX_INCON x 100 in m_Epoch's bits 16-30; 0: the least-known pick)
     for (int k = 0; k < (bCoh ? 1 : VOX_PICKS); ++k)
     {
         const uint  px = bCoh ? (RHash(uint(Push.m_Frame)) + gl_GlobalInvocationID.x * 7u) % uint(Push.m_nPixels) : uint(Rnd() * float(Push.m_nPixels)) % uint(Push.m_nPixels);
@@ -456,14 +471,15 @@ void VoxMain()
         if (!VoxCell(Ps.xyz, Hd.xyz, Hd.w, 0, Lk, Ok, gk)) continue;
         const int   Ax = abs(Nk.x) >= abs(Nk.y) && abs(Nk.x) >= abs(Nk.z) ? 0 : abs(Nk.y) >= abs(Nk.z) ? 1 : 2;
         vec3 gq = vec3(Ok) + gk; gq[Ax] *= vox_layers_v;
-        const float n  = VoxFace(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))).w;
+        const uint  hk = VoxHash(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))), ek = VoxEntryOf(hk);
+        float n = GIRefAccum[ek + 1u].x == VoxTagOf(hk) ? GIRefAccum[ek].w : 0.0;
+        if (VoxIncon > 0.0) n = n < 64.0 ? n - 1e6 : -unpackHalf2x16(floatBitsToUint(GIRefAccum[VoxX2Of(ek)].y)).y;      // (XLION_VOX_INCON: the unknown first, then the most inconsistent)
         if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; }
     }
     if (Least >= 1e30) return;
-    // (XLION_VOX_CAP, Tomas 2026-11-12: a face gets rays only until it holds this many samples - its window full, the rays go elsewhere or not at all;
-    // a change restarts it (VoxStore), the relight keeps the bounces moving without rays. m_Epoch's bits 16-30, 0: no cap)
-    const int VoxCap = (abs(Push.m_Epoch) >> 16) & 0x7FFF;
-    if (VoxCap > 0 && Least >= float(VoxCap)) return;
+    // (XLION_VOX_INCON=<scale>: a known face takes the ray with probability inconsistency x scale - a resolved face (its long and short means agree within
+    // their noise) takes none: no work, no flicker; one still drifting, propagating, stays inconsistent and keeps its rays. WickedEngine: rays = inconsistency x boost)
+    if (VoxIncon > 0.0 && Least > -1e5 && Rnd() >= min(-Least * VoxIncon, 1.0)) return;
     const float BucketAO = uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
     vec3 Ph, Nh; bool bHit;
     // (one copy of VoxRay: the shader's compiled size goes with its copies. The second ray: the surface the first hit, seen yet or not: a sample of that surface's own
