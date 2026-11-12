@@ -286,7 +286,7 @@ vec3 ScreenNormal(in const uint w)
     return normalize(n);
 }
 
-const float kGIScreenBlend = 0.25;      // the fresh irradiance's share over last frame's (1: none kept)
+const float kGIScreenBlend = 0.10;      // the fresh irradiance's share over last frame's (1: none kept); 0.25 -> 0.10 2026-11-12: panel flicker 2.9 -> 1.0 % of pixels, a sun jump ~0.5 s slower to settle
 void main()
 {
 #ifdef XLION_HEAT
