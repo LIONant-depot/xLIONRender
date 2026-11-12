@@ -23,6 +23,12 @@ namespace
     constexpr std::uint32_t s_StorageReadComp[] = {
         #include "xlionrender_test_storage_read_comp.h"
     };
+    constexpr std::uint32_t s_Storage3DComp[] = {
+        #include "xlionrender_test_storage3d_comp.h"
+    };
+    constexpr std::uint32_t s_Storage3DReadComp[] = {
+        #include "xlionrender_test_storage3d_read_comp.h"
+    };
 
     struct gpu_ray { float m_O[4]; float m_D[4]; };
     struct gpu_hit { float m_TUV[4]; int m_Ids[4]; };
@@ -137,6 +143,39 @@ int main()
             }
         }
         std::printf("xGPU storage images: written and sampled back, twice\n");
+
+        // xGPU 3D textures (2026-11-12, the GI bricks' prerequisite): an 8^3 storage texture written by a compute (image3D), then sampled by
+        // another with the hardware trilinear filter halfway between texel centres (sampler3D): each axis reads the mean of its two texels
+        {
+            xgpu::shader W3, R3;
+            CHECK(!App.m_Device.Create(W3, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_Storage3DComp, std::size(s_Storage3DComp) } } }), "the 3D write shader");
+            CHECK(!App.m_Device.Create(R3, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = xgpu::shader::setup::raw_data{ std::span{ (const std::int32_t*)s_Storage3DReadComp, std::size(s_Storage3DReadComp) } } }), "the 3D read shader");
+            xgpu::compute W3C, R3C;
+            CHECK(!App.m_Device.Create(W3C, { .m_pShader = &W3, .m_nBuffers = 0, .m_nImages = 1 }), "the 3D write compute");
+            CHECK(!App.m_Device.Create(R3C, { .m_pShader = &R3, .m_nBuffers = 1, .m_nTextures = 1, .m_bLinear = true }), "the 3D read compute");
+            xgpu::texture Vol;
+            CHECK(!App.m_Device.Create(Vol, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_AdressModes = { xgpu::texture::address_mode::CLAMP, xgpu::texture::address_mode::CLAMP, xgpu::texture::address_mode::CLAMP }, .m_Width = 8, .m_Height = 8, .m_Depth = 8, .m_isGamma = false, .m_bStorage = true }), "the 3D texture");
+            xgpu::buffer Out3;
+            CHECK(MakeBuffer(App.m_Device, Out3, std::vector<float>{}, 7 * 7 * 7 * 4), "the 3D read back");
+            const xgpu::texture* Vols[] = { &Vol };
+            xgpu::buffer* Out3s[] = { &Out3 };
+            while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break;
+            App.m_Window.Dispatch(W3C, std::span<xgpu::buffer* const>{}, std::span<const xgpu::texture* const>{}, Vols, nullptr, 0, 2, 2, 2);
+            App.m_Window.Dispatch(R3C, Out3s, Vols, nullptr, 0, 2, 2, 2);
+            { auto Cmd = App.m_Window.getCmdBuffer(); }
+            App.m_Window.PageFlip();
+            for (int k = 0; k < 3; ++k) { while (App.m_Window.BeginRendering()) if (!App.m_Instance.ProcessInputEvents()) break; { auto Cmd = App.m_Window.getCmdBuffer(); } App.m_Window.PageFlip(); }
+            std::vector<float> V3(7 * 7 * 7 * 4);
+            CHECK(Out3.MemoryMap(0, int(V3.size()), [&](void* q) { std::memcpy(V3.data(), q, V3.size() * sizeof(float)); }) == nullptr, "read the 3D samples back");
+            int nBad = 0;
+            for (int z = 0; z < 7; ++z) for (int y = 0; y < 7; ++y) for (int x = 0; x < 7; ++x)
+            {
+                const float* T = V3.data() + 4 * ((z * 7 + y) * 7 + x);
+                nBad += !(std::abs(T[0] - (float(x) + 0.5f) / 8.0f) < 2e-3f && std::abs(T[1] - (float(y) + 0.5f) / 8.0f) < 2e-3f && std::abs(T[2] - (float(z) + 0.5f) / 8.0f) < 2e-3f && std::abs(T[3] - 1.0f) < 1e-3f);
+            }
+            CHECK(nBad == 0, "3D texture: %d of 343 trilinear samples wrong (first: %.4f %.4f %.4f %.4f)", nBad, V3[0], V3[1], V3[2], V3[3]);
+            std::printf("xGPU 3D textures: written as image3D, sampled trilinear as sampler3D (343 samples)\n");
+        }
 
         // Bloom and exposure (xlionrender_post_comp.glsl): a flat image stays itself down and up; the exposure brings it to its key
         {
