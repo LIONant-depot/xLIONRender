@@ -558,7 +558,7 @@ int main()
         {
             CHECK(Settle(1), "settle back on the near view");
             const auto& Pg = Renderer.getVSMReport().m_Pages;
-            if (nSettle >= 2 && Pg.m_ResidentPrev == 0 && Pg.m_Deferred == 0 && Pg.m_Epochs == 0) break;
+            if (nSettle >= 2 && Pg.m_ResidentPrev == 0 && Pg.m_Deferred == 0 && Pg.m_Epochs == 0 && Pg.m_MoveBias == 0.0f) break;      // (the sun's moving bias faded too)
         }
         CHECK(nSettle < 120 && Settle(2), "the near view did not settle (%d frames)", nSettle);
     }

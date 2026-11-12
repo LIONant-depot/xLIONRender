@@ -68,6 +68,9 @@ namespace xlionrender::shadows
             int     m_ProtectFrames = 4;                // a page requested this many frames ago is still protected (the requests are a ring late)
             float   m_ResolutionBias = -1;              // levels added to the footprint's (-1: texels half the pixel; Unreal's ResolutionLodBiasDirectional);
                                                         // -1 measured against the clipmap and the rays (tests/xlionrender_test_vsm.cpp)
+            float   m_MovingBias    = 1.0f;             // levels added while the sun turns (4 times fewer pages: a turn settles sooner), faded out over
+                                                        // m_MovingFadeFrames once it stops (Unreal: r.Shadow.Virtual.ResolutionLodBiasDirectionalMoving; Tomas 2026-11-12)
+            int     m_MovingFadeFrames = 30;
             float   m_EpochDegrees  = 0.25f;            // the light turning less than this keeps its epoch: the pages are of its direction then, the
                                                         // shading's is the current one (an approximation; the mismatch in stats::m_EpochMismatchDegrees)
             // Dynamic resolution (Unreal's r.Shadow.Virtual.DynamicRes): while the pages asked for pass m_PoolLoadFactor of the fine slots,
@@ -137,6 +140,7 @@ namespace xlionrender::shadows
             float m_EpochMismatchDegrees = 0;   // the angle between the light's direction and its epoch's (under setup::m_EpochDegrees)
             float m_PoolLoad     = 0;       // the fine pages asked for / the fine slots (above 1: more than fit)
             float m_DynamicBias  = 0;       // the resolution bias dynamic resolution adds now (ResolutionBias())
+            float m_MoveBias     = 0;       // the bias the sun's turn adds now (setup::m_MovingBias, fading: 0 settled)
             int   m_Remapped     = 0;       // requests of an older epoch moved into this one (pages, after the move)
             int   m_ResidentPrev = 0;       // the previous epoch's pages still resident
             float m_SecMs[7]     = {};      // (measurement) Update by part: windows, out of window, dirty, net, requests, movers, the rest
@@ -294,6 +298,12 @@ namespace xlionrender::shadows
             const xmath::fvec3 Z = LightDir.NormalizeCopy();
 
             m_Stats.m_EpochMismatchDegrees = std::acos(std::clamp(Z.Dot(m_Z), -1.0f, 1.0f)) * 180.0f / 3.14159265f;
+            // moving: the coarser bias while it turns and a few frames after (the requests are a ring late), then faded to none - the
+            // levels' band cross-fades the boundary as it sweeps back, no pop
+            if (m_LastDir.Dot(m_LastDir) > 0.0f && Z.Dot(m_LastDir) < 0.9999999f) m_MovedFrame = Frame;
+            m_LastDir = Z;
+            { const float Since = m_MovedFrame ? float(Frame - m_MovedFrame) : 1e9f, Hold = float(m_Setup.m_ProtectFrames + 4);
+              m_MoveBias = m_Setup.m_MovingBias * std::clamp(1.0f - (Since - Hold) / float(std::max(m_Setup.m_MovingFadeFrames, 1)), 0.0f, 1.0f); }
 
             using sec_clk = std::chrono::steady_clock; auto SecT = sec_clk::now(); int SecN = 0;
             const auto Sec = [&] { const auto t = sec_clk::now(); m_Stats.m_SecMs[SecN++] = std::chrono::duration<float, std::milli>(t - SecT).count(); SecT = t; };
@@ -508,11 +518,11 @@ namespace xlionrender::shadows
                 m_DynamicBias = std::clamp(m_DynamicBias, 0.0f, m_Setup.m_MaxDynamicBias);
                 m_Stats.m_PoolLoad = Load;
             }
-            m_Stats.m_DynamicBias = m_DynamicBias;
+            m_Stats.m_DynamicBias = m_DynamicBias; m_Stats.m_MoveBias = m_MoveBias;
         }
 
         // The resolution bias of this frame's request pass and shading: the setup's and dynamic resolution's
-        float ResolutionBias(void) const noexcept { return m_Setup.m_ResolutionBias - m_DetailBias + m_DynamicBias; }
+        float ResolutionBias(void) const noexcept { return m_Setup.m_ResolutionBias - m_DetailBias + m_DynamicBias + m_MoveBias; }
         void  SetDetailDistance(float Scale) noexcept { m_DetailBias = std::log2(std::max(Scale, 1.0f)); }     // (scene's sun_light::m_ShadowDetailDistance: levels finer)
 
         // The page table of this frame: per entry (level-major, then the toroidal row, column) a 16-bit slot + 1 of a VALID page, 0 none;
@@ -739,6 +749,9 @@ namespace xlionrender::shadows
         std::uint64_t                           m_Frame = 0;
         float                                   m_DynamicBias  = 0;
         std::uint64_t                           m_LastOverload = 0;
+        xmath::fvec3                            m_LastDir{ 0, 0, 0 };      // (the sun's direction last frame: moving or not)
+        std::uint64_t                           m_MovedFrame = 0;
+        float                                   m_MoveBias   = 0;          // (setup::m_MovingBias now, fading)
         std::vector<slot>                       m_Slots;
         std::vector<std::uint64_t>              m_RenderedFrame;
         float                                   m_DetailBias = 0;   // the detail distance's levels finer (SetDetailDistance)
