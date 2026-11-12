@@ -75,6 +75,7 @@ vec3 SpecDir(in const vec3 N, in const vec3 V, in const float a, out float W)
 // or along one of the other two axes, each way. No more rays: a place on a floor knows what its rays saw toward the street and toward the wall
 vec3 g_VoxRayD = vec3(0.0);
 bool g_VoxMissed = false;       // (this ray saw the sky. A bin keeps its sky apart, second entry: rgb sum, count: a direction near the surface takes less of it - VoxReflect)
+bool g_DriftProbe = false;      // (Y4: this ray a probe of the whole store - one random pixel, no pick, no inconsistency gate: only probes feed the drift)
 bool g_HasSeen = false; vec3 g_SeenSample = vec3(0.0);      // (the bins take what a hit was seen as, the faces, the diffuse light, stay as the GI's lights give them)
 void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample0)
 {
@@ -205,7 +206,9 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     if (v.w <= 0.0) { m = vec4(Sample, 0.0); Pv.y = dot(Ln, Ln); PL = Ls * Ln; Pl = Ln; }
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
 #ifdef GI_VOX_ONLY
-    if (ConnU[2] == vox_drift_mark_v && v.w > 0.0) VoxDriftAdd(Ds, dot(m.rgb, vec3(0.2126, 0.7152, 0.0722)));
+    // (against the LONG mean, 2026-11-13: the rays pick faces by their short and long means' disagreement (XLION_VOX_INCON), so the sample's
+    // deviation from the short mean is biased by the pick - Police read R +.01 for ever; the long mean, once it holds 64 samples, is not)
+    if (ConnU[2] == vox_drift_mark_v && g_DriftProbe && v.w >= 64.0) { const float Lk = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w; VoxDriftAdd(Ls - Lk, Lk); }
 #endif
     m.rgb += (Sample - m.rgb) * vox_short_v;
     m.w   += (Ds * Ds - m.w) * vox_short_v;
@@ -465,7 +468,12 @@ void VoxMain()
         g_CohU = float(Run & 0xFFFFu) / 65536.0; g_CohV = float(Run >> 16u) / 65536.0;
     }
     const float VoxIncon = float((abs(Push.m_Epoch) >> 16) & 0x7FFF) / 100.0;      // (XLION_VOX_INCON x 100 in m_Epoch's bits 16-30; 0: the least-known pick)
-    for (int k = 0; k < (bCoh ? 1 : VOX_PICKS); ++k)
+    // (Y4, 2026-11-13: the picks choose faces by their state - the most inconsistent, or the least known - so their samples drift by construction and
+    // the store-wide drift never settled (Police R +.01 for ever). One pick in 16 is a probe instead: a random pixel, taken as it comes)
+#ifdef GI_VOX_ONLY
+    g_DriftProbe = ConnU[2] == vox_drift_mark_v && !bCoh && Rnd() < 0.0625;
+#endif
+    for (int k = 0; k < (bCoh || g_DriftProbe ? 1 : VOX_PICKS); ++k)
     {
         const uint  px = bCoh ? (RHash(uint(Push.m_Frame)) + gl_GlobalInvocationID.x * 7u) % uint(Push.m_nPixels) : uint(Rnd() * float(Push.m_nPixels)) % uint(Push.m_nPixels);
         const vec4  Ps = GIRefSample[2u * px];
@@ -486,7 +494,7 @@ void VoxMain()
     // their noise) takes none: no work, no flicker; one still drifting, propagating, stays inconsistent and keeps its rays. WickedEngine: rays = inconsistency x boost)
     // (VOX_AMORTIZE, WickedEngine's temporal ray amortization: a known face in a coarser (farther) level takes its rays 2^-level as often - far light is low
     // frequency and its faces long-lived; new faces (the unknown) are not slowed)
-    if (VoxIncon > 0.0 && Least > -1e5 && Rnd() >= min(-Least * VoxIncon, 1.0) * exp2(-VOX_AMORTIZE * float(L))) return;
+    if (!g_DriftProbe && VoxIncon > 0.0 && Least > -1e5 && Rnd() >= min(-Least * VoxIncon, 1.0) * exp2(-VOX_AMORTIZE * float(L))) return;
     const float BucketAO = uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
     vec3 Ph, Nh; bool bHit;
     // (one copy of VoxRay: the shader's compiled size goes with its copies. The second ray: the surface the first hit, seen yet or not: a sample of that surface's own

@@ -1765,7 +1765,8 @@ namespace xlionrender
             const int  InstantTris = s_InstantEnv >= 0 ? s_InstantEnv : m_ShadowInstantTris;
             const bool bInstant = InstantTris > 0 && nCasterTris <= std::int64_t(InstantTris);
             m_VSM.SetInstant(bInstant);
-            m_VSM.SetFrameBudget(!bInstant && PagesMs > 0 ? std::clamp(int((PagesMs - m_VSMPageCost.FixedMs()) / m_VSMPageCost.PageMs()), 8, 1024) : 0);
+            static const double s_PageMsFixed = [] { const char* p = xlionrender::Env("XLION_VSM_PAGE_MS_FIXED"); return p ? std::atof(p) : 0.0; }();      // (measurement: a fixed cost a page, no fit - C30/C37 2026-11-13)
+            m_VSM.SetFrameBudget(!bInstant && PagesMs > 0 ? std::clamp(s_PageMsFixed > 0.0 ? int(PagesMs / s_PageMsFixed) : int((PagesMs - m_VSMPageCost.FixedMs()) / m_VSMPageCost.PageMs()), 8, 1024) : 0);
             static const bool s_bMoverSameLevel = xlionrender::Env("XLION_VSM_MOVER_SAME_LEVEL") != nullptr;     // (measurement: the movers at the pages' own level)
             m_VSM.m_bMoversCoarse = m_bShadowMoversCoarse && !s_bMoverSameLevel;
             std::vector<xmath::fbbox> VSMMovers;      // (the mover maps: the skinned movers have no sun mover pages)

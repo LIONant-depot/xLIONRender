@@ -12,6 +12,7 @@
 // surfel on the CPU. Before each slice the world's changes go up: its estimator changes as ops (world::TakeGPUOps, _ops_comp), the
 // links' emitted light that changed, the means, the setup and the lights (_scatter_comp). The shown light is made on the GPU (Show,
 // _filter_comp), straight into the renderer's ring. ReadBack fills the world's arrays from the GPU's light (its tests, its dump)
+#include <deque>
 #include <bit>
 #include <cmath>
 #include "../../xlionrender_env.h"
@@ -941,7 +942,7 @@ namespace xlionrender::gi
             const std::array<const xgpu::texture*, 1> VoxTex{ &SceneHDR };
             // The lights still for a while: no face can have changed, the noise can't start one over: the light settles and the flicker dies out, with fewer rays too (ponytail: moving objects aren't in the key)
             const auto VoxNow = std::chrono::steady_clock::now();
-            if (LightsKey != m_VoxLightsKey) { m_VoxLightsKey = LightsKey; m_VoxLightsMoved = VoxNow; m_VoxRaysSince = 0.0; }
+            if (LightsKey != m_VoxLightsKey) { m_VoxLightsKey = LightsKey; m_VoxLightsMoved = VoxNow; m_VoxRaysSince = 0.0; m_DriftCalmSince = {}; }
             const bool bStill = std::chrono::duration<float>(VoxNow - m_VoxLightsMoved).count() > 0.5f;      // (seconds: a game can't promise its frame rate)
             // VoxQuiet: fewer rays only when nothing asks for them: the eye still too (a moving eye's new cells fill from them: a quarter of them drew a bubble around it, Tomas). A nudge asks for nothing (Tomas: it dropped the frame):
             // the eye has to leave a place by a quarter of a cell, a slow drift counts too. How far it went since the rays last slept says how long they stay: a nudge a second, past a metre or so the old ten (a long way: much is new; a second alone left 2.5 % off at 5 s against .8). A turn asks for nothing yet: rays stay one frame in 8 (ponytail: what a turn brings in fills slowly; wake on a large turn if it shows)
@@ -952,9 +953,9 @@ namespace xlionrender::gi
             {
                 const float Ll = std::sqrt(Look.Dot(Look)), La = std::sqrt(m_VoxLookAt[0] * m_VoxLookAt[0] + m_VoxLookAt[1] * m_VoxLookAt[1] + m_VoxLookAt[2] * m_VoxLookAt[2]);
                 const float Cs = Ll > 0.0f && La > 0.0f ? (Look.m_X * m_VoxLookAt[0] + Look.m_Y * m_VoxLookAt[1] + Look.m_Z * m_VoxLookAt[2]) / (Ll * La) : 0.0f;
-                if (Cs < 0.9986f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxRaysSince = 0.0; m_VoxLookAt = { Look.m_X, Look.m_Y, Look.m_Z }; }
+                if (Cs < 0.9986f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxRaysSince = 0.0; m_DriftCalmSince = {}; m_VoxLookAt = { Look.m_X, Look.m_Y, Look.m_Z }; }
             }
-            if (dv.Dot(dv) > Cell * Cell * 0.0625f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxRaysSince = 0.0; m_VoxTravel += std::sqrt(dv.Dot(dv)); m_VoxEyeAt = { Eye.m_X, Eye.m_Y, Eye.m_Z }; }
+            if (dv.Dot(dv) > Cell * Cell * 0.0625f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxRaysSince = 0.0; m_DriftCalmSince = {}; m_VoxTravel += std::sqrt(dv.Dot(dv)); m_VoxEyeAt = { Eye.m_X, Eye.m_Y, Eye.m_Z }; }
             const int Keep = KeepMax;
             if (!m_bVox || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
             const std::size_t nEntries = std::size_t(vox_slots_v) * 3;
@@ -998,11 +999,11 @@ namespace xlionrender::gi
             // VOXDRIFT: R = (above - below) / short means, its noise band B = mean |d| / sqrt(stores) / mean short mean - gi_settled_stop_design_2026-11-12.md)
             static const int s_Drift = [] { const char* p = xlionrender::Env("XLION_VOX_DRIFT"); return p ? std::atoi(p) : 0; }();
             static const bool s_bGlide = xlionrender::Env("XLION_VOX_GLIDE") != nullptr;      // (a face whose light moved halves its history instead of restarting from its short mean: xlionrender_gi_ref.glsl VoxStore)
-            if ((s_Drift > 0 || s_bGlide) && s_Relight == 0 && s_Bricks == 0)
+            if ((s_Drift > 0 || s_bGlide || DriftStop()) && s_Relight == 0 && s_Bricks == 0)
             {
                 if (!m_ConnB.m_Private)
                 {
-                    std::array<std::uint32_t, 32> W{}; W[2] = s_Drift > 0 ? 0x44524654u : 0u; W[1] = s_bGlide ? 0x474C4944u : 0u;
+                    std::array<std::uint32_t, 32> W{}; W[2] = s_Drift > 0 || DriftStop() ? 0x44524654u : 0u; W[1] = s_bGlide ? 0x474C4944u : 0u;
                     if (m_pDevice->Create(m_ConnB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4
                                                    , .m_EntryCount = int(W.size()), .m_pData = W.data(), .m_pName = "GI: vox drift counters" })) return false;
                 }
@@ -1019,6 +1020,23 @@ namespace xlionrender::gi
                         std::fflush(stdout);
                     }
                     m_DriftLast = Now;
+                }
+                // (Y4, the drift stop - gi_settled_stop_design_2026-11-12.md: the store-wide signed drift R over the last second; settled once
+                // |R| < XLION_VOX_DRIFT_STOP's threshold (.003) for 3 s with the lights and the eye still. Its own running totals, read every .1 s)
+                if (DriftStop() && std::chrono::duration<double>(VoxNow - m_DriftReadAt).count() >= 0.1 && !m_ConnB.getMappedVirtualMemory(p) && p)
+                {
+                    const std::array<std::uint32_t, 4> Now{ p[4], p[5], p[6], p[7] };
+                    if (m_DriftReadAt != std::chrono::steady_clock::time_point{})
+                        m_DriftWin.push_back({ VoxNow, double(Now[0] - m_DriftStopLast[0]) / 4096.0 - double(Now[1] - m_DriftStopLast[1]) / 4096.0, double(Now[2] - m_DriftStopLast[2]) / 4096.0 });
+                    m_DriftStopLast = Now; m_DriftReadAt = VoxNow;
+                    while (!m_DriftWin.empty() && std::chrono::duration<double>(VoxNow - m_DriftWin.front().m_At).count() > 1.0) m_DriftWin.pop_front();
+                    double D = 0.0, Lm = 0.0; for (const auto& w : m_DriftWin) { D += w.m_D; Lm += w.m_Lm; }
+                    m_DriftR = Lm > 0.0 ? D / Lm : 1.0;
+                    const bool bCalm = Lm > 0.0 && std::abs(m_DriftR) < DriftStopBand() * (m_DriftCalmSince == std::chrono::steady_clock::time_point{} ? 1.0 : 2.0) && m_DriftWin.size() >= 5;      // (calm once inside the band, left only past twice it: the trickle's fewer stores are noisier - it flapped)
+                    if (!bCalm) m_DriftCalmSince = {};
+                    else if (m_DriftCalmSince == std::chrono::steady_clock::time_point{}) m_DriftCalmSince = VoxNow;
+                    static const bool s_bLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr;      // (measurement: the stop at work, once a second)
+                    if (s_bLog && ++m_DriftLogN % 10 == 0) { static const auto s_T0 = VoxNow; std::printf("VOXSTOP t %.1f R %+.5f calm %.1f s quiet %d\n", std::chrono::duration<double>(VoxNow - s_T0).count(), m_DriftR, m_DriftCalmSince == std::chrono::steady_clock::time_point{} ? 0.0 : std::chrono::duration<double>(VoxNow - m_DriftCalmSince).count(), int(VoxQuiet())); std::fflush(stdout); }
                 }
             }
             if (!m_ConnB.m_Private && !FitLocal(m_ConnB, 16, s_Relight > 0 ? 1 + 200000 * 7 : 8)) return false;
@@ -1086,7 +1104,13 @@ namespace xlionrender::gi
         // minutes to settle - graded lit against the path tracer at tomas, % pixels off: 37.1 at 20 s, 29.5 at 120 s; never quiet 29.9 at 20 s, 26.9 at 60 s.
         // A moving camera has every frame's rays anyway: the frame's worst case is the same. XLION_VOX_QUIET_AFTER=<rays>, default 50 M: about 30 s at 16384 a frame)
         static inline const double s_QuietAfterRays = [] { const char* p = xlionrender::Env("XLION_VOX_QUIET_AFTER"); return p ? std::atof(p) : 50.0e6; }();
-        bool                 VoxQuiet(void) const noexcept { static const bool s_bNoQuiet = xlionrender::Env("XLION_VOX_NO_QUIET") != nullptr; if (s_bNoQuiet || m_VoxRaysSince < s_QuietAfterRays) return false; return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
+        // (Y4, 2026-11-13, an experiment, OFF by default: XLION_VOX_DRIFT_STOP=<band>, e.g. .003 - quiet once the store-wide drift (probe rays only) stayed inside the band 3 s.
+        // Measured: probe drift stays ~+.003 (INCON 0) to +.0045 (INCON 2) on Police at 40 s - at the band: it flaps, not a default yet; off: the old rule, 50 M rays)
+        static bool          DriftStop(void) noexcept { return DriftStopBand() > 0.0; }
+        static double        DriftStopBand(void) noexcept { static const double s_B = [] { const char* p = xlionrender::Env("XLION_VOX_DRIFT_STOP"); return p ? std::atof(p) : 0.0; }(); return s_B; }
+        bool                 DriftCalm(void) const noexcept { return m_DriftCalmSince != std::chrono::steady_clock::time_point{} && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_DriftCalmSince).count() > 3.0f; }
+        double               DriftR(void) const noexcept { return m_DriftR; }
+        bool                 VoxQuiet(void) const noexcept { static const bool s_bNoQuiet = xlionrender::Env("XLION_VOX_NO_QUIET") != nullptr; if (s_bNoQuiet || (DriftStop() ? !DriftCalm() : m_VoxRaysSince < s_QuietAfterRays)) return false; return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxLightsMoved).count() > 5.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - m_VoxEyeMoved).count() > (m_VoxTravel > 1.0f ? 5.0f : 1.0f); }      // (seconds: what a person waits; frames would change with the frame rate)
         // XLION_GI_VOX=<level 0's cell> [<ms a frame> [<samples a face keeps>]]
         // The surfel GI off (XLION_GI_NO_SURFELS, not "0"; Tomas 2026-11-08: dropped - with the voxel GI nothing visible read it, ~0.7 ms and
         // ~300 MB): no surfel slices, links or shown light, and the meshes' read structures not packed (the BVH, the meshes, the materials and
@@ -1490,6 +1514,12 @@ namespace xlionrender::gi
         xgpu::buffer                        m_ConnB;
         int                                 m_BrickFrames = 0;      // (XLION_VOX_BRICKS)
         std::array<std::uint32_t, 4>        m_DriftLast{};          // (XLION_VOX_DRIFT: the counters' running totals at the last print)
+        struct drift_sample { std::chrono::steady_clock::time_point m_At; double m_D, m_Lm; };
+        std::deque<drift_sample>            m_DriftWin;             // (the drift stop: the last second's signed drift and short means)
+        std::array<std::uint32_t, 4>        m_DriftStopLast{};
+        std::chrono::steady_clock::time_point m_DriftReadAt{}, m_DriftCalmSince{};
+        double                              m_DriftR = 1.0;
+        int                                 m_DriftLogN = 0;
         std::uint32_t                       m_VoxLightsKey = 0;
         std::chrono::steady_clock::time_point m_VoxLightsMoved{};
         bool                                m_bRef = false;
