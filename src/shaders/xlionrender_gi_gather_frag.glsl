@@ -217,6 +217,7 @@ vec3 ScreenNormal(in const uint w)
     return normalize(n);
 }
 
+const float kGIScreenBlend = 0.25;      // the fresh irradiance's share over last frame's (1: none kept)
 void main()
 {
 #ifdef XLION_HEAT
@@ -378,7 +379,9 @@ void main()
         // (never a non-finite or negative reflection, as E above: reprojection carries it on, black and blocky on the moto, Tomas 2026-11-04)
         vec3 Rr = bR && !any(isnan(g_GIRefl.rgb)) && !any(isinf(g_GIRefl.rgb)) ? max(g_GIRefl.rgb, vec3(0.0)) : vec3(0.0);
         // (the read along R over time, every pixel every frame: no tiles, no squares. Its bins' means move a little with each ray: on a still moto, 7 in 8 of the flicker went with the read)
-        if ((Hd.w & 1u) != 0u && bR)
+        // the irradiance the same way (Tomas 2026-11-12: the GI used to lean on last frame's and flickered less; every tile has been fresh
+        // each frame since 82c5988, with no history): this frame's a share of kGIScreenBlend over last frame's at the same surface
+        if ((Hd.w & 1u) != 0u && (bR || bE))
         {
             const mat4 PrevW2C = mat4(uintBitsToFloat(GIScreen[1]), uintBitsToFloat(GIScreen[2]), uintBitsToFloat(GIScreen[3]), uintBitsToFloat(GIScreen[4]));
             const vec3 Prev    = S.P + uintBitsToFloat(GIScreen[5].xyz);
@@ -390,8 +393,11 @@ void main()
                 {
                     const uvec4 Rp = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
                     const float Sd = unpackHalf2x16(Rp.y).y, Ld = length(Prev);
-                    if ((Rp.w & (1u << 31)) != 0u && abs(Sd - Ld) < 0.02 * Ld + 0.01 && dot(ScreenNormal(Rp.w), N) > 0.9)
+                    const bool bSame = abs(Sd - Ld) < 0.02 * Ld + 0.01 && dot(ScreenNormal(Rp.w), N) > 0.9;
+                    if (bR && bSame && (Rp.w & (1u << 31)) != 0u)
                         Rr = mix(vec3(unpackHalf2x16(Rp.z), unpackHalf2x16(Rp.w & 0xFFFFu).x), Rr, 0.1);
+                    if (bE && bSame && (Rp.w & (1u << 30)) != 0u && ((Rp.w >> 28) & 3u) != 3u)      // (not a weak entry's: a hole carried on)
+                        E.rgb = mix(vec3(unpackHalf2x16(Rp.x), unpackHalf2x16(Rp.y).x), E.rgb, kGIScreenBlend);
                 }
             }
         }
