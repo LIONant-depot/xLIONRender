@@ -177,7 +177,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
     m.rgb += (Sample - m.rgb) * vox_short_v;
     m.w   += (Ds * Ds - m.w) * vox_short_v;
-    if (v.w >= 64.0 && (Push.m_First & 1) != 0)       // (m_First: the lights changed lately)
+    if (v.w >= 64.0)       // (always, not only after a light change (m_First bit 1): the bounces filling in drift a face as a change does - its long mean lagged them: at 20 s 31.1 -> 28.9 % off, signed -2.68 -> -1.75, 2026-11-12)
     {
         const float Lk = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w, Lm = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
         const float Noise = sqrt(max(m.w, 0.0) * vox_short_v / (2.0 - vox_short_v));       // (the short mean's own standard deviation)
