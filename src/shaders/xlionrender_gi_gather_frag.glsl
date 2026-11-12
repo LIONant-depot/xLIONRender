@@ -305,6 +305,9 @@ void main()
     const mat3  Ai = inverse(transpose(At));
     const vec3  Off = vec3(uintBitsToFloat(GITable[push.TableBase + 16u]), uintBitsToFloat(GITable[push.TableBase + 17u]), uintBitsToFloat(GITable[push.TableBase + 18u]));
     const vec3  Pm = Ai * (S.P - Off - vec3(I.Rows[0].w, I.Rows[1].w, I.Rows[2].w));
+    // (C39: the surface's own move since last frame, by its instance's transform then (PrevRows, instance_slots - the TAA's motion): the GI history reprojects
+    // a mover's point to where it was, not to where a static point would have been. 0 for what stands still. A skinned mesh's limbs move inside it: the history's mover rule)
+    const vec3  Moved = Pm * (mat3(I.PrevRows[0].xyz, I.PrevRows[1].xyz, I.PrevRows[2].xyz) - At) + vec3(I.PrevRows[0].w - I.Rows[0].w, I.PrevRows[1].w - I.Rows[1].w, I.PrevRows[2].w - I.Rows[2].w);
     // The read's face normal from the derivatives of a position at the same texel of every block (the checkerboard's alternate texels
     // skewed them: a wrong face on curved surfaces, sunlit surfels behind read - Tomas's Sponza arch), before any lane leaves
     vec3 Pd = Pm;
@@ -323,6 +326,9 @@ void main()
     }
     const vec3  GFaceD = cross(dFdx(Pd), dFdy(Pd));
     if (!S.bHit) return;
+    // (C39: a mover - skinned, or its transform changed since last frame - and what stands still never take each other's history: a walker's pixels took the
+    // street's light behind it and the street took the walker's blotches, kept at 90 % a frame: a trail. The entry's bit 0 says which it was)
+    const bool  bMover = S.Entry.y == gi_probes_v || S.Entry.y == gi_screen_v || any(notEqual(Moved, vec3(0.0)));
 
     const uvec4 Hd = GIScreen[0];
     const uint  W = Hd.x, H = Hd.y;
@@ -345,7 +351,7 @@ void main()
     {
         Kind = 2u;
         const mat4  PrevW2C = mat4(uintBitsToFloat(GIScreen[1]), uintBitsToFloat(GIScreen[2]), uintBitsToFloat(GIScreen[3]), uintBitsToFloat(GIScreen[4]));
-        const vec3  Prev    = S.P + uintBitsToFloat(GIScreen[5].xyz);
+        const vec3  Prev    = S.P + uintBitsToFloat(GIScreen[5].xyz) + Moved;
         const vec4  C       = PrevW2C * vec4(Prev, 1.0);
         if (C.w > 1e-6)
         {
@@ -355,7 +361,7 @@ void main()
                 const uvec4 R   = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
                 const float Sd  = unpackHalf2x16(R.y).y, Pd = length(Prev);
                 const uint  Age = (R.w >> 28) & 3u;
-                if ((R.w & (1u << 30)) != 0u && abs(Sd - Pd) < 0.02 * Pd + 0.01 && dot(ScreenNormal(R.w), N) > 0.9)
+                if ((R.w & (1u << 30)) != 0u && abs(Sd - Pd) < 0.02 * Pd + 0.01 && dot(ScreenNormal(R.w), N) > 0.9 && ((R.w & 1u) != 0u) == bMover)
                 {
                     if (Age >= screen_max_age_v) Kind = 3u;
                     else
@@ -394,7 +400,12 @@ void main()
             const uint Rw = GITable[push.TableBase + 28u], Ri = uint(P.y) * Rw + uint(P.x);
             const vec3 Eyw = vec3(TF(25u), TF(26u), TF(27u));
             const float Ah = push.AO != 0u ? GatherAO(P, W, H, Dist) : 1.0;
-            GIRefSample[2u * Ri] = vec4(S.P + Eyw, Ref == gi_probes_v ? 0.0 : 1.0);      // (a skinned surface - XLION_SKIN_VOX's entry - reads the store, no ray starts from it: a mover's points fed the shared store)
+            // (C40: a skinned surface - XLION_SKIN_VOX's entry - is a point in open space, not one of the surfaces the store's faces stand for: read at a
+            // walker's chest, a face of the cell (a wall's, the ground's, nobody's) gave black and bright blocks. Its rays (w 2) feed records of their own
+            // (the faces' keys + 128) that only such surfaces read: the light of open space where movers were, which the rays - movers aren't in the BVH -
+            // see the same whoever stands there. Fed to the shared store, they had blackened the whole voxel GI (2026-11-07))
+            const bool bSkinRead = Ref == gi_probes_v;
+            GIRefSample[2u * Ri] = vec4(S.P + Eyw, bSkinRead ? 2.0 : 1.0);
             GIRefSample[2u * Ri + 1u] = vec4(N, Ah);      // (w: this reader's AO - XLION_VOX_AO_BUCKET sorts its rays' samples by it)
             GIRefSample[2u * W * H] = vec4(TF(22u), TF(23u), TF(24u), TF(21u));
             g_ClipFloat = true;
@@ -402,7 +413,8 @@ void main()
             const float BucketAO = uintBitsToFloat(GITable[push.TableBase + 34u]);
             bool bPubMiss = true;
             if (GITable[push.TableBase + 37u] == 2u) { E = vec4(0.5, 0.5, 0.5, 1.0); bPubMiss = false; }      // (measurement: no level read at all)
-            else if (GITable[push.TableBase + 37u] != 0u) { E = VoxReadPublished(S.P, N, bPubMiss); g_ClipTrust = 1.0; }
+            else if (GITable[push.TableBase + 37u] != 0u && !bSkinRead) { E = VoxReadPublished(S.P, N, bPubMiss); g_ClipTrust = 1.0; }
+            if (bSkinRead) { g_VoxBucket = 2u; E = VoxReadLevels(S.P, N); g_VoxBucket = 0u; bPubMiss = E.w <= 0.0; }      // (none yet - it just came: the surfaces' read until its rays come back)
 #ifdef XLION_GI_BRICKS
             if (bPubMiss) E = VoxReadBricks(S.P, N);
 #else
@@ -457,7 +469,7 @@ void main()
         if ((Hd.w & 1u) != 0u && (bR || bE))
         {
             const mat4 PrevW2C = mat4(uintBitsToFloat(GIScreen[1]), uintBitsToFloat(GIScreen[2]), uintBitsToFloat(GIScreen[3]), uintBitsToFloat(GIScreen[4]));
-            const vec3 Prev    = S.P + uintBitsToFloat(GIScreen[5].xyz);
+            const vec3 Prev    = S.P + uintBitsToFloat(GIScreen[5].xyz) + Moved;
             const vec4 C       = PrevW2C * vec4(Prev, 1.0);
             if (C.w > 1e-6)
             {
@@ -466,7 +478,7 @@ void main()
                 {
                     const uvec4 Rp = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
                     const float Sd = unpackHalf2x16(Rp.y).y, Ld = length(Prev);
-                    const bool bSame = abs(Sd - Ld) < 0.02 * Ld + 0.01 && dot(ScreenNormal(Rp.w), N) > 0.9;
+                    const bool bSame = abs(Sd - Ld) < 0.02 * Ld + 0.01 && dot(ScreenNormal(Rp.w), N) > 0.9 && ((Rp.w & 1u) != 0u) == bMover;
                     if (bR && bSame && (Rp.w & (1u << 31)) != 0u)
                         Rr = mix(vec3(unpackHalf2x16(Rp.z), unpackHalf2x16(Rp.w & 0xFFFFu).x), Rr, 0.1);
                     if (bE && bSame && (Rp.w & (1u << 30)) != 0u && ((Rp.w >> 28) & 3u) != 3u)      // (not a weak entry's: a hole carried on)
@@ -475,7 +487,7 @@ void main()
             }
         }
         Out = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, Dist)), packHalf2x16(Rr.rg),
-                    (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFFu) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u) | (bE && bWeak ? 3u << 28 : 0u));     // (age 3, never a fresh one's: weak - a hole in the surfels' coverage, the Cornell cube's dashes)
+                    (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFEu) | (bMover ? 1u : 0u) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u) | (bE && bWeak ? 3u << 28 : 0u));     // (age 3, never a fresh one's: weak - a hole in the surfels' coverage, the Cornell cube's dashes)
     }
     if (bIn && !(bKeep && push.AO != 0u)) GIScreen[screen_header_v + uint(P.y) * W + uint(P.x)] = Out;
 #ifdef XLION_HEAT

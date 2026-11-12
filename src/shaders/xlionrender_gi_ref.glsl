@@ -126,7 +126,7 @@ void VoxDirsAdd(in const vec3 Pw, in const vec3 N, in const float Cell0, in cons
     atomicAdd(GIRefAccumU[e].x, c.x); atomicAdd(GIRefAccumU[e].y, c.y); atomicAdd(GIRefAccumU[e].z, c.z); atomicAdd(GIRefAccumU[e].w, w16);
     GIRefAccumU[VoxX2Of(e)].w = floatBitsToUint(Now);
 }
-uint g_VoxStoreKind = 0u;      // (XLION_VOX_AO_BUCKET: 1 a contact's records - the faces' keys + 64; the direction bins stay shared)
+uint g_VoxStoreKind = 0u;      // (XLION_VOX_AO_BUCKET: 1 a contact's records - the faces' keys + 64; the direction bins stay shared. 2: a skinned surface's - open space, + 128: C40)
 #ifdef GI_VOX_ONLY
 // (measurement, XLION_VOX_BRICKS - gi_store_bricks_plan_2026-11-08.md: each face a store writes marks a bit of three 2^21-bit maps, by the
 // hash of its cell, of its 2 x 2 x 2 brick, of its 4 x 4 x 4 brick: distinct cells and bricks, so how full bricks would be)
@@ -155,7 +155,7 @@ const uint vox_busy_v = 0xFFFFFFFFu;      // (a face slot's tag while its new ow
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 SampleIn)
 {
     vec3 Sample = SampleIn;
-    VoxStoreDir(L, Org, g, N, Sample);
+    if (g_VoxStoreKind != 2u) VoxStoreDir(L, Org, g, N, Sample);      // (a mover's open space point: no reflection bins, they are the surfaces')
     const vec3  w = N * N;
     const float r = Rnd() * (w.x + w.y + w.z);
     const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
@@ -456,6 +456,7 @@ void VoxMain()
     vec3 P = vec3(0.0), N = vec3(0.0, 1.0, 0.0);
     int L = 0; ivec3 Org = ivec3(0); vec3 g = vec3(0.0);
     float Least = 1e30, OriginAO = 1.0;
+    uint  OriginKind = 0u;      // (C40: 2 a skinned surface's point - its samples to the records of its kind, + 128; the gather's w 2)
     const bool bCoh = (Push.m_First & 8) != 0;
     if (bCoh)
     {
@@ -474,10 +475,11 @@ void VoxMain()
         if (!VoxCell(Ps.xyz, Hd.xyz, Hd.w, 0, Lk, Ok, gk)) continue;
         const int   Ax = abs(Nk.x) >= abs(Nk.y) && abs(Nk.x) >= abs(Nk.z) ? 0 : abs(Nk.y) >= abs(Nk.z) ? 1 : 2;
         vec3 gq = vec3(Ok) + gk; gq[Ax] *= vox_layers_v;
-        const uint  hk = VoxHash(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))), ek = VoxEntryOf(hk);
+        const uint  Kk = Ps.w > 1.5 ? 2u : 0u;
+        const uint  hk = VoxHash(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)) + 64u * Kk), ek = VoxEntryOf(hk);
         float n = GIRefAccum[ek + 1u].x == VoxTagOf(hk) ? GIRefAccum[ek].w : 0.0;
         if (VoxIncon > 0.0) n = n < 64.0 ? n - 1e6 : -unpackHalf2x16(floatBitsToUint(GIRefAccum[VoxX2Of(ek)].y)).y;      // (XLION_VOX_INCON: the unknown first, then the most inconsistent)
-        if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; }
+        if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; OriginKind = Kk; }
     }
     if (Least >= 1e30) return;
     // (XLION_VOX_INCON=<scale>: a known face takes the ray with probability inconsistency x scale - a resolved face (its long and short means agree within
@@ -503,9 +505,9 @@ void VoxMain()
 #endif
         if (!any(isnan(Sample)) && all(lessThan(Sample, vec3(1e6))))
         {
-            g_VoxStoreKind = r == 0 && BucketAO > 0.0 && OriginAO < BucketAO ? 1u : 0u;
+            g_VoxStoreKind = r == 0 && OriginKind == 2u ? 2u : r == 0 && BucketAO > 0.0 && OriginAO < BucketAO ? 1u : 0u;
             VoxStore(L, Org, g, N, Sample);
-            if ((Push.m_First & 2048) != 0) VoxDirsAdd(P, N, Hd.w, g_HasSeen ? g_SeenSample : Sample);
+            if ((Push.m_First & 2048) != 0 && g_VoxStoreKind != 2u) VoxDirsAdd(P, N, Hd.w, g_HasSeen ? g_SeenSample : Sample);
             int Lp; ivec3 Op; vec3 gp;
             if (r == 0 && VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) VoxStore(Lp, Op, gp, N, Sample);
         }
