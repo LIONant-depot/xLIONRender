@@ -64,7 +64,7 @@ namespace xlionrender::shadows
             int     m_Levels        = 10;               // level L's texel: level 0's x 2^L; the coarsest is the net
             int     m_Window        = 32;               // pages per level side kept in the table around the camera
             int     m_PinnedRadius  = 8;                // the net: the coarsest level's pages within this many of the camera's (a 16 x 16 square)
-            int     m_Budget        = 48;               // fine pages rendered a frame (the net's are not counted against it) - with m_NetBudget the shadows' 2 ms slice (methodology 3: ~0.03 ms a page in Bistro)
+            int     m_Budget        = 256;              // fine pages rendered a frame (48 until 2026-11-12: a new sun epoch took ~70 frames, ~1 s, to finish - Tomas: Unreal is more responsive; 256 ~13 frames; Bistro moving-sun sequence avg 11.1 -> 11.5, p95 14.1 -> 15.0 ms) (the net's are not counted against it) - with m_NetBudget the shadows' 2 ms slice (methodology 3: ~0.03 ms a page in Bistro)
             int     m_ProtectFrames = 4;                // a page requested this many frames ago is still protected (the requests are a ring late)
             float   m_ResolutionBias = -1;              // levels added to the footprint's (-1: texels half the pixel; Unreal's ResolutionLodBiasDirectional);
                                                         // -1 measured against the clipmap and the rays (tests/xlionrender_test_vsm.cpp)
