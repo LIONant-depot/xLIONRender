@@ -133,6 +133,16 @@ void VoxBrickMark(in const int L, in const ivec3 q, in const uint Face)
     atomicOr(ConnU[4u + 65536u + (h1 >> 5)], 1u << (h1 & 31u));
     atomicOr(ConnU[4u + 131072u + (h2 >> 5)], 1u << (h2 & 31u));
 }
+// (measurement, XLION_VOX_DRIFT - gi_settled_stop_design_2026-11-12.md: the store-wide signed drift, running totals in 1/4096 fixed point (1/16 truncated the many small negative deviations: a false +.115) the CPU
+// reads as differences: the samples' luminance above and below their face's short mean, the short means, the stores. Noise cancels, propagation adds up)
+const uint vox_drift_mark_v = 0x44524654u;
+void VoxDriftAdd(in const float Ds, in const float Lm)
+{
+    const float d = clamp(Ds, -64.0, 64.0);
+    if (d > 0.0) atomicAdd(ConnU[4], uint(d * 4096.0)); else atomicAdd(ConnU[5], uint(-d * 4096.0));
+    atomicAdd(ConnU[6], uint(clamp(Lm, 0.0, 64.0) * 4096.0));
+    atomicAdd(ConnU[7], 1u);
+}
 #endif
 const uint vox_busy_v = 0xFFFFFFFFu;      // (a face slot's tag while its new owner writes it: a NaN, equal to no tag)
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 Sample)
@@ -175,6 +185,9 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     const vec2  Ln = vec2(N[ua], N[va]);
     if (v.w <= 0.0) { m = vec4(Sample, 0.0); Pv.y = dot(Ln, Ln); PL = Ls * Ln; Pl = Ln; }
     const float Ds = Ls - dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
+#ifdef GI_VOX_ONLY
+    if (ConnU[2] == vox_drift_mark_v && v.w > 0.0) VoxDriftAdd(Ds, dot(m.rgb, vec3(0.2126, 0.7152, 0.0722)));
+#endif
     m.rgb += (Sample - m.rgb) * vox_short_v;
     m.w   += (Ds * Ds - m.w) * vox_short_v;
     if (v.w >= 64.0)       // (always, not only after a light change (m_First bit 1): the bounces filling in drift a face as a change does - its long mean lagged them: at 20 s 31.1 -> 28.9 % off, signed -2.68 -> -1.75, 2026-11-12)

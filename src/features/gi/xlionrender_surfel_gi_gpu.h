@@ -987,6 +987,32 @@ namespace xlionrender::gi
                     }
                 }
             }
+            // (measurement, XLION_VOX_DRIFT=<frames>: the connections' token is host-visible, marked; the store-wide signed drift printed every that many frames,
+            // VOXDRIFT: R = (above - below) / short means, its noise band B = mean |d| / sqrt(stores) / mean short mean - gi_settled_stop_design_2026-11-12.md)
+            static const int s_Drift = [] { const char* p = xlionrender::Env("XLION_VOX_DRIFT"); return p ? std::atoi(p) : 0; }();
+            if (s_Drift > 0 && s_Relight == 0 && s_Bricks == 0)
+            {
+                if (!m_ConnB.m_Private)
+                {
+                    std::array<std::uint32_t, 32> W{}; W[2] = 0x44524654u;
+                    if (m_pDevice->Create(m_ConnB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4
+                                                   , .m_EntryCount = int(W.size()), .m_pData = W.data(), .m_pName = "GI: vox drift counters" })) return false;
+                }
+                std::uint32_t* p = nullptr;
+                if ((Frame % std::uint64_t(s_Drift)) == 0 && !m_ConnB.getMappedVirtualMemory(p) && p)
+                {
+                    const std::array<std::uint32_t, 4> Now{ p[4], p[5], p[6], p[7] };
+                    const double Pos = double(Now[0] - m_DriftLast[0]) / 4096.0, Neg = double(Now[1] - m_DriftLast[1]) / 4096.0, Lm = double(Now[2] - m_DriftLast[2]) / 4096.0, n = double(Now[3] - m_DriftLast[3]);
+                    if (n > 0.0 && Lm > 0.0)
+                    {
+                        static const auto s_T0 = std::chrono::steady_clock::now();
+                        std::printf("VOXDRIFT t %.2f still %.2f R %.5f B %.5f stores %.0f meanL %.4f\n", std::chrono::duration<double>(VoxNow - s_T0).count()
+                                   , std::chrono::duration<double>(VoxNow - std::max(m_VoxLightsMoved, m_VoxEyeMoved)).count(), (Pos - Neg) / Lm, (Pos + Neg) / std::sqrt(n) / Lm, n, Lm / n);
+                        std::fflush(stdout);
+                    }
+                    m_DriftLast = Now;
+                }
+            }
             if (!m_ConnB.m_Private && !FitLocal(m_ConnB, 16, s_Relight > 0 ? 1 + 200000 * 7 : 8)) return false;
             xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0], &m_ConnB };
             m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z };
@@ -1450,6 +1476,7 @@ namespace xlionrender::gi
         std::size_t                         m_VoxCleared = 0;
         xgpu::buffer                        m_ConnB;
         int                                 m_BrickFrames = 0;      // (XLION_VOX_BRICKS)
+        std::array<std::uint32_t, 4>        m_DriftLast{};          // (XLION_VOX_DRIFT: the counters' running totals at the last print)
         std::uint32_t                       m_VoxLightsKey = 0;
         std::chrono::steady_clock::time_point m_VoxLightsMoved{};
         bool                                m_bRef = false;
