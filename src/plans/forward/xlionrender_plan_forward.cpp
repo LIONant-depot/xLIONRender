@@ -3641,6 +3641,7 @@ namespace xlionrender
                             const auto A = m_pGITrace->VoxAnchor();
                             const float C[7] = { s_Vox[0], A[0], A[1], A[2], Eye[0], Eye[1], Eye[2] };
                             m_GatherTable[20] = 3u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
+                            { static const bool s_bOnePass = xlionrender::Env("XLION_GI_ONE_PASS") != nullptr; m_GatherTable[39] = s_bOnePass ? 1u : 0u; }      // (the voxels' read takes no GI buffer: one pass, not one a buffer - word 39, the classification's)
                             std::memcpy(m_GatherTable.data() + 21, C, sizeof(C));
                         }
                     }
@@ -4112,7 +4113,7 @@ namespace xlionrender
                     R.m_pFullscreenVB = &m_FullscreenVB; R.m_pFullscreenIB = &m_FullscreenIB;
                     R.m_Lists.Add("gi.gather_buffers", {});
                     auto& List = R.m_Lists.m_Items[std::size_t(R.m_Lists.Find("gi.gather_buffers"))];
-                    List.clear(); for( const auto* p : m_GatherBuffers ) List.push_back(const_cast<xgpu::buffer*>(p));
+                    List.clear(); for( const auto* p : m_GatherBuffers ) { List.push_back(const_cast<xgpu::buffer*>(p)); if( m_GatherTable.size() > 39 && m_GatherTable[39] != 0u ) break; }
                     const std::pair<const char*, xgpu::buffer*> Bs[] = { { "Frame: instance data", &m_InstanceBuffer }, { "GI: gather buffers", &m_GIDummy }, { "GI: dummy", &m_GIDummy }, { "GI: light ring", &m_GILightRing }
                         , { "GI: moment ring", &m_GIMomentRing }, { "GI: screen buffer*", &View.m_GIScreenBuffer }, { "GI: screen buffer previous", &View.m_GIScreenPrev }, { "GI: gather table", &View.m_GIGatherTable }
                         , { "GI: ambient occlusion", &View.m_AO }, { "GI: voxel clipmap", m_pGatherClip ? m_pGatherClip : &m_GIDummy }, { "GI: reference samples", m_pGatherRefS ? m_pGatherRefS : &m_GIDummy }
@@ -4156,7 +4157,7 @@ namespace xlionrender
                     GCmd.setBuffer(m_FullscreenIB);
                     GCmd.Draw(3);
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 2);
-                    for( std::size_t k = 0; k < m_GatherBuffers.size(); ++k )
+                    for( std::size_t k = 0; k < (m_GatherTable.size() > 39 && m_GatherTable[39] != 0u ? std::min<std::size_t>(m_GatherBuffers.size(), 1) : m_GatherBuffers.size()); ++k )
                     {
                         Buffers[1] = const_cast<xgpu::buffer*>(m_GatherBuffers[k]);
                         GCmd.setPipelineInstance(View.m_GIGatherInstance, std::span{ Buffers });
