@@ -213,7 +213,7 @@ vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
                 ivec3 o = ivec3(0); o[u] = c & 1; o[v] = c >> 1; o[a] = f[a] >= 0.5 ? 1 : 0;
                 const float t = (o[u] != 0 ? f[u] : 1.0 - f[u]) * (o[v] != 0 ? f[v] : 1.0 - f[v]);
                 const uint  h = VoxHash(L, iv + o, Base + Bk[b]), e = VoxEntryOf(h);
-                if (uintBitsToFloat(GIClip[e + 1u].x) == VoxTagOf(h)) { const vec4 w = VoxBin(GIClip[e]); if (w.w > 0.0) { const vec4 m0 = VoxBin(uvec4(GIClip[VoxX2Of(e)].xyz, GIClip[e + 1u].z)); const vec4 m = m0 * ((1.0 - SkyTake) * smoothstep(8.0, 48.0, w.w - m0.w));      /* (the sky left out only where enough rays hit something: a few hits' mean flips between tiles: black squares, Tomas) */ const float cw = min(w.w, 128.0) * t, nl = w.w - m.w; Num += (nl > 0.5 ? (w.rgb - m.rgb) / nl : w.rgb / w.w) * cw; Den += cw; } }
+                if (uintBitsToFloat(GIClip[e + 1u].x) == VoxTagOf(h)) { const vec4 w = VoxBin(GIClip[e]); if (w.w > 0.0) { const vec4 m0 = SkyTake < 1.0 ? VoxBin(uvec4(GIClip[VoxX2Of(e)].xyz, GIClip[e + 1u].z)) : vec4(0.0);      /* (the sky kept - the default: its bins not read, a load a corner saved) */ const vec4 m = m0 * ((1.0 - SkyTake) * smoothstep(8.0, 48.0, w.w - m0.w));      /* (the sky left out only where enough rays hit something: a few hits' mean flips between tiles: black squares, Tomas) */ const float cw = min(w.w, 128.0) * t, nl = w.w - m.w; Num += (nl > 0.5 ? (w.rgb - m.rgb) / nl : w.rgb / w.w) * cw; Den += cw; } }
             }
             if (Den > 1e-3) { Lit += Num / Den * Bw[b]; WSum += Bw[b]; Trust += Den * Bw[b]; }
         }
