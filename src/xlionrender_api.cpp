@@ -1,3 +1,4 @@
+#include "xlionrender_env.h"
 #include "xlionrender_api.h"
 #include "xlionrender_renderer.h"
 #include "xlionrender_internal.h"
@@ -193,7 +194,7 @@ namespace xlionrender
                 {
                     char Name[64] = {}; int On = 1;
                     auto& V = pSystem->m_pScene->m_View;
-                    if (std::sscanf(pEdit + 6, "%63s %d", Name, &On) != 2) Reply = "stage <name> 0|1";
+                    if (xlionrender::Scan(pEdit + 6, "%63s %d", Name, &On) != 2) Reply = "stage <name> 0|1";
                     else if (!stage::Bypassable(Name)) Reply = std::format("the stage '{}' cannot be bypassed", Name);
                     else { std::erase(V.m_StagesOff, std::string(Name)); if (!On) V.m_StagesOff.push_back(Name); Reply = "ok"; bOk = true; }
                 }
@@ -201,7 +202,7 @@ namespace xlionrender
                 {
                     char Name[64] = {}; float Value = 0;
                     auto& Ov = pSystem->m_pScene->m_View.StageParams();
-                    const int n = std::sscanf(pEdit + 6, "%63s %f", Name, &Value);
+                    const int n = xlionrender::Scan(pEdit + 6, "%63s %f", Name, &Value);
                     const auto* pP = n >= 1 ? stage::Parameter(Name) : nullptr;
                     if (!pP) Reply = "param <name> [value]: ao.radius, ao.thickness, refl.ssr_steps, refl.ssr_max_dist, refl.ssr_thickness";
                     else { std::erase_if(Ov, [&](const auto& P) { return P.first == Name; }); if (n == 2) Ov.emplace_back(Name, stage::param{ Name, std::string(pP->m_Type), Value }.Word()); Reply = "ok"; bOk = true; }
@@ -223,7 +224,7 @@ namespace xlionrender
                         std::string Name(A.substr(0, Bar)); while (!Name.empty() && Name.back() == ' ') Name.pop_back();
                         bool bKnown = false; V.ForEachImage([&](const char* pName, const xgpu::texture&) { bKnown |= Name == pName; });
                         char Mode[16] = "auto"; float Scale = 1, Bias = 0; int Channel = 0, Mip = 0;
-                        if (Bar != std::string_view::npos) (void)std::sscanf(std::string(A.substr(Bar + 1)).c_str(), "%15s %f %f %d %d", Mode, &Scale, &Bias, &Channel, &Mip);
+                        if (Bar != std::string_view::npos) (void)xlionrender::Scan(std::string(A.substr(Bar + 1)).c_str(), "%15s %f %f %d %d", Mode, &Scale, &Bias, &Channel, &Mip);
                         static constexpr std::array<std::string_view, 5> modes_v{ "auto", "colour", "channel", "normal", "depth" };
                         const auto It = std::find(modes_v.begin(), modes_v.end(), std::string_view(Mode));
                         if (!bKnown) Reply = "no image '" + Name + "' ('view' lists them)";

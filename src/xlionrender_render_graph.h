@@ -11,6 +11,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include "xlionrender_env.h"
 
 namespace xlionrender::rg
 {
@@ -71,9 +72,9 @@ namespace xlionrender::rg
         // XLION_RG_DUMP=<file>: the frame's scopes as one JSON line (overwritten every frame: the last frame stays), errors first
         void Dump( void ) const noexcept
         {
-            static const char* s_pPath = std::getenv("XLION_RG_DUMP");
+            static const char* s_pPath = xlionrender::Env("XLION_RG_DUMP");
             if( !s_pPath ) return;
-            std::FILE* f = std::fopen(s_pPath, "w");
+            std::FILE* f = xlionrender::Open(s_pPath, "w");
             if( !f ) return;
             static constexpr const char* s_Usage[]  = { "sampled", "storage", "colour attachment", "depth attachment", "transfer src", "transfer dst" };
             static constexpr const char* s_Policy[] = { "none", "clear", "full overwrite", "preserve", "partial", "discard" };

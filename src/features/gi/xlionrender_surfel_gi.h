@@ -3094,7 +3094,7 @@ namespace xlionrender::gi
             }
             Out.m_nMeshNodes = int(Out.m_Nodes.size());
             PackGPUTlas(Out);
-            if (std::getenv("XLION_BVH_STATS"))        // (measurement: the TLAS's share - BLAS flattening, pt_performance_whitepaper_notes_2026-11-07.md)
+            if (xlionrender::Env("XLION_BVH_STATS"))        // (measurement: the TLAS's share - BLAS flattening, pt_performance_whitepaper_notes_2026-11-07.md)
             {
                 double Vol = 0; v3 Lo{ 1e30f, 1e30f, 1e30f }, Hi{ -1e30f, -1e30f, -1e30f };
                 for (const int i : m_TlasIds)

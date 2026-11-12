@@ -891,9 +891,18 @@ namespace xlionrender
         xgpu::buffer                            m_VSMFrames, m_VSMReq, m_VSMReqHost, m_VSMZeros;
         xgpu::timestamps                        m_VSMTimes;                 // the request pass's GPU time
         xgpu::timestamps                        m_VSMRenderTimes;           // the sun's pages' rendering GPU time
-        std::array<bool, ring_frames_v>         m_VSMRenderTimed{};         // whether a ring slot's frame rendered sun pages (timed)
-        std::array<int, ring_frames_v>          m_VSMRenderPages{};         // how many (the GPU time a page: m_VSMPageMs)
-        double                                  m_VSMPageMs     = 0.05;     // a sun page's GPU time (pairs, clears), smoothed - the frame's page budget (renderShadows)
+        struct vsm_pages_rendered { std::uint64_t m_Frame = ~0ull; int m_nPages = 0; };
+        std::array<vsm_pages_rendered, ring_frames_v> m_VSMRenderPages{};   // a ring slot's frame and the sun pages it rendered (m_VSMPageCost)
+        // The sun pages' GPU time as fixed + a page x pages (C37: a frame that renders any page pays the skinned casters' draw into the atlas once,
+        // ~0.19 ms on Bistro Game, the pages ~2 us each - time / pages mixed them). A least-squares line over the frames, exponentially forgotten
+        struct page_cost_fit
+        {
+            double m_N = 0, m_T = 0, m_NN = 0, m_NT = 0; bool m_bAny = false;
+            void Add( double n, double t ) noexcept { constexpr double a = 0.05; if( !m_bAny ) { m_N = n; m_T = t; m_NN = n * n; m_NT = n * t; m_bAny = true; return; } m_N += (n - m_N) * a; m_T += (t - m_T) * a; m_NN += (n * n - m_NN) * a; m_NT += (n * t - m_NT) * a; }
+            double PageMs( void ) const noexcept { const double Var = m_NN - m_N * m_N; return Var > 1.0 ? std::max((m_NT - m_N * m_T) / Var, 1e-4) : m_N > 0 ? std::max(m_T / m_N, 1e-4) : 0.05; }      // (one page count only: no slope - time / pages)
+            double FixedMs( void ) const noexcept { const double Var = m_NN - m_N * m_N; return Var > 1.0 ? std::max(m_T - PageMs() * m_N, 0.0) : 0.0; }
+        };
+        page_cost_fit                           m_VSMPageCost   {};         // (renderShadows: the frame's page budget from it)
         xgpu::buffer*                           m_pGatherRefS = nullptr, *m_pGatherRefA = nullptr;     // the ground truth's buffers this frame (XLION_GI_REF)
         xgpu::buffer*                           m_pGatherClip   = nullptr;  // experiment X1: the clipmap the gather reads this frame (XLION_GI_CLIP)
         float                                   m_LODProjScale  = 0;        // the main view's pixels per unit at distance 1 (its LOD pick: renderScenePass)

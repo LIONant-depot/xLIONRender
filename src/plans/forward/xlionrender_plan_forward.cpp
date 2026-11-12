@@ -1691,13 +1691,17 @@ namespace xlionrender
         {
             if( std::vector<std::uint64_t> Ns; m_VSMTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
                 m_VSMReport.m_RequestGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
-            if( const int Slot = int(m_Device.getFrameIndex() % ring_frames_v); !m_VSMRenderTimed[Slot] ) m_VSMReport.m_RenderGpuMs = 0;
-            else if( std::vector<std::uint64_t> Ns; m_VSMRenderTimes.getResults(Ns) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
+            // (C37: the time and the pages of the SAME frame - the timer's results are the newest finished frame that rendered pages, the count was
+            // this ring slot's, another frame: page bursts paired a few pages' time with many pages' count: ~1 us a page read, ~2.2 us + 0.19 ms a frame real)
+            int TimedFrame = -1;
+            if( std::vector<std::uint64_t> Ns; m_VSMRenderTimes.getResults(Ns, &TimedFrame) && Ns.size() >= 2 && Ns[0] != ~0ull && Ns[1] != ~0ull && Ns[1] >= Ns[0] )
             {
                 m_VSMReport.m_RenderGpuMs = double(Ns[1] - Ns[0]) * 1e-6;
-                // a page's GPU time, smoothed (the frames that rendered a few: their fixed part would dominate)
-                if( const int n = m_VSMRenderPages[std::size_t(m_Device.getFrameIndex() % ring_frames_v)]; n >= 8 ) m_VSMPageMs += (m_VSMReport.m_RenderGpuMs / n - m_VSMPageMs) * 0.1;
+                const auto& R = m_VSMRenderPages[std::size_t(TimedFrame) % ring_frames_v];
+                // the frame's fixed part and a page's, fitted over the frames (C37)
+                if( R.m_Frame == std::uint64_t(TimedFrame) && R.m_nPages > 0 ) m_VSMPageCost.Add(double(R.m_nPages), m_VSMReport.m_RenderGpuMs);
             }
+            else if( const auto& R = m_VSMRenderPages[std::size_t(m_Device.getFrameIndex() % ring_frames_v)]; R.m_nPages == 0 ) m_VSMReport.m_RenderGpuMs = 0;
             // Level 0's texel: the clipmap's level 0 texel / 4, at most 2 mm (a scene's tile can be tens of metres: the static geom
             // preview's is the model's radius / 2); the screen picks the level, so the 2 mm only show where a pixel asks for them. The
             // levels: at least the setup's, more (up to max_levels_v) when the coarsest would not cover what the clipmap covers
@@ -1748,7 +1752,7 @@ namespace xlionrender
                                , m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_RenderedPinned, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine, int(m_VSM.HasPrevious()), m_VSM.m_Stats.m_DynamicBias), std::fflush(stdout);
             }
             { static const bool s_bT = xlionrender::Env("XLION_GPU_TIMES") != nullptr;      // (measurement: the sun's shadow detail reaching the renderer)
-              if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL sun dir %.3f %.3f %.3f, distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d\n", Sun.m_Direction.m_X, Sun.m_Direction.m_Y, Sun.m_Direction.m_Z, Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine), std::fflush(stdout); }
+              if( s_bT && m_Device.getFrameIndex() % 240 == 0 ) std::printf("VSMDETAIL sun dir %.3f %.3f %.3f, distance %.2f blend %.2f: bias %.2f (dynamic %.2f); pages requested %d rendered %d rejected %d deferred %d resident %d; a page %.4f ms + %.3f ms a frame (C37 fit), last pages %.3f ms\n", Sun.m_Direction.m_X, Sun.m_Direction.m_Y, Sun.m_Direction.m_Z, Sun.m_ShadowDetailDistance, Sun.m_ShadowLevelBlend, m_VSM.ResolutionBias(), m_VSM.m_Stats.m_DynamicBias, m_VSM.m_Stats.m_Requested, m_VSM.m_Stats.m_Rendered, m_VSM.m_Stats.m_Rejected, m_VSM.m_Stats.m_Deferred, m_VSM.m_Stats.m_ResidentFine, m_VSMPageCost.PageMs(), m_VSMPageCost.FixedMs(), m_VSMReport.m_RenderGpuMs), std::fflush(stdout); }
             m_VSMLevelBand = std::clamp(Sun.m_ShadowLevelBlend, 0.01f, 0.95f);
             ShCpu.Lap();
             // The frame's pages by their measured cost: what fits the pages' share of the shadows' slice (XLION_SH_PAGES_MS overrides; 0 off)
@@ -1761,7 +1765,7 @@ namespace xlionrender
             const int  InstantTris = s_InstantEnv >= 0 ? s_InstantEnv : m_ShadowInstantTris;
             const bool bInstant = InstantTris > 0 && nCasterTris <= std::int64_t(InstantTris);
             m_VSM.SetInstant(bInstant);
-            m_VSM.SetFrameBudget(!bInstant && PagesMs > 0 ? std::clamp(int(PagesMs / std::max(m_VSMPageMs, 1e-3)), 8, 1024) : 0);
+            m_VSM.SetFrameBudget(!bInstant && PagesMs > 0 ? std::clamp(int((PagesMs - m_VSMPageCost.FixedMs()) / m_VSMPageCost.PageMs()), 8, 1024) : 0);
             static const bool s_bMoverSameLevel = xlionrender::Env("XLION_VSM_MOVER_SAME_LEVEL") != nullptr;     // (measurement: the movers at the pages' own level)
             m_VSM.m_bMoversCoarse = m_bShadowMoversCoarse && !s_bMoverSameLevel;
             std::vector<xmath::fbbox> VSMMovers;      // (the mover maps: the skinned movers have no sun mover pages)
@@ -1815,8 +1819,7 @@ namespace xlionrender
         m_LightStats.m_nShadowStale = m_LocalPages.m_Stats.m_Stale;
 
         m_nShadowTilesRendered = static_cast<int>(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
-        m_VSMRenderTimed[m_Device.getFrameIndex() % ring_frames_v] = !m_VSM.m_ToRender.empty();
-        m_VSMRenderPages[m_Device.getFrameIndex() % ring_frames_v] = int(m_VSM.m_ToRender.size());
+        m_VSMRenderPages[m_Device.getFrameIndex() % ring_frames_v] = { m_Device.getFrameIndex(), int(m_VSM.m_ToRender.size()) };
         const bool bMoverMaps = m_bMoverMaps && Scene.m_Sun.m_bCastShadows && std::ranges::any_of(Draws, [](const draw_caster& D) { return D.m_pMesh->m_bCluster && D.m_pMesh->m_Geom.m_Kind == geom_kind::SKIN; });     // (the skinned movers' sun maps: drawn every frame)
         if( m_nShadowTilesRendered == 0 && !bMoverMaps ) { m_MoverMaps.clear(); return; }
 
