@@ -79,6 +79,8 @@ namespace xlionrender
         bool                    m_bStageGIUpdate = true;
         stage::plan             m_VoxRaysPlan;          // the GI's voxel rays (a recorded step; on the second queue: the code's)
         bool                    m_bStageVoxRays = true;
+        stage::plan             m_SunMaskPlan;          // the sun's shadow mask (a draw over the prepass, then its copy - a recorded step)
+        bool                    m_bStageSunMask = true;
         // XLION_STAGE_AB (a stage's proof on real materials: the same frame's inputs through the hand-written pass and the stage): the HDR
         // saved, a copy, the two results in rings read back frames later, the count
         xgpu::texture           m_ABSave;
@@ -86,7 +88,7 @@ namespace xlionrender
         std::array<xgpu::buffer, 2> m_ABBuffer;
         int                     m_ABFrames = 0, m_ABChecked = 0;
         std::uint64_t           m_ABDiffWords = 0;
-        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon, ao, gi_read, vsm_request, local_request, tile, shadow_pages, gi_update, gi_voxel_rays; the RenderGraph
+        // the stages' descriptions in place of the built-in ones, by stage name (light_tiles, refl_ssr, refl_recon, ao, gi_read, vsm_request, local_request, tile, shadow_pages, gi_update, gi_voxel_rays, sun_mask; the RenderGraph
         // resource's, xlionrender_stage_graph_text.h): one that does not lower leaves its stage hand-written (and says why once)
         std::vector<std::pair<std::string, stage::desc>> m_StageDescs;
         std::vector<std::pair<std::string, std::uint32_t>>& StageParams( void ) noexcept { return m_Stages.m_Overrides; }      // (the RenderGraph's StageParams: frame values that win)
@@ -96,13 +98,13 @@ namespace xlionrender
         {
             std::erase_if(m_StageDescs, [&]( const auto& P ) { return P.first == Name; });
             if( !D.m_Passes.empty() ) m_StageDescs.emplace_back(Name, std::move(D));
-            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {}; m_TilePlan = {}; m_ShadowPagesPlan = {}; m_GIUpdatePlan = {}; m_VoxRaysPlan = {};
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {}; m_TilePlan = {}; m_ShadowPagesPlan = {}; m_GIUpdatePlan = {}; m_VoxRaysPlan = {}; m_SunMaskPlan = {};
         }
         void SetStageDescs( std::vector<std::pair<std::string, stage::desc>> All ) noexcept      // (all of them at once: the RenderGraph bundle's; none: the built-in ones)
         {
             if( All == m_StageDescs ) return;
             m_StageDescs = std::move(All);
-            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {}; m_TilePlan = {}; m_ShadowPagesPlan = {}; m_GIUpdatePlan = {}; m_VoxRaysPlan = {};
+            m_LightTilesPlan = {}; m_ReflSSRPlan = {}; m_ReflReconPlan = {}; m_AOPlan = {}; m_GIReadPlan = {}; m_VSMRequestPlan = {}; m_LocalRequestPlan = {}; m_TilePlan = {}; m_ShadowPagesPlan = {}; m_GIUpdatePlan = {}; m_VoxRaysPlan = {}; m_SunMaskPlan = {};
         }
         const stage::desc& StageDesc( std::string_view Name, const stage::desc& BuiltIn ) const noexcept
         {

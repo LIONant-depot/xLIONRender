@@ -150,7 +150,7 @@ namespace xlionrender::stage
             if( bDraw != (K.m_pInstance != nullptr || K.m_bItems) ) return Fail(Pa, bDraw ? "a draw pass, the kernel '" + Pa.m_Kernel + "' is a compute" : "a dispatch, the kernel '" + Pa.m_Kernel + "' draws");
             if( K.m_bItems != !Pa.m_Items.empty() ) return Fail(Pa, K.m_bItems ? "the kernel '" + Pa.m_Kernel + "' draws a list of items: the pass names none" : "a list of items, the kernel '" + Pa.m_Kernel + "' has one pipeline");
             if( !Pa.m_Items.empty() && (L.m_Items = R.m_Items.Find(Pa.m_Items)) < 0 ) return Fail(Pa, "no draw item list '" + Pa.m_Items + "'");
-            for( const auto& U : Pa.m_UBOs ) { const int i = R.m_Buffers.Find(U); if( i < 0 ) return Fail(Pa, "no uniform buffer '" + U + "'"); L.m_UBOs.push_back(i); }
+            for( const auto& U : Pa.m_UBOs ) { if( U.empty() ) { L.m_UBOs.push_back(-1); continue; } const int i = R.m_Buffers.Find(U); if( i < 0 ) return Fail(Pa, "no uniform buffer '" + U + "'"); L.m_UBOs.push_back(i); }      // (an empty name: no uniform buffer at that index)
             if( !bDraw )
             {
                 for( const auto& B : Pa.m_Textures ) { const int i = R.m_Textures.Find(B.m_Name); if( i < 0 ) return Fail(Pa, "no texture '" + B.m_Name + "'"); L.m_Textures.push_back(i); }
@@ -253,7 +253,7 @@ namespace xlionrender::stage
                     }
                     Cmd->setPipelineInstance(pItems ? *(*pItems)[r].m_pInstance : *K.m_pInstance, std::span<xgpu::buffer*>(B.data(), L.m_Buffers.size()));
                     if( pItems && (*pItems)[r].m_pTable ) Cmd->setTextureTable(*(*pItems)[r].m_pTable);
-                    for( std::size_t u = 0; u < L.m_UBOs.size(); ++u ) Cmd->setDynamicUBO(*R.m_Buffers.m_Items[std::size_t(L.m_UBOs[u])], int(u));
+                    for( std::size_t u = 0; u < L.m_UBOs.size(); ++u ) if( L.m_UBOs[u] >= 0 ) Cmd->setDynamicUBO(*R.m_Buffers.m_Items[std::size_t(L.m_UBOs[u])], int(u));
                     Cmd->setPushConstants(Push.data(), std::size_t(n) * 4);
                     Cmd->setBuffer(*R.m_pFullscreenVB);
                     Cmd->setBuffer(*R.m_pFullscreenIB);

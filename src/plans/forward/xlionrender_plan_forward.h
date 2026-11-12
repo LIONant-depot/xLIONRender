@@ -381,6 +381,27 @@ namespace xlionrender::details
         return D;
     }
 
+    // The sun's shadow mask as a stage (xlionrender_sun_mask_frag.glsl): a full-screen draw over the G-buffer prepass into the mask's
+    // target - its pipeline instance holds the shadow atlas, the prepass and last frame's mask (declared, not bound) - then the copy the
+    // materials read (a recorded step: next frame's pass reads it as last frame's). The lighting block at index 1 (none at 0)
+    inline const stage::desc& SunMaskStage( void ) noexcept
+    {
+        const auto Rd = []( const char* p ) { return stage::binding{ p, rg::lifetime::RETAINED, rg::usage::SAMPLED }; };
+        static const stage::desc D{ {
+              { .m_Name = "sun shadow mask", .m_Kernel = "sun_mask"
+            , .m_Buffers  = { Rd("Lights: light ring"), Rd("Lights: cell ring"), Rd("Shadows: VSM page depth bounds") }
+            , .m_Textures = { Rd("Probes: environment DFG"), Rd("Probes: environment atlas"), Rd("Probes: probe atlas"), Rd("Render target: contact shadow"), Rd("Render target: depth")
+                            , Rd("Render target: prepass ids"), Rd("Render target: prepass normals"), Rd("Render target: sun shadow mask"), Rd("Shadows: shadow atlas"), Rd("Shadows: white dummy") }
+            , .m_Images   = { { "Render target: sun shadow mask (pass)", rg::lifetime::FRAME, rg::usage::COLOR_ATTACHMENT, true, rg::policy::FULL_OVERWRITE } }
+            , .m_Push     = { { "sun_mask.reproject" }, { "sun_mask.delta" }, { "sun_mask.params" } }
+            , .m_RenderPass = "Render target: sun shadow mask (pass)", .m_UBOs = { "", "Lights: lighting block" } }
+            , { .m_Name = "sun shadow mask copy"
+            , .m_Textures = { { "Render target: sun shadow mask (pass)", rg::lifetime::FRAME, rg::usage::TRANSFER_SRC } }
+            , .m_Images   = { { "Render target: sun shadow mask", rg::lifetime::HISTORY, rg::usage::TRANSFER_DST, true, rg::policy::FULL_OVERWRITE } }
+            , .m_Recorder = "sun_mask.copy" } } };
+        return D;
+    }
+
     // The shadow request passes as stages (xlionrender_vsm_request_comp.glsl, xlionrender_local_request_comp.glsl): over the main view's
     // depth, the pages each pixel needs into the requests (cleared before, read back after by the code: the page systems are CPU side)
     inline stage::pass RequestPass( const char* pName, const char* pKernel, const char* pFrames, const char* pReq, std::vector<stage::word> Push )

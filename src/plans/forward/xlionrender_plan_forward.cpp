@@ -4180,24 +4180,53 @@ namespace xlionrender
             {
                 XPROFILE_SCOPE("Scene: sun mask");
                 m_LightUBO.allocEntry<details::ubo_lighting>() = *pLight;     // (the scene's block: other passes took entries since - the pass binds the latest)
+                // the reuse (mode 6, a still view with last frame's mask): how much may be kept - 3 nothing about the pages changed (none
+                // rendered, evicted, dirtied or re-centred: every pixel at the same surface), 2 none gone (a page not in the table was not
+                // last frame either: only the ones rendered now change), 0 nothing (the first still frame)
+                const auto MaskReuse = [&]() -> std::uint32_t
+                {
+                    if( m_SunMaskMode < 6 || !View.m_bSunMaskValid ) return 0u;
+                    const auto& St = m_VSM.m_Stats;
+                    if( St.m_Evicted || St.m_Dirtied || St.m_Recentred ) return 1u;
+                    return m_VSM.m_ToRender.empty() ? 3u : 2u;
+                };
+                // (render graph: the mask from its description - xlionrender_stage_graph.h, a draw pass and a recorded copy; hand-written below until retired)
+                bool bMaskStaged = false;
+                if( View.m_bStageSunMask )
+                {
+                    auto& R = View.m_Stages;
+                    R.m_Kernels.Add("sun_mask", { nullptr, 3, 0, 0, 96, "Render target: sun shadow mask (pass)", &View.m_SunMaskInstance });
+                    R.m_RenderPasses.Add("Render target: sun shadow mask (pass)", &View.m_SunMaskPass);
+                    R.m_pFullscreenVB = &m_FullscreenVB; R.m_pFullscreenIB = &m_FullscreenIB;
+                    const std::pair<const char*, xgpu::buffer*> Bs[] = { { "Lights: light ring", &m_LightRing }, { "Lights: cell ring", &m_CellRing }, { "Shadows: VSM page depth bounds", &m_VSMBounds }, { "Lights: lighting block", &m_LightUBO } };
+                    for( const auto& [N, p] : Bs ) R.m_Buffers.Add(N, p);
+                    { const auto Rp = View.m_SunMaskPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_SunMaskPrevEye); R.SetFloats(R.Value("sun_mask.reproject"), reinterpret_cast<const float*>(&Rp), 16); }
+                    { const xmath::fvec4 Dl(Eye - View.m_SunMaskPrevEye, 0.0f); R.SetFloats(R.Value("sun_mask.delta"), &Dl.m_X, 4); }
+                    { const std::uint32_t Pm[4] = { MaskReuse(), std::uint32_t(m_Device.getFrameIndex()), std::uint32_t(m_VSM.getSetup().Slots()), m_SunMaskMode == 7 ? 1u : 0u };
+                      R.SetFloats(R.Value("sun_mask.params"), reinterpret_cast<const float*>(Pm), 4); }
+                    R.m_Steps.Add("sun_mask.copy", [&] { Window.CopyTexture(m_SunMaskNew, m_SunMaskTex, View.m_Width, View.m_Height); });
+                    if( View.m_SunMaskPlan.m_Passes.empty() && View.m_SunMaskPlan.m_Error.empty() )
+                    {
+                        View.m_SunMaskPlan = stage::Lower(View.StageDesc("sun_mask", details::SunMaskStage()), R);
+                        if( !View.m_SunMaskPlan.m_Error.empty() ) std::fprintf(stderr, "xLIONRender: sun mask stage: %s\n", View.m_SunMaskPlan.m_Error.c_str());
+                    }
+                    if( View.m_SunMaskPlan.m_Error.empty() )
+                    {
+                        // (its timestamps around the draw, in the pass's command buffer, as the hand-written pass's)
+                        stage::Run(View.m_SunMaskPlan, R, Window, View.m_Graph, [&]( int, bool bAfter, auto& Cmd ) { Cmd.WriteTimestamp(m_SunMaskTimes, bAfter ? 1 : 0); if( !bAfter ) { Cmd.setViewport(0.0f, 0.0f, float(View.m_Width), float(View.m_Height)); Cmd.setScissor(0, 0, View.m_Width, View.m_Height); } });
+                        bMaskStaged = true;
+                    }
+                }
+                if( !bMaskStaged )
+                {
                 {
                     auto MCmd = Window.StartRenderPass(View.m_SunMaskPass);
                     MCmd.WriteTimestamp(m_SunMaskTimes, 0);          // (in the pass's own command buffer: the window's wrote them around nothing)
                     MCmd.setViewport(0.0f, 0.0f, float(View.m_Width), float(View.m_Height));
                     MCmd.setScissor(0, 0, View.m_Width, View.m_Height);
-                    // the reuse (mode 6, a still view with last frame's mask): how much may be kept - 3 nothing about the pages changed (none
-                    // rendered, evicted, dirtied or re-centred: every pixel at the same surface), 2 none gone (a page not in the table was not
-                    // last frame either: only the ones rendered now change), 0 nothing (the first still frame)
-                    const auto ReuseLevel = [&]() -> std::uint32_t
-                    {
-                        if( m_SunMaskMode < 6 || !View.m_bSunMaskValid ) return 0u;
-                        const auto& St = m_VSM.m_Stats;
-                        if( St.m_Evicted || St.m_Dirtied || St.m_Recentred ) return 1u;
-                        return m_VSM.m_ToRender.empty() ? 3u : 2u;
-                    };
                     struct { xmath::fmat4 m_Reproject; xmath::fvec4 m_Delta; std::uint32_t m_Params[4]; } Push
                     { View.m_SunMaskPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_SunMaskPrevEye), xmath::fvec4(Eye - View.m_SunMaskPrevEye, 0.0f)
-                    , { ReuseLevel(), std::uint32_t(m_Device.getFrameIndex()), std::uint32_t(m_VSM.getSetup().Slots()), m_SunMaskMode == 7 ? 1u : 0u } };
+                    , { MaskReuse(), std::uint32_t(m_Device.getFrameIndex()), std::uint32_t(m_VSM.getSetup().Slots()), m_SunMaskMode == 7 ? 1u : 0u } };
                     std::array<xgpu::buffer*, 3> Buffers{ &m_LightRing, &m_CellRing, &m_VSMBounds };
                     MCmd.setPipelineInstance(View.m_SunMaskInstance, Buffers);
                     MCmd.setDynamicUBO(m_LightUBO, 1);
@@ -4218,6 +4247,7 @@ namespace xlionrender
                     S = G.Begin("sun shadow mask copy", "copy Render target: sun shadow mask (pass)");
                     G.Read(S, G.Resource("Render target: sun shadow mask (pass)", rg::lifetime::FRAME), rg::usage::TRANSFER_SRC);
                     G.Write(S, G.Resource("Render target: sun shadow mask", rg::lifetime::HISTORY), rg::usage::TRANSFER_DST, rg::policy::FULL_OVERWRITE);
+                }
                 }
                 View.m_SunMaskPrevW2C = W2C; View.m_bSunMaskValid = true;
                 // mode 3: the materials read it - the flag in the scene's block itself (the light cuts' per draw entries are copies of it) and
@@ -5389,7 +5419,7 @@ namespace xlionrender
         assert(m_bReady && View.m_Width > 0);
         View.m_Graph.BeginFrame();             // (R0b: the frame's declarations, from its first work)
         static const bool s_bNoStages = xlionrender::Env("XLION_NO_STAGES") != nullptr;      // (measurement: every stage hand-written - the stages' cost)
-        if( s_bNoStages ) View.m_bStageLightTiles = View.m_bStageReflSSR = View.m_bStageReflRecon = View.m_bStageAO = View.m_bStageGIRead = View.m_bStageVSMRequest = View.m_bStageLocalRequest = View.m_bStageTile = View.m_bStageShadowPages = View.m_bStageGIUpdate = View.m_bStageVoxRays = false;
+        if( s_bNoStages ) View.m_bStageLightTiles = View.m_bStageReflSSR = View.m_bStageReflRecon = View.m_bStageAO = View.m_bStageGIRead = View.m_bStageVSMRequest = View.m_bStageLocalRequest = View.m_bStageTile = View.m_bStageShadowPages = View.m_bStageGIUpdate = View.m_bStageVoxRays = View.m_bStageSunMask = false;
         m_pTailRecords = nullptr;              // (binding 14: none until this render's screen tail)
         if( View.m_HDRPrevPendingW )            // (last frame's image for the screen reads, its copy held back while the async rays read the older one)
         {
