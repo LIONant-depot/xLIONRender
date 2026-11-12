@@ -936,7 +936,7 @@ namespace xlionrender::gi
         // Experiment X1c (XLION_GI_VOX; xlionrender_gi_ref_comp.glsl VoxMain): rays from the screen's points into voxels of light on the surfaces.
         // A sparse store: vox_slots_v faces of 3 entries, 50 MB whatever the scene
         // KeepMax: the most samples a face keeps; a face notices a change of its own light and starts over (VoxStore), the rest stay as they are
-        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, std::uint32_t LightsKey, const xgpu::texture& SceneHDR, int HalfW, bool bLit) noexcept
+        bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, const v3& Look, std::uint32_t LightsKey, const xgpu::texture& SceneHDR, int HalfW, bool bLit) noexcept
         {
             const std::array<const xgpu::texture*, 1> VoxTex{ &SceneHDR };
             // The lights still for a while: no face can have changed, the noise can't start one over: the light settles and the flicker dies out, with fewer rays too (ponytail: moving objects aren't in the key)
@@ -947,6 +947,13 @@ namespace xlionrender::gi
             // the eye has to leave a place by a quarter of a cell, a slow drift counts too. How far it went since the rays last slept says how long they stay: a nudge a second, past a metre or so the old ten (a long way: much is new; a second alone left 2.5 % off at 5 s against .8). A turn asks for nothing yet: rays stay one frame in 8 (ponytail: what a turn brings in fills slowly; wake on a large turn if it shows)
             const v3 dv{ Eye.m_X - m_VoxEyeAt[0], Eye.m_Y - m_VoxEyeAt[1], Eye.m_Z - m_VoxEyeAt[2] };
             if (VoxQuiet()) m_VoxTravel = 0.0f;
+            // (a turn wakes them too, Tomas 2026-11-12: after a still view went quiet, the surfaces a turn brought in got a ray one frame in 8 - not resolved
+            // at all. The view's forward (clip w's row) past ~3 degrees from where the rays last woke counts as a move of the eye)
+            {
+                const float Ll = std::sqrt(Look.Dot(Look)), La = std::sqrt(m_VoxLookAt[0] * m_VoxLookAt[0] + m_VoxLookAt[1] * m_VoxLookAt[1] + m_VoxLookAt[2] * m_VoxLookAt[2]);
+                const float Cs = Ll > 0.0f && La > 0.0f ? (Look.m_X * m_VoxLookAt[0] + Look.m_Y * m_VoxLookAt[1] + Look.m_Z * m_VoxLookAt[2]) / (Ll * La) : 0.0f;
+                if (Cs < 0.9986f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxRaysSince = 0.0; m_VoxLookAt = { Look.m_X, Look.m_Y, Look.m_Z }; }
+            }
             if (dv.Dot(dv) > Cell * Cell * 0.0625f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxRaysSince = 0.0; m_VoxTravel += std::sqrt(dv.Dot(dv)); m_VoxEyeAt = { Eye.m_X, Eye.m_Y, Eye.m_Z }; }
             const int Keep = KeepMax;
             if (!m_bVox || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
@@ -1473,6 +1480,7 @@ namespace xlionrender::gi
         xgpu::buffer                        m_RefSampleB, m_RefAccumB;
         std::array<float, 3>                m_VoxAnchor{};
         std::array<float, 3>                m_VoxEyeAt{};
+        std::array<float, 3>                m_VoxLookAt{};         // (the view's forward when the rays last woke: a turn wakes them)
         float                               m_VoxTravel = 0.0f;
         double                              m_VoxRaysSince = 0.0;       // the voxels' rays since the lights or the eye last changed (VoxQuiet)
         std::chrono::steady_clock::time_point m_VoxEyeMoved{};

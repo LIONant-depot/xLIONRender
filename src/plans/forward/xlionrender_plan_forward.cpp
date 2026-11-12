@@ -3607,7 +3607,7 @@ namespace xlionrender
                             const auto RaysBody = [this, &Window, &View, &Scene, Eye, Vox = Vox, Frame = m_Device.getFrameIndex()]()
                             {
                                 if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
-                                m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, Frame, int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
+                                m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, Frame, int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, [&]{ const float* p = reinterpret_cast<const float*>(&View.m_GIScreenPrevW2C); return xmath::fvec3{ p[3], p[7], p[11] }; }(), m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
                                 if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
                             };
                             const auto Rays = [RaysBody, &View]()

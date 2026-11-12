@@ -19,6 +19,9 @@ layout(set = 1, binding = 0) uniform sampler2D SceneHDR;      // (XLION_VOX_SEEN
 #endif
 layout(std430, set = 0, binding = 6)          buffer accum_u_b { uvec4 GIRefAccumU[]; };    // (the same memory: a direction bin's fixed point sums, added atomically)
 layout(push_constant) uniform push_t { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push;
+#ifndef VOX_AMORTIZE
+#define VOX_AMORTIZE 0.0      // (1.0 tried 2026-11-12: lit at 20 s 26.8 -> 29.1 %, frame 9.0 -> 8.8 ms - not kept; the store's far levels already need few rays)
+#endif
 #ifndef VOX_PICKS
 #define VOX_PICKS 4       // (the pixels a ray chooses its least-known face from; 16 tried 2026-11-12: no fewer flashes at thin edges, 10 s resolve 34.5 -> 41.1 % off)
 #endif
@@ -479,7 +482,9 @@ void VoxMain()
     if (Least >= 1e30) return;
     // (XLION_VOX_INCON=<scale>: a known face takes the ray with probability inconsistency x scale - a resolved face (its long and short means agree within
     // their noise) takes none: no work, no flicker; one still drifting, propagating, stays inconsistent and keeps its rays. WickedEngine: rays = inconsistency x boost)
-    if (VoxIncon > 0.0 && Least > -1e5 && Rnd() >= min(-Least * VoxIncon, 1.0)) return;
+    // (VOX_AMORTIZE, WickedEngine's temporal ray amortization: a known face in a coarser (farther) level takes its rays 2^-level as often - far light is low
+    // frequency and its faces long-lived; new faces (the unknown) are not slowed)
+    if (VoxIncon > 0.0 && Least > -1e5 && Rnd() >= min(-Least * VoxIncon, 1.0) * exp2(-VOX_AMORTIZE * float(L))) return;
     const float BucketAO = uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
     vec3 Ph, Nh; bool bHit;
     // (one copy of VoxRay: the shader's compiled size goes with its copies. The second ray: the surface the first hit, seen yet or not: a sample of that surface's own
