@@ -651,19 +651,11 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
 #endif
         }
     }
-    for (uint k = 0u; k < nList; ++k)
-    {
-#ifdef XLION_TILE_PIXEL
-        const int i = Src == 0 ? int((LightTiles[ListAt + 1u + (k >> 1)] >> ((k & 1u) * 16u)) & 0xFFFFu)
-                    : Src == 1 ? int(k) : int(LightCells[EntryBase + 2u * (First + k)]);
-#else
-        const int i = Src == 1 ? int(k) : int(LightCells[EntryBase + 2u * (First + k)]);
-#endif
-        Sum += LocalLight(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
-    }
-    if (Src != 2) return Sum;
-
-    if (bInlineTail && Count > Head && abs(UBOLight.LocalCount.w) > 1.5)
+    // The tail (Src 2 only): the lights it adds go through the list's loop below, after the list, each with its weight - one copy of
+    // LocalLight in the shader for the list and both tails (each tail had its own inlined copy: code size and spills, A5 2026-11-12)
+    int   Tail = 0, Samples = 1, Pick = -1;                                     // (Tail: 0 none, 1 the stratified samples, 2 the resampled pick)
+    float PickW = 0.0, u0 = 0.0;
+    if (Src == 2 && bInlineTail && Count > Head && abs(UBOLight.LocalCount.w) > 1.5)
     {
         // Resampled (RIS, P3's first step): M stratified candidates from the cell's tail distribution q, each weighted by the light's
         // unshadowed contribution at this pixel p (its luminance) over q, one of them picked in proportion to its weight and shaded with its
@@ -674,21 +666,20 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
         // weighs its samples by their traced visibility alike). Lights behind a wall: per-frame error 0.41 -> 0.26, for 0.036 -> 0.048 ms
         const int   M  = int(abs(UBOLight.LocalCount.w));
         const bool  bVis = UBOLight.LocalCount.w < 0.0;
-        const float u0 = LocalRandom(0u);
+        const float v0 = LocalRandom(0u);
         float       u1 = LocalRandom(1u);
-        int   k    = 0, Pick = -1;
+        int   k    = 0;
         float WSum = 0.0, PickP = 1.0;
-        vec3  PickC = vec3(0.0);
         uint  e    = Head;
         while (k < M)
         {
             // the next candidate's entry (the samples grow: from the last one on), and the samples after it that fall in it too
-            e = LocalTailFind(EntryBase, First, e, Count, (float(k) + u0) / float(M));
+            e = LocalTailFind(EntryBase, First, e, Count, (float(k) + v0) / float(M));
             const float Cdf  = LocalTailCdf(EntryBase, First, e);
             const float Prev = e > Head ? LocalTailCdf(EntryBase, First, e - 1u) : 0.0;
             int nHits = 1;
             ++k;
-            while (k < M && ((float(k) + u0) / float(M) < Cdf || e + 1u == Count)) { ++nHits; ++k; }
+            while (k < M && ((float(k) + v0) / float(M) < Cdf || e + 1u == Count)) { ++nHits; ++k; }
             {
                 const int   l = int(LightCells[EntryBase + 2u * (First + e)]);
                 const vec3  C = LocalLightUnshadowed(l, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic);
@@ -700,32 +691,51 @@ vec3 LocalLights(in const vec3 N, in const vec3 V, in const float NdotV, in cons
                 if (W > 0.0)
                 {
                     const float a = W / WSum;                                       // (a streaming pick: u1 stays uniform)
-                    if (u1 < a) { Pick = l; PickC = C; PickP = P; u1 = u1 / a; }
+                    if (u1 < a) { Pick = l; PickP = P; u1 = u1 / a; }
                     else        u1 = (u1 - a) / (1.0 - a);
                 }
             }
             ++e;
         }
-        if (Pick >= 0) Sum += PickC * LocalLightShadow(Pick, N) * (WSum / (float(M) * PickP));
+        // shaded below as LocalLight(Pick) = its unshadowed term (C, positive: P > 0) x its shadow, x this weight
+        if (Pick >= 0) { Tail = 2; PickW = WSum / (float(M) * PickP); }
     }
-    else if (bInlineTail && Count > Head)
+    else if (Src == 2 && bInlineTail && Count > Head)
     {
         // Samples stratified tail samples (u_k = (k + u) / Samples), each found by a binary search from the last one on
-        const int   Samples = max(int(UBOLight.LocalBase.w), 1);
-        const float u0      = LocalRandom();
-        int   k    = 0;
-        uint  e    = Head;
-        while (k < Samples)
+        Tail = 1; Samples = max(int(UBOLight.LocalBase.w), 1); u0 = LocalRandom();
+    }
+    uint k = 0u, e = Head;
+    int  ks = 0;
+    for (;;)
+    {
+        int   i;
+        float w = 1.0;
+        if (k < nList)
         {
-            e = LocalTailFind(EntryBase, First, e, Count, (float(k) + u0) / float(Samples));
+#ifdef XLION_TILE_PIXEL
+            i = Src == 0 ? int((LightTiles[ListAt + 1u + (k >> 1)] >> ((k & 1u) * 16u)) & 0xFFFFu)
+              : Src == 1 ? int(k) : int(LightCells[EntryBase + 2u * (First + k)]);
+#else
+            i = Src == 1 ? int(k) : int(LightCells[EntryBase + 2u * (First + k)]);
+#endif
+            ++k;
+        }
+        else if (Tail == 1 && ks < Samples)
+        {
+            e = LocalTailFind(EntryBase, First, e, Count, (float(ks) + u0) / float(Samples));
             const float Cdf  = LocalTailCdf(EntryBase, First, e);
             const float Prev = e > Head ? LocalTailCdf(EntryBase, First, e - 1u) : 0.0;
             int nHits = 1;
-            ++k;
-            while (k < Samples && ((float(k) + u0) / float(Samples) < Cdf || e + 1u == Count)) { ++nHits; ++k; }
-            Sum += LocalLight(int(LightCells[EntryBase + 2u * (First + e)]), N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic) * (float(nHits) / (float(Samples) * (Cdf - Prev)));
+            ++ks;
+            while (ks < Samples && ((float(ks) + u0) / float(Samples) < Cdf || e + 1u == Count)) { ++nHits; ++ks; }
+            i = int(LightCells[EntryBase + 2u * (First + e)]);
+            w = float(nHits) / (float(Samples) * (Cdf - Prev));
             ++e;
         }
+        else if (Tail == 2) { i = Pick; w = PickW; Tail = 0; }
+        else break;
+        Sum += LocalLight(i, N, V, NdotV, Albedo, F0, PerceptualRoughness, Metallic) * w;     // (x 1.0 for the list: exact)
     }
     return Sum;
 }
