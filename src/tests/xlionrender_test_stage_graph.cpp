@@ -216,6 +216,7 @@ int main( int argc, char** argv )
         }
         auto SG = S;
         SG.m_GI.m_bEnable = true;
+        if( std::getenv("XLION_SG_CPUGI") ) { SG.m_GI.m_bGPUTrace = false; SG.m_GI.m_TraceAllowanceMs = 0; }      // (C35 narrowing: the GI's rays on the CPU, no time allowance)
         SG.m_Draws = { { .m_Mesh = BoxG, .m_L2W = xmath::fmat4::fromTranslation({ 0, -0.55f, 0 }) * xmath::fmat4::fromScale({ 10.0f, 0.1f, 10.0f }), .m_Material = { .m_BaseColor = { 0.5f, 0.5f, 0.5f } }, .m_Instance = 101 }
                      , { .m_Mesh = SphereG, .m_L2W = xmath::fmat4::fromTranslation({ -0.4f, 0.3f, 0 }), .m_Material = { .m_BaseColor = { 0.9f, 0.3f, 0.2f } }, .m_Instance = 102 }
                      , { .m_Mesh = BoxG, .m_L2W = xmath::fmat4::fromTranslation({ 0.7f, -0.1f, 0.5f }) * xmath::fmat4::fromScale({ 0.4f, 0.8f, 0.4f }), .m_Material = { .m_BaseColor = { 0.2f, 0.8f, 0.3f } }, .m_Instance = 103 } };
@@ -272,6 +273,9 @@ int main( int argc, char** argv )
                     std::size_t k = 0; while( k < std::min(a.size(), b.size()) && a[k] == b[k] ) ++k;
                     std::size_t nDiff = 0; for( std::size_t j = 0; j < std::min(a.size(), b.size()); ++j ) nDiff += a[j] != b[j];
                     Wy = std::format("frame {}: {} differs ({} vs {} words, {} differ), the first at word {}", f, Ca.m_OutNames[i], a.size(), b.size(), nDiff, k);
+                    if( std::getenv("XLION_SG_DUMP") )      // (each differing word: its index, both as hex and as float)
+                        for( std::size_t j = 0, n = 0; j < std::min(a.size(), b.size()) && n < 32; ++j )
+                            if( a[j] != b[j] ) { float fa, fb; std::memcpy(&fa, &a[j], 4); std::memcpy(&fb, &b[j], 4); Wy += std::format("\n   word {} (mod 16: {}): {:08x} {:08x}  {} {}", j, j % 16, a[j], b[j], fa, fb); ++n; }
                 }
             }
             if( f == nFrames - 1 && c == 0 )
