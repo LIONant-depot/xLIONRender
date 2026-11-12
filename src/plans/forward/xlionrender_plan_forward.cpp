@@ -3641,7 +3641,7 @@ namespace xlionrender
                             const auto A = m_pGITrace->VoxAnchor();
                             const float C[7] = { s_Vox[0], A[0], A[1], A[2], Eye[0], Eye[1], Eye[2] };
                             m_GatherTable[20] = 3u; m_GatherTable[28] = std::uint32_t(View.m_GIScreenWidth);
-                            { static const bool s_bOnePass = xlionrender::Env("XLION_GI_ONE_PASS") != nullptr; m_GatherTable[39] = s_bOnePass ? 1u : 0u; }      // (the voxels' read takes no GI buffer: one pass, not one a buffer - word 39, the classification's)
+                            { static const bool s_bOnePass = [] { const char* p = xlionrender::Env("XLION_GI_ONE_PASS"); return p == nullptr || p[0] != '0'; }(); m_GatherTable[39] = s_bOnePass ? 1u : 0u; }      // (the voxels' read takes no GI buffer: one pass, not one a buffer - word 39, the classification's; default since 2026-11-12, XLION_GI_ONE_PASS=0 the old passes)
                             std::memcpy(m_GatherTable.data() + 21, C, sizeof(C));
                         }
                     }
