@@ -121,7 +121,13 @@ int main()
         Scene.m_LocalLights = { { .m_Position = { 0.5f, 2.5f, 1.0f }, .m_Radius = 8 }, { .m_Type = xlionrender::local_light::type::SPOT, .m_Position = { 2, 4, -1 }
                               , .m_Direction = xmath::fvec3{ -0.3f, -1, 0.4f }.NormalizeCopy(), .m_Radius = 9, .m_InnerAngle = 0.4f, .m_OuterAngle = 0.7f } };
         std::vector<float> One, Two;
+        // the pages settle first: the requested ones come back a ring late (frames 3 and 4 render them; 14, 7, 7, 19, 13, then 0 maps), so
+        // the change is measured against a settled light, not its first frames (C33: four frames were taken as settled)
+        int nSettle = 0;
+        do CHECK(App.RenderFrame(Scene, View, Camera), "render to settle"); while (Renderer.getShadowTilesRendered() != 0 && ++nSettle < 16);
+        CHECK(nSettle < 16, "the lights' shadow pages never settle (%d maps rendered a frame after 16 frames)", Renderer.getShadowTilesRendered());
         CHECK(Render(One), "render x1");
+        CHECK(Renderer.getShadowTilesRendered() == 0, "an unchanged settled light rendered %d shadow maps", Renderer.getShadowTilesRendered());
         for (auto& l : Scene.m_LocalLights) l.m_Intensity *= 2;
         CHECK(App.RenderFrame(Scene, View, Camera), "render the change");
         CHECK(Renderer.getShadowTilesRendered() == 0, "an intensity change rendered %d shadow maps", Renderer.getShadowTilesRendered());
