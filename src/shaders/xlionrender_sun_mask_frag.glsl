@@ -146,6 +146,7 @@ void main()
     g_VSMFoot = max(min(Fl, Fd), 1e-9);
 
     // (y 2: the test's view - a pixel proven lit written half lit, to count them and check each against the full evaluation)
+    g_VSMPixel = gl_FragCoord.xy;
     float S;
     if (SunMaskReuse(P, FaceN, Size, S)) { if (MaskPush.Params.w != 0u) S *= 0.5; }      // (w: the test's view of the reused pixels - half)
     else S = UBOLight.ShadowLevels[0].y >= 1.0 && VSMProvenLit(P + UBOLight.CameraPos.xyz, FaceN) ? (UBOLight.ShadowLevels[0].y == 2.0 ? 0.5 : 1.0) : ShadowVSM(P + UBOLight.CameraPos.xyz, FaceN);

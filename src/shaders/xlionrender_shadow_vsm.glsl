@@ -241,16 +241,29 @@ float ShadowVSMAt(in const int Level, in const vec3 World, in const vec3 Ng, in 
 // Unreal's SMRT samples its finest level over the sun's disc likewise (rays, TSR averaging their noise); without a TAA the disc's rotation
 // is fixed per point (a hash of its place on the finest grid: no flicker). Each tap moved along the receiver's plane
 const int kVSMDiscTaps = 4;
+vec2 g_VSMPixel = vec2(-1.0);      // (a fragment caller's gl_FragCoord.xy: the disc's noise in screen space; -1 none)
 float ShadowVSMDisc(in const int Level, in const vec3 World, in const vec3 Ng, in const vec2 Slope, in const vec2 SlopeP, in const float Grazing, in const float R)
 {
     const vec3  Ax = vec3(UBOLight.W2Light[0][0], UBOLight.W2Light[1][0], UBOLight.W2Light[2][0]);     // the light's x, y, z in world
     const vec3  Ay = vec3(UBOLight.W2Light[0][1], UBOLight.W2Light[1][1], UBOLight.W2Light[2][1]);
     const vec3  Az = vec3(UBOLight.W2Light[0][2], UBOLight.W2Light[1][2], UBOLight.W2Light[2][2]);
     const float nz = dot(Az, Ng);
-    const ivec3 Cell = ivec3(floor(World / max(UBOLight.VSMParams.y, 1e-6)));
-    uint h = uint(Cell.x) * 73856093u ^ uint(Cell.y) * 19349663u ^ uint(Cell.z) * 83492791u;
-    h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15;
-    const float a0 = float(h & 0xFFFFu) * (6.2831853 / 65536.0);
+    // The disc's rotation: per pixel and per frame where the caller is a pixel (interleaved gradient noise, its frame offset from the
+    // lights' seed) - the taps differ pixel to pixel and frame to frame and TAA resolves them (Tomas 2026-11-12: noise belongs to the screen,
+    // not to the shadow's texels); elsewhere (compute callers) by the world cell at level 0's texel, as before
+    float a0;
+    if (g_VSMPixel.x >= 0.0)
+    {
+        const vec2 p = g_VSMPixel + 5.588238 * float(uint(UBOLight.LocalCount.z) & 63u);
+        a0 = fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))) * 6.2831853;
+    }
+    else
+    {
+        const ivec3 Cell = ivec3(floor(World / max(UBOLight.VSMParams.y, 1e-6)));
+        uint h = uint(Cell.x) * 73856093u ^ uint(Cell.y) * 19349663u ^ uint(Cell.z) * 83492791u;
+        h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15;
+        a0 = float(h & 0xFFFFu) * (6.2831853 / 65536.0);
+    }
     float S = 0.0, W = 0.0;
     g_VSMSmallTap = UBOLight.VSMParams2.w == 0.0;                                      // (the tests' table-check mode keeps the 4 x 4)
     const int nTaps = clamp(int(UBOLight.VSMParams.x), 1, 16);                         // (the sun's m_ShadowDiscTaps; kVSMDiscTaps its default)
@@ -543,6 +556,7 @@ float SunShadowMaskedOnly(in const vec3 World, in const vec3 Ng)
         const float d = length(World - UBOLight.CameraPos.xyz);
         if (abs(unpackHalf2x16(m & 0xFFFFu).x - d) <= kSunMaskTolerance * d) return float(m >> 16u) / 65535.0;
     }
+    g_VSMPixel = gl_FragCoord.xy;
     return SunShadow(World, Ng);
 }
 float SunShadowMasked(in const vec3 World, in const vec3 Ng)

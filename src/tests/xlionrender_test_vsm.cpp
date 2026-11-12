@@ -506,8 +506,17 @@ int main()
             {
                 Setup.m_ResolutionBias = B0 + 0.02f * float(s);
                 Renderer.configureVSM(Setup);
-                for (int k = 0; k < 40; ++k) CHECK(App.RenderFrame(Scene, Hi, Camera) && Renderer.validateVSM(), "bias step %d", s);     // (re-initialized: every page again)
-                CHECK(ReadHDR(Device, Hi, Cur), "bias step %d read", s);
+                for (int k = 0; k < 32; ++k) CHECK(App.RenderFrame(Scene, Hi, Camera) && Renderer.validateVSM(), "bias step %d", s);     // (re-initialized: every page again)
+                // the mean of 8 frames: the soft shadow's disc turns per pixel and per frame (screen-space noise, resolved over frames as TAA
+                // does, 2026-11-12) - one frame's pixels differ by their noise, not by a pop
+                std::vector<float> One;
+                Cur.clear();
+                for (int k = 0; k < 8; ++k)
+                {
+                    CHECK(App.RenderFrame(Scene, Hi, Camera) && ReadHDR(Device, Hi, One), "bias step %d read", s);
+                    if (Cur.empty()) Cur.assign(One.size(), 0.0f);
+                    for (std::size_t i = 0; i < One.size(); ++i) Cur[i] += One[i] / 8.0f;
+                }
                 if (s > 0)
                     for (std::size_t i = 0; i < Cur.size(); ++i)
                     {
