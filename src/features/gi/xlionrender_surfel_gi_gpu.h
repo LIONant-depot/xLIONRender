@@ -1054,7 +1054,7 @@ namespace xlionrender::gi
         // ~300 MB): no surfel slices, links or shown light, and the meshes' read structures not packed (the BVH, the meshes, the materials and
         // the emitters stay: the voxel rays' and the reflections' hits). Its GI mode stays available: XLION_GI_NO_SURFELS=0
         static bool SurfelsOff(void) noexcept { static const bool s_b = [] { const char* p = xlionrender::Env("XLION_GI_NO_SURFELS"); return p != nullptr && p[0] != '0'; }(); return s_b; }
-        static const std::array<float, 3>& VoxConfig(void) noexcept { static const std::array<float, 3> s_A = [] { std::array<float, 3> A{ 0.0f, 1.0f, 16384.0f }; if (const char* p = xlionrender::Env("XLION_GI_VOX")) (void)xlionrender::Scan(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }(); return s_A; }
+        static const std::array<float, 3>& VoxConfig(void) noexcept { static const std::array<float, 3> s_A = [] { std::array<float, 3> A{ 0.0f, 1.0f, 1024.0f }; if (const char* p = xlionrender::Env("XLION_GI_VOX")) (void)xlionrender::Scan(p, "%f %f %f", &A[0], &A[1], &A[2]); return A; }(); return s_A; }
         std::array<float, 3> VoxAnchor(void) const noexcept { return m_VoxAnchor; }
         xgpu::buffer*        VoxBuffer(void) noexcept { return m_ClipB[0].m_Private ? &m_ClipB[0] : nullptr; }
         xgpu::buffer*        RefSamples(void) noexcept { return m_RefSampleB.m_Private ? &m_RefSampleB : nullptr; }
