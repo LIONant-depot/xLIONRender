@@ -210,9 +210,6 @@ namespace xlionrender
         constexpr std::uint32_t s_NoiseLagsComp[] = {
             #include "xlionrender_noise_lags_comp.h"
         };
-        constexpr std::uint32_t s_SlmPrimeComp[] = {
-            #include "xlionrender_slm_prime_comp.h"
-        };
         constexpr std::uint32_t s_TAAComp[] = {
             #include "xlionrender_taa_comp.h"
         };
@@ -914,8 +911,6 @@ namespace xlionrender
             if( auto Err = Device.Create(m_PostCompute, { .m_pShader = &m_PostShader, .m_nBuffers = 0, .m_nTextures = 2, .m_nImages = 1, .m_PushConstantsSize = 32, .m_bLinear = !s_bComputeNearest, .m_pName = "instance: m_PostCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_ContactComp) }); Err ) return Err;
             if( auto Err = Device.Create(m_NoiseLagsShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_NoiseLagsComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_SlmPrimeShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_SlmPrimeComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_SlmPrimeCompute, { .m_pShader = &m_SlmPrimeShader, .m_nBuffers = 1, .m_PushConstantsSize = 16, .m_pName = "instance: m_SlmPrimeCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_NoiseLagsCompute, { .m_pShader = &m_NoiseLagsShader, .m_nBuffers = 1, .m_nTextures = 1, .m_PushConstantsSize = 16, .m_pName = "instance: m_NoiseLagsCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactCompute, { .m_pShader = &m_ContactShader, .m_nBuffers = 1, .m_nTextures = 1, .m_nImages = 1, .m_PushConstantsSize = 112, .m_pName = "instance: m_ContactCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_GIDenoiseShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_GIDenoiseComp) }); Err ) return Err;
@@ -1728,7 +1723,6 @@ namespace xlionrender
     {
         constexpr auto k = capture_path_v;
         if( M.m_Instance[k].m_Private ) return &M.m_Instance[k];
-        if( xlionrender::Env("XGPU_WAIT_LOG") ) { std::printf("CAPTUREMADE param base %u at device frame %llu\n", M.m_ParamBase, static_cast<unsigned long long>(m_Device.getFrameIndex())); std::fflush(stdout); }      // (C30 measurement)
         return makeInstance(M, k, true, [&](xgpu::pipeline& Pipeline) -> xgpu::device::error*
         {
             const auto Samplers = LitSamplers();

@@ -221,7 +221,6 @@ namespace xlionrender
             if (Textures.empty() || m_Renderer.CreateMaterial(Id, pMat->getShaderHDR(), Textures, xmaterial::RenderState(pMat->m_Render, pMI->m_DoubleSided), { pMI->m_pParams, pMI->m_BlockBytes / 4u }, pMat->m_Flags.m_bTextureTable)) return {};
             if (pMat->getShaderTile().m_Private) (void)m_Renderer.SetMaterialTile(Id, pMat->getShaderTile());
             if (pMat->getShaderGBuffer().m_Private) (void)m_Renderer.SetMaterialGBuffer(Id, pMat->getShaderGBuffer());     // (the screen tail's thin G-buffer)
-            if (xlionrender::Env("XLION_DRAW_PROBE")) { std::printf("MATPROBE material id %u: material instance %016llX\n", Id.m_Index, static_cast<unsigned long long>(MIInstance)); std::fflush(stdout); }      // (C30: a probed draw's material by its instance's guid)
             m_Materials[MIInstance] = { Id, std::move(From) };
             return Id;
         }
