@@ -1,3 +1,4 @@
+#extension GL_EXT_control_flow_attributes : enable
 // The sun's shadow from its virtual pages (features/shadows/xlionrender_shadow_vsm.h; documentation/lighting_strategy.md sec. 7).
 // Included by mb_standard_pbr.frag after xlionrender_local_lights.glsl (the page table is in LightCells: one buffer, no new binding).
 //  - Level: the one whose texel fits the pixel's light-space footprint (max of the derivatives), as the request pass picks it.
@@ -214,21 +215,23 @@ float ShadowVSMAt(in const int Level, in const vec3 World, in const vec3 Ng, in 
     // (VSMParams3.w: the movers' table + 1, 0 none; negative: the movers' pages a level coarser - a parallel dynamic map, Tomas 2026-11-06: their
     // own filtered visibility at Level + 1, the nearer kept; a page they have none of there: lit by them)
     const float MW = UBOLight.VSMParams3.w;
-    float S = MW <= 0.0                                                                 // (no mover this frame, or coarse ones: the static pages alone here)
-            ? ShadowVSMLevel(Level, Lo, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w), 0u)
-            : ShadowVSMLevel(Level, Lo, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w), uint(MW));
-    if (MW < 0.0 && S >= 0.0)
+    // (one call for both mover cases - the static pages alone, or with the fine movers' table: they differed only in the last argument)
+    float S = ShadowVSMLevel(Level, Lo, Slope, UBOLight.VSMLevels[Level], UBOLight.VSMParams.y, uint(UBOLight.VSMParams.w), MW > 0.0 ? uint(MW) : 0u);
+    // The rare lookups - the coarse movers a level up, the previous epoch while the sun moves - through one call in a loop that is not
+    // unrolled (the same math as the two calls written out): each call site was a full inlined copy of ShadowVSMLevel (A5 2026-11-12)
+    const int Lm = min(Level + 1, int(UBOLight.VSMParams.z) - 1);
+    [[dont_unroll]] for (int r = 1; r < 3; ++r)
     {
-        const int   Lm   = min(Level + 1, int(UBOLight.VSMParams.z) - 1);
-        const vec3  OffM = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMParams.y * float(1 << Lm));
-        const float Sm   = ShadowVSMLevel(Lm, (UBOLight.W2Light * vec4(OffM, 1.0)).xyz, Slope, UBOLight.VSMLevels[Lm], UBOLight.VSMParams.y, uint(-MW) - 1u, 0u);
-        if (Sm >= 0.0) S = min(S, Sm);
-    }
-    if (UBOLight.VSMPrevParams.x != 0.0 && (S < 0.0 || UBOLight.VSMPrevParams.y < 1.0))
-    {
-        const vec3  OffP = World + Ng * (kVSMNormalOffset * Grazing * UBOLight.VSMPrevParams.z * float(1 << Level));
-        const float SP   = ShadowVSMLevel(Level, (UBOLight.VSMPrevW2Light * vec4(OffP, 1.0)).xyz, SlopeP, UBOLight.VSMPrevLevels[Level], UBOLight.VSMPrevParams.z, uint(UBOLight.VSMPrevParams.w), 0u);
-        S = S < 0.0 ? SP : SP < 0.0 ? S : mix(SP, S, UBOLight.VSMPrevParams.y);
+        if (r == 1 && !(MW < 0.0 && S >= 0.0)) continue;
+        if (r == 2 && !(UBOLight.VSMPrevParams.x != 0.0 && (S < 0.0 || UBOLight.VSMPrevParams.y < 1.0))) break;
+        const int   Lr  = r == 1 ? Lm : Level;
+        const float Tex = r == 1 ? UBOLight.VSMParams.y : UBOLight.VSMPrevParams.z;
+        const vec3  Wr  = World + Ng * (kVSMNormalOffset * Grazing * Tex * float(1 << Lr));
+        const vec3  Lr3 = r == 1 ? (UBOLight.W2Light * vec4(Wr, 1.0)).xyz : (UBOLight.VSMPrevW2Light * vec4(Wr, 1.0)).xyz;
+        const float v   = ShadowVSMLevel(Lr, Lr3, r == 1 ? Slope : SlopeP, r == 1 ? UBOLight.VSMLevels[Lm] : UBOLight.VSMPrevLevels[Level], Tex
+                                       , r == 1 ? uint(-MW) - 1u : uint(UBOLight.VSMPrevParams.w), 0u);
+        if (r == 1) { if (v >= 0.0) S = min(S, v); }
+        else S = S < 0.0 ? v : v < 0.0 ? S : mix(v, S, UBOLight.VSMPrevParams.y);
     }
     return S;
 }
@@ -414,21 +417,28 @@ float ShadowVSMPages(in const vec3 World, in const vec3 Ng)
             // coarse one twice as wide - mixing a sharp and a soft image showed. Across the band the fine level's filter widens with the
             // blend (4 of its filters spread over up to half a coarse texel along the light's plane): at the band's end it is as wide as
             // the coarse one's, and the mix between them is between two equally soft images
-            const float S1 = Pen > 0.0 ? ShadowVSMDisc(Level + 1, World, Ng, Slope, SlopeP, Grazing, Pen) : ShadowVSMAt(Level + 1, World, Ng, Slope, SlopeP, Grazing);
+            // (the band's lookups - the next level, then the four widened filters of this one - through one call in a loop that is not
+            // unrolled: the same math as the five calls written out, each of which was a full inlined copy; the band is a small part of
+            // the screen, A5 2026-11-12)
+            const vec3  Ax = vec3(UBOLight.W2Light[0][0], UBOLight.W2Light[1][0], UBOLight.W2Light[2][0]);
+            const vec3  Ay = vec3(UBOLight.W2Light[0][1], UBOLight.W2Light[1][1], UBOLight.W2Light[2][1]);
+            const float d  = t * 0.5 * UBOLight.VSMParams.y * float(2 << Level);           // (half the coarse level's texel, times the blend)
+            float S1 = -1.0, Sw = 0.0, nw = 0.0;
+            [[dont_unroll]] for (int q = 1; q < 6; ++q)
+            {
+                if (q >= 2 && !(S1 >= 0.0 && Pen <= 0.0 && !bWide)) break;
+                const int  k  = q - 2;
+                const vec2 o  = vec2((k & 1) != 0 ? 1.0 : -1.0, (k & 2) != 0 ? 1.0 : -1.0) * (0.5 * d);
+                const vec3 Wq = q == 1 ? World : World + Ax * o.x + Ay * o.y;
+                const float v = q == 1 && Pen > 0.0 ? ShadowVSMDisc(Level + 1, Wq, Ng, Slope, SlopeP, Grazing, Pen)
+                                                    : ShadowVSMAt(q == 1 ? Level + 1 : Level, Wq, Ng, Slope, SlopeP, Grazing);
+                if (q == 1) S1 = v;
+                else if (v >= 0.0) { Sw += v; nw += 1.0; }
+            }
             if (S1 >= 0.0 && Pen > 0.0) S = mix(S, S1, t);
             else if (S1 >= 0.0 && bWide) S = mix(S, S1, t);
             else if (S1 >= 0.0)
             {
-                const vec3  Ax = vec3(UBOLight.W2Light[0][0], UBOLight.W2Light[1][0], UBOLight.W2Light[2][0]);
-                const vec3  Ay = vec3(UBOLight.W2Light[0][1], UBOLight.W2Light[1][1], UBOLight.W2Light[2][1]);
-                const float d  = t * 0.5 * UBOLight.VSMParams.y * float(2 << Level);       // (half the coarse level's texel, times the blend)
-                float Sw = 0.0, nw = 0.0;
-                for (int k = 0; k < 4; ++k)
-                {
-                    const vec2  o  = vec2((k & 1) != 0 ? 1.0 : -1.0, (k & 2) != 0 ? 1.0 : -1.0) * (0.5 * d);
-                    const float Sk = ShadowVSMAt(Level, World + Ax * o.x + Ay * o.y, Ng, Slope, SlopeP, Grazing);
-                    if (Sk >= 0.0) { Sw += Sk; nw += 1.0; }
-                }
                 if (nw > 0.0) S = mix(S, Sw / nw, t);
                 S = mix(S, S1, t);
             }
