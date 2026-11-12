@@ -193,8 +193,8 @@ namespace xlionrender
         // The ambient occlusion on that grid (xlionrender_ao_comp.glsl): this frame's and last frame's (vec2 a pixel: the AO, the distance)
         xgpu::buffer            m_AO, m_AOPrev, m_AORaw;      // (m_AORaw: this frame's unfiltered)
         bool                    m_bAOPrev           = false;
-        xmath::fmat4            m_GIScreenPrevW2C;
-        xmath::fvec3            m_GIScreenPrevEye;
+        xmath::fmat4            m_GIScreenPrevW2C{};
+        xmath::fvec3            m_GIScreenPrevEye{};
         std::uint32_t           m_GIScreenFrame     = 0;
         bool                    m_bGIScreenPrev     = false;
         bool                    m_bGIScreenPerPixel = true;     // the read it was (scene::gi_settings::m_bPerPixel): a change drops it
