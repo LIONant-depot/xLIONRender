@@ -160,7 +160,7 @@ float CortaoAO(in const ivec2 p, in const vec3 P, in const float Dist, in const 
       T = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x); B = vec3(b, s + n.y * n.y * a, -n.y); }
     const float cr = cos(Rot), sr = sin(Rot);
     const mat3 TBN = mat3(cr * T + sr * B, cr * B - sr * T, normalize(N));
-    const vec3 Pc = P + N * (0.02 * Dist / max(RadiusPx, 1.0));      // (the centre pushed off its own surface by about a pixel)
+    const vec3 Pc = P + N * (Dist / max(Push.PixelsPerUnit, 1.0));      // (the centre pushed off its own surface by a half-size pixel's size there - CORTAO's normalBias x depth)
     uint Bits = 0u;
     for (int i = 0; i < cortao_samples_v; ++i)
     {
@@ -180,7 +180,7 @@ float CortaoAO(in const ivec2 p, in const vec3 P, in const float Dist, in const 
         vec3 Dir = d * iL;
         const vec3  Ns = NormalAt(Qs);
         const float Slope = inversesqrt(max(dot(Ns, V), 1.0 / 16.0));      // (CORTAO's slope compensation: a sample seen at a grazing angle stands for more surface)
-        float Rad = Push.Radius * w * Slope * iL;      // (the occluder's normalized angular radius)
+        float Rad = min(Push.Radius * w * Slope * iL, 1.0);      // (the occluder's normalized angular radius; at most a quarter sphere - one close sample covered the whole hemisphere)
         if (dot(Ns, Dir) < 0.5) Dir = normalize(Dir - Ns * (Rad / max(1.0 - Rad * Rad * 0.5, 1e-6)));     // (a front face: moved into its object by its radius - no self-occlusion)
         else Rad *= mix(1.0, Slope, 0.5);      // (a back face: boosted, no leak)
         const vec3  H = transpose(TBN) * Dir;
