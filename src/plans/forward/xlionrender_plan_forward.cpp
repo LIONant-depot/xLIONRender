@@ -3675,7 +3675,9 @@ namespace xlionrender
                     const auto MoverBlock = [&]( const auto& D, const xmath::fbbox& Box ) -> std::uint32_t
                     {
                         if( !s_bMoverProbes || !m_pGITrace ) return 0u;
-                        const std::uint64_t Key = (D.m_Instance & 0xFFFFFFFFull) != 0 ? (D.m_Instance & 0xFFFFFFFFull) : D.m_UserID;
+                        // (keyed by the entity first: a character is several skinned draws - hair, top, trousers - that share one lattice over all
+                        // of them; one each gave a part its own small box and light that jumped where the parts meet, white patches - Tomas)
+                        const std::uint64_t Key = D.m_UserID != 0 ? D.m_UserID : (D.m_Instance & 0xFFFFFFFFull);
                         if( Key == 0 ) return 0u;
                         int b = -1, Free = -1;
                         for( int i = 0; i < int(m_MoverBlocks.size()); ++i )
@@ -3683,19 +3685,21 @@ namespace xlionrender
                             if( m_MoverBlocks[i].m_Key == Key ) { b = i; break; }
                             if( Free < 0 && (m_MoverBlocks[i].m_Key == 0 || m_MoverBlocks[i].m_Seen + 60 < MoverFrame) ) Free = i;      // (unseen a second or so: its block is free)
                         }
-                        const bool bNew = b < 0;
-                        if( bNew ) { if( Free < 0 ) return 0u; b = Free; m_MoverBlocks[b] = { Key, MoverFrame, {} }; }
+                        if( b < 0 ) { if( Free < 0 ) return 0u; b = Free; m_MoverBlocks[b] = {}; m_MoverBlocks[b].m_Key = Key; m_MoverBlocks[b].m_bNew = true; }
                         auto& M = m_MoverBlocks[b];
-                        const xmath::fvec3 C = D.m_L2W * Box.getCenter(), O = D.m_L2W * xmath::fvec3{ 0, 0, 0 };
+                        // (the sphere's centre where the body is this frame - its bones' box (draw::m_Bounds), not the root: a root can be held in place
+                        // while the body moves (root motion, Tomas); its radius from the every-pose box, so its size never changes)
+                        const bool bPose = D.m_Bounds.m_Min.m_X <= D.m_Bounds.m_Max.m_X;
+                        const xmath::fvec3 C = bPose ? D.m_Bounds.getCenter() : D.m_L2W * Box.getCenter(), O = D.m_L2W * xmath::fvec3{ 0, 0, 0 };
                         const float Sx = (D.m_L2W * xmath::fvec3{ 1, 0, 0 } - O).Length(), Sy = (D.m_L2W * xmath::fvec3{ 0, 1, 0 } - O).Length(), Sz = (D.m_L2W * xmath::fvec3{ 0, 0, 1 } - O).Length();
+                        // (its bounds as a sphere - Tomas: whatever the pose or the turn, all of it stays inside: the every-pose box's centre and half
+                        // diagonal; the mover's grid a cube around its parts' spheres, so it follows the position alone, never a rotation or a pose)
                         const xmath::fvec3 H = (Box.m_Max - Box.m_Min) * 0.5f;
-                        const float Hxz = std::max(H.m_X * Sx, H.m_Z * Sz), Hy = H.m_Y * Sy;      // (x/z by the larger: the same lattice whichever way it faces)
-                        const float Org[3] = { C.m_X - Hxz, C.m_Y - Hy, C.m_Z - Hxz };
-                        const float dx = Org[0] - M.m_Origin[0], dy = Org[1] - M.m_Origin[1], dz = Org[2] - M.m_Origin[2];
-                        const bool bJump = dx * dx + dy * dy + dz * dz > 4.0f;      // (a teleport, 2 m in a frame: its probes start over)
-                        std::copy(Org, Org + 3, M.m_Origin); M.m_Seen = MoverFrame;
+                        const float R = std::sqrt(H.m_X * H.m_X * Sx * Sx + H.m_Y * H.m_Y * Sy * Sy + H.m_Z * H.m_Z * Sz * Sz);
+                        const float Lo[3] = { C.m_X - R, C.m_Y - R, C.m_Z - R }, Hi[3] = { C.m_X + R, C.m_Y + R, C.m_Z + R };
+                        if( M.m_Seen != MoverFrame ) { std::copy(Lo, Lo + 3, M.m_Lo); std::copy(Hi, Hi + 3, M.m_Hi); M.m_Seen = MoverFrame; }      // (its first part this frame)
+                        else for( int k = 0; k < 3; ++k ) { M.m_Lo[k] = std::min(M.m_Lo[k], Lo[k]); M.m_Hi[k] = std::max(M.m_Hi[k], Hi[k]); }
                         if( Movers.size() <= std::size_t(b) ) Movers.resize(std::size_t(b) + 1, gi::gpu_trace::mover{ { 0, 0, 0 }, 0.0f, 0.0f, false });
-                        Movers[std::size_t(b)] = { { Org[0], Org[1], Org[2] }, 2.0f * Hxz, Hy, bNew || bJump };
                         return std::uint32_t(b) + 1u;
                     };
                     bool bFull = false;
@@ -3753,6 +3757,17 @@ namespace xlionrender
                         const auto Now = std::chrono::steady_clock::now();
                         const float Dt = m_MoverAt == std::chrono::steady_clock::time_point{} ? 1.0f / 60.0f : std::clamp(std::chrono::duration<float>(Now - m_MoverAt).count(), 1e-4f, 0.25f);
                         m_MoverAt = Now;
+                        for( std::size_t b = 0; b < Movers.size(); ++b )       // (each mover's lattice over the union of its parts: x/z square)
+                        {
+                            auto& M = m_MoverBlocks[b];
+                            if( M.m_Seen != MoverFrame ) continue;
+                            const float Hxz = 0.5f * std::max(M.m_Hi[0] - M.m_Lo[0], M.m_Hi[2] - M.m_Lo[2]), Hy = 0.5f * (M.m_Hi[1] - M.m_Lo[1]);
+                            const float Org[3] = { 0.5f * (M.m_Lo[0] + M.m_Hi[0]) - Hxz, M.m_Lo[1], 0.5f * (M.m_Lo[2] + M.m_Hi[2]) - Hxz };
+                            const float dx = Org[0] - M.m_Origin[0], dy = Org[1] - M.m_Origin[1], dz = Org[2] - M.m_Origin[2];
+                            const bool bJump = dx * dx + dy * dy + dz * dz > 4.0f;      // (a teleport, 2 m in a frame: its probes start over)
+                            Movers[b] = { { Org[0], Org[1], Org[2] }, 2.0f * Hxz, Hy, M.m_bNew || bJump };
+                            std::copy(Org, Org + 3, M.m_Origin); M.m_bNew = false;
+                        }
                         m_GatherTable[30] = 0u;
                         if( !Movers.empty() && m_GatherTable.size() + 8 * Movers.size() <= std::size_t(gather_table_uints_v) )
                         {

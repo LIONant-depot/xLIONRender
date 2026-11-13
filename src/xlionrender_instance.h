@@ -802,7 +802,7 @@ namespace xlionrender
         std::uint32_t                               m_GatherTableBase = 0;
         std::vector<const xgpu::buffer*>            m_GatherBuffers;
         // Milestone A (milestone_a_impl_2026-11-13.md): the movers' probe blocks - a skinned draw keeps its block (by its instance id) while it is seen
-        struct mover_block { std::uint64_t m_Key = 0; std::uint64_t m_Seen = 0; float m_Origin[3]{}; };
+        struct mover_block { std::uint64_t m_Key = 0; std::uint64_t m_Seen = ~0ull; float m_Origin[3]{}, m_Lo[3]{}, m_Hi[3]{}; bool m_bNew = false; };
         std::array<mover_block, 64>                 m_MoverBlocks{};
         std::chrono::steady_clock::time_point       m_MoverAt{};
         // GPU culling (features/cull): the main view's opaque rigid clusters with a material, culled into runs of indirect draws - a run a bind
