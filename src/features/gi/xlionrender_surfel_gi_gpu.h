@@ -1003,7 +1003,7 @@ namespace xlionrender::gi
             {
                 if (!m_ConnB.m_Private)
                 {
-                    std::array<std::uint32_t, 32> W{}; W[2] = s_Drift > 0 || DriftStop() ? 0x44524654u : 0u; W[1] = s_bGlide ? 0x474C4944u : 0u;
+                    std::array<std::uint32_t, 32> W{}; W[2] = s_Drift > 0 || DriftStop() ? 0x44524654u : 0u; W[12] = xlionrender::Env("XLION_VOX_NO_KEEPALIVE") ? 1u : 0u; W[1] = s_bGlide ? 0x474C4944u : 0u;
                     if (m_pDevice->Create(m_ConnB, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 4
                                                    , .m_EntryCount = int(W.size()), .m_pData = W.data(), .m_pName = "GI: vox drift counters" })) return false;
                 }
@@ -1020,6 +1020,11 @@ namespace xlionrender::gi
                         std::fflush(stdout);
                     }
                     m_DriftLast = Now;
+                    {   // (step B, static_settle_plan v2: the store's churn since the last print - takeovers of another face's slot, faces refused, new faces, seen marks)
+                        const std::array<std::uint32_t, 4> C{ p[8], p[9], p[10], p[11] };
+                        std::printf("VOXCHURN over %d frames: takeovers %u refused %u new %u seen marks %u\n", s_Drift, C[0] - m_ChurnLast[0], C[1] - m_ChurnLast[1], C[2] - m_ChurnLast[2], C[3] - m_ChurnLast[3]); std::fflush(stdout);
+                        m_ChurnLast = C;
+                    }
                 }
                 // (Y4, the drift stop - gi_settled_stop_design_2026-11-12.md: the store-wide signed drift R over the last second; settled once
                 // |R| < XLION_VOX_DRIFT_STOP's threshold (.003) for 3 s with the lights and the eye still. Its own running totals, read every .1 s)
@@ -1065,6 +1070,8 @@ namespace xlionrender::gi
             if (s_bFirstOnly) Push.m_First |= 2;
             static const float s_BucketAO = [] { const char* p = xlionrender::Env("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }();     // (P1 #1 prototype: a contact's rays feed their own records)
             if (s_BucketAO > 0.0f) { std::uint32_t u; std::memcpy(&u, &s_BucketAO, 4); Push.m_First = int((std::uint32_t(Push.m_First) & 0xFFFFu) | (u & 0xFFFF0000u)); }
+            static const bool s_bFreeze = [] { const char* p = xlionrender::Env("XLION_VOX_FREEZE"); return p != nullptr && p[0] != '0'; }();      // (settle phase 1: a converged face takes no ray - an experiment until propagation and invalidation pass their tests; static_settle_plan v2)
+            if (s_bFreeze && s_BucketAO <= 0.0f) Push.m_First |= 0x10000;
             static const bool s_bBinPdf = xlionrender::Env("XLION_VOX_NO_BIN_PDF") == nullptr;      // (a bin's mean over its directions: xlionrender_gi_ref.glsl VoxStoreDir)
             if (s_bBinPdf) Push.m_First |= 4;
             static const int s_DirsBits = [] { float L = -1.0f, K = 8.0f; if( const char* p = xlionrender::Env("XLION_VOX_DIRS") ) xlionrender::Scan(p, "%f,%f", &L, &K); return L < 0.0f ? 0 : 2048 | (int(L) & 3) << 12 | (K > 8.5f ? 16384 : 0); }();      // (a prototype: xlionrender_gi_ref.glsl VoxDirsAdd)
@@ -1514,6 +1521,7 @@ namespace xlionrender::gi
         xgpu::buffer                        m_ConnB;
         int                                 m_BrickFrames = 0;      // (XLION_VOX_BRICKS)
         std::array<std::uint32_t, 4>        m_DriftLast{};          // (XLION_VOX_DRIFT: the counters' running totals at the last print)
+        std::array<std::uint32_t, 4>        m_ChurnLast{};          // (XLION_VOX_DRIFT: VOXCHURN's running totals)
         struct drift_sample { std::chrono::steady_clock::time_point m_At; double m_D, m_Lm; };
         std::deque<drift_sample>            m_DriftWin;             // (the drift stop: the last second's signed drift and short means)
         std::array<std::uint32_t, 4>        m_DriftStopLast{};

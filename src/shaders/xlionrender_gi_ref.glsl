@@ -73,6 +73,19 @@ vec3 SpecDir(in const vec3 N, in const vec3 V, in const float a, out float W)
 // A sample into a level: a cell around the point and a face its normal looks toward, by the read's weights: it lands where the reads look for it
 // The same rays, by where they went (the reflection's read, xlionrender_gi_gather_frag.glsl VoxReflect): a cell's face (no layers) keeps a plain mean per direction: around its normal,
 // or along one of the other two axes, each way. No more rays: a place on a floor knows what its rays saw toward the street and toward the wall
+// (settle phase 1, 2026-11-13 - gi_settle_and_movers_plan_2026-11-13.md: a slot is in use while its owner was WRITTEN (X2.w) or SEEN (X2.z: the
+// rays' pick marks the faces of the points the camera sees) in the last 120 frames. A converged face takes no rays, so by writes alone it was
+// taken by another cell after 2 s and restarted from one sample: near, settled faces churned for ever. A direction bin (X1.y 1.0) keeps sky
+// sums in X2.xyz: its last write only)
+bool VoxSlotInUse(in const uint e, in const float Now)
+{
+    const vec4 X2 = GIRefAccum[VoxX2Of(e)];
+    bool bKeep = true;
+#ifdef GI_VOX_ONLY
+    bKeep = ConnU[2] != 0x44524654u || (ConnU[12] & 1u) == 0u;      // (measurement, XLION_VOX_NO_KEEPALIVE with XLION_VOX_DRIFT: the old rule, writes only)
+#endif
+    return abs(Now - X2.w) < 120.0 || (bKeep && GIRefAccum[e + 1u].y != 1.0 && abs(Now - X2.z) < 120.0);
+}
 vec3 g_VoxRayD = vec3(0.0);
 bool g_VoxMissed = false;       // (this ray saw the sky. A bin keeps its sky apart, second entry: rgb sum, count: a direction near the surface takes less of it - VoxReflect)
 bool g_DriftProbe = false;      // (Y4: this ray a probe of the whole store - one random pixel, no pick, no inconsistency gate: only probes feed the drift)
@@ -91,7 +104,7 @@ void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const v
     const uint TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 1u].x;
     if (Cur != TagU)
     {
-        if (Cur != 0u && abs(Now - GIRefAccum[VoxX2Of(e)].w) < 120.0) return;
+        if (Cur != 0u && VoxSlotInUse(e, Now)) return;
         if (atomicCompSwap(GIRefAccumU[e + 1u].x, Cur, TagU) != Cur) return;
         GIRefAccumU[e] = uvec4(0u); GIRefAccumU[VoxX2Of(e)] = uvec4(0u); GIRefAccumU[e + 1u].yzw = uvec3(floatBitsToUint(1.0), 0u, 0u);
     }
@@ -118,7 +131,7 @@ void VoxDirsAdd(in const vec3 Pw, in const vec3 N, in const float Cell0, in cons
     const uint  TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 1u].x;
     if (Cur != TagU)
     {
-        if (Cur != 0u && abs(Now - GIRefAccum[VoxX2Of(e)].w) < 120.0) return;
+        if (Cur != 0u && VoxSlotInUse(e, Now)) return;
         if (atomicCompSwap(GIRefAccumU[e + 1u].x, Cur, TagU) != Cur) return;
         GIRefAccumU[e] = uvec4(0u); GIRefAccumU[VoxX2Of(e)] = uvec4(0u); GIRefAccumU[e + 1u].yzw = uvec3(floatBitsToUint(1.0), 0u, 0u);
     }
@@ -186,10 +199,19 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     if (d.x != Tag)
     {
         // someone else's: taken only if nobody has fed it for 2 seconds or so: a face in use keeps its slot and its history (a face that finds no room waits)
-        if (d.x != 0.0 && abs(Now - d.y) < 120.0) return;
+        if (d.x != 0.0 && VoxSlotInUse(e, Now))
+        {
+#ifdef GI_VOX_ONLY
+            if (ConnU[2] == vox_drift_mark_v) atomicAdd(ConnU[9], 1u);      // (step B, XLION_VOX_DRIFT: a face refused - its slot in use by another)
+#endif
+            return;
+        }
         // (C31: taken by compare-and-swap to a busy tag - one owner wins, the others leave; readers see the busy tag as a miss until the payload is whole)
         if (atomicCompSwap(GIRefAccumU[e + 1u].x, dU.x, vox_busy_v) != dU.x) return;
         bTaken = true;
+#ifdef GI_VOX_ONLY
+        if (ConnU[2] == vox_drift_mark_v) atomicAdd(ConnU[d.x != 0.0 ? 8 : 10], 1u);      // (step B: a takeover of another face's slot / a new face in an empty one)
+#endif
         v = vec4(0.0); m = vec4(0.0); Pv = PL = Pl = vec2(0.0); Incon = 1.0;
     }
     m.w = Pv.x;
@@ -234,7 +256,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     // (C31: a taken slot publishes payload first, then its tag - a reader that sees the tag sees a whole record)
     GIRefAccum[e] = v;
     if (v.w < 64.0) Incon = 1.0;
-    GIRefAccumU[VoxX2Of(e)] = uvec4(packHalf2x16(clamp(m.rg, vec2(0.0), vec2(60000.0))), packHalf2x16(vec2(clamp(m.b, 0.0, 60000.0), Incon)), 0u, floatBitsToUint(Now));
+    GIRefAccumU[VoxX2Of(e)] = uvec4(packHalf2x16(clamp(m.rg, vec2(0.0), vec2(60000.0))), packHalf2x16(vec2(clamp(m.b, 0.0, 60000.0), Incon)), floatBitsToUint(Now), floatBitsToUint(Now));
     if (bTaken) memoryBarrierBuffer();
     GIRefAccumU[e + 1u] = uvec4(floatBitsToUint(Tag), packHalf2x16(PL) | 1u, packHalf2x16(Pl), packHalf2x16(vec2(min(m.w, 60000.0), Pv.y)));
 }
@@ -313,7 +335,7 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
     vec4 c = bMine ? GIRefAccum[e] : vec4(0.0);
     if ((Push.m_First & 1) == 0 && c.w >= 1.0 && ((Push.m_First & 16) != 0 || Rnd() >= 0.125)) return c.rgb / c.w;      // (m_First's bit 4, XLION_VOX_HIT_CACHED, measurement: a hit with a kept direct never casts its shadow rays again: the best case of hits reading a cache)
     const vec3 E = VoxDirect(P, N);
-    if (!bMine && d.x != 0.0 && abs(Now - d.y) < 120.0) return E;
+    if (!bMine && d.x != 0.0 && VoxSlotInUse(e, Now)) return E;
     const uint T0 = floatBitsToUint(d.x);      // (C31: a takeover by compare-and-swap to the busy tag, the tag published last)
     if (T0 == vox_busy_v || (!bMine && atomicCompSwap(GIRefAccumU[e + 1u].x, T0, vox_busy_v) != T0)) return E;
     c += vec4(E, 1.0);
@@ -330,7 +352,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
 {
     bHit = false; Ph = vec3(0.0); Nh = vec3(0.0, 1.0, 0.0); g_HasSeen = false;
     // the emitters by light sampling (G5, as the surfels' pass: the table, a shadow ray), this point's own unless lighting shades it; an emission a ray hits is not counted again
-    const vec3 Own = GD[15] > 0u && !EmitterDirectExternal() ? VoxEmitters(P, N) : vec3(0.0);
+    const vec3 Own = GD[15] > 0u && g_Ablate != 6 && !EmitterDirectExternal() ? VoxEmitters(P, N) : vec3(0.0);      // (XLION_VOX_ABLATE=6, measurement C38: no emitter light sampling - an emitter counts only where a ray hits it)
     const vec3 D = CosineDir(N);
     g_VoxRayD = D;
     const gi_hit H = GICast(P + N * 2e-3, D, 1e30);
@@ -367,7 +389,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     if (g_Ablate == 3) return In * Albedo;
     In += (Push.m_First & 2) != 0 ? vec3(0.0) : VoxRead(Ph, Nh, Hd.xyz, Hd.w);
     if (g_Ablate == 4) return In * Albedo;     // (m_First's bit 1, XLION_VOX_FIRST_ONLY: measurement: no bounce past the first, so nothing a sample reads is still converging)
-    if (GD[15] > 0u) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
+    if (GD[15] > 0u && g_Ablate != 6) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
     return Own + (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }
 void VoxMain()
@@ -394,7 +416,7 @@ void VoxMain()
         const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
         const vec2 d = vec2(GIRefAccum[e + 1u].x, GIRefAccum[VoxX2Of(e)].w);
         vec4 c = d.x == Tag ? GIRefAccum[e] : vec4(0.0);
-        if (d.x != Tag && d.x != 0.0 && abs(Now - d.y) < 120.0) return;
+        if (d.x != Tag && d.x != 0.0 && VoxSlotInUse(e, Now)) return;
         const uint T0 = floatBitsToUint(d.x);      // (C31: as VoxStore - taken by compare-and-swap, the tag published last)
         if (T0 == vox_busy_v || (d.x != Tag && atomicCompSwap(GIRefAccumU[e + 1u].x, T0, vox_busy_v) != T0)) return;
         c += vec4(min(Lit, vec3(4000.0)), 1.0);
@@ -458,7 +480,7 @@ void VoxMain()
     // Of a few pixels, the one whose cell knows least: the rays go where they are needed - the cells a moving eye just brought in - and not, as the screen's area would have it, to the near floor
     vec3 P = vec3(0.0), N = vec3(0.0, 1.0, 0.0);
     int L = 0; ivec3 Org = ivec3(0); vec3 g = vec3(0.0);
-    float Least = 1e30, OriginAO = 1.0;
+    float Least = 1e30, OriginAO = 1.0, LeastCount = 0.0, LeastIncon = 1.0;
     uint  OriginKind = 0u;      // (C40: 2 a skinned surface's point - its samples to the records of its kind, + 128; the gather's w 2)
     const bool bCoh = (Push.m_First & 8) != 0;
     if (bCoh)
@@ -485,17 +507,35 @@ void VoxMain()
         vec3 gq = vec3(Ok) + gk; gq[Ax] *= vox_layers_v;
         const uint  Kk = Ps.w > 1.5 ? 2u : 0u;
         const uint  hk = VoxHash(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)) + 64u * Kk), ek = VoxEntryOf(hk);
-        float n = GIRefAccum[ek + 1u].x == VoxTagOf(hk) ? GIRefAccum[ek].w : 0.0;
+        const bool bOwn = GIRefAccum[ek + 1u].x == VoxTagOf(hk);
+        float n = bOwn ? GIRefAccum[ek].w : 0.0;
+        const float nCount = n, nIncon = bOwn ? unpackHalf2x16(floatBitsToUint(GIRefAccum[VoxX2Of(ek)].y)).y : 1.0;
+        {   // (settle phase 1: the faces this seen point reads - its axis face's 8 corners at this level - marked seen this frame)
+            const ivec3 i0 = ivec3(floor(gq));
+            const float NowS = float(uint(Push.m_Frame) & 0xFFFFFFu);
+            for (int c = 0; c < 8; ++c)
+            {
+                const uint hc = VoxHash(Lk, i0 + ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)) + 64u * Kk), ec = VoxEntryOf(hc);
+                if (GIRefAccum[ec + 1u].x == VoxTagOf(hc) && GIRefAccum[VoxX2Of(ec)].z != NowS) { GIRefAccumU[VoxX2Of(ec)].z = floatBitsToUint(NowS);
+#ifdef GI_VOX_ONLY
+                    if (ConnU[2] == vox_drift_mark_v) atomicAdd(ConnU[11], 1u);
+#endif
+                }
+            }
+        }
         if (VoxIncon > 0.0) n = n < 64.0 ? n - 1e6 : -unpackHalf2x16(floatBitsToUint(GIRefAccum[VoxX2Of(ek)].y)).y;      // (XLION_VOX_INCON: the unknown first, then the most inconsistent)
-        if (n < Least) { Least = n; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; OriginKind = Kk; }
+        if (n < Least) { Least = n; LeastCount = nCount; LeastIncon = nIncon; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; OriginKind = Kk; }
     }
     if (Least >= 1e30) return;
     // (XLION_VOX_INCON=<scale>: a known face takes the ray with probability inconsistency x scale - a resolved face (its long and short means agree within
     // their noise) takes none: no work, no flicker; one still drifting, propagating, stays inconsistent and keeps its rays. WickedEngine: rays = inconsistency x boost)
     // (VOX_AMORTIZE, WickedEngine's temporal ray amortization: a known face in a coarser (farther) level takes its rays 2^-level as often - far light is low
     // frequency and its faces long-lived; new faces (the unknown) are not slowed)
+    // (settle phase 1, XLION_VOX_FREEZE=1 - m_First bit 16 - an experiment, off by default after the review: converged - half the window of samples or more, short and long means agreeing within 2.5 sigma of the short mean - no ray
+    // at all while the lights are still: it stays as it is until a light change wakes every face. Tomas 2026-11-13: settled faces stole rays and made noise)
+    if ((uint(Push.m_First) & 0xFFFF0000u) == 0x10000u && !g_DriftProbe && VoxIncon > 0.0 && (Push.m_First & 1) == 0 && LeastCount >= float(abs(Push.m_Epoch) & 0xFFFF) * 0.5 && LeastIncon < 0.2) return;
     if (!g_DriftProbe && VoxIncon > 0.0 && Least > -1e5 && Rnd() >= min(-Least * VoxIncon, 1.0) * exp2(-VOX_AMORTIZE * float(L))) return;
-    const float BucketAO = uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
+    const float BucketAO = (uint(Push.m_First) & 0xFFFF0000u) == 0x10000u ? 0.0 : uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (high bits exactly 0x10000: XLION_VOX_FREEZE, never with the bucket)      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
     vec3 Ph, Nh; bool bHit;
     // (one copy of VoxRay: the shader's compiled size goes with its copies. The second ray: the surface the first hit, seen yet or not: a sample of that surface's own
     // indirect light; off screen surfaces are lit before the eye turns to them. A group in four, all its lanes: one lane firing it makes its whole group wait)

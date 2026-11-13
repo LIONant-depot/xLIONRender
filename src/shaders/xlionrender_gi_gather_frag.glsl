@@ -361,7 +361,7 @@ void main()
                 const uvec4 R   = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
                 const float Sd  = unpackHalf2x16(R.y).y, Pd = length(Prev);
                 const uint  Age = (R.w >> 28) & 3u;
-                if ((R.w & (1u << 30)) != 0u && abs(Sd - Pd) < 0.02 * Pd + 0.01 && dot(ScreenNormal(R.w), N) > 0.9 && ((R.w & 1u) != 0u) == bMover)
+                if ((R.w & (1u << 30)) != 0u && abs(Sd - Pd) < 0.02 * Pd + 0.01 && dot(ScreenNormal(R.w), N) > 0.9 && !bMover && (R.w & 1u) == 0u)
                 {
                     if (Age >= screen_max_age_v) Kind = 3u;
                     else
@@ -478,7 +478,7 @@ void main()
                 {
                     const uvec4 Rp = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
                     const float Sd = unpackHalf2x16(Rp.y).y, Ld = length(Prev);
-                    const bool bSame = abs(Sd - Ld) < 0.02 * Ld + 0.01 && dot(ScreenNormal(Rp.w), N) > 0.9 && ((Rp.w & 1u) != 0u) == bMover;
+                    const bool bSame = abs(Sd - Ld) < 0.02 * Ld + 0.01 && dot(ScreenNormal(Rp.w), N) > 0.9 && !bMover && (Rp.w & 1u) == 0u;      // (C40 reopened, Tomas 2026-11-13: a mover takes no screen history at all - a skinned limb moves inside its instance, no reprojection follows it; its own records are already a time mean)
                     if (bR && bSame && (Rp.w & (1u << 31)) != 0u)
                         Rr = mix(vec3(unpackHalf2x16(Rp.z), unpackHalf2x16(Rp.w & 0xFFFFu).x), Rr, 0.1);
                     if (bE && bSame && (Rp.w & (1u << 30)) != 0u && ((Rp.w >> 28) & 3u) != 3u)      // (not a weak entry's: a hole carried on)
