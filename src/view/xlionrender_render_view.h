@@ -189,6 +189,9 @@ namespace xlionrender
         // the header's ring (host visible, instance::screen_header_v entries a frame: xlionrender_gi_gather_frag.glsl), last frame's
         // camera-centered world to clip and eye, and whether the last buffer holds a frame of this size
         xgpu::buffer            m_GIScreenFilter;       // (the screen filter's other side: xlionrender_gi_denoise_comp.glsl)
+        // (Tomas 2026-11-13: the history holds what stands still only - m_GIScreenHistory written this frame, m_GIScreenPrev last frame's, swapped each
+        // frame; under a mover the static entry is carried on. m_GIScreenBuffer is the frame's output, the movers' pixels in it; cleared each frame)
+        xgpu::buffer            m_GIScreenHistory;
         xgpu::buffer            m_GIScreenPrev, m_GIScreenHeader, m_GIScreenCounters;     // (the counters: host visible, an entry a ring frame)
         // The ambient occlusion on that grid (xlionrender_ao_comp.glsl): this frame's and last frame's (vec2 a pixel: the AO, the distance)
         xgpu::buffer            m_AO, m_AOPrev, m_AORaw;      // (m_AORaw: this frame's unfiltered)

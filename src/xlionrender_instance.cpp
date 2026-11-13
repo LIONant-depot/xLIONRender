@@ -792,6 +792,7 @@ namespace xlionrender
                     , ub{ .m_BindIndex = 23, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     //   and their means
                     , ub{ .m_BindIndex = 24, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // the published voxel light (XLION_VOX_PUBLISHED)
                     , ub{ .m_BindIndex = 25, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // XLION_HEAT: the clock a pixel (render_view::m_HeatBuffer)
+                    , ub{ .m_BindIndex = 26, .m_Usage = { .m_bFragment = true }, .m_Type = ub::type::SSBO_STATIC }     // the history: what stands still only (render_view::m_GIScreenHistory)
                     };
                     auto ClassifyShaders = std::array<const xgpu::shader*, 2>{ &ClassifyFrag, &GatherVert };
                     auto GatherShaders   = std::array<const xgpu::shader*, 2>{ &GatherFrag, &GatherVert };
@@ -2038,6 +2039,7 @@ namespace xlionrender
         Data[0] = { std::uint32_t(W), std::uint32_t(H), 0u, 0u };
         if( auto Err = m_Device.Create(View.m_GIScreenBuffer, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen buffer" }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenFilter, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen filter" }); Err ) return Err;
+        if( auto Err = m_Device.Create(View.m_GIScreenHistory, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen history" }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenPrev, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = int(Data.size()), .m_pData = Data.data(), .m_pName = "GI: screen buffer previous" }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenHeader, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v * screen_header_v, .m_pName = "GI: screen header" }); Err ) return Err;
         if( auto Err = m_Device.Create(View.m_GIScreenCounters, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = xgpu::buffer::setup::usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = 16, .m_EntryCount = ring_frames_v, .m_pName = "GI: screen counters" }); Err ) return Err;
@@ -2065,6 +2067,7 @@ namespace xlionrender
         if( View.m_GIScreenBuffer.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenBuffer));
         if( View.m_GIScreenZeros.m_Private )  m_Device.Destroy(std::move(View.m_GIScreenZeros));
         if( View.m_GIScreenPrev.m_Private )   m_Device.Destroy(std::move(View.m_GIScreenPrev));
+        if( View.m_GIScreenHistory.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenHistory));
         if( View.m_GIScreenFilter.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenFilter));
         if( View.m_GIScreenHeader.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenHeader));
         if( View.m_GIScreenCounters.m_Private ) m_Device.Destroy(std::move(View.m_GIScreenCounters));

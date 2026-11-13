@@ -534,7 +534,9 @@ void VoxMain()
         GIRefAccum[e]      = mix(GIRefAccum[e], R, a);
         GIRefAccum[e + 1u] = mix(GIRefAccum[e + 1u], G, a);
         GIRefAccum[e + 2u] = mix(GIRefAccum[e + 2u], Bl, a);
-        GIRefAccum[e + 3u] = vec4(Valid, min(V.y + 1.0, 65000.0), 0.0, 0.0);
+        // (z: seconds since it was last valid - the read's bounded history, v3.1 #1: an invalid probe's last estimate bridges at most 0.5 s; after a reset none)
+        const float Since = Valid > 0.0 ? 0.0 : (bReset ? 1e3 : V.z + 0.5 * H0.z);
+        GIRefAccum[e + 3u] = vec4(Valid, min(V.y + 1.0, 65000.0), min(Since, 1e3), 0.0);
         return;
     }
 #endif

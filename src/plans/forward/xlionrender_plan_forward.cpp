@@ -3493,7 +3493,7 @@ namespace xlionrender
                     const auto* pC = static_cast<const std::uint32_t*>(p);
                     m_GIStats.m_nScreenFresh = int(pC[0]); m_GIStats.m_nScreenReprojected = int(pC[1]); m_GIStats.m_nScreenRejected = int(pC[2]); m_GIStats.m_nScreenAged = int(pC[3]);
                 });
-                std::swap(View.m_GIScreenBuffer, View.m_GIScreenPrev);
+                std::swap(View.m_GIScreenHistory, View.m_GIScreenPrev);      // (the history - what stands still - is its own: the output, m_GIScreenBuffer, is cleared each frame; Tomas 2026-11-13)
                 if( View.m_bGIScreenPerPixel != Scene.m_GI.m_bPerPixel ) View.m_bGIScreenPrev = false;
                 View.m_bGIScreenPerPixel = Scene.m_GI.m_bPerPixel;
                 {   // A camera cut (a jump past 2 m, or the view turned past 45 degrees): no history - a surface seen from both sides of a
@@ -3751,8 +3751,6 @@ namespace xlionrender
                         }
                     }
                     if( bFull && m_Device.getFrameIndex() % 240 == 0 ) { std::printf("GATHERFULL the GI gather's table is full (%d uints): instances left without GI\n", gather_table_uints_v); std::fflush(stdout); }
-                    m_GatherTableBase = std::uint32_t(m_Device.getFrameIndex() % ring_frames_v) * std::uint32_t(gather_table_uints_v);
-                    (void)View.m_GIGatherTable.MemoryMapFrameRegion(int(m_GatherTableBase), int(m_GatherTable.size()), [&](void* p) { std::memcpy(p, m_GatherTable.data(), m_GatherTable.size() * sizeof(std::uint32_t)); });
                     {   // Milestone A: the movers to the rays (their probes' update) and their lattices to the gather (m_GatherTable[30]: where; 8 a block)
                         const auto Now = std::chrono::steady_clock::now();
                         const float Dt = m_MoverAt == std::chrono::steady_clock::time_point{} ? 1.0f / 60.0f : std::clamp(std::chrono::duration<float>(Now - m_MoverAt).count(), 1e-4f, 0.25f);
@@ -3772,9 +3770,12 @@ namespace xlionrender
                         if( !Movers.empty() && m_GatherTable.size() + 8 * Movers.size() <= std::size_t(gather_table_uints_v) )
                         {
                             m_GatherTable[30] = std::uint32_t(m_GatherTable.size());
+                            // (XLION_MOVER_DEBUG=1, plan v3.1 #5: the movers' GI painted by the path it took - probes green, their last estimates yellow,
+                            // the static store's coarse read blue, the +128 records red; a lattice's word 5)
+                            static const float s_MoverDebug = xlionrender::Env("XLION_MOVER_DEBUG") ? 1.0f : 0.0f;
                             for( const auto& M : Movers )
                             {
-                                const float F[8] = { M.m_Origin[0], M.m_Origin[1], M.m_Origin[2], M.m_CellXZ, M.m_CellY, 0, 0, 0 };
+                                const float F[8] = { M.m_Origin[0], M.m_Origin[1], M.m_Origin[2], M.m_CellXZ, M.m_CellY, s_MoverDebug, 0, 0 };
                                 for( float f : F ) m_GatherTable.push_back(std::bit_cast<std::uint32_t>(f));
                             }
                         }
@@ -3782,6 +3783,10 @@ namespace xlionrender
                         if( s_bMoverLog && MoverFrame % 120 == 0 ) { int n = 0; for( const auto& M : Movers ) n += M.m_CellXZ > 0.0f ? 1 : 0; std::printf("MOVERS %d held of %d blocks, %d probes, %u rays a frame\n", n, int(Movers.size()), n * 12, unsigned(n * 12 * gi::gpu_trace::probe_rays_v)); std::fflush(stdout); }
                         if( m_pGITrace ) m_pGITrace->SetMovers(std::move(Movers), 1.0f - std::exp(-Dt / 0.25f), Dt / 0.5f);      // (the probes' mean over ~0.25 s; valid again over ~0.5 s)
                     }
+                    // (uploaded after the movers' lattices and word 30: before, from 2a68af9 to here, the gather never saw them - word 30 went up as 0 and
+                    // every character read the +128 records; the probes were updated and never read)
+                    m_GatherTableBase = std::uint32_t(m_Device.getFrameIndex() % ring_frames_v) * std::uint32_t(gather_table_uints_v);
+                    (void)View.m_GIGatherTable.MemoryMapFrameRegion(int(m_GatherTableBase), int(m_GatherTable.size()), [&](void* p) { std::memcpy(p, m_GatherTable.data(), m_GatherTable.size() * sizeof(std::uint32_t)); });
                     m_GIStats.m_nScreenDraws = int(m_GatherBuffers.size());          // (its passes: a full-screen draw a GI buffer)
                     m_GIStats.m_nScreenCalls = int(m_GatherBuffers.size()) + 1;      // (+ the classification)
                 }
@@ -4176,8 +4181,8 @@ namespace xlionrender
                 {
                     // (render graph: the GI read from its description - xlionrender_stage_graph.h, draw passes; hand-written below until retired)
                     auto& R = View.m_Stages;
-                    R.m_Kernels.Add("gi_classify", { nullptr, 13, 0, 0, int(sizeof(details::push_gi_gather)), "GI: screen colour", &View.m_GIClassifyInstance });
-                    R.m_Kernels.Add("gi_gather",   { nullptr, 13, 0, 0, int(sizeof(details::push_gi_gather)), "GI: screen colour", &View.m_GIGatherInstance });
+                    R.m_Kernels.Add("gi_classify", { nullptr, 14, 0, 0, int(sizeof(details::push_gi_gather)), "GI: screen colour", &View.m_GIClassifyInstance });
+                    R.m_Kernels.Add("gi_gather",   { nullptr, 14, 0, 0, int(sizeof(details::push_gi_gather)), "GI: screen colour", &View.m_GIGatherInstance });
                     R.m_RenderPasses.Add("GI: screen pass", &View.m_GIScreenPass);
                     R.m_pFullscreenVB = &m_FullscreenVB; R.m_pFullscreenIB = &m_FullscreenIB;
                     R.m_Lists.Add("gi.gather_buffers", {});
@@ -4187,7 +4192,7 @@ namespace xlionrender
                         , { "GI: moment ring", &m_GIMomentRing }, { "GI: screen buffer*", &View.m_GIScreenBuffer }, { "GI: screen buffer previous", &View.m_GIScreenPrev }, { "GI: gather table", &View.m_GIGatherTable }
                         , { "GI: ambient occlusion", &View.m_AO }, { "GI: voxel clipmap", m_pGatherClip ? m_pGatherClip : &m_GIDummy }, { "GI: reference samples", m_pGatherRefS ? m_pGatherRefS : &m_GIDummy }
                         , { "GI: reference sums", m_pGatherRefA ? m_pGatherRefA : &m_GIDummy }, { "GI: the published voxel light", bVoxPub && m_VoxPub.m_Private ? &m_VoxPub : &m_GIDummy }
-                        , { "Heat: the gather's clock a pixel", bHeat ? &View.m_HeatBuffer : &m_GIDummy } };
+                        , { "Heat: the gather's clock a pixel", bHeat ? &View.m_HeatBuffer : &m_GIDummy }, { "GI: screen history", &View.m_GIScreenHistory } };
                     for( const auto& [N, p] : Bs ) R.m_Buffers.Add(N, p);
                     R.SetU32(R.Value("gi.table_base"), m_GatherTableBase); R.SetU32(R.Value("gi.divisor"), std::uint32_t(GIScreenDivisor()));
                     R.SetU32(R.Value("gi.ao_mode"), bAO ? (s_bSSGI ? 2u : 1u) : 0u); R.SetU32(R.Value("gi.ao"), bAO ? 1u : 0u);
@@ -4217,9 +4222,9 @@ namespace xlionrender
                     auto GCmd = Window.StartRenderPass(View.m_GIScreenPass);
                     if( pGS ) GCmd.WriteTimestamp(*pGS, 1);
                     const details::push_gi_gather Push{ m_GatherTableBase, 0u, std::uint32_t(GIScreenDivisor()), bAO ? (s_bSSGI ? 2u : 1u) : 0u };
-                    std::array<xgpu::buffer*, 13> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO, m_pGatherClip ? m_pGatherClip : &m_GIDummy
+                    std::array<xgpu::buffer*, 14> Buffers{ &m_InstanceBuffer, &m_GIDummy, &m_GILightRing, &m_GIMomentRing, &View.m_GIScreenBuffer, &View.m_GIScreenPrev, &View.m_GIGatherTable, &View.m_AO, m_pGatherClip ? m_pGatherClip : &m_GIDummy
                                                          , m_pGatherRefS ? m_pGatherRefS : &m_GIDummy, m_pGatherRefA ? m_pGatherRefA : &m_GIDummy, bVoxPub && m_VoxPub.m_Private ? &m_VoxPub : &m_GIDummy
-                                                         , bHeat ? &View.m_HeatBuffer : &m_GIDummy };
+                                                         , bHeat ? &View.m_HeatBuffer : &m_GIDummy, &View.m_GIScreenHistory };
                     GCmd.setPipelineInstance(View.m_GIClassifyInstance, std::span{ Buffers });
                     GCmd.setPushConstants(Push);
                     GCmd.setBuffer(m_FullscreenVB);

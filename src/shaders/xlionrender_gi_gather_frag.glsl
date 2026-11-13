@@ -16,7 +16,8 @@ layout(early_fragment_tests) in;
 struct InstanceData { vec4 Rows[3]; vec4 Material[3]; vec4 PrevRows[3]; };     // (xlionrender_static_geom_body.glsl)
 layout(std430, set = 1, binding = 1) readonly buffer InstanceBuffer { InstanceData Instances[]; } instances;
 layout(std430, set = 1, binding = 11) buffer GIScreenBuffer { uvec4 GIScreen[]; };
-layout(std430, set = 1, binding = 13) readonly buffer GIScreenPrevBuffer { uvec4 GIScreenPrev[]; };
+layout(std430, set = 1, binding = 13) readonly buffer GIScreenPrevBuffer { uvec4 GIScreenPrev[]; };      // (last frame's history: what stands still only)
+layout(std430, set = 1, binding = 26) writeonly buffer GIScreenHistoryBuffer { uvec4 GIScreenHistory[]; };   // (this frame's: Tomas 2026-11-13 - a mover's pixel keeps the static entry under it)
 layout(std430, set = 1, binding = 20) readonly buffer AOBuffer { vec2 AOData[]; };    // the ambient occlusion on this grid (xlionrender_ao_comp.glsl): AO, distance
 
 // The AO at this pixel, its 3 x 3 neighbours weighed by their distance's match (the denoiser's spatial pass: edge-aware)
@@ -57,28 +58,34 @@ layout(std430, set = 1, binding = 25) buffer HeatBuffer { uint Heat[]; };     //
 #include "xlionrender_vox_levels.glsl"
 #include "xlionrender_sh_l1.glsl"
 // Milestone A (milestone_a_impl_2026-11-13.md): a skinned pixel's light from its mover's probes - 2 x 3 x 2, trilinear, each by its validity;
-// the lattice from the gather table (GITable[30]: where, 8 a block), the probes from the store's tail (xlionrender_gi_ref.glsl mode -8). w 0: none valid
-vec4 MoverProbesRead(in const vec3 Pw, in const vec3 n, in const uint b)
+// the lattice from the gather table (GITable[30]: where, 8 a block), the probes from the store's tail (xlionrender_gi_ref.glsl mode -8).
+// The all-invalid contract (plan v3.1 #1): none valid -> the invalid ones' last estimates if no older than 0.5 s (w 0.5: historical), else w 0 and
+// Centre = the support's centre (world) for the caller's coarse read of the static store
+vec4 MoverProbesRead(in const vec3 Pw, in const vec3 n, in const uint b, out vec3 Centre)
 {
     const uint Lt = push.TableBase + GITable[push.TableBase + 30u] + 8u * b;
     const vec3 O = vec3(uintBitsToFloat(GITable[Lt]), uintBitsToFloat(GITable[Lt + 1u]), uintBitsToFloat(GITable[Lt + 2u]));
     const float Cxz = uintBitsToFloat(GITable[Lt + 3u]), Cy = uintBitsToFloat(GITable[Lt + 4u]);
+    Centre = O + vec3(0.5 * Cxz, Cy, 0.5 * Cxz);
     if (Cxz <= 0.0 || Cy <= 0.0) return vec4(0.0);
     const vec3 g = clamp((Pw - O) / vec3(Cxz, Cy, Cxz), vec3(0.0), vec3(1.0, 2.0, 1.0));
     const uint iy = min(uint(g.y), 1u);
     const vec3 f = vec3(g.x, g.y - float(iy), g.z);
-    vec4 R = vec4(0.0), G = vec4(0.0), B = vec4(0.0);
-    float W = 0.0;
+    vec4 R = vec4(0.0), G = vec4(0.0), B = vec4(0.0), Rh = vec4(0.0), Gh = vec4(0.0), Bh = vec4(0.0);
+    float W = 0.0, Wh = 0.0;
     for (uint c = 0u; c < 8u; ++c)
     {
         const uvec3 o = uvec3(c & 1u, (c >> 1u) & 1u, (c >> 2u) & 1u);
         const uint  e = vox_probe_base_v + 4u * (12u * b + o.x + 2u * (iy + o.y) + 6u * o.z);
         const vec4  V = uintBitsToFloat(GIClip[e + 3u]);
-        const float t = (o.x != 0u ? f.x : 1.0 - f.x) * (o.y != 0u ? f.y : 1.0 - f.y) * (o.z != 0u ? f.z : 1.0 - f.z), w = t * V.x * (V.y > 0.0 ? 1.0 : 0.0);
-        if (w <= 0.0) continue;
-        R += uintBitsToFloat(GIClip[e]) * w; G += uintBitsToFloat(GIClip[e + 1u]) * w; B += uintBitsToFloat(GIClip[e + 2u]) * w; W += w;
+        if (V.y <= 0.0) continue;
+        const float t = (o.x != 0u ? f.x : 1.0 - f.x) * (o.y != 0u ? f.y : 1.0 - f.y) * (o.z != 0u ? f.z : 1.0 - f.z), w = t * V.x;
+        const vec4  Sr = uintBitsToFloat(GIClip[e]), Sg = uintBitsToFloat(GIClip[e + 1u]), Sb = uintBitsToFloat(GIClip[e + 2u]);
+        if (w > 0.0) { R += Sr * w; G += Sg * w; B += Sb * w; W += w; }
+        else if (V.z <= 0.5) { const float th = max(t, 1e-4); Rh += Sr * th; Gh += Sg * th; Bh += Sb * th; Wh += th; }
     }
-    return W > 1e-3 ? vec4(ShIrradiance(R / W, G / W, B / W, n), 1.0) : vec4(0.0);
+    if (W > 1e-3) return vec4(ShIrradiance(R / W, G / W, B / W, n), 1.0);
+    return Wh > 0.0 ? vec4(ShIrradiance(Rh / Wh, Gh / Wh, Bh / Wh, n), 0.5) : vec4(0.0);
 }
 
 #ifdef VOX_PUBLISHED_BUFFER
@@ -441,8 +448,14 @@ void main()
             else if (GITable[push.TableBase + 37u] != 0u && !bSkinRead) { E = VoxReadPublished(S.P, N, bPubMiss); g_ClipTrust = 1.0; }
             if (bSkinRead)
             {
-                E = S.Entry.x != 0u && GITable[push.TableBase + 30u] != 0u ? MoverProbesRead(S.P + Eyw, N, S.Entry.x - 1u) : vec4(0.0);      // (Milestone A: its own probes)
-                if (E.w <= 0.0) { g_VoxBucket = 2u; E = VoxReadLevels(S.P, N); g_VoxBucket = 0u; }      // (none valid yet: the +128 records, as before)
+                const bool bProbes = S.Entry.x != 0u && GITable[push.TableBase + 30u] != 0u;
+                vec3 Centre = S.P + Eyw;
+                E = bProbes ? MoverProbesRead(S.P + Eyw, N, S.Entry.x - 1u, Centre) : vec4(0.0);      // (Milestone A: its own probes, else their last estimates <= 0.5 s)
+                uint Path = E.w >= 1.0 ? 0u : (E.w > 0.0 ? 1u : 2u);
+                if (E.w <= 0.0 && bProbes) E = VoxReadLevels(Centre - Eyw, N);      // (none, no history: the static store at the support's centre, by the pixel's normal - v3.1 #1)
+                if (E.w <= 0.0) { Path = 3u; g_VoxBucket = 2u; E = VoxReadLevels(S.P, N); g_VoxBucket = 0u; }      // (no probes - XLION_MOVER_PROBES=0, or past the 64 movers: the +128 records, as before)
+                if (GITable[push.TableBase + 30u] != 0u && GITable[push.TableBase + GITable[push.TableBase + 30u] + 5u] != 0u)      // (XLION_MOVER_DEBUG: the path taken)
+                    E = vec4(Path == 0u ? vec3(0.1, 1.0, 0.1) : Path == 1u ? vec3(1.0, 1.0, 0.1) : Path == 2u ? vec3(0.1, 0.3, 1.0) : vec3(1.0, 0.1, 0.1), 1.0);
                 bPubMiss = E.w <= 0.0;
             }      // (none yet - it just came: the surfaces' read until its rays come back)
 #ifdef XLION_GI_BRICKS
@@ -519,7 +532,29 @@ void main()
         Out = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, Dist)), packHalf2x16(Rr.rg),
                     (packHalf2x16(vec2(Rr.b, 0.0)) & 0xFFFEu) | (bMover ? 1u : 0u) | Guide | (bE ? 1u << 30 : 0u) | (bR ? 1u << 31 : 0u) | (bE && bWeak ? 3u << 28 : 0u));     // (age 3, never a fresh one's: weak - a hole in the surfels' coverage, the Cornell cube's dashes)
     }
-    if (bIn && !(bKeep && push.AO != 0u)) GIScreen[screen_header_v + uint(P.y) * W + uint(P.x)] = Out;
+    if (bIn && !(bKeep && push.AO != 0u))
+    {
+        GIScreen[screen_header_v + uint(P.y) * W + uint(P.x)] = Out;
+        // (the history: what stands still. Under a mover the static entry it hides is carried on from last frame - reprojected as a still point, so
+        // the floor behind a walker keeps its settled light and is not read from nothing when the walker leaves (Tomas 2026-11-13); none: an empty entry)
+        uvec4 Hist = Out;
+        if (bMover)
+        {
+            Hist = uvec4(0u);
+            if ((Hd.w & 1u) != 0u)
+            {
+                const mat4 PrevW2C = mat4(uintBitsToFloat(GIScreen[1]), uintBitsToFloat(GIScreen[2]), uintBitsToFloat(GIScreen[3]), uintBitsToFloat(GIScreen[4]));
+                const vec4 C = PrevW2C * vec4(S.P + uintBitsToFloat(GIScreen[5].xyz), 1.0);
+                const ivec2 Q = C.w > 1e-6 ? ivec2(floor((C.xy / C.w * 0.5 + 0.5) * vec2(float(W), float(H)))) : ivec2(-1);
+                if (Q.x >= 0 && Q.y >= 0 && uint(Q.x) < W && uint(Q.y) < H)
+                {
+                    const uvec4 Rp = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
+                    if ((Rp.w & 1u) == 0u && (Rp.w & (3u << 30)) != 0u) Hist = Rp;
+                }
+            }
+        }
+        GIScreenHistory[screen_header_v + uint(P.y) * W + uint(P.x)] = Hist;
+    }
 #ifdef XLION_HEAT
     if (bIn) Heat[4u + uint(P.y) * W + uint(P.x)] = max(clock2x32ARB().x - HeatT0, 1u);
 #endif

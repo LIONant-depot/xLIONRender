@@ -301,7 +301,8 @@ namespace xlionrender::details
                                 , { "GI: screen buffer*", rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::PARTIAL }
                                 , Rd("GI: screen buffer previous"), { "GI: gather table" }, { "GI: ambient occlusion", rg::lifetime::FRAME, rg::usage::STORAGE, false, rg::policy::NONE, "gi.ao" }
                                 , Rd("GI: voxel clipmap", "gi.clip"), Rd("GI: reference samples", "gi.reference"), { "GI: reference sums", rg::lifetime::RETAINED, rg::usage::STORAGE, true, rg::policy::PARTIAL, "gi.reference" }
-                                , Rd("GI: the published voxel light", "gi.voxpub"), { "Heat: the gather's clock a pixel", rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::PARTIAL, "gi.heat" } }
+                                , Rd("GI: the published voxel light", "gi.voxpub"), { "Heat: the gather's clock a pixel", rg::lifetime::FRAME, rg::usage::STORAGE, true, rg::policy::PARTIAL, "gi.heat" }
+                                , { "GI: screen history", rg::lifetime::RETAINED, rg::usage::STORAGE, true, rg::policy::PARTIAL } }
                 , .m_Textures = { Tx("Probes: environment DFG"), Tx("Probes: environment atlas"), Tx("Probes: probe atlas"), Tx("Render target: contact shadow"), Tx("Render target: depth")
                                 , Tx("Render target: prepass ids"), Tx("Render target: prepass normals"), Tx("Render target: sun shadow mask"), Tx("Shadows: white dummy") }
                 , .m_Images   = { { "GI: screen colour", rg::lifetime::FRAME, rg::usage::COLOR_ATTACHMENT, true, bGather ? rg::policy::PRESERVE : rg::policy::DISCARD }
