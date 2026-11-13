@@ -3536,7 +3536,7 @@ namespace xlionrender
                     // (XLION_VOX_PUBLISHED: word 37 the published read on, 38 the frame - the gather's VoxReadPublished, the resolve's stamp)
                     static const bool s_bVoxPub = xlionrender::Env("XLION_VOX_PUBLISHED") != nullptr;
                     { static const char* s_pPub = xlionrender::Env("XLION_VOX_PUBLISHED"); m_GatherTable[37] = s_pPub ? (s_pPub[0] == '2' ? 2u : 1u) : 0u; }      // (2, measurement: no level read)
-                    m_GatherTable[38] = (m_VoxPubFrame + 1u) & 0x7FFFFFFFu;      // (its own count of gathers: the device's frame index steps by every window's frames - the lists' parity broke)
+                    m_GatherTable[38] = (m_VoxPubFrame + 1u) & 0x7FFFFFFFu; { static const bool s_bTrustView = xlionrender::Env("XLION_VOX_TRUST_VIEW") != nullptr; if( s_bTrustView ) m_GatherTable[38] |= 0x80000000u; }      // (XLION_VOX_TRUST_VIEW: the gather paints its read's sample trust)      // (its own count of gathers: the device's frame index steps by every window's frames - the lists' parity broke)
                     static const bool s_bNoGatherRefl = xlionrender::Env("XLION_GI_NO_REFL") != nullptr;      // (measurement: the gather's reflection term off - the path traced view has none: read against it fairly)
                     m_GatherTable[29] = s_bNoGatherRefl ? 1u : 0u;
                     static const bool s_bBinPdf = xlionrender::Env("XLION_VOX_NO_BIN_PDF") == nullptr;
@@ -3586,15 +3586,18 @@ namespace xlionrender
             static const auto s_VoxT0 = std::chrono::steady_clock::now();
             // Settled (XLION_VOX_SETTLE seconds, 0: never): lights, eye and view all still that long: no more rays until one of them moves. With the rays stopped a still moto's whole surfaces stop shifting
             // (mean change 0.6 to 0.2 of 255, Tomas: rough reflections should settle). ponytail: moving objects don't wake it, they aren't in the lights' key; wake on a changed caster when they matter
-            static const double s_VoxSettle = [] { const char* p = xlionrender::Env("XLION_VOX_SETTLE"); return p ? std::atof(p) : 0.0; }();
+            // (2026-11-13, default 1 s - Tomas's view, edit mode, auto exposure, 64 frames: pixels wobbling > 1 level 3.3-9.7 % -> 0.53 / 0.54 %, the rays-stopped floor;
+            // settle error vs PT at 40 s 7.18 -> 7.28. The characters' probes keep their rays: VoxStep runs with no static rays. XLION_VOX_SETTLE=0: never)
+            static const double s_VoxSettle = [] { const char* p = xlionrender::Env("XLION_VOX_SETTLE"); return p ? std::atof(p) : 1.0; }();
             const float* pFw = reinterpret_cast<const float*>(&W2C);
             const xmath::fvec3 VoxFw = xmath::fvec3{ pFw[3], pFw[7], pFw[11] } / std::max(xmath::fvec3{ pFw[3], pFw[7], pFw[11] }.Length(), 1e-12f);
             if( VoxFw.Dot(m_VoxFwd) < 0.999999f ) { m_VoxFwd = VoxFw; m_VoxTurned = std::chrono::steady_clock::now(); }
             const bool bVoxSettled = s_VoxSettle > 0.0 && m_pGITrace && m_pGITrace->VoxQuiet() && std::chrono::duration<double>(std::chrono::steady_clock::now() - m_VoxTurned).count() > s_VoxSettle;
-            if( const auto& Vox = s_Vox; Vox[0] > 0.0f && !m_pGatherRefS && m_pGITrace && m_VoxPixels > 0 && !bVoxSettled && !(s_VoxStop > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - s_VoxT0).count() > s_VoxStop) && !(m_pGITrace->VoxQuiet() && m_Device.getFrameIndex() % 8 != 0) )
+            const bool bVoxNoStatic = bVoxSettled || (s_VoxStop > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - s_VoxT0).count() > s_VoxStop) || (m_pGITrace && m_pGITrace->VoxQuiet() && m_Device.getFrameIndex() % 8 != 0);
+            if( const auto& Vox = s_Vox; Vox[0] > 0.0f && !m_pGatherRefS && m_pGITrace && m_VoxPixels > 0 )      // (no static rays - settled, quiet's 7 frames in 8: VoxStep still runs - the movers' probes, and it notices the eye moving: skipped, a strafing eye never woke the rays)
                         {
                             if( !m_bVoxTSTried ) { m_bVoxTSTried = true; m_bVoxTS = m_Device.Create(m_VoxTS, { .m_Count = 2 }) == nullptr; }
-                            if( std::vector<std::uint64_t> Ns; m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )
+                            if( std::vector<std::uint64_t> Ns; !bVoxNoStatic && m_bVoxTS && m_VoxTS.getResults(Ns) && Ns.size() >= 2 && Ns[1] > Ns[0] )      // (no static rays: their cost isn't measured)
                             {
                                 const double Ms = double(Ns[1] - Ns[0]) * 1e-6, Budget = double(Vox[1]);
                                 m_VoxRays = std::clamp(m_VoxRays * std::clamp(Budget / std::max(Ms, 1e-3), 0.7, 1.3), 2048.0, 65536.0);     // (groups of 4 lanes: the cost follows the rays - in groups of 64 a dispatch cost 2 ms and more with any rays at all, and the budget could only starve them. The top: past it many small groups cost more than the rays)
@@ -3608,10 +3611,10 @@ namespace xlionrender
                             // forward, post: ~6.5 ms of graphics on Bistro Game; the frame map 2026-11-08); the next frame waits for them before
                             // anything of its own. This frame's gather and reflections read the store as the last frame's rays left it. XLION_ASYNC=0:
                             // here, in the frame (the default: XLION_ASYNC=1 turns the second queue on)
-                            const auto RaysBody = [this, &Window, &View, &Scene, Eye, Vox = Vox, Frame = m_Device.getFrameIndex()]()
+                            const auto RaysBody = [this, &Window, &View, &Scene, Eye, Vox = Vox, Frame = m_Device.getFrameIndex(), bNoStatic = bVoxNoStatic]()
                             {
                                 if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 0);
-                                m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, Frame, int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, [&]{ const float* p = reinterpret_cast<const float*>(&View.m_GIScreenPrevW2C); return xmath::fvec3{ p[3], p[7], p[11] }; }(), m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
+                                m_bVoxOn = m_pGITrace->VoxStep(Window, m_VoxPixels, Frame, bNoStatic ? 0 : int(m_VoxRays), int(Vox[2]), Vox[0], { Eye[0], Eye[1], Eye[2] }, [&]{ const float* p = reinterpret_cast<const float*>(&View.m_GIScreenPrevW2C); return xmath::fvec3{ p[3], p[7], p[11] }; }(), m_VoxKey, View.m_bHDRPrev ? View.m_HDRPrev : View.m_HDR, View.m_GIScreenWidth, !Scene.m_bDebugReflection && Scene.m_GI.m_Debug == gi_debug::NONE);
                                 if( m_bVoxTS ) Window.WriteTimestamp(m_VoxTS, 1);
                             };
                             const auto Rays = [RaysBody, &View]()
@@ -3763,7 +3766,11 @@ namespace xlionrender
                             const float Org[3] = { 0.5f * (M.m_Lo[0] + M.m_Hi[0]) - Hxz, M.m_Lo[1], 0.5f * (M.m_Lo[2] + M.m_Hi[2]) - Hxz };
                             const float dx = Org[0] - M.m_Origin[0], dy = Org[1] - M.m_Origin[1], dz = Org[2] - M.m_Origin[2];
                             const bool bJump = dx * dx + dy * dy + dz * dz > 4.0f;      // (a teleport, 2 m in a frame: its probes start over)
-                            Movers[b] = { { Org[0], Org[1], Org[2] }, 2.0f * Hxz, Hy, M.m_bNew || bJump };
+                            // (its probes' history by its speed, 2026-11-13: standing, ~1.5 s - 32 rays a probe still wobbled 11.7 % of its pixels at 0.75 s, 7.7 % at 1.5 s; walking
+                            // 1.5 m/s or more, 0.4 s - out of the shade into the sun without a lag. XLION_MOVER_TAU=<s>: one history for all)
+                            static const float s_TauFixed = [] { const char* p = xlionrender::Env("XLION_MOVER_TAU"); return p ? std::max(float(std::atof(p)), 0.01f) : 0.0f; }();
+                            const float Speed = std::sqrt(dx * dx + dy * dy + dz * dz) / std::max(Dt, 1e-4f), Tau = s_TauFixed > 0.0f ? s_TauFixed : 1.5f + (0.4f - 1.5f) * std::clamp(Speed / 1.5f, 0.0f, 1.0f);
+                            Movers[b] = { { Org[0], Org[1], Org[2] }, 2.0f * Hxz, Hy, M.m_bNew || bJump, 1.0f - std::exp(-Dt / Tau) };
                             std::copy(Org, Org + 3, M.m_Origin); M.m_bNew = false;
                         }
                         m_GatherTable[30] = 0u;
@@ -3781,7 +3788,10 @@ namespace xlionrender
                         }
                         static const bool s_bMoverLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
                         if( s_bMoverLog && MoverFrame % 120 == 0 ) { int n = 0; for( const auto& M : Movers ) n += M.m_CellXZ > 0.0f ? 1 : 0; std::printf("MOVERS %d held of %d blocks, %d probes, %u rays a frame\n", n, int(Movers.size()), n * 12, unsigned(n * 12 * gi::gpu_trace::probe_rays_v)); std::fflush(stdout); }
-                        if( m_pGITrace ) m_pGITrace->SetMovers(std::move(Movers), 1.0f - std::exp(-Dt / 0.25f), Dt / 0.5f);      // (the probes' mean over ~0.25 s; valid again over ~0.5 s)
+                        // (the probes' mean over ~0.75 s - DDGI's hysteresis ~0.97 a frame; 0.25 s was ~120 samples and visibly noisy, Tomas 2026-11-13.
+                        // XLION_MOVER_TAU=<s> tunes it; a teleport or a new character still resets; valid again over ~0.5 s)
+                        static const float s_MoverTau = [] { const char* p = xlionrender::Env("XLION_MOVER_TAU"); return p ? std::max(float(std::atof(p)), 0.01f) : 0.75f; }();
+                        if( m_pGITrace ) m_pGITrace->SetMovers(std::move(Movers), 1.0f - std::exp(-Dt / s_MoverTau), Dt / 0.5f);
                     }
                     // (uploaded after the movers' lattices and word 30: before, from 2a68af9 to here, the gather never saw them - word 30 went up as 0 and
                     // every character read the +128 records; the probes were updated and never read)

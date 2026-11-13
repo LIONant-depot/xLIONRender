@@ -491,6 +491,7 @@ void main()
             const float Wc = BucketAO > 0.0 ? smoothstep(BucketAO + 0.05, BucketAO - 0.1, Ah) : 0.0;      // (a soft hand-over by the AO: a hard one speckled - the AO a pixel at a time)
             if (Wc > 0.0) { g_VoxBucket = 1u; const float Tr = g_ClipTrust; const vec4 Ec = VoxReadLevels(S.P, N); g_VoxBucket = 0u; g_ClipTrust = Tr; if (Ec.w > 0.0) E.rgb = mix(E.rgb, Ec.rgb, Wc); }
             bWeak = E.w < 0.5;
+            if ((GITable[push.TableBase + 38u] & 0x80000000u) != 0u) E.rgb = mix(vec3(1.0, 0.05, 0.05), vec3(0.05, 1.0, 0.05), g_ClipTrust);      // (XLION_VOX_TRUST_VIEW: the read's sample trust - red few samples, green full)
             E.w = 1.0;
             if (GITable[push.TableBase + 29u] == 0u) { g_GIRefl = VoxReflect(S.P, N, E.rgb); if ((GITable[push.TableBase + 32u] & 8u) != 0u) g_GIRefl = VoxDirsRead(S.P, N, g_GIRefl, P); }
         }

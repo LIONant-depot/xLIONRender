@@ -174,7 +174,8 @@ const uint vox_busy_v = 0xFFFFFFFFu;      // (a face slot's tag while its new ow
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 SampleIn)
 {
     vec3 Sample = SampleIn;
-    if (g_VoxStoreKind != 2u) VoxStoreDir(L, Org, g, N, Sample);      // (a mover's open space point: no reflection bins, they are the surfaces')
+    const bool bFreeze = (uint(Push.m_First) & 0xFFFF0000u) == 0x10000u;
+    if (!bFreeze && g_VoxStoreKind != 2u) VoxStoreDir(L, Org, g, N, Sample);      // (a mover's open space point: no reflection bins, they are the surfaces')
     const vec3  w = N * N;
     const float r = Rnd() * (w.x + w.y + w.z);
     const int   a = r < w.x ? 0 : r < w.x + w.y ? 1 : 2;
@@ -220,6 +221,13 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
         v = vec4(0.0); m = vec4(0.0); Pv = PL = Pl = vec2(0.0); Incon = 1.0;
     }
     m.w = Pv.x;
+    // (static settle v2, XLION_VOX_FREEZE: a frozen face is read-only - no ray of anyone's writes it (a coarser level's store from a finer face's ray,
+    // a second bounce's hit), not only its own pick: it stays exactly as it is until a light change (m_First bit 0) wakes every face. Before, the
+    // pick alone was frozen and the other writes kept moving it - Tomas 2026-11-13: once the faces near you are frozen, no more changes)
+    // (its write time still refreshed: a frozen face stays resident - unwritten for 120 frames its slot was taken over by another key and it flashed back from
+    // nothing; the read-only freeze's first run flickered 0.45 for that)
+    if (bFreeze && (Push.m_First & 1) == 0 && !bTaken && v.w >= float(abs(Push.m_Epoch) & 0xFFFF) * 0.5 && Incon < 0.2) { GIRefAccumU[VoxX2Of(e)].w = floatBitsToUint(Now); return; }
+    if (bFreeze && g_VoxStoreKind != 2u) VoxStoreDir(L, Org, g, N, Sample);      // (XLION_VOX_FREEZE: after the test - a frozen face's bins stay too)
     // (fireflies, kajiya's / WickedEngine's MultiscaleMeanEstimator: a sample past the face's short mean + 8 sigma + 0.1 is cut there - one bright ray (the sun,
     // a sky gap) jolted every face it landed on: the GI flickered everywhere while rays ran, Tomas 2026-11-12)
     if (v.w >= 16.0)
@@ -244,7 +252,10 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
         const float Lk = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) / v.w, Lm = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722));
         const float Noise = sqrt(max(m.w, 0.0) * vox_short_v / (2.0 - vox_short_v));       // (the short mean's own standard deviation)
         Incon += (min(abs(Lm - Lk) / max(sqrt(max(m.w, 0.0)), 1e-4 + 1e-3 * Lk), 4.0) - Incon) * 0.08;
-        if (abs(Lm - Lk) > vox_sigmas_v * Noise && abs(Lm - Lk) > 0.1 * Lk)
+        // (2026-11-13: only while the lights moved (m_First bit 0, 0.5 s after a change) - on a settled view a face whose samples come from two differently lit
+        // surfaces in its cell (a panel's recess and frame) had its short mean swing, re-anchored again and again, and popped: the blotches at Tomas's view were
+        // full-trust faces. Propagation after the lights stop moves the long mean instead)
+        if ((Push.m_First & 1) != 0 && abs(Lm - Lk) > vox_sigmas_v * Noise && abs(Lm - Lk) > 0.1 * Lk)
         {
 #ifdef GI_VOX_ONLY
             if (ConnU[1] == vox_glide_mark_v) v *= max(0.5, 32.0 / v.w);                   // (XLION_VOX_GLIDE: its history halved, its mean kept - new samples move it faster, it glides: no jump to the short mean's noise)
@@ -528,15 +539,18 @@ void VoxMain()
         const uint e = vox_probe_base_v + 4u * (12u * m + p);
         const vec4 V = GIRefAccum[e + 3u];
         const bool bReset = B.y > 0.5 || V.y <= 0.0;
-        const float a = bReset ? 1.0 : H0.y;
+        const float a = bReset ? 1.0 : (B.z > 0.0 ? B.z : H0.y);      // (B.z: this mover's own blend - by its speed, plan_forward)
         // (validity: inside geometry - over a quarter of its rays on back faces - invalid at once; valid again only by the step a frame, ~0.5 s)
-        const float Valid = nBack > 0.25 * float(K) ? 0.0 : (bReset ? 1.0 : min(V.x + H0.z, 1.0));
+        // (2026-11-13: by the back-face share's own running mean (V.w), not this frame's 8 rays - 2 or 3 back hits of 8 by chance flipped a probe near the ground
+        // invalid and back every few frames, its weight came and went in the trilinear read: the characters flickered on 18 % of their pixels)
+        const float BackNow = nBack / float(K), Bf = bReset ? BackNow : mix(V.w, BackNow, a);
+        const float Valid = Bf > 0.25 ? 0.0 : (bReset ? 1.0 : min(V.x + H0.z, 1.0));
         GIRefAccum[e]      = mix(GIRefAccum[e], R, a);
         GIRefAccum[e + 1u] = mix(GIRefAccum[e + 1u], G, a);
         GIRefAccum[e + 2u] = mix(GIRefAccum[e + 2u], Bl, a);
         // (z: seconds since it was last valid - the read's bounded history, v3.1 #1: an invalid probe's last estimate bridges at most 0.5 s; after a reset none)
         const float Since = Valid > 0.0 ? 0.0 : (bReset ? 1e3 : V.z + 0.5 * H0.z);
-        GIRefAccum[e + 3u] = vec4(Valid, min(V.y + 1.0, 65000.0), min(Since, 1e3), 0.0);
+        GIRefAccum[e + 3u] = vec4(Valid, min(V.y + 1.0, 65000.0), min(Since, 1e3), Bf);
         return;
     }
 #endif
@@ -573,19 +587,35 @@ void VoxMain()
         const bool bOwn = GIRefAccum[ek + 1u].x == VoxTagOf(hk);
         float n = bOwn ? GIRefAccum[ek].w : 0.0;
         const float nCount = n, nIncon = bOwn ? unpackHalf2x16(floatBitsToUint(GIRefAccum[VoxX2Of(ek)].y)).y : 1.0;
-        {   // (settle phase 1: the faces this seen point reads - its axis face's 8 corners at this level - marked seen this frame)
-            const ivec3 i0 = ivec3(floor(gq));
+        {   // (settle phase 1: the faces this seen point reads, marked seen this frame. 2026-11-13: every axis face its normal weighs (the gather reads all three by
+            // N x N, not only the dominant one) at this level and the next coarser (the gather falls back to it) - before, the other axes' and the parent's faces
+            // were 'unused' after 2 s, taken over by off-screen hit keys, and restarted from nothing: ~350 takeovers a second on a settled still view, the blotches)
             const float NowS = float(uint(Push.m_Frame) & 0xFFFFFFu);
-            for (int c = 0; c < 8; ++c)
+            const vec3 Wn = Nk * Nk;
+            for (int lv = 0; lv < 2; ++lv)
             {
-                const uint hc = VoxHash(Lk, i0 + ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)) + 64u * Kk), ec = VoxEntryOf(hc);
-                if (GIRefAccum[ec + 1u].x == VoxTagOf(hc) && GIRefAccum[VoxX2Of(ec)].z != NowS) { GIRefAccumU[VoxX2Of(ec)].z = floatBitsToUint(NowS);
+                int Lm; ivec3 Om; vec3 gm;
+                if (lv == 0) { Lm = Lk; Om = Ok; gm = gk; } else if (!VoxCell(Ps.xyz, Hd.xyz, Hd.w, Lk + 1, Lm, Om, gm)) break;
+                for (int ax = 0; ax < 3; ++ax)
+                {
+                    if (Wn[ax] < 0.05) continue;
+                    vec3 gv = vec3(Om) + gm; gv[ax] *= vox_layers_v;
+                    const ivec3 i0 = ivec3(floor(gv));
+                    const uint Fc = uint(2 * ax + (Nk[ax] < 0.0 ? 1 : 0)) + 64u * Kk;
+                    for (int c = 0; c < 8; ++c)
+                    {
+                        const uint hc = VoxHash(Lm, i0 + ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), Fc), ec = VoxEntryOf(hc);
+                        if (GIRefAccum[ec + 1u].x == VoxTagOf(hc) && GIRefAccum[VoxX2Of(ec)].z != NowS) { GIRefAccumU[VoxX2Of(ec)].z = floatBitsToUint(NowS);
 #ifdef GI_VOX_ONLY
-                    if (ConnU[2] == vox_drift_mark_v) atomicAdd(ConnU[11], 1u);
+                            if (ConnU[2] == vox_drift_mark_v) atomicAdd(ConnU[11], 1u);
 #endif
+                        }
+                    }
                 }
             }
         }
+        // (XLION_VOX_FREEZE: a frozen face isn't a candidate at all - it used to win the pick when the others were calm too and then fire nothing; the review 2026-11-13)
+        if ((uint(Push.m_First) & 0xFFFF0000u) == 0x10000u && (Push.m_First & 1) == 0 && nCount >= float(abs(Push.m_Epoch) & 0xFFFF) * 0.5 && nIncon < 0.2) continue;
         if (VoxIncon > 0.0) n = n < 64.0 ? n - 1e6 : -unpackHalf2x16(floatBitsToUint(GIRefAccum[VoxX2Of(ek)].y)).y;      // (XLION_VOX_INCON: the unknown first, then the most inconsistent)
         if (n < Least) { Least = n; LeastCount = nCount; LeastIncon = nIncon; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; OriginKind = Kk; }
     }

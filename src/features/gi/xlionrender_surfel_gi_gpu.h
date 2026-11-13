@@ -938,9 +938,10 @@ namespace xlionrender::gi
         // A sparse store: vox_slots_v faces of 3 entries, 50 MB whatever the scene
         // KeepMax: the most samples a face keeps; a face notices a change of its own light and starts over (VoxStore), the rest stay as they are
         // Milestone A (milestone_a_impl_2026-11-13.md): this frame's movers - a skinned draw's probe lattice, 2 x 3 x 2, world-aligned, absolute world
-        struct mover { float m_Origin[3]; float m_CellXZ; float m_CellY; bool m_bReset; };
-        static constexpr std::uint32_t      mover_max_v = 64, probe_rays_v = 8;
+        struct mover { float m_Origin[3]; float m_CellXZ; float m_CellY; bool m_bReset; float m_Alpha = 0.0f; };      // (m_Alpha: its probes' blend this frame, 0: the common one)
+        static constexpr std::uint32_t      mover_max_v = 64, probe_rays_v = 32;      // (2026-11-13: 8 rays a probe a frame left the characters' light flickering on 17 % of their pixels - noise-limited: a 3 s history cut it to 5 %; 32 rays: 7 characters ~2.7k rays)
         static constexpr std::uint32_t      vox_probe_base_v = (1u << 21) * 3 + 4;      // (xlionrender_vox_read.glsl, _vox_levels.glsl)
+        bool HasMovers(void) const noexcept { return !m_Movers.empty(); }
         void SetMovers(std::vector<mover>&& M, float Alpha, float ValidStep) noexcept { m_Movers = std::move(M); m_MoverAlpha = Alpha; m_MoverValidStep = ValidStep; }
         bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, const v3& Look, std::uint32_t LightsKey, const xgpu::texture& SceneHDR, int HalfW, bool bLit) noexcept
         {
@@ -1108,7 +1109,7 @@ namespace xlionrender::gi
                 Push.m_First |= 128;
                 if (bLit) { auto Fd = Push; Fd.m_Bounces = -7; Fd.m_Count = s_Seen; Fd.m_Epoch = HalfW; Window.Dispatch(m_VoxC, B, VoxTex, &Fd, sizeof(Fd), (s_Seen + 3) / 4); }
             }
-            Window.Dispatch(m_VoxC, B, VoxTex, &Push, sizeof(Push), (PerFrame + 3) / 4);
+            if (PerFrame > 0) Window.Dispatch(m_VoxC, B, VoxTex, &Push, sizeof(Push), (PerFrame + 3) / 4);      // (0: settled - the movers' probes below only)
             m_VoxRaysSince += double(PerFrame);
             if (!m_Movers.empty())
             {   // Milestone A: the movers' probes (milestone_a_impl_2026-11-13.md), inside the rays' timed slice: the ray budget pays for them
@@ -1123,7 +1124,7 @@ namespace xlionrender::gi
                         const auto& M = m_Movers[m];
                         float* r = q + 4 + 8 * m;
                         r[0] = M.m_Origin[0]; r[1] = M.m_Origin[1]; r[2] = M.m_Origin[2]; r[3] = M.m_CellXZ;
-                        r[4] = M.m_CellY; r[5] = M.m_bReset ? 1.0f : 0.0f; r[6] = 0.0f; r[7] = 0.0f;
+                        r[4] = M.m_CellY; r[5] = M.m_bReset ? 1.0f : 0.0f; r[6] = M.m_Alpha; r[7] = 0.0f;
                     }
                     auto Pr = Push; Pr.m_Bounces = -8; Pr.m_First = int(Base); Pr.m_Count = int(m_Movers.size() * 12 * probe_rays_v); Pr.m_Epoch = probe_rays_v;
                     Window.Dispatch(m_VoxC, B, VoxTex, &Pr, sizeof(Pr), (Pr.m_Count + 3) / 4);      // (a lane a ray)
@@ -1137,7 +1138,7 @@ namespace xlionrender::gi
         // (VoxQuiet - rays one frame in 8 - only once enough rays went out since the last change: it had begun 1 to 5 s after one, and a still view took
         // minutes to settle - graded lit against the path tracer at tomas, % pixels off: 37.1 at 20 s, 29.5 at 120 s; never quiet 29.9 at 20 s, 26.9 at 60 s.
         // A moving camera has every frame's rays anyway: the frame's worst case is the same. XLION_VOX_QUIET_AFTER=<rays>, default 50 M: about 30 s at 16384 a frame)
-        static inline const double s_QuietAfterRays = [] { const char* p = xlionrender::Env("XLION_VOX_QUIET_AFTER"); return p ? std::atof(p) : 50.0e6; }();
+        static inline const double s_QuietAfterRays = [] { const char* p = xlionrender::Env("XLION_VOX_QUIET_AFTER"); return p ? std::atof(p) : 20.0e6; }();      // (2026-11-13: 20 M with the settle stop: error at 40 s 7.28 vs 7.18 never stopping)
         // (Y4, 2026-11-13, an experiment, OFF by default: XLION_VOX_DRIFT_STOP=<band>, e.g. .003 - quiet once the store-wide drift (probe rays only) stayed inside the band 3 s.
         // Measured: probe drift stays ~+.003 (INCON 0) to +.0045 (INCON 2) on Police at 40 s - at the band: it flaps, not a default yet; off: the old rule, 50 M rays)
         static bool          DriftStop(void) noexcept { return DriftStopBand() > 0.0; }
