@@ -6,6 +6,8 @@
 const int clip_dim_v = 64, clip_levels_v = 4;
 float TF(in const uint i) { return uintBitsToFloat(GITable[push.TableBase + i]); }
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
+const uint vox_probe_base_v = 3u * vox_slots_v + 4u;        // (Milestone A: the movers' probes after the faces - gpu_trace::vox_probe_base_v)
+const uint vox_movers_v = 64u;        // (gpu_trace::mover_max_v; after the probes, 64 x 12 x 8 rays' scratch entries)
 const float vox_layers_v = 4.0;            // (xlionrender_gi_ref_comp.glsl)
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
 uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }

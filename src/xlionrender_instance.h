@@ -801,6 +801,10 @@ namespace xlionrender
         std::vector<std::uint32_t>                  m_GatherTable;
         std::uint32_t                               m_GatherTableBase = 0;
         std::vector<const xgpu::buffer*>            m_GatherBuffers;
+        // Milestone A (milestone_a_impl_2026-11-13.md): the movers' probe blocks - a skinned draw keeps its block (by its instance id) while it is seen
+        struct mover_block { std::uint64_t m_Key = 0; std::uint64_t m_Seen = 0; float m_Origin[3]{}; };
+        std::array<mover_block, 64>                 m_MoverBlocks{};
+        std::chrono::steady_clock::time_point       m_MoverAt{};
         // GPU culling (features/cull): the main view's opaque rigid clusters with a material, culled into runs of indirect draws - a run a bind
         // state (records pipeline, material, geometry, GI buffer), a prepass run a geometry (m_pInstance null). XLION_NO_GPU_CULL=1: the CPU path
         struct cull_run { xgpu::pipeline_instance* m_pInstance; material_slot* m_pMat; const cluster_geom* m_pGeom; xgpu::buffer* m_pGI; std::uint32_t m_First = 0, m_Max = 0; };

@@ -16,6 +16,10 @@ layout(std430, set = 0, binding = 6)          buffer accum_b   { vec4 GIRefAccum
 layout(std430, set = 0, binding = 7)          buffer conn_b    { uvec4 ConnHeader; vec4 Conn[]; };
 layout(std430, set = 0, binding = 7)          buffer conn_u_b  { uint ConnU[]; };      // (the same memory: XLION_VOX_BRICKS's bitmaps, its word 3 the mark)
 layout(set = 1, binding = 0) uniform sampler2D SceneHDR;      // (XLION_VOX_SEEN: last frame's lit image, what the surfaces were seen as: every light, shadow and texture on screen)
+// (Milestone A, the movers' probes - milestone_a_impl_2026-11-13.md: this frame's lattices, written by the CPU, a region a frame parity at Push.m_First:
+// [0] (movers, alpha, the validity's step, 0); then per mover (origin xyz, the x/z spacing), (the y spacing, reset 1, 0, 0). The probes themselves:
+// the store's tail, GIRefAccum[vox_probe_base_v + 4 (12 mover + probe) + 0..3]: SH L1 R, G, B, (validity, frames, 0, 0))
+layout(std430, set = 0, binding = 8) readonly buffer mover_b { vec4 Mover[]; };
 #endif
 layout(std430, set = 0, binding = 6)          buffer accum_u_b { uvec4 GIRefAccumU[]; };    // (the same memory: a direction bin's fixed point sums, added atomically)
 layout(push_constant) uniform push_t { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push;
@@ -70,6 +74,7 @@ vec3 SpecDir(in const vec3 N, in const vec3 V, in const float a, out float W)
 // the short mean leaves the kept one by more than the noise says it can (Wicked's multiscale mean estimator, estimator::Add), the old samples go, in this face only.
 // The header after the pixels (2 entries): the eye and level 0's cell
 #include "xlionrender_vox_read.glsl"
+#include "xlionrender_sh_l1.glsl"
 // A sample into a level: a cell around the point and a face its normal looks toward, by the read's weights: it lands where the reads look for it
 // The same rays, by where they went (the reflection's read, xlionrender_gi_gather_frag.glsl VoxReflect): a cell's face (no layers) keeps a plain mean per direction: around its normal,
 // or along one of the other two axes, each way. No more rays: a place on a floor knows what its rays saw toward the street and toward the wall
@@ -474,6 +479,62 @@ void VoxMain()
             int Lp1; ivec3 Op1; vec3 gp1;
             if (VoxCell(C0.xyz, Hd.xyz, Hd.w, L1 + 1, Lp1, Op1, gp1)) VoxStore(Lp1, Op1, gp1, N1, Sample);
         }
+        return;
+    }
+    if (Push.m_Bounces == -8 || Push.m_Bounces == -9)      // (Milestone A, the movers' probes: -8 a lane a ray - Push.m_Epoch of them a probe, uniform-sphere, stratified in z - its
+    {                                                       // radiance's SH to a scratch entry; -9 a lane a probe: its rays' sum into its SH by an exponential mean. 8 rays in one lane cost 1.3 ms)
+        const int  K = max(Push.m_Epoch, 1);
+        const uint i = gl_GlobalInvocationID.x, q = Push.m_Bounces == -8 ? i / uint(K) : i, m = q / 12u, p = q % 12u, Base = uint(Push.m_First);
+        const vec4 H0 = Mover[Base], A = Mover[Base + 1u + 2u * m], B = Mover[Base + 2u + 2u * m];
+        if (float(m) >= H0.x || A.w <= 0.0) return;      // (a block nobody holds this frame)
+        const uint Scratch = vox_probe_base_v + 4u * 12u * vox_movers_v + 4u * (q * uint(K));
+        if (Push.m_Bounces == -8)
+        {
+            const uint k = i % uint(K);
+            const vec3 Pp = A.xyz + vec3(float(p & 1u) * A.w, float((p >> 1u) % 3u) * B.x, float(p / 6u) * A.w);
+            const float u = (float(k) + Rnd()) / float(K), v = Rnd(), z = 1.0 - 2.0 * u, r = sqrt(max(0.0, 1.0 - z * z)), Phi = 6.2831853 * v;
+            const vec3 D = vec3(r * cos(Phi), z, r * sin(Phi));
+            const gi_hit H = GICast(Pp, D, 1e30);
+            vec3 Lr = vec3(0.0);
+            float Back = 0.0;
+            if (H.m_Inst < 0) Lr = SkyAt(D);
+            else
+            {
+                const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
+                const uvec3 HT = MTri(HM, H.m_Tri);
+                const float B0 = 1.0 - H.m_U - H.m_V;
+                const vec3 Nh = NormalToWorld(HR, MNrm(HM, HT.x) * B0 + MNrm(HM, HT.y) * H.m_U + MNrm(HM, HT.z) * H.m_V);
+                if (dot(Nh, D) > 0.0) Back = 1.0;      // (inside something: no light from there, and a vote against the probe)
+                else
+                {
+                    vec3 Albedo, Emission;
+                    SurfaceAt(H.m_Inst, H.m_Tri, H.m_U, H.m_V, Albedo, Emission);
+                    const vec3 Ph = ToWorld(HR, MPos(HM, HT.x) * B0 + MPos(HM, HT.y) * H.m_U + MPos(HM, HT.z) * H.m_V);
+                    vec3 In = VoxDirectKept(Ph, Nh, Hd) + VoxRead(Ph, Nh, Hd.xyz, Hd.w);      // (the voxel rays' own hit lighting: VoxRay)
+                    if (GD[15] > 0u) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
+                    Lr = Albedo * In * (1.0 / gi_pi_v) + Emission;
+                }
+            }
+            if (any(isnan(Lr)) || any(greaterThan(Lr, vec3(1e5)))) Lr = vec3(0.0);
+            vec4 R = vec4(0.0), G = vec4(0.0), Bl = vec4(0.0);
+            ShAddSample(R, G, Bl, Lr, D, float(K));
+            const uint e = Scratch + 4u * k;
+            GIRefAccum[e] = R; GIRefAccum[e + 1u] = G; GIRefAccum[e + 2u] = Bl; GIRefAccum[e + 3u] = vec4(Back, 0.0, 0.0, 0.0);
+            return;
+        }
+        vec4 R = vec4(0.0), G = vec4(0.0), Bl = vec4(0.0);
+        float nBack = 0.0;
+        for (int k = 0; k < K; ++k) { const uint e = Scratch + 4u * uint(k); R += GIRefAccum[e]; G += GIRefAccum[e + 1u]; Bl += GIRefAccum[e + 2u]; nBack += GIRefAccum[e + 3u].x; }
+        const uint e = vox_probe_base_v + 4u * (12u * m + p);
+        const vec4 V = GIRefAccum[e + 3u];
+        const bool bReset = B.y > 0.5 || V.y <= 0.0;
+        const float a = bReset ? 1.0 : H0.y;
+        // (validity: inside geometry - over a quarter of its rays on back faces - invalid at once; valid again only by the step a frame, ~0.5 s)
+        const float Valid = nBack > 0.25 * float(K) ? 0.0 : (bReset ? 1.0 : min(V.x + H0.z, 1.0));
+        GIRefAccum[e]      = mix(GIRefAccum[e], R, a);
+        GIRefAccum[e + 1u] = mix(GIRefAccum[e + 1u], G, a);
+        GIRefAccum[e + 2u] = mix(GIRefAccum[e + 2u], Bl, a);
+        GIRefAccum[e + 3u] = vec4(Valid, min(V.y + 1.0, 65000.0), 0.0, 0.0);
         return;
     }
 #endif

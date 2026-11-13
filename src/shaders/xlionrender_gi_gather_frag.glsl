@@ -55,6 +55,31 @@ layout(std430, set = 1, binding = 25) buffer HeatBuffer { uint Heat[]; };     //
 #define VOX_READ_SCREEN
 #define VOX_PUBLISHED_BUFFER
 #include "xlionrender_vox_levels.glsl"
+#include "xlionrender_sh_l1.glsl"
+// Milestone A (milestone_a_impl_2026-11-13.md): a skinned pixel's light from its mover's probes - 2 x 3 x 2, trilinear, each by its validity;
+// the lattice from the gather table (GITable[30]: where, 8 a block), the probes from the store's tail (xlionrender_gi_ref.glsl mode -8). w 0: none valid
+vec4 MoverProbesRead(in const vec3 Pw, in const vec3 n, in const uint b)
+{
+    const uint Lt = push.TableBase + GITable[push.TableBase + 30u] + 8u * b;
+    const vec3 O = vec3(uintBitsToFloat(GITable[Lt]), uintBitsToFloat(GITable[Lt + 1u]), uintBitsToFloat(GITable[Lt + 2u]));
+    const float Cxz = uintBitsToFloat(GITable[Lt + 3u]), Cy = uintBitsToFloat(GITable[Lt + 4u]);
+    if (Cxz <= 0.0 || Cy <= 0.0) return vec4(0.0);
+    const vec3 g = clamp((Pw - O) / vec3(Cxz, Cy, Cxz), vec3(0.0), vec3(1.0, 2.0, 1.0));
+    const uint iy = min(uint(g.y), 1u);
+    const vec3 f = vec3(g.x, g.y - float(iy), g.z);
+    vec4 R = vec4(0.0), G = vec4(0.0), B = vec4(0.0);
+    float W = 0.0;
+    for (uint c = 0u; c < 8u; ++c)
+    {
+        const uvec3 o = uvec3(c & 1u, (c >> 1u) & 1u, (c >> 2u) & 1u);
+        const uint  e = vox_probe_base_v + 4u * (12u * b + o.x + 2u * (iy + o.y) + 6u * o.z);
+        const vec4  V = uintBitsToFloat(GIClip[e + 3u]);
+        const float t = (o.x != 0u ? f.x : 1.0 - f.x) * (o.y != 0u ? f.y : 1.0 - f.y) * (o.z != 0u ? f.z : 1.0 - f.z), w = t * V.x * (V.y > 0.0 ? 1.0 : 0.0);
+        if (w <= 0.0) continue;
+        R += uintBitsToFloat(GIClip[e]) * w; G += uintBitsToFloat(GIClip[e + 1u]) * w; B += uintBitsToFloat(GIClip[e + 2u]) * w; W += w;
+    }
+    return W > 1e-3 ? vec4(ShIrradiance(R / W, G / W, B / W, n), 1.0) : vec4(0.0);
+}
 
 #ifdef VOX_PUBLISHED_BUFFER
 // The published read (word 37 1): this level's 8 corners a face from the published entries; any corner not resolved this frame or the last
@@ -414,7 +439,12 @@ void main()
             bool bPubMiss = true;
             if (GITable[push.TableBase + 37u] == 2u) { E = vec4(0.5, 0.5, 0.5, 1.0); bPubMiss = false; }      // (measurement: no level read at all)
             else if (GITable[push.TableBase + 37u] != 0u && !bSkinRead) { E = VoxReadPublished(S.P, N, bPubMiss); g_ClipTrust = 1.0; }
-            if (bSkinRead) { g_VoxBucket = 2u; E = VoxReadLevels(S.P, N); g_VoxBucket = 0u; bPubMiss = E.w <= 0.0; }      // (none yet - it just came: the surfaces' read until its rays come back)
+            if (bSkinRead)
+            {
+                E = S.Entry.x != 0u && GITable[push.TableBase + 30u] != 0u ? MoverProbesRead(S.P + Eyw, N, S.Entry.x - 1u) : vec4(0.0);      // (Milestone A: its own probes)
+                if (E.w <= 0.0) { g_VoxBucket = 2u; E = VoxReadLevels(S.P, N); g_VoxBucket = 0u; }      // (none valid yet: the +128 records, as before)
+                bPubMiss = E.w <= 0.0;
+            }      // (none yet - it just came: the surfaces' read until its rays come back)
 #ifdef XLION_GI_BRICKS
             if (bPubMiss) E = VoxReadBricks(S.P, N);
 #else

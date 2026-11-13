@@ -1,6 +1,8 @@
 // The voxels of light (experiment X1c, xlionrender_gi_ref_comp.glsl keeps them; the gather has its own read): the cells, the sparse store's lookup and a read at a world point. The includer has the store as GIRefAccum
 const int vox_dim_v = 64, vox_levels_v = 4;
 const uint vox_slots_v = 1u << 21;        // (gpu_trace::vox_slots_v)
+const uint vox_probe_base_v = 3u * vox_slots_v + 4u;        // (Milestone A: the movers' probes after the faces - gpu_trace::vox_probe_base_v)
+const uint vox_movers_v = 64u;        // (gpu_trace::mover_max_v; after the probes, 64 x 12 x 8 rays' scratch entries)
 // A face's cell is finer along the face's own axis: surfaces that look the same way at different depths (a bench's front, a wall behind it) are told apart; a surface only fills the few layers it crosses
 const float vox_layers_v = 4.0;
 const float vox_read_min_v = 16.0;        // (C38: the samples a level needs before a hit's bounce read takes it alone)

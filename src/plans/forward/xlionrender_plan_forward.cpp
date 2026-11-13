@@ -3667,6 +3667,37 @@ namespace xlionrender
                         m_GatherBuffers.push_back(p);
                         return std::uint32_t(m_GatherBuffers.size() - 1);
                     };
+                    // Milestone A (milestone_a_impl_2026-11-13.md, XLION_MOVER_PROBES=0: off - the +128 records): a skinned draw's 2 x 3 x 2 probes, world-aligned
+                    // over its reference box (every pose's: stable while it animates), centred on its root; a block per mover kept by its instance id
+                    static const bool s_bMoverProbes = [] { const char* p = xlionrender::Env("XLION_MOVER_PROBES"); return p == nullptr || p[0] != '0'; }();
+                    std::vector<gi::gpu_trace::mover> Movers;
+                    const std::uint64_t MoverFrame = m_Device.getFrameIndex();
+                    const auto MoverBlock = [&]( const auto& D, const xmath::fbbox& Box ) -> std::uint32_t
+                    {
+                        if( !s_bMoverProbes || !m_pGITrace ) return 0u;
+                        const std::uint64_t Key = (D.m_Instance & 0xFFFFFFFFull) != 0 ? (D.m_Instance & 0xFFFFFFFFull) : D.m_UserID;
+                        if( Key == 0 ) return 0u;
+                        int b = -1, Free = -1;
+                        for( int i = 0; i < int(m_MoverBlocks.size()); ++i )
+                        {
+                            if( m_MoverBlocks[i].m_Key == Key ) { b = i; break; }
+                            if( Free < 0 && (m_MoverBlocks[i].m_Key == 0 || m_MoverBlocks[i].m_Seen + 60 < MoverFrame) ) Free = i;      // (unseen a second or so: its block is free)
+                        }
+                        const bool bNew = b < 0;
+                        if( bNew ) { if( Free < 0 ) return 0u; b = Free; m_MoverBlocks[b] = { Key, MoverFrame, {} }; }
+                        auto& M = m_MoverBlocks[b];
+                        const xmath::fvec3 C = D.m_L2W * Box.getCenter(), O = D.m_L2W * xmath::fvec3{ 0, 0, 0 };
+                        const float Sx = (D.m_L2W * xmath::fvec3{ 1, 0, 0 } - O).Length(), Sy = (D.m_L2W * xmath::fvec3{ 0, 1, 0 } - O).Length(), Sz = (D.m_L2W * xmath::fvec3{ 0, 0, 1 } - O).Length();
+                        const xmath::fvec3 H = (Box.m_Max - Box.m_Min) * 0.5f;
+                        const float Hxz = std::max(H.m_X * Sx, H.m_Z * Sz), Hy = H.m_Y * Sy;      // (x/z by the larger: the same lattice whichever way it faces)
+                        const float Org[3] = { C.m_X - Hxz, C.m_Y - Hy, C.m_Z - Hxz };
+                        const float dx = Org[0] - M.m_Origin[0], dy = Org[1] - M.m_Origin[1], dz = Org[2] - M.m_Origin[2];
+                        const bool bJump = dx * dx + dy * dy + dz * dz > 4.0f;      // (a teleport, 2 m in a frame: its probes start over)
+                        std::copy(Org, Org + 3, M.m_Origin); M.m_Seen = MoverFrame;
+                        if( Movers.size() <= std::size_t(b) ) Movers.resize(std::size_t(b) + 1, gi::gpu_trace::mover{ { 0, 0, 0 }, 0.0f, 0.0f, false });
+                        Movers[std::size_t(b)] = { { Org[0], Org[1], Org[2] }, 2.0f * Hxz, Hy, bNew || bJump };
+                        return std::uint32_t(b) + 1u;
+                    };
                     bool bFull = false;
                     for( const auto& Vis : m_Visible )
                     {
@@ -3688,7 +3719,8 @@ namespace xlionrender
                             m_GatherTable.push_back(std::uint32_t(pMesh->m_Geom.m_Clusters.size()));     // (its clusters' count before them: the gather reads no other instance's)
                             m_GatherTable[40 + Slot] = std::uint32_t(m_GatherTable.size());
                             const std::uint32_t k = pProbes ? BufferIndex(pProbes) : 0u;
-                            for( std::size_t c = 0; c < pMesh->m_Geom.m_Clusters.size(); ++c ) m_GatherTable.insert(m_GatherTable.end(), { 0u, 0xFFFFFFFEu, k, 0u });     // (xlionrender_surfel_gi.glsl gi_probes_v)
+                            const std::uint32_t Block = bVoxRead && m_GatherTable[20] == 3u ? MoverBlock(Scene.m_Draws[iDraw], pMesh->m_Geom.m_BBox) : 0u;      // (Milestone A: its probes' block + 1; 0: the +128 records)
+                            for( std::size_t c = 0; c < pMesh->m_Geom.m_Clusters.size(); ++c ) m_GatherTable.insert(m_GatherTable.end(), { Block, 0xFFFFFFFEu, k, 0u });     // (xlionrender_surfel_gi.glsl gi_probes_v)
                             continue;
                         }
                         const auto& G = pMesh->m_Geom;
@@ -3717,6 +3749,24 @@ namespace xlionrender
                     if( bFull && m_Device.getFrameIndex() % 240 == 0 ) { std::printf("GATHERFULL the GI gather's table is full (%d uints): instances left without GI\n", gather_table_uints_v); std::fflush(stdout); }
                     m_GatherTableBase = std::uint32_t(m_Device.getFrameIndex() % ring_frames_v) * std::uint32_t(gather_table_uints_v);
                     (void)View.m_GIGatherTable.MemoryMapFrameRegion(int(m_GatherTableBase), int(m_GatherTable.size()), [&](void* p) { std::memcpy(p, m_GatherTable.data(), m_GatherTable.size() * sizeof(std::uint32_t)); });
+                    {   // Milestone A: the movers to the rays (their probes' update) and their lattices to the gather (m_GatherTable[30]: where; 8 a block)
+                        const auto Now = std::chrono::steady_clock::now();
+                        const float Dt = m_MoverAt == std::chrono::steady_clock::time_point{} ? 1.0f / 60.0f : std::clamp(std::chrono::duration<float>(Now - m_MoverAt).count(), 1e-4f, 0.25f);
+                        m_MoverAt = Now;
+                        m_GatherTable[30] = 0u;
+                        if( !Movers.empty() && m_GatherTable.size() + 8 * Movers.size() <= std::size_t(gather_table_uints_v) )
+                        {
+                            m_GatherTable[30] = std::uint32_t(m_GatherTable.size());
+                            for( const auto& M : Movers )
+                            {
+                                const float F[8] = { M.m_Origin[0], M.m_Origin[1], M.m_Origin[2], M.m_CellXZ, M.m_CellY, 0, 0, 0 };
+                                for( float f : F ) m_GatherTable.push_back(std::bit_cast<std::uint32_t>(f));
+                            }
+                        }
+                        static const bool s_bMoverLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr;
+                        if( s_bMoverLog && MoverFrame % 120 == 0 ) { int n = 0; for( const auto& M : Movers ) n += M.m_CellXZ > 0.0f ? 1 : 0; std::printf("MOVERS %d held of %d blocks, %d probes, %u rays a frame\n", n, int(Movers.size()), n * 12, unsigned(n * 12 * gi::gpu_trace::probe_rays_v)); std::fflush(stdout); }
+                        if( m_pGITrace ) m_pGITrace->SetMovers(std::move(Movers), 1.0f - std::exp(-Dt / 0.25f), Dt / 0.5f);      // (the probes' mean over ~0.25 s; valid again over ~0.5 s)
+                    }
                     m_GIStats.m_nScreenDraws = int(m_GatherBuffers.size());          // (its passes: a full-screen draw a GI buffer)
                     m_GIStats.m_nScreenCalls = int(m_GatherBuffers.size()) + 1;      // (+ the classification)
                 }

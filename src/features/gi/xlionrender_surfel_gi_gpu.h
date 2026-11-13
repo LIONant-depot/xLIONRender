@@ -53,7 +53,7 @@ namespace xlionrender::gi
                 && (S.m_Probes.empty() || (m_bProbes = Make("gi: probes", m_Shader[13], m_ProbesC, S.m_Probes, 7, 32)) || true)
                 && (S.m_Clip.empty() || (m_bClip = Make("gi: clip", m_Shader[14], m_ClipC, S.m_Clip, 8, 48)) || true)
                 && (S.m_Ref.empty() || (m_bRef = Make("gi: ref", m_Shader[15], m_RefC, S.m_Ref, 7, 32)) || true)
-                && (S.m_Vox.empty() || (m_bVox = Make("gi: vox", m_Shader[16], m_VoxC, S.m_Vox, 8, 32, 1)) || true);
+                && (S.m_Vox.empty() || (m_bVox = Make("gi: vox", m_Shader[16], m_VoxC, S.m_Vox, 9, 32, 1)) || true);
         }
 
         // Before world::Update: what the GPU wrote two frames ago or earlier (that frame is done: xGPU keeps one in flight, its EndFrame
@@ -937,6 +937,11 @@ namespace xlionrender::gi
         // Experiment X1c (XLION_GI_VOX; xlionrender_gi_ref_comp.glsl VoxMain): rays from the screen's points into voxels of light on the surfaces.
         // A sparse store: vox_slots_v faces of 3 entries, 50 MB whatever the scene
         // KeepMax: the most samples a face keeps; a face notices a change of its own light and starts over (VoxStore), the rest stay as they are
+        // Milestone A (milestone_a_impl_2026-11-13.md): this frame's movers - a skinned draw's probe lattice, 2 x 3 x 2, world-aligned, absolute world
+        struct mover { float m_Origin[3]; float m_CellXZ; float m_CellY; bool m_bReset; };
+        static constexpr std::uint32_t      mover_max_v = 64, probe_rays_v = 8;
+        static constexpr std::uint32_t      vox_probe_base_v = (1u << 21) * 3 + 4;      // (xlionrender_vox_read.glsl, _vox_levels.glsl)
+        void SetMovers(std::vector<mover>&& M, float Alpha, float ValidStep) noexcept { m_Movers = std::move(M); m_MoverAlpha = Alpha; m_MoverValidStep = ValidStep; }
         bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, const v3& Look, std::uint32_t LightsKey, const xgpu::texture& SceneHDR, int HalfW, bool bLit) noexcept
         {
             const std::array<const xgpu::texture*, 1> VoxTex{ &SceneHDR };
@@ -958,7 +963,7 @@ namespace xlionrender::gi
             if (dv.Dot(dv) > Cell * Cell * 0.0625f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxRaysSince = 0.0; m_DriftCalmSince = {}; m_VoxTravel += std::sqrt(dv.Dot(dv)); m_VoxEyeAt = { Eye.m_X, Eye.m_Y, Eye.m_Z }; }
             const int Keep = KeepMax;
             if (!m_bVox || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
-            const std::size_t nEntries = std::size_t(vox_slots_v) * 3;
+            const std::size_t nEntries = std::size_t(vox_slots_v) * 3 + 4 + std::size_t(mover_max_v) * 12 * 4 * (1 + probe_rays_v);      // (the faces, then the movers' probes: vox_probe_base_v, then their rays' scratch)
             if (!FitScreen(nPixels) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries, "GI: voxel store"))) return false;
             // (XLION_VOX_RELIGHT=<connections a frame>, a prototype: rays keep what they found, 200000 of them; that many are relit each frame, no traversal; its buffer a token otherwise)
             static const int s_Relight = [] { const char* p = xlionrender::Env("XLION_VOX_RELIGHT"); return p ? std::atoi(p) : 0; }();
@@ -1045,7 +1050,8 @@ namespace xlionrender::gi
                 }
             }
             if (!m_ConnB.m_Private && !FitLocal(m_ConnB, 16, s_Relight > 0 ? 1 + 200000 * 7 : 8)) return false;
-            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0], &m_ConnB };
+            if (!Fit(m_MoverB, 16, 2 * (1 + 2 * std::size_t(mover_max_v)), "GI: mover lattices")) return false;
+            xgpu::buffer* B[] = { &m_Nodes, &m_Tri4, &m_Inst, &m_Tlas, &m_DataB, &m_RefSampleB, &m_ClipB[0], &m_ConnB, &m_MoverB };
             m_VoxAnchor = { Eye.m_X, Eye.m_Y, Eye.m_Z };
             struct { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push{ int(nPixels), bStill ? 0 : 1, PerFrame, int(Frame), m_Scene.m_TlasRoot, m_Scene.m_PrimOffset, -1, Keep };
             if (m_VoxCleared < nEntries)
@@ -1104,6 +1110,27 @@ namespace xlionrender::gi
             }
             Window.Dispatch(m_VoxC, B, VoxTex, &Push, sizeof(Push), (PerFrame + 3) / 4);
             m_VoxRaysSince += double(PerFrame);
+            if (!m_Movers.empty())
+            {   // Milestone A: the movers' probes (milestone_a_impl_2026-11-13.md), inside the rays' timed slice: the ray budget pays for them
+                const std::uint32_t Base = std::uint32_t(Frame & 1) * (1 + 2 * mover_max_v);
+                float* pW = nullptr;
+                if (!m_MoverB.getMappedVirtualMemory(pW) && pW)
+                {
+                    float* q = pW + 4 * std::size_t(Base);
+                    q[0] = float(m_Movers.size()); q[1] = m_MoverAlpha; q[2] = m_MoverValidStep; q[3] = 0.0f;
+                    for (std::size_t m = 0; m < m_Movers.size(); ++m)
+                    {
+                        const auto& M = m_Movers[m];
+                        float* r = q + 4 + 8 * m;
+                        r[0] = M.m_Origin[0]; r[1] = M.m_Origin[1]; r[2] = M.m_Origin[2]; r[3] = M.m_CellXZ;
+                        r[4] = M.m_CellY; r[5] = M.m_bReset ? 1.0f : 0.0f; r[6] = 0.0f; r[7] = 0.0f;
+                    }
+                    auto Pr = Push; Pr.m_Bounces = -8; Pr.m_First = int(Base); Pr.m_Count = int(m_Movers.size() * 12 * probe_rays_v); Pr.m_Epoch = probe_rays_v;
+                    Window.Dispatch(m_VoxC, B, VoxTex, &Pr, sizeof(Pr), (Pr.m_Count + 3) / 4);      // (a lane a ray)
+                    Pr.m_Bounces = -9; Pr.m_Count = int(m_Movers.size() * 12);
+                    Window.Dispatch(m_VoxC, B, VoxTex, &Pr, sizeof(Pr), (Pr.m_Count + 3) / 4);      // (a lane a probe: the sum, the mean)
+                }
+            }
             if (s_Relight > 0) { auto Rl = Push; Rl.m_First = (Push.m_First & ~32) | 64; Rl.m_Count = s_Relight; Window.Dispatch(m_VoxC, B, VoxTex, &Rl, sizeof(Rl), (s_Relight + 3) / 4); }
             return true;
         }
@@ -1519,6 +1546,9 @@ namespace xlionrender::gi
         static constexpr std::uint32_t      vox_slots_v = 1u << 21;     // (xlionrender_gi_ref_comp.glsl, _gather_frag.glsl)
         std::size_t                         m_VoxCleared = 0;
         xgpu::buffer                        m_ConnB;
+        xgpu::buffer                        m_MoverB;               // (Milestone A: the movers' lattices, a region a frame parity - host-visible)
+        std::vector<mover>                  m_Movers;
+        float                               m_MoverAlpha = 1.0f, m_MoverValidStep = 0.03f;
         int                                 m_BrickFrames = 0;      // (XLION_VOX_BRICKS)
         std::array<std::uint32_t, 4>        m_DriftLast{};          // (XLION_VOX_DRIFT: the counters' running totals at the last print)
         std::array<std::uint32_t, 4>        m_ChurnLast{};          // (XLION_VOX_DRIFT: VOXCHURN's running totals)
