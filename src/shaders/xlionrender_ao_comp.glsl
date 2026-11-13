@@ -132,6 +132,64 @@ float RawAO(in const ivec2 p, in const ivec2 Q, in const float z, in const vec3 
     return Wsum > 0.0 ? clamp(Sum / Wsum, 0.0, 1.0) : 1.0;
 }
 
+// XLION_AO_CORTAO (Mode bit 3, a prototype - xLION_Docs research/cortao_review_2026-11-14.md): CORTAO's idea (Isheden 2026, MIT,
+// E:\source_code\GI\CORTAO), in our camera-centred world space: each of a few depth samples around the pixel is a sphere (its radius from the
+// sample's share of the disc, slope-compensated by its normal against the view), and the occlusion is the share of a fixed set of rays in the
+// normal's hemisphere that any sphere blocks - a bitmask, as brute force ray tracing has it, not two horizon slices that skew on surfaces not
+// facing the camera. No lookup table (the analytic per-ray test) and no depth mips: the screen offsets at the pixel's radius instead
+const int cortao_samples_v = 8, cortao_rays_v = 16;
+const float cortao_golden_v = 2.3999632297;
+vec3 CortaoRay(in const int k)
+{
+    const float a = float(k) * cortao_golden_v, r = sqrt((float(k) + 0.5) / float(cortao_rays_v));
+    return vec3(cos(a) * r, sin(a) * r, sqrt(1.0 - r * r));
+}
+float CortaoAO(in const ivec2 p, in const vec3 P, in const float Dist, in const vec3 N0)
+{
+    const vec3  V = -P / Dist;
+    const vec3  N = dot(N0, V) < 0.0 ? N0 - V * (dot(N0, V) - 1e-3) : N0;      // (a normal facing away: into the visible hemisphere)
+    const float RadiusPx = min(Push.Radius * Push.PixelsPerUnit / Dist, 64.0);
+    if (RadiusPx < 1.0) return 1.0;
+    // the per-pixel randoms of the 4 x 4 pattern (as RawAO's: the filter's 4 x 4 sums the rotations)
+    const uint  k16 = uint((p.x & 3) | ((p.y & 3) << 2));
+    const uint  Order[16] = uint[16](0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+    const float Rot = (float(Order[k16]) + 0.5) / 16.0 * 6.2831853, Dither = fract(float(Order[(k16 + 5u) & 15u]) / 16.0 + 0.03125);
+    // the rays' frame around N, turned by the pixel's rotation (Frisvad's basis)
+    vec3 T, B;
+    { const vec3 n = normalize(N); const float s = n.z >= 0.0 ? 1.0 : -1.0, a = -1.0 / (s + n.z), b = n.x * n.y * a;
+      T = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x); B = vec3(b, s + n.y * n.y * a, -n.y); }
+    const float cr = cos(Rot), sr = sin(Rot);
+    const mat3 TBN = mat3(cr * T + sr * B, cr * B - sr * T, normalize(N));
+    const vec3 Pc = P + N * (0.02 * Dist / max(RadiusPx, 1.0));      // (the centre pushed off its own surface by about a pixel)
+    uint Bits = 0u;
+    for (int i = 0; i < cortao_samples_v; ++i)
+    {
+        const float a = float(i) * cortao_golden_v + Rot;
+        const float r0 = pow(float(i) / float(cortao_samples_v), 1.75), r1 = pow(float(i + 1) / float(cortao_samples_v), 1.75);
+        const float w = sqrt(r1 * r1 - r0 * r0);      // (the share of the disc this sample stands for, as a radius)
+        const vec2  Off = vec2(cos(a), sin(a)) * mix(r0, r1, Dither) * RadiusPx;
+        const ivec2 q = ivec2(round(vec2(p) + Off));
+        if (q.x < 0 || q.y < 0 || uint(q.x) >= Push.W || uint(q.y) >= Push.H) continue;
+        const ivec2 Qs = FullTexel(q);
+        const float zs = texelFetch(GPreDepth, Qs, 0).r;
+        if (zs >= 1.0) continue;
+        const vec3  d = RayAt(Qs, zs) - Pc;
+        const float L2 = dot(d, d);
+        if (L2 < 1e-10 || L2 > Push.Radius * Push.Radius || dot(d, N) <= 0.0) continue;
+        const float iL = inversesqrt(L2);
+        vec3 Dir = d * iL;
+        const vec3  Ns = NormalAt(Qs);
+        const float Slope = inversesqrt(max(dot(Ns, V), 1.0 / 16.0));      // (CORTAO's slope compensation: a sample seen at a grazing angle stands for more surface)
+        float Rad = Push.Radius * w * Slope * iL;      // (the occluder's normalized angular radius)
+        if (dot(Ns, Dir) < 0.5) Dir = normalize(Dir - Ns * (Rad / max(1.0 - Rad * Rad * 0.5, 1e-6)));     // (a front face: moved into its object by its radius - no self-occlusion)
+        else Rad *= mix(1.0, Slope, 0.5);      // (a back face: boosted, no leak)
+        const vec3  H = transpose(TBN) * Dir;
+        const float CosA = max(0.0, 1.0 - Rad * Rad * 0.5);
+        for (int k = 0; k < cortao_rays_v; ++k) if (dot(CortaoRay(k), H) > CosA) Bits |= 1u << uint(k);
+    }
+    return 1.0 - float(bitCount(Bits)) / float(cortao_rays_v);
+}
+
 void main()
 {
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
@@ -153,7 +211,8 @@ void main()
         const vec3 P = WorldAt(Q, z);
         const float Dist = length(P);
         vec3 Gi;
-        AORaw[i] = vec2(RawAO(p, Q, z, RayAt(Q, z), Dist, Gi), Dist);
+        if ((Push.Mode & 8u) != 0u) { const vec3 N0 = NormalAt(Q); Gi = vec3(0.0); AORaw[i] = vec2(CortaoAO(p, RayAt(Q, z), Dist, texelFetch(GPreId, Q, 0).y >= 0.0 ? N0 : -N0), Dist); }
+        else AORaw[i] = vec2(RawAO(p, Q, z, RayAt(Q, z), Dist, Gi), Dist);
         if (bGi) { AORaw[NP + i] = Gi.rg; AORaw[2u * NP + i] = vec2(Gi.b, 0.0); }
         return;
     }

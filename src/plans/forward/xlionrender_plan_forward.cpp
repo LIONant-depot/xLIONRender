@@ -4046,7 +4046,8 @@ namespace xlionrender
                         const char* TN[] = { "Render target: depth", "Render target: prepass normals", "Render target: prepass ids", "Render target: last frame's HDR" };
                         for( int t = 0; t < 4; ++t ) R.m_Textures.Add(TN[t], Textures[std::size_t(t)]);
                         R.SetU32(R.Value("gi.screen_width"), Push.m_W); R.SetU32(R.Value("gi.screen_height"), Push.m_H); R.SetU32(R.Value("gi.divisor"), Push.m_Div);
-                        R.SetU32(R.Value("ao.mode_raw"), s_bSSGI ? 4u : 0u); R.SetU32(R.Value("ao.mode_filter"), s_bSSGI ? 5u : 1u); R.SetU32(R.Value("ao.ssgi"), s_bSSGI ? 1u : 0u);
+                        static const std::uint32_t s_Cortao = xlionrender::Env("XLION_AO_CORTAO") && xlionrender::Env("XLION_AO_CORTAO")[0] != '0' ? 8u : 0u;      // (prototype: xlionrender_ao_comp.glsl CortaoAO, research/cortao_review_2026-11-14.md)
+                        R.SetU32(R.Value("ao.mode_raw"), (s_bSSGI ? 4u : 0u) | s_Cortao); R.SetU32(R.Value("ao.mode_filter"), s_bSSGI ? 5u : 1u); R.SetU32(R.Value("ao.ssgi"), s_bSSGI ? 1u : 0u);
                         R.SetFloats(R.Value("ao.radius"), &Push.m_Radius, 1); R.SetFloats(R.Value("ao.thickness"), &Push.m_Thickness, 1); R.SetFloats(R.Value("ao.pixels_per_unit"), &Push.m_PixelsPerUnit, 1);
                         R.SetU32(R.Value("gi.table_base"), Push.m_TableBase);
                         R.SetSize(R.Value("gi.screen_size"), View.m_GIScreenWidth, View.m_GIScreenHeight);
@@ -4060,6 +4061,7 @@ namespace xlionrender
                     else
                     {
                     if( s_bSSGI ) Push.m_Mode = 4u;
+                    { static const bool s_bCortao = xlionrender::Env("XLION_AO_CORTAO") && xlionrender::Env("XLION_AO_CORTAO")[0] != '0'; if( s_bCortao ) Push.m_Mode |= 8u; }
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
                     Push.m_Mode = s_bSSGI ? 5u : 1u;
                     Window.Dispatch(m_AOCompute, Buffers, Textures, &Push, sizeof(Push), GX, GY);
