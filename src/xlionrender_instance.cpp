@@ -947,7 +947,7 @@ namespace xlionrender
             if( auto Err = Device.Create(m_LightTilesCompute, { .m_pShader = &m_LightTilesShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 80, .m_pName = "instance: m_LightTilesCompute" }); Err ) return Err;
             if( auto Err = Device.Create(m_ContactTimes, { .m_Count = 2 }); Err ) return Err;
             if( auto Err = Device.Create(m_TAAShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_TAAComp) }); Err ) return Err;
-            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 4, .m_nImages = 2, .m_PushConstantsSize = 128, .m_bLinear = true, .m_pName = "instance: m_TAACompute" }); Err ) return Err;
+            if( auto Err = Device.Create(m_TAACompute, { .m_pShader = &m_TAAShader, .m_nBuffers = 0, .m_nTextures = 5, .m_nImages = 3, .m_PushConstantsSize = 128, .m_bLinear = true, .m_pName = "instance: m_TAACompute" }); Err ) return Err;
             // the ambient occlusion (xlionrender_ao_comp.glsl): the GI screen buffer's header, the gather's table, last frame's AO, this frame's;
             // the G-buffer's depth and normal
             if( auto Err = Device.Create(m_AOShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = SPIRV(s_AOComp) }); Err ) return Err;
@@ -2207,6 +2207,9 @@ namespace xlionrender
         for( auto& T : View.m_Bloom ) if( T.m_Private ) m_Device.Destroy(std::move(T));
         for( auto& I : View.m_ToneMapTAA ) if( I.m_Private ) m_Device.Destroy(std::move(I));
         for( auto& T : View.m_TAA ) if( T.m_Private ) m_Device.Destroy(std::move(T));
+        for( auto& T : View.m_TAAVel ) if( T.m_Private ) m_Device.Destroy(std::move(T));
+        if( View.m_TAADebug.m_Private ) m_Device.Destroy(std::move(View.m_TAADebug));
+        View.m_TAAVelFrames = 0;
         View.m_bTAAHistory = false;
         for( int c = 0; c < post::max_custom_nodes_v; ++c )     // (the custom post nodes' images and pipelines; their SPIR-V stays: the owner's)
         {

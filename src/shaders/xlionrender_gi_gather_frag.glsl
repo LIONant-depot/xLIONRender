@@ -319,6 +319,30 @@ vec3 ScreenNormal(in const uint w)
 }
 
 const float kGIScreenBlend = 0.10;      // the fresh irradiance's share over last frame's (1: none kept); 0.25 -> 0.10 2026-11-12: panel flicker 2.9 -> 1.0 % of pixels, a sun jump ~0.5 s slower to settle
+// The history read bilinearly (Tomas 2026-11-13: every GI / history buffer bilinear - the single nearest entry made the light float while the camera
+// moved): the 4 entries around the point's place last frame, each kept only if it is the same surface (distance within 2 % + 1 cm, normal within
+// ~25 degrees, not a mover's), weighted by the bilinear share and renormalized. E: the irradiance's (not a weak entry's), R: the reflection's;
+// w 0: none. Age: the oldest used (the reuse path's limit)
+void HistoryBilinear(in const vec4 C, in const uint W, in const uint H, in const float Ld, in const vec3 N, out vec4 E, out vec4 R, out uint Age)
+{
+    E = vec4(0.0); R = vec4(0.0); Age = 0u;
+    const vec2 g = (C.xy / C.w * 0.5 + 0.5) * vec2(float(W), float(H)) - 0.5, i0 = floor(g), f = g - i0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 Q = ivec2(i0) + ivec2(k & 1, k >> 1);
+        if (Q.x < 0 || Q.y < 0 || uint(Q.x) >= W || uint(Q.y) >= H) continue;
+        const float wb = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
+        if (wb <= 0.0) continue;
+        const uvec4 Rp = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
+        if (abs(unpackHalf2x16(Rp.y).y - Ld) >= 0.02 * Ld + 0.01 || dot(ScreenNormal(Rp.w), N) <= 0.9 || (Rp.w & 1u) != 0u) continue;
+        const uint A = (Rp.w >> 28) & 3u;
+        if ((Rp.w & (1u << 30)) != 0u && A != 3u) { E += vec4(vec3(unpackHalf2x16(Rp.x), unpackHalf2x16(Rp.y).x) * wb, wb); Age = max(Age, A); }
+        if ((Rp.w & (1u << 31)) != 0u) R += vec4(vec3(unpackHalf2x16(Rp.z), unpackHalf2x16(Rp.w & 0xFFFFu).x) * wb, wb);
+    }
+    if (E.w > 0.0) E.rgb /= E.w;
+    if (R.w > 0.0) R.rgb /= R.w;
+}
+
 void main()
 {
 #ifdef XLION_HEAT
@@ -387,20 +411,16 @@ void main()
         const vec4  C       = PrevW2C * vec4(Prev, 1.0);
         if (C.w > 1e-6)
         {
-            const ivec2 Q = ivec2(floor((C.xy / C.w * 0.5 + 0.5) * vec2(float(W), float(H))));
-            if (Q.x >= 0 && Q.y >= 0 && uint(Q.x) < W && uint(Q.y) < H)
+            vec4 He, Hr; uint Age;
+            HistoryBilinear(C, W, H, length(Prev), N, He, Hr, Age);
+            if (He.w > 0.5 && !bMover)      // (most of the bilinear footprint on this surface)
             {
-                const uvec4 R   = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
-                const float Sd  = unpackHalf2x16(R.y).y, Pd = length(Prev);
-                const uint  Age = (R.w >> 28) & 3u;
-                if ((R.w & (1u << 30)) != 0u && abs(Sd - Pd) < 0.02 * Pd + 0.01 && dot(ScreenNormal(R.w), N) > 0.9 && !bMover && (R.w & 1u) == 0u)
+                if (Age >= screen_max_age_v) Kind = 3u;
+                else
                 {
-                    if (Age >= screen_max_age_v) Kind = 3u;
-                    else
-                    {
-                        Kind = 1u;
-                        Out  = uvec4(R.x, packHalf2x16(vec2(unpackHalf2x16(R.y).x, Dist)), R.z, (R.w & 0xC000FFFFu) | Guide | ((Age + 1u) << 28));
-                    }
+                    Kind = 1u;
+                    Out  = uvec4(packHalf2x16(He.rg), packHalf2x16(vec2(He.b, Dist)), packHalf2x16(Hr.rg),
+                                 (packHalf2x16(vec2(Hr.b, 0.0)) & 0xFFFEu) | Guide | (1u << 30) | (Hr.w > 0.0 ? 1u << 31 : 0u) | ((Age + 1u) << 28));
                 }
             }
         }
@@ -516,16 +536,14 @@ void main()
             const vec4 C       = PrevW2C * vec4(Prev, 1.0);
             if (C.w > 1e-6)
             {
-                const ivec2 Q = ivec2(floor((C.xy / C.w * 0.5 + 0.5) * vec2(float(W), float(H))));
-                if (Q.x >= 0 && Q.y >= 0 && uint(Q.x) < W && uint(Q.y) < H)
+                // (C40 reopened, Tomas 2026-11-13: a mover takes no screen history at all - a skinned limb moves inside its instance, no reprojection follows it;
+                // its own records are already a time mean. The history read bilinearly: HistoryBilinear - a partial footprint (an edge) takes its share less)
+                if (!bMover)
                 {
-                    const uvec4 Rp = GIScreenPrev[screen_header_v + uint(Q.y) * W + uint(Q.x)];
-                    const float Sd = unpackHalf2x16(Rp.y).y, Ld = length(Prev);
-                    const bool bSame = abs(Sd - Ld) < 0.02 * Ld + 0.01 && dot(ScreenNormal(Rp.w), N) > 0.9 && !bMover && (Rp.w & 1u) == 0u;      // (C40 reopened, Tomas 2026-11-13: a mover takes no screen history at all - a skinned limb moves inside its instance, no reprojection follows it; its own records are already a time mean)
-                    if (bR && bSame && (Rp.w & (1u << 31)) != 0u)
-                        Rr = mix(vec3(unpackHalf2x16(Rp.z), unpackHalf2x16(Rp.w & 0xFFFFu).x), Rr, 0.1);
-                    if (bE && bSame && (Rp.w & (1u << 30)) != 0u && ((Rp.w >> 28) & 3u) != 3u)      // (not a weak entry's: a hole carried on)
-                        E.rgb = mix(vec3(unpackHalf2x16(Rp.x), unpackHalf2x16(Rp.y).x), E.rgb, kGIScreenBlend);
+                    vec4 He, Hr; uint Age;
+                    HistoryBilinear(C, W, H, length(Prev), N, He, Hr, Age);
+                    if (bR && Hr.w > 0.0) Rr = mix(Rr, mix(Hr.rgb, Rr, 0.1), Hr.w);
+                    if (bE && He.w > 0.0) E.rgb = mix(E.rgb, mix(He.rgb, E.rgb, kGIScreenBlend), He.w);      // (not weak entries': a hole carried on)
                 }
             }
         }

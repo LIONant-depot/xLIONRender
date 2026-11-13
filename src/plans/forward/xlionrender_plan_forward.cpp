@@ -5993,9 +5993,9 @@ namespace xlionrender
                         // detector unchanged with it on, 2026-11-10. XLION_TAA_CAMERA_ONLY: the camera's reprojection everywhere)
                         static const bool s_bVertexMotion = xlionrender::Env("XLION_TAA_CAMERA_ONLY") == nullptr;
                         const bool bMotion = s_bVertexMotion && View.m_SharpMotionFrame == View.m_TAAFrame && View.m_SharpGMotion.m_Private && View.m_SharpWidth == View.m_Width;
-                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; float m_JitterU, m_JitterV, m_GammaSlow, m_GammaFast, m_PrevJitterU, m_PrevJitterV, m_bMotion; std::int32_t m_Debug; float m_MovingShare, m_Sharpen; } Push
+                        struct { xmath::fmat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; float m_JitterU, m_JitterV, m_GammaSlow, m_GammaFast, m_PrevJitterU, m_PrevJitterV, m_bMotion; std::int32_t m_Debug; float m_MovingShare, m_Sharpen, m_bPrevVel; } Push
                         { View.m_TAAPrevW2C * xmath::fmat4::fromTranslation(Eye - View.m_TAAPrevEye) * W2C.Inverse(), View.m_Width, View.m_Height, 0.0f, View.m_bTAAHistory ? 1.0f : 0.0f
-                        , J(kT, 2, View.m_Width), J(kT, 3, View.m_Height), s_Gamma[0], s_Gamma[1], J(kP, 2, View.m_Width), J(kP, 3, View.m_Height), bMotion ? 1.0f : 0.0f, s_TAADebug, 0.0f, 0.0f };
+                        , J(kT, 2, View.m_Width), J(kT, 3, View.m_Height), s_Gamma[0], s_Gamma[1], J(kP, 2, View.m_Width), J(kP, 3, View.m_Height), bMotion ? 1.0f : 0.0f, s_TAADebug, 0.0f, 0.0f, 0.0f };
                         static_assert(offsetof(decltype(Push), m_Blend) == 18 * 4 && sizeof(Push) == 128);      // (fmat4 is 16-aligned: the struct rounds up)     // (the plan's TAA slot: word 18)
                         post::FillSlots(P, Snap, 0.0f, View.m_Exposure, &Push);
                         static const float s_Blend = [] { const char* p = xlionrender::Env("XLION_TAA_BLEND"); return p ? float(std::atof(p)) : -1.0f; }();      // (measurement: the scene's m_TAABlend replaced)
@@ -6005,9 +6005,20 @@ namespace xlionrender
                         Push.m_MovingShare = s_Moving[0] >= 0.0f ? s_Moving[0] : Push.m_Blend * 2.5f;      /* (2026-11-11 detector: share 0.25 + sharpen 0.5 kept 0.685 of TAA-off detail moving, 0.605 before; waves 0.025 / 0.022) */ Push.m_Sharpen = s_Moving[1];
                         // (the diagnostics go to an image of their own - the TAA's output stays its history: "Render target: TAA debug" in DebugView)
                         if( s_TAADebug && !View.m_TAADebug.m_Private ) (void)m_Device.Create(View.m_TAADebug, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: TAA debug" });
-                        const xgpu::texture* I2[] = { I[0], View.m_TAADebug.m_Private ? &View.m_TAADebug : I[0] };
-                        const xgpu::texture* T4[] = { T[0], T[1], T[2], bMotion ? &View.m_SharpGMotion : T[1] };      // (no motion this frame: a stand-in, not read)
-                        Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, std::span<const xgpu::texture* const>(T4, 4), I2, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
+                        // (velocity disocclusion - Godot's taa_resolve, elopezr's 'quest for the holy trail': where a pixel's motion differs from the motion last frame had
+                        // where it was, it was hidden then - a walker's colour stood there; its history is dropped. Tomas 2026-11-13: TAA trails behind fast movers)
+                        for( auto& Vt : View.m_TAAVel ) if( !Vt.m_Private || Vt.getTextureDimensions()[0] != View.m_Width || Vt.getTextureDimensions()[1] != View.m_Height )
+                        {
+                            if( Vt.m_Private ) m_Device.Destroy(std::move(Vt));
+                            (void)m_Device.Create(Vt, { .m_Format = xgpu::texture::format::R16G16B16A16_SFLOAT, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_bStorage = true, .m_pName = "Render target: TAA motion" });
+                            View.m_TAAVelFrames = 0;
+                        }
+                        const int VCur = View.m_TAAFrame & 1;
+                        Push.m_bPrevVel = View.m_TAAVelFrames >= 2 && View.m_bTAAHistory ? 1.0f : 0.0f;
+                        const xgpu::texture* I2[] = { I[0], View.m_TAADebug.m_Private ? &View.m_TAADebug : I[0], &View.m_TAAVel[VCur] };
+                        const xgpu::texture* T4[] = { T[0], T[1], T[2], bMotion ? &View.m_SharpGMotion : T[1], &View.m_TAAVel[1 - VCur] };      // (no motion this frame: a stand-in, not read)
+                        Window.Dispatch(m_TAACompute, std::span<xgpu::buffer* const>{}, std::span<const xgpu::texture* const>(T4, 5), I2, &Push, sizeof(Push), P.m_GroupsX, P.m_GroupsY);
+                        ++View.m_TAAVelFrames;
                         return;
                     }
                     struct { int m_W, m_H, m_Mode; float m_A, m_B, m_C, m_D, m_E; } Push{ P.m_W, P.m_H, P.m_Mode };     // (words 3..7: the plan's slots)

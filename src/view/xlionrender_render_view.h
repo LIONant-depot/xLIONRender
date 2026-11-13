@@ -136,6 +136,8 @@ namespace xlionrender
         xmath::fmat4            m_TailPrevW2CNoJit{};
         xmath::fmat4            m_GIScreenPrevW2CNoJit{};
         int                     m_SharpMotionFrame = -1;     // the TAA frame the full-size G-buffer's motion was drawn in (C22: the TAA reads it then)
+        std::array<xgpu::texture, 2> m_TAAVel;          // the TAA's motion a pixel, px (rg16f): this frame's written, last frame's read where the pixel was - velocity disocclusion
+        int                     m_TAAVelFrames = 0;     // (frames written since made: last frame's is read only once both were written - a storage image is undefined before)
         xgpu::texture           m_TAADebug;             // XLION_TAA_DEBUG: the TAA's diagnostic, written beside its output (made the first time it is on)
         // XLION_HEAT (measurement): the GI gather's clock a pixel (4-uint header, then the gather's grid), its colours (xlionrender_heat_comp.glsl),
         // the header a ring slot for the HEAT line, the tone mapper over m_HDR with the colours in the bloom's slot; made the first time it is on

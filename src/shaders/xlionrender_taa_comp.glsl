@@ -6,13 +6,15 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 1, binding = 0) uniform sampler2D HDR;
 layout(set = 1, binding = 1) uniform sampler2D Depth;
 layout(set = 1, binding = 2) uniform sampler2D History;
+layout(set = 1, binding = 4) uniform sampler2D PrevVel;     // (last frame's motion a pixel, px: velocity disocclusion)
 layout(set = 1, binding = 3) uniform sampler2D Motion;      // (the full-size G-buffer's: last frame's NDC xy, clip w, w > 0.5 where a vertex gave its last position)
 layout(set = 2, binding = 0, rgba16f) writeonly uniform image2D Dst;
+layout(set = 2, binding = 2, rgba16f) writeonly uniform image2D Vel;      // (this frame's motion a pixel, px, the jitter taken off)
 layout(set = 2, binding = 1, rgba16f) writeonly uniform image2D Dbg;      // (XLION_TAA_DEBUG: the diagnostic, beside the output - Dst stays the history)
 // Reproject: this frame's clip (jittered) to last frame's (un-jittered); Blend: this frame's share; Jitter / PrevJitter: this / last frame's, in uv; Gamma: the clip box's
 // width in standard deviations, still / moving 8 px or more; Debug (XLION_TAA_DEBUG): 1 the motion, px (|m| x 0.25 red, x / y signed in green / blue around 0.5),
 // 3 this frame's share x 4, 11 the camera's reprojection against the vertices' motion (|difference| x 4 red, x / y signed)
-layout(push_constant) uniform push_t { mat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; vec2 m_Jitter; float m_GammaSlow, m_GammaFast; vec2 m_PrevJitter; float m_bMotion; int m_Debug; float m_MovingShare, m_Sharpen; } Push;
+layout(push_constant) uniform push_t { mat4 m_Reproject; int m_W, m_H; float m_Blend, m_bHistory; vec2 m_Jitter; float m_GammaSlow, m_GammaFast; vec2 m_PrevJitter; float m_bMotion; int m_Debug; float m_MovingShare, m_Sharpen, m_bPrevVel; } Push;
 
 vec3 ToYCoCg(in const vec3 c) { return vec3(dot(c, vec3(0.25, 0.5, 0.25)), dot(c, vec3(0.5, 0.0, -0.5)), dot(c, vec3(-0.25, 0.5, -0.25))); }
 vec3 FromYCoCg(in const vec3 c) { return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
@@ -50,6 +52,7 @@ void main()
     const vec3 C0 = s_Tile[l.y * 10 + l.x];
     vec3 C = C0, M1 = vec3(0.0), M2 = vec3(0.0);
     float Sharp = 0.0;
+    vec2 VelOut = vec2(0.0);
     for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x)
     {
         const vec3 s = ToYCoCg(s_Tile[(l.y + y) * 10 + l.x + x]);
@@ -59,15 +62,29 @@ void main()
     {
         // Where the pixel was: its depth is where its jittered sample landed, unprojected with the jittered camera into last frame's un-jittered one, plus this
         // frame's jitter - the history at the pixel plus its motion, the jitter cancelled (C22)
-        const vec4 Prev = Push.m_Reproject * vec4((vec2(p) + 0.5) / Sz * 2.0 - 1.0, texelFetch(Depth, p, 0).r, 1.0);
-        vec2 puv = Prev.xy / Prev.w * 0.5 + 0.5 + Push.m_Jitter;
+        // (closest-depth motion - Godot's, Wicked's, Unreal's: the pixel moves as the nearest surface in its 3 x 3, so a mover's silhouette edge follows the mover,
+        // not the background behind it - the limbs' edges smeared. The nearest's offset applied to this pixel)
+        ivec2 qc = p; float Dc = texelFetch(Depth, p, 0).r;
+        for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x)
+        {
+            const ivec2 q = clamp(p + ivec2(x, y), ivec2(0), ivec2(Push.m_W, Push.m_H) - 1);
+            const float d = texelFetch(Depth, q, 0).r;
+            if (d < Dc) { Dc = d; qc = q; }
+        }
+        const vec4 Prev = Push.m_Reproject * vec4((vec2(qc) + 0.5) / Sz * 2.0 - 1.0, Dc, 1.0);
+        vec2 puv = Prev.xy / Prev.w * 0.5 + 0.5 + Push.m_Jitter + vec2(p - qc) / Sz;
         if (Push.m_bMotion > 0.5)
         {   // What moved on its own (characters, moved meshes): its vertices' motion - last frame's NDC carries last frame's jitter, taken off. Only where it differs
             // from the camera's by over 0.75 px: the target keeps absolute NDC in half floats, up to ~0.5 px off at the screen's sides (Fable)
-            const vec4 M = texelFetch(Motion, p, 0);
-            const vec2 Vtx = M.xy * 0.5 + 0.5 - Push.m_PrevJitter + Push.m_Jitter;
+            const vec4 M = texelFetch(Motion, qc, 0);
+            const vec2 Vtx = M.xy * 0.5 + 0.5 - Push.m_PrevJitter + Push.m_Jitter + vec2(p - qc) / Sz;
             if (Push.m_Debug == 11) { const vec2 d = (puv - Vtx) * Sz; imageStore(Dbg, p, M.w > 0.5 ? vec4(length(d) * 4.0, 0.5 + 2.0 * d.x, 0.5 + 2.0 * d.y, 1.0) : vec4(0.0)); }
-            if (M.w > 0.5 && length((Vtx - puv) * Sz) > 0.75) puv = Vtx;
+            // (C50, Tomas 2026-11-13: slow characters looked defocused - a fixed 0.75 px guard threw away every vertex motion under it, so a slow limb read
+            // the history where it no longer was. The guard is the half float's own rounding at this NDC instead: half an ulp, x1.5 - ~0.05 px near the
+            // centre, ~0.7 px at a 3778-wide screen's sides)
+            const vec2 Ulp = exp2(floor(log2(max(abs(M.xy), vec2(6.2e-5)))) - 10.0);
+            const vec2 Guard = 0.75 * Ulp * 0.5 * Sz + 0.02;
+            if (M.w > 0.5 && any(greaterThan(abs((Vtx - puv) * Sz), Guard))) puv = Vtx;
         }
         if (Prev.w > 0.0 && all(greaterThanEqual(puv, vec2(0.0))) && all(lessThanEqual(puv, vec2(1.0))))
         {
@@ -78,7 +95,17 @@ void main()
             const float Gamma = mix(Push.m_GammaSlow, Push.m_GammaFast, smoothstep(1.0, 8.0, Moved));      // (wide while slow: the jitter's own change isn't clipped; narrow when fast)
             const vec3 H = max(FromYCoCg(clamp(ToYCoCg(SampleHistory(puv)), M1 - Gamma * Sd, M1 + Gamma * Sd)), vec3(0.0));
             // This frame's share by how far the pixel moved: still, half of it (the jitter's difference times the share was a shimmer with its 8-frame cycle); moving, a little more
-            const float Share = mix(Push.m_Blend * 0.5, Push.m_MovingShare, clamp(Moved / 2.0, 0.0, 1.0));
+            float Share = mix(Push.m_Blend * 0.5, Push.m_MovingShare, clamp(Moved / 2.0, 0.0, 1.0));
+            // (velocity disocclusion: last frame's motion where the pixel was against this one's - over 1 px apart, a mover stood there or here moved
+            // differently: its colour is not this surface's history. Up to all of this frame's by 3 px; the jitter's step taken off both)
+            VelOut = m - Push.m_Jitter * Sz;
+            if (Push.m_bPrevVel > 0.5)
+            {
+                const vec2 Pv = textureLod(PrevVel, puv, 0.0).xy;      // (where the history is read; bilinear: an edge's two sides blend)
+                const float Dis = clamp((length(VelOut - Pv) - 1.0) / 2.0, 0.0, 1.0);
+                Share = mix(Share, 1.0, Dis);
+                if (Push.m_Debug == 12) imageStore(Dbg, p, vec4(Dis, length(VelOut) * 0.1, length(Pv) * 0.1, 1.0));
+            }
             // The display sharpened where the history blurs - moving (TFAA's idea): an amount for the tone map, in the alpha above 1 - never in the history's colour
             Sharp = Push.m_Sharpen * clamp(Moved / 2.0, 0.0, 1.0);
             if (Push.m_Debug == 3) imageStore(Dbg, p, vec4(vec3(Share * 4.0), 1.0));
@@ -86,6 +113,7 @@ void main()
             C = (C * Wc + H * Wh) / (Wc + Wh);
         }
     }
+    imageStore(Vel, p, vec4(VelOut, 0.0, 0.0));
     const float A = texelFetch(HDR, p, 0).a;      // (coverage: 0 nothing drawn, 1 geometry)
     imageStore(Dst, p, vec4(C, A > 0.5 ? 1.0 + 0.99 * clamp(Sharp, 0.0, 1.0) : A));
 }
