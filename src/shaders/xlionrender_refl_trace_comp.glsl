@@ -265,6 +265,9 @@ void main()
         // (a sharp receiver seen, whether or not the full size runs: Stats' top bit: an empty full size dispatch cost 2 ms on Bistro)
         if (Push.m_Mode == 0u && !bPlanarHere && Rough < Push.m_SharpSeen) s_SharpSeen = 1u;      // (one global atomic a group, at the end)
         bool bListed = false;
+        if (bFull && !bList && bSharpHere)      // (measurement, 2026-11-14: Stats 10 - the listed sharp pixels whose half-size screen trace already had a certain answer (>= 0.95): the upper bound of 'screen first' for the sharp list)
+        { const uvec2 Hs = uvec2(F[Push.m_Slot].Params.xy); const uvec2 ph = min(uvec2(p) / 2u, Hs - 1u); const uvec4 Rh = Records[Hs.x * Hs.y + ph.y * Hs.x + ph.x];
+          if (((Rh.w >> 24) & 15u) == refl_screen_v && unpackHalf2x16(Rh.y).y >= 0.95) atomicAdd(Stats[Push.m_Slot * 12u + 10u], 1u); }
         if (bFull && !bList && bSharpHere) { const uint a = atomicAdd(SharpList[Par], 1u); if (a < refl_sharp_cap_v) { if ((a & 63u) == 0u) atomicAdd(SharpList[refl_sharp_args_v + 4u * Par], 1u); SharpList[2u + a] = uint(p.x) | (uint(p.y) << 16); bListed = true; s_Listed[gl_LocalInvocationIndex] = 1u; } }
         if (bFull && (!bSharpHere || bListed)) { }      // (the full-size dispatch: the sharp ones only; the rest: none - the half-size records serve them)
         else if (!bFull && bSharpHere) { }  // (the half-size dispatch leaves the sharp ones to the full-size one)
