@@ -3775,7 +3775,8 @@ namespace xlionrender
                             std::copy(Org, Org + 3, M.m_Origin); M.m_bNew = false;
                         }
                         m_GatherTable[30] = 0u;
-                        if( !Movers.empty() && m_GatherTable.size() + 8 * Movers.size() <= std::size_t(gather_table_uints_v) )
+                        static const int s_MoverSplit = [] { const char* p = xlionrender::Env("XLION_MOVER_PROBES"); return p ? std::atoi(p) : 1; }();      // (C52 narrowing: 2 the probes updated but never read, 3 read but never updated)
+                        if( s_MoverSplit != 2 && !Movers.empty() && m_GatherTable.size() + 8 * Movers.size() <= std::size_t(gather_table_uints_v) )
                         {
                             m_GatherTable[30] = std::uint32_t(m_GatherTable.size());
                             // (XLION_MOVER_DEBUG=1, plan v3.1 #5: the movers' GI painted by the path it took - probes green, their last estimates yellow,
@@ -3792,7 +3793,7 @@ namespace xlionrender
                         // (the probes' mean over ~0.75 s - DDGI's hysteresis ~0.97 a frame; 0.25 s was ~120 samples and visibly noisy, Tomas 2026-11-13.
                         // XLION_MOVER_TAU=<s> tunes it; a teleport or a new character still resets; valid again over ~0.5 s)
                         static const float s_MoverTau = [] { const char* p = xlionrender::Env("XLION_MOVER_TAU"); return p ? std::max(float(std::atof(p)), 0.01f) : 0.75f; }();
-                        if( m_pGITrace ) m_pGITrace->SetMovers(std::move(Movers), 1.0f - std::exp(-Dt / s_MoverTau), Dt / 0.5f);
+                        if( m_pGITrace ) m_pGITrace->SetMovers(s_MoverSplit == 3 ? std::vector<gi::gpu_trace::mover>{} : std::move(Movers), 1.0f - std::exp(-Dt / s_MoverTau), Dt / 0.5f);
                     }
                     // (uploaded after the movers' lattices and word 30: before, from 2a68af9 to here, the gather never saw them - word 30 went up as 0 and
                     // every character read the +128 records; the probes were updated and never read)

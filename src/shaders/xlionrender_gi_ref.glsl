@@ -521,7 +521,7 @@ void VoxMain()
     }
     if (Push.m_Bounces == -8 || Push.m_Bounces == -9)      // (Milestone A, the movers' probes: -8 a lane a ray - Push.m_Epoch of them a probe, uniform-sphere, stratified in z - its
     {                                                       // radiance's SH to a scratch entry; -9 a lane a probe: its rays' sum into its SH by an exponential mean. 8 rays in one lane cost 1.3 ms)
-        const int  K = max(Push.m_Epoch, 1);
+        const int  K = max(Push.m_Epoch & 0xFFFF, 1);      // (bit 16: C52 narrowing - the hits unlit, no store reads or writes from a probe's ray)
         const uint i = gl_GlobalInvocationID.x, q = Push.m_Bounces == -8 ? i / uint(K) : i, m = q / 12u, p = q % 12u, Base = uint(Push.m_First);
         const vec4 H0 = Mover[Base], A = Mover[Base + 1u + 2u * m], B = Mover[Base + 2u + 2u * m];
         if (float(m) >= H0.x || A.w <= 0.0) return;      // (a block nobody holds this frame)
@@ -532,7 +532,8 @@ void VoxMain()
             const vec3 Pp = A.xyz + vec3(float(p & 1u) * A.w, float((p >> 1u) % 3u) * B.x, float(p / 6u) * A.w);
             const float u = (float(k) + Rnd()) / float(K), v = Rnd(), z = 1.0 - 2.0 * u, r = sqrt(max(0.0, 1.0 - z * z)), Phi = 6.2831853 * v;
             const vec3 D = vec3(r * cos(Phi), z, r * sin(Phi));
-            const gi_hit H = GICast(Pp, D, 1e30);
+            gi_hit H; H.m_Inst = -1;
+            if ((Push.m_Epoch & 0x20000) == 0) H = GICast(Pp, D, 1e30);      // (bit 17, C52 narrowing: no cast - the sky every ray)
             vec3 Lr = vec3(0.0);
             float Back = 0.0;
             if (H.m_Inst < 0) Lr = SkyAt(D);
@@ -543,6 +544,7 @@ void VoxMain()
                 const float B0 = 1.0 - H.m_U - H.m_V;
                 const vec3 Nh = NormalToWorld(HR, MNrm(HM, HT.x) * B0 + MNrm(HM, HT.y) * H.m_U + MNrm(HM, HT.z) * H.m_V);
                 if (dot(Nh, D) > 0.0) Back = 1.0;      // (inside something: no light from there, and a vote against the probe)
+                else if ((Push.m_Epoch & 0x10000) != 0) Lr = vec3(0.0);
                 else
                 {
                     vec3 Albedo, Emission;
