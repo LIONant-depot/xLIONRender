@@ -19,14 +19,19 @@ bool VoxCell(in const vec3 Pw, in const vec3 Anchor, in const float Cell0, in co
     return false;
 }
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+// (C51, 2026-11-13: .y, the tag's hash, is a second hash of the key, independent of .x - the tag was (h * odd) >> 8 of the slot's own h: two keys in one slot
+// differ in h's top 11 bits only, so another face matched the tag 1 time in 2048, not 1 in 16 M. VoxEntryOf / VoxTagOf take the pair)
+uint VoxPcg(in uint v) { const uint s = v * 747796405u + 2891336453u; const uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+uvec2 VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    return uvec2(h, VoxPcg(uint(q.x) ^ VoxPcg(uint(q.y) ^ VoxPcg(uint(q.z) ^ VoxPcg(uint(L) * 4096u + Face))))); }
 // A record's three uvec4 by role (gi_store_read_sector_plan_2026-11-08.md): X0 and X1 what a read takes (a face: its value; its tag, leans), X2 the
 // writer's. An even slot X0 X1 X2, an odd one X2 X0 X1: X0, X1 one 32-byte sector for every record (they are 48 bytes). VoxEntryOf: X0; X1 = X0 + 1;
 // VoxX2Of. Every kind: the tag X1.x, its last write's time X2.w, the direction bins' marker 1.0 X1.y
 uint VoxEntryOf(in const uint h) { const uint s = h % vox_slots_v; return 3u * s + (s & 1u); }
 uint VoxX2Of(in const uint e) { return (e % 3u) == 0u ? e + 2u : e - 1u; }
-float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
-vec4 VoxFace(in const int L, in const ivec3 q, in const uint Face) { const uint h = VoxHash(L, q, Face), e = VoxEntryOf(h); return GIRefAccum[e + 1u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0); }
+uint VoxEntryOf(in const uvec2 h) { return VoxEntryOf(h.x); }
+float VoxTagOf(in const uvec2 h) { return float((h.y >> 8u) + 1u); }      // (24 bits: exact in a float, never 0)
+vec4 VoxFace(in const int L, in const ivec3 q, in const uint Face) { const uvec2 h = VoxHash(L, q, Face); const uint e = VoxEntryOf(h); return GIRefAccum[e + 1u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0); }
 // (A15, the lean moments: xlionrender_gi_gather_frag.glsl VoxLeanScale's copy - the hits' read too)
 float VoxLean(in const uint e, in const vec4 v, in const vec3 n, in const int a)
 {
@@ -60,7 +65,7 @@ vec3 VoxRead(in const vec3 Pw, in const vec3 n, in const vec3 Anchor, in const f
             {
                 const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
                 const float t = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y) * (o.z != 0 ? f.z : 1.0 - f.z);
-                const uint  h = VoxHash(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+                const uvec2  h = VoxHash(L, i + o, uint(2 * a + (n[a] < 0.0 ? 1 : 0))); const uint e = VoxEntryOf(h);
                 const vec4  v = GIRefAccum[e + 1u].x == VoxTagOf(h) ? GIRefAccum[e] : vec4(0.0);
                 if (v.w > 0.0) { const float cw = min(v.w, 32.0) * t; Num += v.rgb / v.w * VoxLean(e, v, n, a) * cw; Den += cw; Raw += v.w * t; }     // (as the read: each corner its mean, trusted up to 32 samples)
             }

@@ -22,6 +22,7 @@ layout(set = 1, binding = 0) uniform sampler2D SceneHDR;      // (XLION_VOX_SEEN
 layout(std430, set = 0, binding = 8) readonly buffer mover_b { vec4 Mover[]; };
 #endif
 layout(std430, set = 0, binding = 6)          buffer accum_u_b { uvec4 GIRefAccumU[]; };    // (the same memory: a direction bin's fixed point sums, added atomically)
+layout(std430, set = 0, binding = 6)          buffer accum_w_b { uint GIRefAccumW[]; };     // (the same memory by words: the faces' freeze states)
 layout(push_constant) uniform push_t { int m_nPixels, m_First, m_Count, m_Frame, m_TlasRoot, m_PrimOffset, m_Bounces, m_Epoch; } Push;
 #ifndef VOX_AMORTIZE
 #define VOX_AMORTIZE 0.0      // (1.0 tried 2026-11-12: lit at 20 s 26.8 -> 29.1 %, frame 9.0 -> 8.8 ms - not kept; the store's far levels already need few rays)
@@ -102,7 +103,7 @@ void VoxStoreDir(in const int L, in const ivec3 Org, in const vec3 g, in const v
     const int  a = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2, u = (a + 1) % 3, v = (a + 2) % 3;
     const vec3 D = g_VoxRayD, Ad = abs(D);
     const uint b = Ad[a] >= Ad[u] && Ad[a] >= Ad[v] ? 4u : Ad[u] >= Ad[v] ? (D[u] > 0.0 ? 0u : 1u) : (D[v] > 0.0 ? 2u : 3u);
-    const uint h = VoxHash(L, Org + ivec3(floor(g + 0.5)), 6u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 5u + b), e = VoxEntryOf(h);
+    const uvec2 h = VoxHash(L, Org + ivec3(floor(g + 0.5)), 6u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 5u + b); const uint e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     // Atomic: lanes sharing a bin read, added and wrote over each other: samples lost, a bin's sum and its sky from different lanes. Its halving in a pass of its own (VoxMain, -4), one owner.
     // Entry e and e + 1: rgb by bin_scale_v, count; z of e + 2: 1, a bin
@@ -131,7 +132,7 @@ void VoxDirsAdd(in const vec3 Pw, in const vec3 N, in const float Cell0, in cons
     const vec3  D = g_VoxRayD;
     const float s = abs(D[u]) + abs(D[v]) + max(D[a] * sg, 0.0) + 1e-6, x = D[u] / s, y = D[v] / s;
     const uint  i = min(uint((x + y + 1.0) * 0.5 * float(k)), k - 1u), j = min(uint((x - y + 1.0) * 0.5 * float(k)), k - 1u);
-    const uint  h = VoxHash(L, q, 1000u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 256u + i * k + j), e = VoxEntryOf(h);
+    const uvec2  h = VoxHash(L, q, 1000u + uint(2 * a + (N[a] < 0.0 ? 1 : 0)) * 256u + i * k + j); const uint e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     const uint  TagU = floatBitsToUint(Tag), Cur = GIRefAccumU[e + 1u].x;
     if (Cur != TagU)
@@ -153,7 +154,7 @@ const uint vox_brick_mark_v = 0x42524B53u;
 void VoxBrickMark(in const int L, in const ivec3 q, in const uint Face)
 {
     const uint R = 1u << 21;
-    const uint h0 = VoxHash(L, q, Face) % R, h1 = VoxHash(L, q >> 1, Face + 16u) % R, h2 = VoxHash(L, q >> 2, Face + 32u) % R;
+    const uint h0 = VoxHash(L, q, Face).x % R, h1 = VoxHash(L, q >> 1, Face + 16u).x % R, h2 = VoxHash(L, q >> 2, Face + 32u).x % R;
     atomicOr(ConnU[4u + (h0 >> 5)], 1u << (h0 & 31u));
     atomicOr(ConnU[4u + 65536u + (h1 >> 5)], 1u << (h1 & 31u));
     atomicOr(ConnU[4u + 131072u + (h2 >> 5)], 1u << (h2 & 31u));
@@ -171,10 +172,24 @@ void VoxDriftAdd(in const float Ds, in const float Lm)
 }
 #endif
 const uint vox_busy_v = 0xFFFFFFFFu;      // (a face slot's tag while its new owner writes it: a NaN, equal to no tag)
+// Per-face freeze (XLION_VOX_FREEZE, static_settle_plan v4, 2026-11-14 - replaces the global settle stop): a word a slot after the movers' probes and their scratch
+// (gpu_trace::vox_freeze_base_v): bits 0-30 the samples the face took since the lights last stood still (the CPU clears the words then), bit 31 frozen.
+// Frozen: read-only, no ray picks it, the camera never wakes it - only a light change does (while the lights move nothing is frozen or counted).
+// A face freezes after the budget (m_First bits 16-30, x 16) of fresh samples, or after an eighth of it when it already holds half its window and its
+// short and long means agree (the old freeze's rule). ponytail: one global light gate, no dependency wake - a frozen face misses later propagation; wake by sources later
+const uint vox_freeze_base_v = vox_probe_base_v + 4u * 12u * vox_movers_v * 33u;      // (uvec4 index: gpu_trace::vox_freeze_base_v)
+const uint vox_frozen_v = 0x80000000u;
+// (m_Frame's top 8 bits: bit 31 on, 24-30 the budget / 16 - the time and seeds use its low 24. Not m_First's top: XLION_VOX_AO_BUCKET, on by default,
+// keeps its AO there - the first build put the freeze there and it never ran; neither did the old XLION_VOX_FREEZE)
+bool  VoxFreezeOn(void) { return (uint(Push.m_Frame) & 0x80000000u) != 0u && (Push.m_First & 1) == 0; }      // (on, and the lights still)
+float VoxFreezeBudget(void) { return float((uint(Push.m_Frame) >> 24u) & 0x1Fu) * 64.0; }      // (bits 24-28, x 64; bit 29: parents count and keep the rays coming; bit 30: the early freeze of calm faces)
+bool  VoxFreezeParents(void) { return (uint(Push.m_Frame) & 0x20000000u) != 0u; }
+uint  VoxFreezeWord(in const uint h) { return 4u * vox_freeze_base_v + h % vox_slots_v; }
+bool  g_VoxParentStore = false;      // (a coarser level's store from a finer face's ray: not counted - the plan's 'parent writes are not evidence')
 void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3 N, in const vec3 SampleIn)
 {
     vec3 Sample = SampleIn;
-    const bool bFreeze = (uint(Push.m_First) & 0xFFFF0000u) == 0x10000u;
+    const bool bFreeze = VoxFreezeOn() && g_VoxStoreKind != 2u;      // (a skinned surface's records move with it: never frozen)
     if (!bFreeze && g_VoxStoreKind != 2u) VoxStoreDir(L, Org, g, N, Sample);      // (a mover's open space point: no reflection bins, they are the surfaces')
     const vec3  w = N * N;
     const float r = Rnd() * (w.x + w.y + w.z);
@@ -182,7 +197,7 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;
     const ivec3 i = ivec3(floor(gv)); const vec3 f = gv - vec3(i);
     const ivec3 q = i + ivec3(Rnd() < f.x ? 1 : 0, Rnd() < f.y ? 1 : 0, Rnd() < f.z ? 1 : 0);
-    const uint  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)) + 64u * g_VoxStoreKind), e = VoxEntryOf(h);
+    const uvec2  h = VoxHash(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)) + 64u * g_VoxStoreKind); const uint e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
 #ifdef GI_VOX_ONLY
     if (ConnU[3] == vox_brick_mark_v) VoxBrickMark(L, q, uint(2 * a + (N[a] < 0.0 ? 1 : 0)) + 64u * g_VoxStoreKind);
@@ -226,7 +241,12 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     // pick alone was frozen and the other writes kept moving it - Tomas 2026-11-13: once the faces near you are frozen, no more changes)
     // (its write time still refreshed: a frozen face stays resident - unwritten for 120 frames its slot was taken over by another key and it flashed back from
     // nothing; the read-only freeze's first run flickered 0.45 for that)
-    if (bFreeze && (Push.m_First & 1) == 0 && !bTaken && v.w >= float(abs(Push.m_Epoch) & 0xFFFF) * 0.5 && Incon < 0.2) { GIRefAccumU[VoxX2Of(e)].w = floatBitsToUint(Now); return; }
+    const uint Fw = VoxFreezeWord(h.x);
+#ifdef GI_VOX_ONLY
+    if (ConnU[2] == vox_drift_mark_v) atomicAdd(ConnU[bFreeze && !bTaken && (GIRefAccumW[Fw] & vox_frozen_v) != 0u ? 16 : !bFreeze ? 18 : g_VoxParentStore ? 19 : 17], 1u);      // (measurement: stores refused frozen / counted / freeze off (lights moving, a skinned record) / parent)
+#endif
+    if (bFreeze && !bTaken && (GIRefAccumW[Fw] & vox_frozen_v) != 0u) { GIRefAccumU[VoxX2Of(e)].w = floatBitsToUint(Now); return; }
+    if (bTaken) GIRefAccumW[Fw] = 0u;      // (a new owner: its count starts from nothing)
     if (bFreeze && g_VoxStoreKind != 2u) VoxStoreDir(L, Org, g, N, Sample);      // (XLION_VOX_FREEZE: after the test - a frozen face's bins stay too)
     // (fireflies, kajiya's / WickedEngine's MultiscaleMeanEstimator: a sample past the face's short mean + 8 sigma + 0.1 is cut there - one bright ray (the sun,
     // a sky gap) jolted every face it landed on: the GI flickered everywhere while rays ran, Tomas 2026-11-12)
@@ -275,6 +295,13 @@ void VoxStore(in const int L, in const ivec3 Org, in const vec3 g, in const vec3
     GIRefAccumU[VoxX2Of(e)] = uvec4(packHalf2x16(clamp(m.rg, vec2(0.0), vec2(60000.0))), packHalf2x16(vec2(clamp(m.b, 0.0, 60000.0), Incon)), floatBitsToUint(Now), floatBitsToUint(Now));
     if (bTaken) memoryBarrierBuffer();
     GIRefAccumU[e + 1u] = uvec4(floatBitsToUint(Tag), packHalf2x16(PL) | 1u, packHalf2x16(Pl), packHalf2x16(vec2(min(m.w, 60000.0), Pv.y)));
+    // (counted and frozen only once the store is quiet - m_Frame bit 30, gpu_trace::VoxQuiet: enough rays since the last change of the lights or the eye. Before,
+    // faces froze 2-5 s after the camera arrived, while the bounces were still filling in: neighbours frozen at different stages, a patchwork - 2026-11-14)
+    if (bFreeze && (uint(Push.m_Frame) & 0x40000000u) != 0u && (!g_VoxParentStore || VoxFreezeParents()))
+    {
+        const float n = float((atomicAdd(GIRefAccumW[Fw], 1u) & ~vox_frozen_v) + 1u), Budget = VoxFreezeBudget();
+        if (n >= Budget) atomicOr(GIRefAccumW[Fw], vox_frozen_v);
+    }
 }
 // The emitters' light by light sampling at a budget: EmitterIrradianceAt, but over a few of the table picked at random, not all of it per ray (Bistro's table: 3 ms a frame at any
 // number of rays). The pick's weight scaled up by the table over the few. As noisy as it needs; a face averages it
@@ -344,7 +371,7 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
     const vec3 An = abs(N);
     const int  a = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2;
     vec3 gv = vec3(Org) + g; gv[a] *= vox_layers_v;
-    const uint  h = VoxHash(L, ivec3(floor(gv + 0.5)), 36u + uint(2 * a + (N[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+    const uvec2  h = VoxHash(L, ivec3(floor(gv + 0.5)), 36u + uint(2 * a + (N[a] < 0.0 ? 1 : 0))); const uint e = VoxEntryOf(h);
     const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
     const vec2  d = vec2(GIRefAccum[e + 1u].x, GIRefAccum[VoxX2Of(e)].w);
     const bool  bMine = d.x == Tag;
@@ -393,7 +420,7 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
         {
             const vec3 An = abs(Nh);
             const int  a  = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2;
-            const uint h  = VoxHash(Ls, Os + ivec3(floor(gs + 0.5)), 42u + uint(2 * a + (Nh[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+            const uvec2 h  = VoxHash(Ls, Os + ivec3(floor(gs + 0.5)), 42u + uint(2 * a + (Nh[a] < 0.0 ? 1 : 0))); const uint e = VoxEntryOf(h);
             const vec4 c  = GIRefAccum[e];
             if (GIRefAccum[e + 1u].x == VoxTagOf(h) && c.w >= 1.0) { g_HasSeen = true; g_SeenSample = c.rgb / c.w * gi_pi_v; }
         }
@@ -428,7 +455,7 @@ void VoxMain()
         if (any(isnan(Lit)) || any(isinf(Lit))) return;
         const vec3 An = abs(Nk);
         const int  a  = An.x >= An.y && An.x >= An.z ? 0 : An.y >= An.z ? 1 : 2;
-        const uint h  = VoxHash(Ls, Os + ivec3(floor(gs + 0.5)), 42u + uint(2 * a + (Nk[a] < 0.0 ? 1 : 0))), e = VoxEntryOf(h);
+        const uvec2 h  = VoxHash(Ls, Os + ivec3(floor(gs + 0.5)), 42u + uint(2 * a + (Nk[a] < 0.0 ? 1 : 0))); const uint e = VoxEntryOf(h);
         const float Tag = VoxTagOf(h), Now = float(uint(Push.m_Frame) & 0xFFFFFFu);
         const vec2 d = vec2(GIRefAccum[e + 1u].x, GIRefAccum[VoxX2Of(e)].w);
         vec4 c = d.x == Tag ? GIRefAccum[e] : vec4(0.0);
@@ -583,7 +610,7 @@ void VoxMain()
         const int   Ax = abs(Nk.x) >= abs(Nk.y) && abs(Nk.x) >= abs(Nk.z) ? 0 : abs(Nk.y) >= abs(Nk.z) ? 1 : 2;
         vec3 gq = vec3(Ok) + gk; gq[Ax] *= vox_layers_v;
         const uint  Kk = Ps.w > 1.5 ? 2u : 0u;
-        const uint  hk = VoxHash(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)) + 64u * Kk), ek = VoxEntryOf(hk);
+        const uvec2  hk = VoxHash(Lk, ivec3(floor(gq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0)) + 64u * Kk); const uint ek = VoxEntryOf(hk);
         const bool bOwn = GIRefAccum[ek + 1u].x == VoxTagOf(hk);
         float n = bOwn ? GIRefAccum[ek].w : 0.0;
         const float nCount = n, nIncon = bOwn ? unpackHalf2x16(floatBitsToUint(GIRefAccum[VoxX2Of(ek)].y)).y : 1.0;
@@ -604,7 +631,7 @@ void VoxMain()
                     const uint Fc = uint(2 * ax + (Nk[ax] < 0.0 ? 1 : 0)) + 64u * Kk;
                     for (int c = 0; c < 8; ++c)
                     {
-                        const uint hc = VoxHash(Lm, i0 + ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), Fc), ec = VoxEntryOf(hc);
+                        const uvec2 hc = VoxHash(Lm, i0 + ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), Fc); const uint ec = VoxEntryOf(hc);
                         if (GIRefAccum[ec + 1u].x == VoxTagOf(hc) && GIRefAccum[VoxX2Of(ec)].z != NowS) { GIRefAccumU[VoxX2Of(ec)].z = floatBitsToUint(NowS);
 #ifdef GI_VOX_ONLY
                             if (ConnU[2] == vox_drift_mark_v) atomicAdd(ConnU[11], 1u);
@@ -615,7 +642,15 @@ void VoxMain()
             }
         }
         // (XLION_VOX_FREEZE: a frozen face isn't a candidate at all - it used to win the pick when the others were calm too and then fire nothing; the review 2026-11-13)
-        if ((uint(Push.m_First) & 0xFFFF0000u) == 0x10000u && (Push.m_First & 1) == 0 && nCount >= float(abs(Push.m_Epoch) & 0xFFFF) * 0.5 && nIncon < 0.2) continue;
+        if (bOwn && Kk != 2u && VoxFreezeOn() && (GIRefAccumW[VoxFreezeWord(hk.x)] & vox_frozen_v) != 0u)
+        {   // (XLION_VOX_FREEZE_PARENTS: a frozen face still takes rays while its parent (the next level, which the read falls back to and blends) isn't frozen - its own stores refused, the parent's counted)
+            if (!VoxFreezeParents()) continue;
+            int Lp; ivec3 Op; vec3 gp;
+            if (!VoxCell(Ps.xyz, Hd.xyz, Hd.w, Lk + 1, Lp, Op, gp)) continue;
+            vec3 gpq = vec3(Op) + gp; gpq[Ax] *= vox_layers_v;
+            const uvec2 hp = VoxHash(Lp, ivec3(floor(gpq + 0.5)), uint(2 * Ax + (Nk[Ax] < 0.0 ? 1 : 0))); const uint ep = VoxEntryOf(hp);
+            if (GIRefAccum[ep + 1u].x == VoxTagOf(hp) && (GIRefAccumW[VoxFreezeWord(hp.x)] & vox_frozen_v) != 0u) continue;
+        }
         if (VoxIncon > 0.0) n = n < 64.0 ? n - 1e6 : -unpackHalf2x16(floatBitsToUint(GIRefAccum[VoxX2Of(ek)].y)).y;      // (XLION_VOX_INCON: the unknown first, then the most inconsistent)
         if (n < Least) { Least = n; LeastCount = nCount; LeastIncon = nIncon; P = Ps.xyz; N = Nk; L = Lk; Org = Ok; g = gk; OriginAO = GIRefSample[2u * px + 1u].w; OriginKind = Kk; }
     }
@@ -626,9 +661,8 @@ void VoxMain()
     // frequency and its faces long-lived; new faces (the unknown) are not slowed)
     // (settle phase 1, XLION_VOX_FREEZE=1 - m_First bit 16 - an experiment, off by default after the review: converged - half the window of samples or more, short and long means agreeing within 2.5 sigma of the short mean - no ray
     // at all while the lights are still: it stays as it is until a light change wakes every face. Tomas 2026-11-13: settled faces stole rays and made noise)
-    if ((uint(Push.m_First) & 0xFFFF0000u) == 0x10000u && !g_DriftProbe && VoxIncon > 0.0 && (Push.m_First & 1) == 0 && LeastCount >= float(abs(Push.m_Epoch) & 0xFFFF) * 0.5 && LeastIncon < 0.2) return;
     if (!g_DriftProbe && VoxIncon > 0.0 && Least > -1e5 && Rnd() >= min(-Least * VoxIncon, 1.0) * exp2(-VOX_AMORTIZE * float(L))) return;
-    const float BucketAO = (uint(Push.m_First) & 0xFFFF0000u) == 0x10000u ? 0.0 : uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (high bits exactly 0x10000: XLION_VOX_FREEZE, never with the bucket)      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
+    const float BucketAO = uintBitsToFloat(uint(Push.m_First >> 16) << 16);      // (XLION_VOX_AO_BUCKET: the AO in m_First's top 16 bits, as a float's)
     vec3 Ph, Nh; bool bHit;
     // (one copy of VoxRay: the shader's compiled size goes with its copies. The second ray: the surface the first hit, seen yet or not: a sample of that surface's own
     // indirect light; off screen surfaces are lit before the eye turns to them. A group in four, all its lanes: one lane firing it makes its whole group wait)
@@ -650,7 +684,7 @@ void VoxMain()
             VoxStore(L, Org, g, N, Sample);
             if ((Push.m_First & 2048) != 0 && g_VoxStoreKind != 2u) VoxDirsAdd(P, N, Hd.w, g_HasSeen ? g_SeenSample : Sample);
             int Lp; ivec3 Op; vec3 gp;
-            if (r == 0 && VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) VoxStore(Lp, Op, gp, N, Sample);
+            if (r == 0 && VoxCell(P, Hd.xyz, Hd.w, L + 1, Lp, Op, gp)) { g_VoxParentStore = true; VoxStore(Lp, Op, gp, N, Sample); g_VoxParentStore = false; }
         }
         if (g_Ablate == 5 || r == 1 || Push.m_Epoch >= 0 || !bHit || (RHash(gl_WorkGroupID.x * 2654435761u + uint(Push.m_Frame) * 97u) & 255u) >= 64u || !VoxCell(Ph, Hd.xyz, Hd.w, 0, L, Org, g)) break;
         P = Ph; N = Nh;

@@ -10,13 +10,18 @@ const uint vox_probe_base_v = 3u * vox_slots_v + 4u;        // (Milestone A: the
 const uint vox_movers_v = 64u;        // (gpu_trace::mover_max_v; after the probes, 64 x 12 x 8 rays' scratch entries)
 const float vox_layers_v = 4.0;            // (xlionrender_gi_ref_comp.glsl)
 // Where a face lives: a fixed pool, one probe; a slot knows whose it is (its tag). Another face in it reads as nothing (idTech 8's: a collision drops), so a miss is one load
-uint VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; return h; }
+// (C51, 2026-11-13: .y, the tag's hash, is a second hash of the key, independent of .x - the tag was (h * odd) >> 8 of the slot's own h: two keys in one slot
+// differ in h's top 11 bits only, so another face matched the tag 1 time in 2048, not 1 in 16 M. VoxEntryOf / VoxTagOf take the pair)
+uint VoxPcg(in uint v) { const uint s = v * 747796405u + 2891336453u; const uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+uvec2 VoxHash(in const int L, in const ivec3 q, in const uint Face) { uint h = uint(q.x) * 73856093u ^ uint(q.y) * 19349663u ^ uint(q.z) * 83492791u ^ (uint(L) * 4096u + Face) * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    return uvec2(h, VoxPcg(uint(q.x) ^ VoxPcg(uint(q.y) ^ VoxPcg(uint(q.z) ^ VoxPcg(uint(L) * 4096u + Face))))); }
 // A record's three uvec4 by role (gi_store_read_sector_plan_2026-11-08.md): X0 and X1 what a read takes (a face: its value; its tag, leans), X2 the
 // writer's. An even slot X0 X1 X2, an odd one X2 X0 X1: X0, X1 one 32-byte sector for every record (they are 48 bytes). VoxEntryOf: X0; X1 = X0 + 1;
 // VoxX2Of. Every kind: the tag X1.x, its last write's time X2.w, the direction bins' marker 1.0 X1.y
 uint VoxEntryOf(in const uint h) { const uint s = h % vox_slots_v; return 3u * s + (s & 1u); }
 uint VoxX2Of(in const uint e) { return (e % 3u) == 0u ? e + 2u : e - 1u; }
-float VoxTagOf(in const uint h) { return float(((h * 3266489917u) >> 8u) + 1u); }
+uint VoxEntryOf(in const uvec2 h) { return VoxEntryOf(h.x); }
+float VoxTagOf(in const uvec2 h) { return float((h.y >> 8u) + 1u); }      // (24 bits: exact in a float, never 0)
 #ifndef VOX_LEAN_V
 const bool vox_lean_v = true;
 #else
@@ -93,7 +98,7 @@ vec4 ClipLevel(in const int L, in const vec3 Pw, in const vec3 n, in const vec3 
             const float t = (o.x != 0 ? fc.x : 1.0 - fc.x) * (o.y != 0 ? fc.y : 1.0 - fc.y) * (o.z != 0 ? fc.z : 1.0 - fc.z);
             if (g_ClipFloat)      // (X1c: the sparse store: a face no surface fed, or lost to another, adds nothing)
             {
-                const uint h = VoxHash(L, iv + o, Face), e = VoxEntryOf(h);
+                const uvec2 h = VoxHash(L, iv + o, Face); const uint e = VoxEntryOf(h);
                 // (each corner its mean, trusted up to 32 samples: by raw count a corner with thousands of samples drowned one with dozens, the light outdoors over the floor indoors)
                 const uvec4 dU = GIClip[e + 1u];
                 float Reach = 1.0;

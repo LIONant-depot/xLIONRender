@@ -321,7 +321,7 @@ void main()
                 vec3 q = Pw / Cell; q[u_] += j0.x - 0.5; q[v_] += j0.y - 0.5;
                 const float sd = abs(D[u_]) + abs(D[v_]) + max(D[a_] * sg, 0.0) + 1e-6, x = D[u_] / sd, y = D[v_] / sd;
                 const uint  di = min(uint((x + y + 1.0) * 0.5 * float(k)), k - 1u), dj = min(uint((x - y + 1.0) * 0.5 * float(k)), k - 1u);
-                const uint  hh = VoxHash(L_, ivec3(floor(q)), 1000u + Face * 256u + di * k + dj), e = VoxEntryOf(hh);
+                const uvec2  hh = VoxHash(L_, ivec3(floor(q)), 1000u + Face * 256u + di * k + dj); const uint e = VoxEntryOf(hh);
                 const bool  bOurs = GIRefAccum[e + 1u].x == VoxTagOf(hh);
                 const uvec4 c = bOurs ? VoxBins[e] : uvec4(0u);
                 const float wq = float(c.w) / 16.0, Tr = clamp(wq / 64.0, 0.0, 1.0);

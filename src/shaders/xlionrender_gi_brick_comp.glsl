@@ -55,7 +55,7 @@ void main()
         for (int j = -2; j <= 1; ++j)
         {
             ivec3 q = k; q[a] = 4 * k[a] + j;
-            const uint  h = VoxHash(L, q, f), e = VoxEntryOf(h);
+            const uvec2  h = VoxHash(L, q, f); const uint e = VoxEntryOf(h);
             const uvec4 dU = GIClip[e + 1u];
             if (uintBitsToFloat(dU.x) != VoxTagOf(h)) continue;
             const vec4 v = uintBitsToFloat(GIClip[e]);

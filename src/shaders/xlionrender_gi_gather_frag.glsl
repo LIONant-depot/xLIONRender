@@ -117,7 +117,7 @@ vec4 VoxReadPublished(in const vec3 Pcam, in const vec3 n, out bool bMiss)
         {
             const ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1), q = iv + o;
             const float t = (o.x != 0 ? fc.x : 1.0 - fc.x) * (o.y != 0 ? fc.y : 1.0 - fc.y) * (o.z != 0 ? fc.z : 1.0 - fc.z);
-            const uint  h = VoxHash(L, q, Face), s = h % vox_slots_v;
+            const uvec2  h = VoxHash(L, q, Face); const uint s = h.x % vox_slots_v;
             // (the entry first: a corner resolved this frame or the last asks nothing - the requests' atomics only for older or missing ones,
             // resolved again every two frames while read; read up to 3 frames old)
             const uvec4 P = Pub[pub_entry0_v + s];
@@ -244,7 +244,7 @@ vec4 VoxReflect(in const vec3 Pcam, in const vec3 n, in const vec3 Fallback)
             {
                 ivec3 o = ivec3(0); o[u] = c & 1; o[v] = c >> 1; o[a] = f[a] >= 0.5 ? 1 : 0;
                 const float t = (o[u] != 0 ? f[u] : 1.0 - f[u]) * (o[v] != 0 ? f[v] : 1.0 - f[v]);
-                const uint  h = VoxHash(L, iv + o, Base + Bk[b]), e = VoxEntryOf(h);
+                const uvec2  h = VoxHash(L, iv + o, Base + Bk[b]); const uint e = VoxEntryOf(h);
                 if (uintBitsToFloat(GIClip[e + 1u].x) == VoxTagOf(h)) { const vec4 w = VoxBin(GIClip[e]); if (w.w > 0.0) { const vec4 m0 = SkyTake < 1.0 ? VoxBin(uvec4(GIClip[VoxX2Of(e)].xyz, GIClip[e + 1u].z)) : vec4(0.0);      /* (the sky kept - the default: its bins not read, a load a corner saved) */ const vec4 m = m0 * ((1.0 - SkyTake) * smoothstep(8.0, 48.0, w.w - m0.w));      /* (the sky left out only where enough rays hit something: a few hits' mean flips between tiles: black squares, Tomas) */ const float cw = min(w.w, 128.0) * t, nl = w.w - m.w; Num += (nl > 0.5 ? (w.rgb - m.rgb) / nl : w.rgb / w.w) * cw; Den += cw; } }
             }
             if (Den > 1e-3) { Lit += Num / Den * Bw[b]; WSum += Bw[b]; Trust += Den * Bw[b]; }
@@ -287,7 +287,7 @@ vec4 VoxDirsRead(in const vec3 Pcam, in const vec3 n, in const vec4 Fallback, in
         vec3 q = Pw / Cell; if (bFixed) { q[u] = floor(q[u] - 0.5) + j1 + 0.5; q[v] = floor(q[v] - 0.5) + j2 + 0.5; } else { q[u] += j1 - 0.5; q[v] += j2 - 0.5; }
         const float sd = abs(D[u]) + abs(D[v]) + max(D[a] * sg, 0.0) + 1e-6, x = D[u] / sd, y = D[v] / sd;
         const uint  di = min(uint((x + y + 1.0) * 0.5 * float(k)), k - 1u), dj = min(uint((x - y + 1.0) * 0.5 * float(k)), k - 1u);
-        const uint  h = VoxHash(L, ivec3(floor(q)), 1000u + Face * 256u + di * k + dj), e = VoxEntryOf(h);
+        const uvec2  h = VoxHash(L, ivec3(floor(q)), 1000u + Face * 256u + di * k + dj); const uint e = VoxEntryOf(h);
         const bool  bOurs = uintBitsToFloat(GIClip[e + 1u].x) == VoxTagOf(h);
         const vec4  w = bOurs ? VoxBin(GIClip[e]) : vec4(0.0);
         const float Tr = clamp(w.w / 64.0, 0.0, 1.0);        // (under a few rays: what the bins say, explicitly)

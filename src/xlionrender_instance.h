@@ -716,7 +716,7 @@ namespace xlionrender
         // owed, smoothed) and the relight's budget a frame, what the slice leaves (instance::updateGI)
         float                       m_GISliceMs = 2.0f;
         xgpu::timestamps            m_VoxTS;                        // experiment X1c: the voxels' rays, by their ms
-        bool                        m_bVoxTS = false, m_bVoxTSTried = false, m_bVoxOn = false;
+        bool                        m_bVoxTS = false, m_bVoxTSTried = false, m_bVoxOn = false, m_bVoxTSPending = false;      // (Pending: a timed frame with static rays not read yet - C53)
         bool                        m_bAsyncVoxThisFrame = false;
         std::function<void()>       m_DeferredVox;
         void                        runDeferredVox( xgpu::window& Window ) noexcept;      // the voxel rays, recorded after the GI gather on the second queue (XLION_ASYNC=0: in place)

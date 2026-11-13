@@ -941,6 +941,10 @@ namespace xlionrender::gi
         struct mover { float m_Origin[3]; float m_CellXZ; float m_CellY; bool m_bReset; float m_Alpha = 0.0f; };      // (m_Alpha: its probes' blend this frame, 0: the common one)
         static constexpr std::uint32_t      mover_max_v = 64, probe_rays_v = 32;      // (2026-11-13: 8 rays a probe a frame left the characters' light flickering on 17 % of their pixels - noise-limited: a 3 s history cut it to 5 %; 32 rays: 7 characters ~2.7k rays)
         static constexpr std::uint32_t      vox_probe_base_v = (1u << 21) * 3 + 4;      // (xlionrender_vox_read.glsl, _vox_levels.glsl)
+        // (the per-face freeze's words, a uint a slot, after the probes and their scratch: xlionrender_gi_ref.glsl vox_freeze_base_v - 8 MB)
+        static constexpr std::uint32_t      vox_freeze_base_v = vox_probe_base_v + mover_max_v * 12 * 4 * (1 + probe_rays_v);
+        // XLION_VOX_FREEZE=<samples> (1: the face's window, KeepMax; 0: off): the per-face freeze - static_settle_plan v4; on, the global settle stop's default is off
+        static int FreezeBudget(int Keep) noexcept { static const int s = [] { const char* p = xlionrender::Env("XLION_VOX_FREEZE"); return p ? std::atoi(p) : 0; }(); return s == 1 ? Keep : s; }
         bool HasMovers(void) const noexcept { return !m_Movers.empty(); }
         void SetMovers(std::vector<mover>&& M, float Alpha, float ValidStep) noexcept { m_Movers = std::move(M); m_MoverAlpha = Alpha; m_MoverValidStep = ValidStep; }
         bool VoxStep(xgpu::window& Window, std::size_t nPixels, std::uint64_t Frame, int PerFrame, int KeepMax, float Cell, const v3& Eye, const v3& Look, std::uint32_t LightsKey, const xgpu::texture& SceneHDR, int HalfW, bool bLit) noexcept
@@ -964,7 +968,7 @@ namespace xlionrender::gi
             if (dv.Dot(dv) > Cell * Cell * 0.0625f) { m_VoxEyeMoved = std::chrono::steady_clock::now(); m_VoxRaysSince = 0.0; m_DriftCalmSince = {}; m_VoxTravel += std::sqrt(dv.Dot(dv)); m_VoxEyeAt = { Eye.m_X, Eye.m_Y, Eye.m_Z }; }
             const int Keep = KeepMax;
             if (!m_bVox || m_Data.empty() || m_Scene.m_bEmpty || nPixels == 0) return false;
-            const std::size_t nEntries = std::size_t(vox_slots_v) * 3 + 4 + std::size_t(mover_max_v) * 12 * 4 * (1 + probe_rays_v);      // (the faces, then the movers' probes: vox_probe_base_v, then their rays' scratch)
+            const std::size_t nEntries = std::size_t(vox_freeze_base_v) + vox_slots_v / 4;      // (the faces, then the movers' probes: vox_probe_base_v, then their rays' scratch, then the freeze words)
             if (!FitScreen(nPixels) || (!m_ClipB[0].m_Private && !FitLocal(m_ClipB[0], 16, nEntries, "GI: voxel store"))) return false;
             // (XLION_VOX_RELIGHT=<connections a frame>, a prototype: rays keep what they found, 200000 of them; that many are relit each frame, no traversal; its buffer a token otherwise)
             static const int s_Relight = [] { const char* p = xlionrender::Env("XLION_VOX_RELIGHT"); return p ? std::atoi(p) : 0; }();
@@ -1028,7 +1032,9 @@ namespace xlionrender::gi
                     m_DriftLast = Now;
                     {   // (step B, static_settle_plan v2: the store's churn since the last print - takeovers of another face's slot, faces refused, new faces, seen marks)
                         const std::array<std::uint32_t, 4> C{ p[8], p[9], p[10], p[11] };
-                        std::printf("VOXCHURN over %d frames: takeovers %u refused %u new %u seen marks %u\n", s_Drift, C[0] - m_ChurnLast[0], C[1] - m_ChurnLast[1], C[2] - m_ChurnLast[2], C[3] - m_ChurnLast[3]); std::fflush(stdout);
+                        const std::array<std::uint32_t, 4> Fz{ p[16], p[17], p[18], p[19] };      // (the per-face freeze's stores: refused frozen, counted, freeze off, parent - xlionrender_gi_ref.glsl VoxStore)
+                        std::printf("VOXCHURN over %d frames: takeovers %u refused %u new %u seen marks %u | stores frozen %u counted %u freeze-off %u parent %u\n", s_Drift, C[0] - m_ChurnLast[0], C[1] - m_ChurnLast[1], C[2] - m_ChurnLast[2], C[3] - m_ChurnLast[3]
+                                   , Fz[0] - m_FzLast[0], Fz[1] - m_FzLast[1], Fz[2] - m_FzLast[2], Fz[3] - m_FzLast[3]); m_FzLast = Fz; std::fflush(stdout);
                         m_ChurnLast = C;
                     }
                 }
@@ -1077,8 +1083,19 @@ namespace xlionrender::gi
             if (s_bFirstOnly) Push.m_First |= 2;
             static const float s_BucketAO = [] { const char* p = xlionrender::Env("XLION_VOX_AO_BUCKET"); return p ? float(std::atof(p)) : 0.0f; }();     // (P1 #1 prototype: a contact's rays feed their own records)
             if (s_BucketAO > 0.0f) { std::uint32_t u; std::memcpy(&u, &s_BucketAO, 4); Push.m_First = int((std::uint32_t(Push.m_First) & 0xFFFFu) | (u & 0xFFFF0000u)); }
-            static const bool s_bFreeze = [] { const char* p = xlionrender::Env("XLION_VOX_FREEZE"); return p != nullptr && p[0] != '0'; }();      // (settle phase 1: a converged face takes no ray - an experiment until propagation and invalidation pass their tests; static_settle_plan v2)
-            if (s_bFreeze && s_BucketAO <= 0.0f) Push.m_First |= 0x10000;
+            if (const int Fb = FreezeBudget(Keep); Fb > 0)
+            {   // (m_Frame's bit 31 on, bits 24-30 the budget / 16 (up to 2032); the words cleared once the lights stand still again - the shader neither counts nor freezes while they move)
+                static const bool s_bAnytime = xlionrender::Env("XLION_VOX_FREEZE_ANYTIME") != nullptr;      // (measurement: faces count and freeze before the store is quiet - the first build's patchwork)      // (a calm face (half its window, means agreeing) freezes at an eighth of the budget)
+                static const bool s_bParents = xlionrender::Env("XLION_VOX_FREEZE_PARENTS") != nullptr;      // (parents count their stores and keep their children's rays coming until frozen)
+                Push.m_Frame = int((std::uint32_t(Frame) & 0xFFFFFFu) | 0x80000000u | (s_bAnytime || VoxQuiet() ? 0x40000000u : 0u) | (s_bParents ? 0x20000000u : 0u) | (std::uint32_t(std::clamp(Fb / 64, 1, 0x1F)) << 24));
+                if (!bStill) m_bFreezeDirty = true;
+                else if (m_bFreezeDirty)
+                {
+                    m_bFreezeDirty = false;
+                    auto Cl = Push; Cl.m_Bounces = -2; Cl.m_First = int(vox_freeze_base_v); Cl.m_Count = int(vox_slots_v / 4);
+                    Window.Dispatch(m_VoxC, B, VoxTex, &Cl, sizeof(Cl), int((vox_slots_v / 4 + 63) / 64));
+                }
+            }
             static const bool s_bBinPdf = xlionrender::Env("XLION_VOX_NO_BIN_PDF") == nullptr;      // (a bin's mean over its directions: xlionrender_gi_ref.glsl VoxStoreDir)
             if (s_bBinPdf) Push.m_First |= 4;
             static const int s_DirsBits = [] { float L = -1.0f, K = 8.0f; if( const char* p = xlionrender::Env("XLION_VOX_DIRS") ) xlionrender::Scan(p, "%f,%f", &L, &K); return L < 0.0f ? 0 : 2048 | (int(L) & 3) << 12 | (K > 8.5f ? 16384 : 0); }();      // (a prototype: xlionrender_gi_ref.glsl VoxDirsAdd)
@@ -1561,6 +1578,8 @@ namespace xlionrender::gi
         int                                 m_DriftLogN = 0;
         std::uint32_t                       m_VoxLightsKey = 0;
         std::chrono::steady_clock::time_point m_VoxLightsMoved{};
+        std::array<std::uint32_t, 4> m_FzLast{};      // (VOXCHURN's freeze counters)
+        bool                 m_bFreezeDirty = true;      // (the freeze words to clear when the lights next stand still)
         bool                                m_bRef = false;
         bool                                m_bVox = false;
         std::size_t                         m_RefNext = 0;

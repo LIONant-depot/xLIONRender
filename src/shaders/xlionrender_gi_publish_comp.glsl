@@ -29,6 +29,6 @@ void main()
     g_VoxBucket = Face >= 64u ? 1u : 0u;
     const vec3 Pw = PubCornerWorld(q, L, a);
     const vec4 E  = VoxReadLevels(Pw - vec3(TF(25u), TF(26u), TF(27u)), n);
-    const uint h  = VoxHash(L, q, Face), s = h % vox_slots_v;
+    const uvec2 h  = VoxHash(L, q, Face); const uint s = h.x % vox_slots_v;
     Pub[pub_entry0_v + s] = uvec4(packHalf2x16(E.rg), packHalf2x16(vec2(E.b, 0.0)), floatBitsToUint(VoxTagOf(h)), (push.Frame & 0x7FFFFFFFu) | (E.w > 0.0 ? 0x80000000u : 0u));
 }
