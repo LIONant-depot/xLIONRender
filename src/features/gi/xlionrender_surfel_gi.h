@@ -142,16 +142,17 @@ namespace xlionrender::gi
 
             // The binary tree
             struct bnode { v3 m_Lo, m_Hi; int m_Left = -1, m_Right = -1, m_First = 0, m_Count = 0, m_Axis = 0; };
-            std::vector<bnode> B;
-            B.reserve(2 * std::size_t(n));
+            std::vector<bnode> B(2 * std::size_t(n));                       // (sized up front, no push_back: Debug's global lock - PackReadGrid)
+            int nB = 1;
             const auto Area = [](const v3& lo, const v3& hi) { const v3 d = v3::Max(hi - lo, v3{ 0, 0, 0 }); return d.m_X * d.m_Y + d.m_Y * d.m_Z + d.m_Z * d.m_X; };
             struct item { int m_Node, m_Begin, m_End; };
-            std::vector<item> Stack{ { 0, 0, n } };
-            B.push_back({});
+            std::vector<item> Stack(std::size_t(n) + 1);
+            int nStack = 0;
+            Stack[nStack++] = { 0, 0, n };
             constexpr int bins_v = 16;
-            while (!Stack.empty())
+            while (nStack > 0)
             {
-                const item It = Stack.back(); Stack.pop_back();
+                const item It = Stack[--nStack];
                 v3 BLo{ 1e30f, 1e30f, 1e30f }, BHi{ -1e30f, -1e30f, -1e30f }, CLo = BLo, CHi = BHi;
                 for (int k = It.m_Begin; k < It.m_End; ++k)
                 {
@@ -199,15 +200,15 @@ namespace xlionrender::gi
                 if (BestAxis >= 0)
                 {
                     const float Scale = bins_v / Ext[BestAxis];
-                    Mid = int(std::partition(m_Prims.begin() + It.m_Begin, m_Prims.begin() + It.m_End, [&](int p)
-                        { return std::min(bins_v - 1, int((C[p][BestAxis] - CLo[BestAxis]) * Scale)) < BestBin; }) - m_Prims.begin());
+                    int* const P = m_Prims.data();          // (pointers: Debug iterators take the CRT's global lock - see PackReadGrid)
+                    Mid = int(std::partition(P + It.m_Begin, P + It.m_End, [&](int p)
+                        { return std::min(bins_v - 1, int((C[p][BestAxis] - CLo[BestAxis]) * Scale)) < BestBin; }) - P);
                 }
                 else Mid = (It.m_Begin + It.m_End) / 2;                     // every centroid in one place: halve
-                const int L = int(B.size());
+                const int L = nB; nB += 2;
                 B[It.m_Node].m_Left = L; B[It.m_Node].m_Right = L + 1; B[It.m_Node].m_Axis = BestAxis >= 0 ? BestAxis : 0;
-                B.push_back({}); B.push_back({});
-                Stack.push_back({ L, It.m_Begin, Mid });
-                Stack.push_back({ L + 1, Mid, It.m_End });
+                Stack[nStack++] = { L, It.m_Begin, Mid };
+                Stack[nStack++] = { L + 1, Mid, It.m_End };
             }
 
             // Collapse to 4 wide
@@ -713,40 +714,77 @@ namespace xlionrender::gi
         static void PackReadGrid(bool bPack, const std::vector<std::array<std::uint32_t, 4>>& Table, const std::vector<std::uint32_t>& List,
                                  std::vector<std::array<std::uint32_t, 4>>& OutTable, std::vector<std::uint32_t>& OutList) noexcept
         {
-            OutTable = Table; OutList.clear(); OutList.reserve(List.size());
-            std::vector<std::uint32_t> Halves, Order;           // (the cells in the lists' order: unpacked again, the same layout)
-            for (std::uint32_t k = 0; k < OutTable.size(); ++k) if (OutTable[k][1] != 0xFFFFFFFFu) Order.push_back(k);
-            std::sort(Order.begin(), Order.end(), [&](std::uint32_t x, std::uint32_t y) { return Table[x][2] < Table[y][2]; });
-            for (const std::uint32_t k : Order)
+            // Raw pointers only, no push_back/insert/iterators: in Debug every iterator and push_back takes the CRT's one global lock
+            // (_ITERATOR_DEBUG_LEVEL 2), and this runs on every worker while a level's GI sections load - the main thread's frame waited
+            // on that lock, ~900 ms a frame on the Bistro (2026-11-14). Pass 1 sizes the output, pass 2 writes it
+            OutTable = Table;
+            const std::uint32_t* In = List.data();
+            const std::size_t nIn = List.size();
+            const auto bCell = [&](const std::array<std::uint32_t, 4>& E) { return E[1] != 0xFFFFFFFFu && std::size_t(E[2]) + 4 * std::size_t(E[3]) <= nIn; };
+            const auto bPackable = [&](std::uint32_t Code) { return bPack && Code >= 1 && Code <= std::uint32_t(fallback_cap_v); };
+            std::size_t nOrder = 0, nOut = 0;
+            for (const auto& E : Table) nOrder += E[1] != 0xFFFFFFFFu;
+            std::vector<std::uint32_t> Order(nOrder);           // (the cells in the lists' order: unpacked again, the same layout)
+            std::uint32_t* const pOrder = Order.data();
+            for (std::uint32_t k = 0, i = 0; k < std::uint32_t(Table.size()); ++k) if (Table[k][1] != 0xFFFFFFFFu) pOrder[i++] = k;
+            std::sort(pOrder, pOrder + nOrder, [&](std::uint32_t x, std::uint32_t y) { return Table[x][2] < Table[y][2]; });
+            for (std::size_t i = 0; i < nOrder; ++i)
             {
-                auto& E = OutTable[k];
-                if (E[1] == 0xFFFFFFFFu || std::size_t(E[2]) + 4 * std::size_t(E[3]) > List.size()) continue;
-                const std::uint32_t H0 = E[2], At = std::uint32_t(OutList.size());
-                OutList.insert(OutList.end(), List.begin() + H0, List.begin() + H0 + 4 * E[3]);
+                const auto& E = Table[pOrder[i]];
+                if (!bCell(E)) continue;
+                nOut += 4 * std::size_t(E[3]);
+                for (std::uint32_t p = 0; p < E[3]; ++p)
+                {
+                    const std::uint32_t First = In[E[2] + 4 * p + 2], Code = In[E[2] + 4 * p + 3] & 0xFFFFu;
+                    if (!bPack && (Code & read_packed_v)) nOut += (Code & 0x7Fu) + ((Code >> 7) & 0x7Fu);
+                    else if (bPackable(Code))
+                    {
+                        std::uint32_t nH = 0;
+                        for (std::uint32_t k = 0; k < Code; ++k) nH += (In[First + k] >> 16) == 0xFFFFu;
+                        nOut += (Code - nH) + (nH + 1) / 2;
+                    }
+                    else nOut += Code;
+                }
+            }
+            OutList.resize(nOut);
+            std::uint32_t* const Out = OutList.data();
+            std::size_t o = 0;
+            for (std::size_t i = 0; i < nOrder; ++i)
+            {
+                auto& E = OutTable[pOrder[i]];
+                if (!bCell(E)) continue;
+                const std::uint32_t H0 = E[2], At = std::uint32_t(o);
+                std::copy_n(In + H0, 4 * std::size_t(E[3]), Out + o); o += 4 * std::size_t(E[3]);
                 E[2] = At;
                 for (std::uint32_t p = 0; p < E[3]; ++p)
                 {
-                    const std::uint32_t First = List[H0 + 4 * p + 2], Code = List[H0 + 4 * p + 3] & 0xFFFFu, Mask = List[H0 + 4 * p + 3] & 0xFFFF0000u;
-                    const std::uint32_t L0 = std::uint32_t(OutList.size());
+                    const std::uint32_t First = In[H0 + 4 * p + 2], Code = In[H0 + 4 * p + 3] & 0xFFFFu, Mask = In[H0 + 4 * p + 3] & 0xFFFF0000u;
+                    const std::uint32_t L0 = std::uint32_t(o);
                     std::uint32_t NewCode = Code;
                     if (!bPack && (Code & read_packed_v))
                     {
                         const std::uint32_t nF = Code & 0x7Fu, nH = (Code >> 7) & 0x7Fu;
-                        OutList.insert(OutList.end(), List.begin() + First, List.begin() + First + nF);
-                        for (std::uint32_t h = 0; h < nH; ++h) { const std::uint32_t w = List[First + nF + h / 2]; OutList.push_back(((h & 1) ? (w >> 16) : (w & 0xFFFFu)) | 0xFFFF0000u); }
+                        std::copy_n(In + First, nF, Out + o); o += nF;
+                        for (std::uint32_t h = 0; h < nH; ++h) { const std::uint32_t w = In[First + nF + h / 2]; Out[o++] = ((h & 1) ? (w >> 16) : (w & 0xFFFFu)) | 0xFFFF0000u; }
                         NewCode = nF + nH;
                     }
-                    else if (bPack && Code >= 1 && Code <= std::uint32_t(fallback_cap_v))
+                    else if (bPackable(Code))
                     {
-                        Halves.clear();
-                        for (std::uint32_t k = 0; k < Code; ++k) { const std::uint32_t e = List[First + k]; if ((e >> 16) == 0xFFFFu) Halves.push_back(e & 0xFFFFu); else OutList.push_back(e); }
-                        const std::uint32_t nF = Code - std::uint32_t(Halves.size());
-                        for (std::size_t h = 0; h < Halves.size(); h += 2) OutList.push_back(Halves[h] | (h + 1 < Halves.size() ? Halves[h + 1] << 16 : 0u));
-                        NewCode = read_packed_v | nF | (std::uint32_t(Halves.size()) << 7);
+                        std::uint32_t nH = 0;
+                        for (std::uint32_t k = 0; k < Code; ++k) { const std::uint32_t e = In[First + k]; if ((e >> 16) != 0xFFFFu) Out[o++] = e; else ++nH; }
+                        std::uint32_t h = 0;
+                        for (std::uint32_t k = 0; k < Code; ++k)
+                        {
+                            const std::uint32_t e = In[First + k];
+                            if ((e >> 16) != 0xFFFFu) continue;
+                            if (h & 1) Out[o - 1] |= (e & 0xFFFFu) << 16; else Out[o++] = e & 0xFFFFu;
+                            ++h;
+                        }
+                        NewCode = read_packed_v | (Code - nH) | (nH << 7);
                     }
-                    else OutList.insert(OutList.end(), List.begin() + First, List.begin() + First + Code);
-                    OutList[At + 4 * p + 2] = L0;
-                    OutList[At + 4 * p + 3] = Mask | NewCode;
+                    else { std::copy_n(In + First, Code, Out + o); o += Code; }
+                    Out[At + 4 * p + 2] = L0;
+                    Out[At + 4 * p + 3] = Mask | NewCode;
                 }
             }
         }
