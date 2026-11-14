@@ -1877,13 +1877,11 @@ namespace xlionrender
             const float AW = float(sunAtlasWidth()), AH = float(sunAtlasHeight()), T = float(shadows::vsm::page_texels_v);
             std::vector<shadow_pairs::page> Pages;
             Pages.reserve(m_VSM.m_ToRender.size() + m_LocalPages.m_ToRender.size());
-            bool bAny[2] = {};
             std::uint32_t LODsUsed = 0;         // (the LODs this frame's sun pages draw: a candidate list each)
             for( const auto& P : m_VSM.m_ToRender )
             {
                 const int k = PageLOD(P.m_Key.m_Level);
                 Pages.push_back({ P.m_W2C, { T / AW, T / AH, (T + 2.0f * float(P.m_AtlasX)) / AW - 1.0f, (T + 2.0f * float(P.m_AtlasY)) / AH - 1.0f }, { P.m_MinX, P.m_MinY, P.m_Size, (P.m_bMover ? 1.0f : 0.0f) + 4.0f * float(k) } });     // (w: its kind + 4 x its LOD)
-                bAny[P.m_bMover] = true;
                 LODsUsed |= 1u << k;
             }
             // (the local pages: in their part's viewport - LocalW x LocalH texels)
@@ -1894,13 +1892,14 @@ namespace xlionrender
                 Pages.push_back({ P.m_W2C, { TL / LW, TL / LH, (TL + 2.0f * float(P.m_AtlasX)) / LW - 1.0f, (TL + 2.0f * float(P.m_AtlasY)) / LH - 1.0f }, { 0, 0, 0, P.m_bMover ? 3.0f : 2.0f } });     // (2: a local page, 3: its mover page)
                 if( std::find(Lit.begin(), Lit.end(), P.m_Light) == Lit.end() ) Lit.push_back(P.m_Light);
             }
-            // ponytail: a caster against every page of its kind until one overlaps (the epoch's hundreds of static pages: a grid if it shows)
-            const auto Touches = [&]( std::uint32_t i )
-            {
-                if( !bAny[Draws[i].m_bMover] ) return false;
-                for( const auto& P : m_VSM.m_ToRender ) if( P.m_bMover == Draws[i].m_bMover && shadows::RectOverlaps(LightBounds[i], P.m_MinX, P.m_MinY, P.m_Size) ) return true;
-                return false;
-            };
+            // (A39, 2026-11-14: the candidate list made the same every frame - every caster against the sun's pages, the LODs and local lights
+            // any frame has used - so it goes up only when the scene changes (shadow_pairs::Pair); the GPU pairs them with this frame's pages.
+            // It was 0.6-1 MB a frame: which pages rendered changed which casters, LODs and lights were in it)
+            m_PairLODs |= LODsUsed; LODsUsed = m_PairLODs;
+            for( int l : Lit ) if( std::find(m_PairLit.begin(), m_PairLit.end(), l) == m_PairLit.end() ) m_PairLit.push_back(l);
+            std::erase_if(m_PairLit, [&](int l) { return l < 0 || std::size_t(l) >= Scene.m_LocalLights.size(); });
+            std::sort(m_PairLit.begin(), m_PairLit.end());
+            Lit = m_PairLit;
             const auto TouchesLocal = [&]( std::uint32_t i )
             {
                 for( int l : Lit ) if( shadows::Overlaps(Draws[i].m_World, Scene.m_LocalLights[std::size_t(l)].m_Position, Scene.m_LocalLights[std::size_t(l)].m_Radius) ) return true;
@@ -1966,7 +1965,7 @@ namespace xlionrender
             for( std::uint32_t i = 0; i < Draws.size(); ++i )
             {
                 if( !Draws[i].m_bGPU ) continue;
-                if( Touches(i) )                AddCandidates(i, false);
+                if( !m_VSM.m_ToRender.empty() || m_PairLODs != 0 ) AddCandidates(i, false);     // (every caster: the GPU pairs it with the pages it touches - A39)
                 if( !Lit.empty() && TouchesLocal(i) ) AddCandidates(i, true);
             }
             if( shadow_pairs::Fits(Cands.size(), L2L.size(), Pages.size(), PairRuns.size()) )

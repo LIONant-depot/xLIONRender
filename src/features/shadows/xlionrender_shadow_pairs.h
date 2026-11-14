@@ -88,15 +88,22 @@ namespace xlionrender
         {
             m_bSlotUsed[m_Slot] = true;
             m_nCandidates = int(Candidates.size());
-            { static const bool s_bWork = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static double s_B = 0; static int s_N = 0;      // (A39 CPUWORK: what a shadow pairing uploads)
-              if( s_bWork ) { s_B += double(Candidates.size_bytes() + L2L.size_bytes() + Pages.size_bytes()); if( ++s_N == 120 ) { std::printf("CPUWORK shadow pairs %d candidates, %zu draws, %zu pages, upload %.0f KB a call\n", m_nCandidates, L2L.size(), Pages.size(), s_B / s_N / 1024.0); std::fflush(stdout); s_B = 0; s_N = 0; } } }
+            // (A39, 2026-11-14: the candidates go up only when they changed - into the next list slot; else the last list is paired again)
+            const bool bListChanged = m_ListSlot < 0 || Candidates.size() != m_Last.size() || std::memcmp(Candidates.data(), m_Last.data(), Candidates.size_bytes()) != 0;
+            { static const bool s_bWork = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static double s_B = 0; static int s_N = 0, s_Up = 0;      // (A39 CPUWORK: what a shadow pairing uploads)
+              if( s_bWork ) { s_B += double((bListChanged ? Candidates.size_bytes() : 0) + L2L.size_bytes() + Pages.size_bytes()); s_Up += bListChanged ? 1 : 0; if( ++s_N == 120 ) { std::printf("CPUWORK shadow pairs %d candidates, %zu draws, %zu pages, list uploaded %d of %d calls, upload %.1f KB a call\n", m_nCandidates, L2L.size(), Pages.size(), s_Up, s_N, s_B / s_N / 1024.0); std::fflush(stdout); s_B = 0; s_N = 0; s_Up = 0; } } }
             (void)m_Pages.MemoryMapFrameRegion(m_Slot * max_pages_v, int(Pages.size()), [&](void* p) { std::memcpy(p, Pages.data(), Pages.size_bytes()); });
             if( Candidates.empty() ) return;
-            (void)m_Candidates.MemoryMapFrameRegion(m_Slot * max_candidates_v, m_nCandidates, [&](void* p) { std::memcpy(p, Candidates.data(), Candidates.size_bytes()); });
+            if( bListChanged )
+            {
+                m_ListSlot = (m_ListSlot + 1) % ring_frames_v;
+                (void)m_Candidates.MemoryMapFrameRegion(m_ListSlot * max_candidates_v, m_nCandidates, [&](void* p) { std::memcpy(p, Candidates.data(), Candidates.size_bytes()); });
+                m_Last.assign(Candidates.begin(), Candidates.end());
+            }
             (void)m_Matrices.MemoryMapFrameRegion(m_Slot * max_draws_v, int(L2L.size()), [&](void* p) { std::memcpy(p, L2L.data(), L2L.size_bytes()); });
             const std::array Z{ xgpu::buffer::copy{ 0, 0, int(nRuns) }, xgpu::buffer::copy{ max_runs_v, max_runs_v, 3 } };
             Window.CopyBuffer(m_Zeros, m_Counts, Z);
-            const std::uint32_t Push[8] = { std::uint32_t(m_Slot * max_candidates_v), std::uint32_t(m_nCandidates), std::uint32_t(m_Slot * max_draws_v), std::uint32_t(m_Slot * max_pages_v)
+            const std::uint32_t Push[8] = { std::uint32_t(m_ListSlot * max_candidates_v), std::uint32_t(m_nCandidates), std::uint32_t(m_Slot * max_draws_v), std::uint32_t(m_Slot * max_pages_v)
                                           , std::uint32_t(Pages.size()), std::uint32_t(max_records_v), std::uint32_t(max_runs_v), 0u };
             auto Buffers = std::array<xgpu::buffer*, 6>{ &m_Candidates, &m_Matrices, &m_Pages, &m_Counts, &m_Commands, &m_Records };
             Window.Dispatch(m_Compute, Buffers, Push, sizeof(Push), (m_nCandidates + 63) / 64);
@@ -122,5 +129,7 @@ namespace xlionrender
         xgpu::buffer        m_Candidates, m_Matrices, m_Zeros, m_CountsHost;
         std::array<bool, ring_frames_v> m_bSlotUsed{};
         int                 m_Slot = 0;
+        int                 m_ListSlot = -1;        // (the candidates' list slot: a new one each time the list changes - A39)
+        std::vector<candidate> m_Last;              // (the list in it)
     };
 }

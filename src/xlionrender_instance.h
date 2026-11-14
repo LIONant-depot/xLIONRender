@@ -930,6 +930,8 @@ namespace xlionrender
         std::vector<xmath::fbbox>               m_CasterLightWorld;
         std::array<xmath::fvec3, 3>             m_CasterLightBasis{};
         std::vector<shadow_pairs::candidate>    m_PairCandidates;           // (the pairs' candidates, kept: their room)
+        std::uint32_t                           m_PairLODs = 0;             // (A39: every sun page LOD seen so far - the list keeps them, so it stays the same frame to frame)
+        std::vector<int>                        m_PairLit;                  // (A39: every local light that has had pages - likewise)
         int                                     m_VSMSoftLevels = 0;        // the coarser levels the request pass asks for too (contact-hardening)
         static constexpr std::uint64_t          static_frames_v = 4;        // a caster unchanged this many shadow passes is static (in the sun's pages), else a mover
         int  sunAtlasWidth( void ) const noexcept { return m_ShadowSetup.m_SunPoolWidth > 0 ? m_ShadowSetup.m_SunPoolWidth : 2 * shadows::atlas_tiles_v * m_ShadowSetup.m_ClipmapTileSize; }
