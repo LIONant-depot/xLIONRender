@@ -143,6 +143,11 @@ int main()
         const auto Traced = ReadRGB(Device, View, W, H);
         DumpRGB("gi_path_traced", Traced, W, H);
         Scene.m_GI.m_bPathTraced = false;
+        // (C49, 2026-11-14: the GI the editor shows - with XLION_GI_VOX set, the voxel store - at the same points: its mean against the CPU path tracer
+        // below; Bistro graded 30-55 % too bright against the path traced view)
+        for (int f = 0; f < 600; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, the GI the editor shows");
+        const auto Shown = ReadRGB(Device, View, W, H);
+        double SumShown = 0;
 
         const auto* pW = Renderer.getGIWorld();
         CHECK(pW != nullptr, "the GI's world");
@@ -184,9 +189,11 @@ int main()
             }
             const double Cpu = Sum.m_Y / 400.0 * 0.75 / 3.14159265;     // (the green channel: grey here; the grey pieces' albedo)
             const double Gpu = Traced[std::size_t(y) * W + x][1] - Direct[std::size_t(y) * W + x][1];
+            SumShown += Shown[std::size_t(y) * W + x][1] - Direct[std::size_t(y) * W + x][1];
             SumGpu += Gpu; SumCpu += Cpu; SumAbs += std::abs(Gpu - Cpu); ++n;
         }
         std::printf("the path traced view against the CPU path tracer, %d grey points: mean %.4f vs %.4f, mean absolute difference %.4f\n", n, SumGpu / std::max(n, 1), SumCpu / std::max(n, 1), SumAbs / std::max(n, 1));
+        std::printf("the GI shown (the voxels with XLION_GI_VOX) against the CPU path tracer: mean %.4f vs %.4f (ratio %.2f)\n", SumShown / std::max(n, 1), SumCpu / std::max(n, 1), SumShown / std::max(SumCpu, 1e-9));
         CHECK(n > 20, "too few grey points for the path traced view's check: %d", n);
         CHECK(std::abs(SumGpu - SumCpu) < 0.10 * SumCpu && SumAbs < 0.25 * SumCpu, "the path traced view is off the CPU reference: mean %.4f vs %.4f, absolute %.4f", SumGpu / n, SumCpu / n, SumAbs / n);
         Scene.m_Ambient = AmbientWas;
