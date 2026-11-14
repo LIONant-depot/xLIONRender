@@ -725,6 +725,7 @@ namespace xlionrender
                     if( s_Px.find("pixel_nocorners") != std::string::npos ) DrawGI.second |= 0x01000000u; // (the per-pixel read without its corner weights)
                     if( s_Px.find("pixel_lookuponly") != std::string::npos ) DrawGI.second |= 0x02000000u; // (the per-pixel read's cell lookup alone: then unsupported)
                     if( s_Px.find("pixel_nolookup") != std::string::npos )  DrawGI.second |= 0x04000000u; // (the per-pixel read unsupported at once)
+                    if( s_Px.find("pixel_corners") != std::string::npos )   DrawGI.second |= 0x06000000u; // (experiment: the read at the cell's 4 corners, bilinear - gi_surfel_placement_proposal.md)
                     if( s_Px.find("pixel_none") != std::string::npos )      DrawGI = { 0u, 0xFFFFFFFFu };
                     static const std::uint32_t s_Cap = [] { const char* p = xlionrender::Env("XLION_GI_PIXEL_CAP"); return p ? std::uint32_t(std::clamp(std::atoi(p), 0, 255)) : 0u; }();
                     if( s_Cap && DrawGI.second != 0xFFFFFFFFu ) DrawGI.second |= s_Cap << 16;     // (xlionrender_surfel_gi.glsl GIPixelCap)

@@ -422,6 +422,37 @@ GIQueryResult SurfelGIQuery(in const vec3 P, in const vec3 N, in const vec3 Nmap
     if (!GIReadCell(P, N, First, Count, PatchN, Patches, nPatches)) return R;
     if (g_GIAblateLookup == 1u) { R.bSupported = true; R.Confidence = 1.0; R.Irradiance = vec3(float(First & 1u) * 1e-30); return R; }     // (First used: the lookup kept)
     vec4 Relaxed;
+    if (g_GIAblateLookup == 3u)
+    {
+        // Experiment (XLION_GI_ABLATE=pixel_corners; gi_surfel_placement_proposal.md, the offset-voxel idea): the light at the 4 corners of
+        // the point's cell in its patch's plane (the patch's own list read there: each corner's sight weights), bilinear - a sample per
+        // corner as a voxel's, on the surface. The corners just inside the cell (its weights, not the next cell's)
+        const float Cell = uintBitsToFloat(GIMesh[4]);
+        const vec3  A = abs(PatchN);
+        const int   Au = A.x >= A.y && A.x >= A.z ? 1 : 0, Av = A.x >= A.y && A.x >= A.z ? 2 : (A.y >= A.z ? 2 : 1), Aa = 3 - Au - Av;
+        const vec3  Pl = P + N * (0.05 * Cell);
+        const vec2  uv = vec2(Pl[Au], Pl[Av]) / Cell, b = floor(uv), f = uv - b;
+        const float Dl = dot(Pl, PatchN);
+        vec4 S = vec4(0.0); vec3 Rf = vec3(0.0); float Wr = 0.0;
+        for (int k = 0; k < 4; ++k)
+        {
+            const vec2 c = vec2(k & 1, k >> 1);
+            vec3 K; K[Au] = (b.x + mix(0.001, 0.999, c.x)) * Cell; K[Av] = (b.y + mix(0.001, 0.999, c.y)) * Cell;
+            K[Aa] = (Dl - PatchN[Au] * K[Au] - PatchN[Av] * K[Av]) / PatchN[Aa];
+            K -= N * (0.05 * Cell);
+            vec4 Rk;
+            vec4 Ek = SurfelGIList(K, N, Nmap, LightOffset, Level, First, Count, PatchN, Rk);
+            const vec3 Gk = g_GIReflSum;
+            if (Ek.w <= 1e-6) Ek = Rk;
+            if (Ek.w <= 1e-6) continue;
+            const float wb = (c.x > 0.5 ? f.x : 1.0 - f.x) * (c.y > 0.5 ? f.y : 1.0 - f.y);
+            S += vec4(Ek.rgb / Ek.w, 1.0) * wb; Rf += Gk / Ek.w * wb; Wr += Ek.w * wb;
+        }
+        if (S.w <= 1e-6) return R;
+        R.Irradiance = S.rgb / S.w; R.Confidence = Wr / S.w; R.bSupported = true;
+        if (dot(g_GIReflDir, g_GIReflDir) > 0.5) g_GIRefl = vec4(Rf / S.w, 1.0);
+        return R;
+    }
     vec4 Sum = SurfelGIList(P, N, Nmap, LightOffset, Level, First, Count, PatchN, Relaxed);
     // The moments' test rejects every surfel (next to a wall's foot: their rays met the wall just past the point): its own surfels without
     // it - the corner weights (the bake's line of sight, the patch split at walls) still keep the other side out. Not the mean light: a
