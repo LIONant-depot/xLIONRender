@@ -219,6 +219,9 @@ namespace xlionrender
         xgpu::texture           m_TileGraphDepth;       // the tile pass's classification (A5.2): each pixel's graph as its depth
         xgpu::pipeline_instance m_TileClassifyInstance;
         xgpu::buffer            m_GIGatherTable;
+        std::vector<std::uint32_t> m_GatherBody;                    // (A39: the gather table's body last written - its instances' entries)
+        std::uint64_t           m_GatherBodyVersion = 0;            //   its version, and the version each ring region of m_GIGatherTable holds:
+        std::array<std::uint64_t, 4> m_GatherSlotBody{};            //   a region already holding it is not written again
         // The screen tail (instance::renderTail, the main view in light_mode::SCREEN; documentation/lighting_p3_design.md "The decision"),
         // made the first time: the thin G-buffer at half size - the octahedral normal and roughness (10-10-10-2; the materials' G-buffer
         // variants draw into it) and its depth -, its pass; the tail pass's two targets (demodulated diffuse and specular, 11-11-10 floats),

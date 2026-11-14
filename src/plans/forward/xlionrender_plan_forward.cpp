@@ -3761,7 +3761,9 @@ namespace xlionrender
                             // Experiment X1b, its cheapest step (XLION_GI_READ_PROBES=<spacing> [<probes a frame> [<cascades> [1: the rays' hits read them too, not the surfels]]]): every surface reads the ray-traced probe grid
                             static const bool s_bReadProbes = xlionrender::Env("XLION_GI_READ_PROBES") != nullptr;
                             if( const xgpu::buffer* pP = s_bReadProbes && m_pGITrace ? m_pGITrace->ProbeBuffer() : nullptr ) { R = { 0u, 0xFFFFFFFEu }; pBuf = pP; }
-                            m_GatherTable.insert(m_GatherTable.end(), { R.first, R.second, R.second == 0xFFFFFFFFu ? 0u : BufferIndex(pBuf), 0u });
+                            // (A39: the voxel GI (word 20 3) never reads a rigid entry's x - the surfels' offset in their light ring, which moves a ring
+                            // region every frame: 0 there, so the entries stay the same frame to frame)
+                            m_GatherTable.insert(m_GatherTable.end(), { m_GatherTable[20] == 3u ? 0u : R.first, R.second, R.second == 0xFFFFFFFFu ? 0u : BufferIndex(pBuf), 0u });
                         }
                     }
                     if( bFull && m_Device.getFrameIndex() % 240 == 0 ) { std::printf("GATHERFULL the GI gather's table is full (%d uints): instances left without GI\n", gather_table_uints_v); std::fflush(stdout); }
@@ -3811,8 +3813,30 @@ namespace xlionrender
                     }
                     // (uploaded after the movers' lattices and word 30: before, from 2a68af9 to here, the gather never saw them - word 30 went up as 0 and
                     // every character read the +128 records; the probes were updated and never read)
+                    // (A39, 2026-11-14: the table in three parts - the header (words 0-39: the view, the frame's switches) every frame, the movers'
+                    // lattices (from word 30's offset on, they move) every frame, the body between (the instances' entries) only into a ring region
+                    // that does not hold it yet: a still scene writes ~200 bytes a frame, not the whole table - 183 KB a frame on Bistro before)
                     m_GatherTableBase = std::uint32_t(m_Device.getFrameIndex() % ring_frames_v) * std::uint32_t(gather_table_uints_v);
-                    (void)View.m_GIGatherTable.MemoryMapFrameRegion(int(m_GatherTableBase), int(m_GatherTable.size()), [&](void* p) { std::memcpy(p, m_GatherTable.data(), m_GatherTable.size() * sizeof(std::uint32_t)); });
+                    {
+                        const std::size_t nAll  = m_GatherTable.size();
+                        const std::size_t Head  = std::min<std::size_t>(40, nAll);
+                        const std::size_t Tail  = m_GatherTable[20] == 3u && m_GatherTable[30] >= Head && m_GatherTable[30] <= nAll ? std::size_t(m_GatherTable[30]) : nAll;
+                        const std::size_t nBody = Tail - Head;
+                        if( View.m_GatherBody.size() != nBody || std::memcmp(View.m_GatherBody.data(), m_GatherTable.data() + Head, nBody * sizeof(std::uint32_t)) != 0 )
+                        {
+                            View.m_GatherBody.assign(m_GatherTable.begin() + std::ptrdiff_t(Head), m_GatherTable.begin() + std::ptrdiff_t(Tail));
+                            ++View.m_GatherBodyVersion;
+                        }
+                        const std::size_t R = std::size_t(m_Device.getFrameIndex() % ring_frames_v);
+                        const bool bBody = View.m_GatherSlotBody[R] != View.m_GatherBodyVersion;
+                        const auto Put = [&]( std::size_t From, std::size_t n ) { if( n ) (void)View.m_GIGatherTable.MemoryMapFrameRegion(int(m_GatherTableBase + From), int(n), [&](void* p) { std::memcpy(p, m_GatherTable.data() + From, n * sizeof(std::uint32_t)); }); };
+                        Put(0, Head);
+                        if( bBody ) { Put(Head, nBody); View.m_GatherSlotBody[R] = View.m_GatherBodyVersion; }
+                        Put(Tail, nAll - Tail);
+                        static const bool s_bWork = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static double s_B = 0; static int s_N = 0, s_Up = 0;      // (A39 CPUWORK)
+                        if( s_bWork ) { s_B += double((Head + (bBody ? nBody : 0) + (nAll - Tail)) * sizeof(std::uint32_t)); s_Up += bBody ? 1 : 0;
+                            if( ++s_N == 120 ) { std::printf("CPUWORK gather table %zu words: body written %d of %d frames, upload %.1f KB a frame\n", nAll, s_Up, s_N, s_B / s_N / 1024.0); std::fflush(stdout); s_B = 0; s_N = 0; s_Up = 0; } }
+                    }
                     m_GIStats.m_nScreenDraws = int(m_GatherBuffers.size());          // (its passes: a full-screen draw a GI buffer)
                     m_GIStats.m_nScreenCalls = int(m_GatherBuffers.size()) + 1;      // (+ the classification)
                 }
@@ -4015,7 +4039,7 @@ namespace xlionrender
                     m_pCull->Cull(Window, m_CullCandidates, m_CullGroups, bListChanged, m_InstanceBuffer, CullView, CullEye, m_CullPrepass, CullSecond, bOcclude);
                     { static const bool s_bWork = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static double s_Ms = 0, s_B = 0, s_G = 0; static int s_N = 0, s_Up = 0;      // (A39: what the CPU rebuilds and uploads a frame)
                       if( s_bWork ) { s_Ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - CullCpu0).count(); s_B += bListChanged ? double(m_CullCandidates.size() * sizeof(m_CullCandidates[0]) + m_CullGroups.size() * sizeof(m_CullGroups[0])) : 0.0; s_Up += bListChanged ? 1 : 0; s_G += double(m_GatherTable.size() * sizeof(std::uint32_t));
-                          if( ++s_N == 120 ) { std::printf("CPUWORK main cull walk %.3f ms a frame, %zu candidates, %zu LOD groups, list uploaded %d of %d frames, upload %.1f KB a frame; gather table %.0f KB a frame\n", s_Ms / s_N, m_CullCandidates.size(), m_CullGroups.size(), s_Up, s_N, s_B / s_N / 1024.0, s_G / s_N / 1024.0); std::fflush(stdout); s_Ms = s_B = s_G = 0; s_N = 0; s_Up = 0; } } }
+                          if( ++s_N == 120 ) { std::printf("CPUWORK main cull walk %.3f ms a frame, %zu candidates, %zu LOD groups, list uploaded %d of %d frames, upload %.1f KB a frame (gather table size %.0f KB)\n", s_Ms / s_N, m_CullCandidates.size(), m_CullGroups.size(), s_Up, s_N, s_B / s_N / 1024.0, s_G / s_N / 1024.0); std::fflush(stdout); s_Ms = s_B = s_G = 0; s_N = 0; s_Up = 0; } } }
                     { auto& G = View.m_Graph; const int S = G.Begin("GPU cull (pass 1)", "group:copy Culling: zeros|gpu_cull: m_Compute", false);
                       G.Read(S, G.Resource("Culling: *", rg::lifetime::RETAINED), rg::usage::STORAGE); G.Read(S, G.Resource("Culling: HiZ pyramid", rg::lifetime::HISTORY), rg::usage::SAMPLED);      // (last frame's pyramid: the occlusion test)
                       G.Write(S, G.Resource("Culling: draw args", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
