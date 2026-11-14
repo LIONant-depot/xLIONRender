@@ -3538,6 +3538,7 @@ namespace xlionrender
                 {
                     // The gather's table (xlionrender_gi_gather_common.glsl): every visible rigid GI instance's clusters - their GI reference
                     // and GI buffer, the passes' list of buffers (GatherBuffers); the passes run after the G-buffer prepass, below
+                    const auto GatherCpu0 = std::chrono::steady_clock::now();      // (A39 CPUWORK: the table's CPU build, the persistent table's upper bound)
                     m_GatherTable.assign(40, 0u);
                     // (XLION_VOX_PUBLISHED: word 37 the published read on, 38 the frame - the gather's VoxReadPublished, the resolve's stamp)
                     static const bool s_bVoxPub = xlionrender::Env("XLION_VOX_PUBLISHED") != nullptr;
@@ -3834,9 +3835,9 @@ namespace xlionrender
                         Put(0, Head);
                         if( bBody ) { Put(Head, nBody); View.m_GatherSlotBody[R] = View.m_GatherBodyVersion; }
                         Put(Tail, nAll - Tail);
-                        static const bool s_bWork = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static double s_B = 0; static int s_N = 0, s_Up = 0;      // (A39 CPUWORK)
-                        if( s_bWork ) { s_B += double((Head + (bBody ? nBody : 0) + (nAll - Tail)) * sizeof(std::uint32_t)); s_Up += bBody ? 1 : 0;
-                            if( ++s_N == 120 ) { std::printf("CPUWORK gather table %zu words: body written %d of %d frames, upload %.1f KB a frame\n", nAll, s_Up, s_N, s_B / s_N / 1024.0); std::fflush(stdout); s_B = 0; s_N = 0; s_Up = 0; } }
+                        static const bool s_bWork = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static double s_B = 0, s_Ms = 0; static int s_N = 0, s_Up = 0;      // (A39 CPUWORK)
+                        if( s_bWork ) { s_B += double((Head + (bBody ? nBody : 0) + (nAll - Tail)) * sizeof(std::uint32_t)); s_Up += bBody ? 1 : 0; s_Ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - GatherCpu0).count();
+                            if( ++s_N == 120 ) { std::printf("CPUWORK gather table %zu words: built in %.3f ms a frame, body written %d of %d frames, upload %.1f KB a frame\n", nAll, s_Ms / s_N, s_Up, s_N, s_B / s_N / 1024.0); std::fflush(stdout); s_B = s_Ms = 0; s_N = 0; s_Up = 0; } }
                     }
                     m_GIStats.m_nScreenDraws = int(m_GatherBuffers.size());          // (its passes: a full-screen draw a GI buffer)
                     m_GIStats.m_nScreenCalls = int(m_GatherBuffers.size()) + 1;      // (+ the classification)
