@@ -1036,6 +1036,13 @@ namespace xlionrender::gi
                         const std::array<std::uint32_t, 4> Fz{ p[16], p[17], p[18], p[19] };      // (the per-face freeze's stores: refused frozen, counted, freeze off, parent - xlionrender_gi_ref.glsl VoxStore)
                         std::printf("VOXCHURN over %d frames: takeovers %u refused %u new %u seen marks %u | stores frozen %u counted %u freeze-off %u parent %u\n", s_Drift, C[0] - m_ChurnLast[0], C[1] - m_ChurnLast[1], C[2] - m_ChurnLast[2], C[3] - m_ChurnLast[3]
                                    , Fz[0] - m_FzLast[0], Fz[1] - m_FzLast[1], Fz[2] - m_FzLast[2], Fz[3] - m_FzLast[3]); m_FzLast = Fz; std::fflush(stdout);
+                        {   // (C49 measurement: the first rays from walls facing away from the sun, their samples' mean luminance by source - xlionrender_gi_ref.glsl SrcAdd)
+                            std::array<std::uint32_t, 8> S; for (int k = 0; k < 8; ++k) S[std::size_t(k)] = p[20 + k];
+                            const double n = double(S[0] - m_SrcLast[0]);
+                            if (n > 0.0) { const auto M = [&](int k) { return double(S[std::size_t(k)] - m_SrcLast[std::size_t(k)]) / 256.0 / n; };
+                                std::printf("VOXSRC %.0f samples: origin emitters %.4f, sky %.4f, hit direct %.4f, hit store %.4f, hit emitters %.4f, emission %.4f | the sample %.4f\n", n, M(1), M(2), M(3), M(4), M(5), M(6), M(7)); std::fflush(stdout); }
+                            m_SrcLast = S;
+                        }
                         m_ChurnLast = C;
                     }
                 }
@@ -1585,6 +1592,7 @@ namespace xlionrender::gi
         int                                 m_DriftLogN = 0;
         std::uint32_t                       m_VoxLightsKey = 0;
         std::chrono::steady_clock::time_point m_VoxLightsMoved{};
+        std::array<std::uint32_t, 8> m_SrcLast{};      // (VOXSRC)
         std::array<std::uint32_t, 4> m_FzLast{};      // (VOXCHURN's freeze counters)
         bool                 m_bFreezeDirty = true;      // (the freeze words to clear when the lights next stand still)
         bool                                m_bRef = false;

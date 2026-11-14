@@ -390,6 +390,12 @@ vec3 VoxDirectKept(in const vec3 P, in const vec3 N, in const vec4 Hd)
 }
 // A cosine ray from a surface point: pi x what it sees (a sample of the point's indirect irradiance), and where it hit
 int g_Ablate = 0;
+bool g_SrcProbe = false;      // (C49 measurement, XLION_VOX_DRIFT on: this ray's sample split by source into ConnU[20..27] - a shadowed wall's first rays)
+#ifdef GI_VOX_ONLY
+void SrcAdd(in const int k, in const vec3 c) { if (g_SrcProbe) atomicAdd(ConnU[20 + k], uint(clamp(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.0, 4000.0) * 256.0)); }
+#else
+void SrcAdd(in const int k, in const vec3 c) {}
+#endif
 float g_ConnKind = -1.0; vec3 g_ConnAlbedo = vec3(0.0), g_ConnEmission = vec3(0.0);
 vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out vec3 Nh, out bool bHit)
 {
@@ -402,7 +408,11 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     if (g_Ablate == 1) return vec3(0.0);
     g_VoxMissed = H.m_Inst < 0;
     g_ConnKind = -1.0;
-    if (H.m_Inst < 0) { g_ConnKind = 0.0; return Own + SkyAt(D) * gi_pi_v; }
+    SrcAdd(1, Own);      // (ConnU[20]: the samples counted below; 1: the origin's emitters)
+#ifdef GI_VOX_ONLY
+    if (g_SrcProbe) atomicAdd(ConnU[20], 1u);
+#endif
+    if (H.m_Inst < 0) { g_ConnKind = 0.0; SrcAdd(2, SkyAt(D) * gi_pi_v); return Own + SkyAt(D) * gi_pi_v; }
     const uint HR = InstRec(H.m_Inst), HM = MeshOf(HR);
     const uvec3 HT = MTri(HM, H.m_Tri);
     const float B0 = 1.0 - H.m_U - H.m_V;
@@ -429,10 +439,12 @@ vec3 VoxRay(in const vec3 P, in const vec3 N, in const vec4 Hd, out vec3 Ph, out
     if (g_Ablate == 2) return Albedo + Emission;
     g_ConnKind = 1.0; g_ConnAlbedo = Albedo; g_ConnEmission = Emission;
     vec3 In = VoxDirectKept(Ph, Nh, Hd);
+    SrcAdd(3, Albedo * In);      // (the hit's direct light: the sun and a lamp)
     if (g_Ablate == 3) return In * Albedo;
-    In += (Push.m_First & 2) != 0 ? vec3(0.0) : VoxRead(Ph, Nh, Hd.xyz, Hd.w);
+    { const vec3 Rv = (Push.m_First & 2) != 0 ? vec3(0.0) : VoxRead(Ph, Nh, Hd.xyz, Hd.w); SrcAdd(4, Albedo * Rv); In += Rv; }      // (the store at the hit: the later bounces)
     if (g_Ablate == 4) return In * Albedo;     // (m_First's bit 1, XLION_VOX_FIRST_ONLY: measurement: no bounce past the first, so nothing a sample reads is still converging)
-    if (GD[15] > 0u && g_Ablate != 6) { In += VoxEmitters(Ph, Nh); Emission = vec3(0.0); }
+    if (GD[15] > 0u && g_Ablate != 6) { const vec3 Ev = VoxEmitters(Ph, Nh); SrcAdd(5, Albedo * Ev); In += Ev; Emission = vec3(0.0); }
+    SrcAdd(6, Emission * gi_pi_v);
     return Own + (Albedo * In * (1.0 / gi_pi_v) + Emission) * gi_pi_v;
 }
 void VoxMain()
@@ -668,9 +680,18 @@ void VoxMain()
     vec3 Ph, Nh; bool bHit;
     // (one copy of VoxRay: the shader's compiled size goes with its copies. The second ray: the surface the first hit, seen yet or not: a sample of that surface's own
     // indirect light; off screen surfaces are lit before the eye turns to them. A group in four, all its lanes: one lane firing it makes its whole group wait)
+#ifdef GI_VOX_ONLY
+    const vec3 SunDp = GV(GD[2]);
+#endif
     for (int r = 0; r < 2; ++r)
     {
+#ifdef GI_VOX_ONLY
+        g_SrcProbe = r == 0 && ConnU[2] == vox_drift_mark_v && abs(N.y) < 0.3 && dot(N, -SunDp) < -0.3;      // (a wall facing away from the sun)
+#endif
         const vec3 Sample = VoxRay(P, N, Hd, Ph, Nh, bHit);
+#ifdef GI_VOX_ONLY
+        if (g_SrcProbe && !any(isnan(Sample))) SrcAdd(7, Sample);      // (the whole sample: its mean is the face's light)
+#endif
         if (g_Ablate >= 1 && g_Ablate <= 4) { if (any(isnan(Sample))) GIRefAccumU[0].w += 0u; return; }
 #ifdef GI_VOX_ONLY
         if (r == 0 && (Push.m_First & 32) != 0)      // (kept for relighting: the ring's oldest goes)
