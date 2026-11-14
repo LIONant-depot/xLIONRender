@@ -776,6 +776,7 @@ namespace xlionrender
         xmath::fvec3    m_SkyHorizon    { 0.70f, 0.78f, 0.90f };
         xmath::fvec3    m_SkyGround     { 0.22f, 0.20f, 0.18f };
         float           m_SkyIntensity  = 0.3f;            // 0: no sky (the flat ambient lights instead)
+        texture_ref     m_SkyCubemap;                       // (Tomas 2026-11-14) a cube texture as the sky in place of the gradient (scene::sky::m_pCubemap); none: the gradient
         xmath::fvec3    m_Ambient       { 0.03f, 0.03f, 0.04f };
         bool            m_bGI           = false;           // surfel GI: the meshes with surfels (baked by their GeomStatic compiler) are lit by it
         int             m_GIRayBudget   = 16384;
@@ -816,6 +817,7 @@ namespace xlionrender
         , obj_member<"SkyHorizon",   &environment::m_SkyHorizon>
         , obj_member<"SkyGround",    &environment::m_SkyGround>
         , obj_member<"SkyIntensity", &environment::m_SkyIntensity, member_help<"0 turns the sky off: the flat ambient lights the scene instead">>
+        , obj_member<"SkyCubemap",   &environment::m_SkyCubemap,   member_help<"A cube texture as the sky (the background, its light, the GI and the reflections), scaled by SkyIntensity. None: the Zenith / Horizon / Ground gradient">>
         , obj_member<"Ambient",      &environment::m_Ambient>
         , obj_member<"GI",           &environment::m_bGI,         member_help<"Diffuse global illumination (surfels): bounce light from every mesh that has surfels">>
         , obj_member<"GIRayBudget",  &environment::m_GIRayBudget, member_help<"Rays traced per frame for the GI: more converges faster, costs more CPU">>
@@ -850,7 +852,24 @@ namespace xlionrender
         )
     };
 
+    // The sky drawn as the background (Tomas 2026-11-14: the dome an entity of its own; the global cube map - Environment's SkyCubemap - lights
+    // the scene). Its cube map empty: the global one; else its own, seen only (the lighting stays the global's). One per level: the first found
+    struct sky_dome
+    {
+        constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "SkyDome" };
+
+        texture_ref     m_Cubemap;                          // none: the Environment's SkyCubemap
+        float           m_Intensity     = 1.0f;             // times the Environment's SkyIntensity
+
+        XPROPERTY_DEF
+        ( "SkyDome", sky_dome
+        , obj_member<"Cubemap",   &sky_dome::m_Cubemap,   member_help<"The cube texture drawn as the sky behind everything. None (recommended): the Environment's SkyCubemap, the one that lights the scene. Set it only on purpose: this map is seen only - the lighting, the GI and the reflections keep the Environment's, so mirrors and puddles will show a different sky than the one behind them">>
+        , obj_member<"Intensity", &sky_dome::m_Intensity, member_help<"Its brightness, times the Environment's SkyIntensity">>
+        )
+    };
+
     // After the Primitive (50) and the Text
+    XSCRIPT_REGISTER_COMPONENT(sky_dome,    "Rendering", 61)
     XSCRIPT_REGISTER_COMPONENT(mesh,        "Rendering", 52)
     XSCRIPT_REGISTER_COMPONENT(light_sun,   "Rendering", 53)
     XSCRIPT_REGISTER_COMPONENT(light_point, "Rendering", 54)

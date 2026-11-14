@@ -513,6 +513,10 @@ namespace xlionrender
                              , .m_bTAA = E.m_bTAA, .m_TAABlend = E.m_TAABlend, .m_ExposureKey = E.m_ExposureKey, .m_ExposureRate = E.m_ExposureRate, .m_ExposureMin = E.m_ExposureMin, .m_ExposureMax = E.m_ExposureMax };
             m_RenderGraph = E.m_RenderGraph.m_Instance.m_Value;
             m_Scene.m_Sky     = { .m_Zenith = E.m_SkyZenith, .m_Horizon = E.m_SkyHorizon, .m_Ground = E.m_SkyGround, .m_Intensity = E.m_SkyIntensity };
+            // (the sky's cube texture as loaded - a compile replaces it; not a cube (a 2D texture picked by mistake): the gradient)
+            if (!E.m_SkyCubemap.empty())
+                if (auto* pTex = static_cast<const xgpu::texture*>(xlioncore::resources::GetResource(texture_type_guid_v.m_Value, E.m_SkyCubemap.m_Instance.m_Value)); pTex && pTex->isCubemap())
+                    m_Scene.m_Sky.m_pCubemap = pTex;
             m_Scene.m_Ambient = E.m_Ambient;
             m_Scene.m_GI      = { .m_bEnable = E.m_bGI, .m_RayBudget = E.m_GIRayBudget, .m_bPerPixel = E.m_bGIPerPixel, .m_Debug = E.m_GIDebug, .m_RaysPerSurfel = E.m_GIRaysPerSurfel, .m_FilterPasses = E.m_GIFilterPasses, .m_bMoments = E.m_bGIMoments, .m_bHalfRes = E.m_bGIHalfRes, .m_EmissiveScale = E.m_GIEmissiveScale, .m_bShowBlend = true, .m_bEmitterLights = E.m_bGIEmitterLights };     // (m_bShowBlend: a game's and an editor's view - never a jump)
             m_Scene.m_ReflectionMaxRoughness = E.m_bGI ? std::max(E.m_ReflectionMaxRoughness, 0.0f) : 0.0f;
@@ -521,6 +525,17 @@ namespace xlionrender
             m_Scene.m_bReflectionScreen      = E.m_bReflectionScreen;
             m_Scene.m_ReflectionTextureMaxRoughness = std::max(E.m_ReflectionTextureMaxRoughness, 0.0f);
             m_Scene.m_ReflectionTextureMinReflectance = std::max(E.m_ReflectionTextureMinReflectance, 0.0f);
+        }
+
+        // A SkyDome: the sky drawn as the background - its own cube map, else the Environment's (SetEnvironment first)
+        void SetSkyDome(const sky_dome& D) noexcept
+        {
+            const xgpu::texture* pTex = m_Scene.m_Sky.m_pCubemap;
+            if (!D.m_Cubemap.empty())
+                if (auto* p = static_cast<const xgpu::texture*>(xlioncore::resources::GetResource(texture_type_guid_v.m_Value, D.m_Cubemap.m_Instance.m_Value)); p && p->isCubemap()) pTex = p;
+            m_Scene.m_Sky.m_pBackground         = pTex;
+            m_Scene.m_Sky.m_BackgroundIntensity = std::max(D.m_Intensity, 0.0f) * m_Scene.m_Sky.m_Intensity;
+            m_Scene.m_Sky.m_bVisible            = pTex != nullptr;
         }
 
         // A new frame's snapshot: no sun unless a LightSun says so, a dim flat ambient unless an Environment says otherwise

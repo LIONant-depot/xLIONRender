@@ -293,6 +293,13 @@ namespace xlionrender
                 auto S = Search(Query);
                 bool bFirst = true;
                 Foreach(S, [&](const environment& E) noexcept { if (bFirst) R.SetEnvironment(E); bFirst = false; });
+                {   // the SkyDome (one per level: the first): the background - after the Environment, whose cube map it defaults to
+                    xecs::query::instance QDome;
+                    QDome.m_Must.AddFromComponents<sky_dome>();
+                    auto SD = Search(QDome);
+                    bool bDome = true;
+                    Foreach(SD, [&](const sky_dome& D) noexcept { if (bDome) R.SetSkyDome(D); bDome = false; });
+                }
                 auto& G = R.m_Scene.m_GI;                                   // the editor's viewing choices on top (view_options)
                 if (m_ViewOptions.m_GIDebug >= 0) G.m_Debug = static_cast<gi_debug>(m_ViewOptions.m_GIDebug);
                 if (m_ViewOptions.m_bNoGI)        G.m_bEnable   = false;

@@ -5101,18 +5101,20 @@ namespace xlionrender
             pBound = nullptr;
 
             // The sky as the background: the cubemap seen from inside, behind everything that was drawn
-            if( bMain && Scene.m_Sky.m_bVisible && Scene.m_Sky.m_pCubemap && Scene.m_Sky.m_Intensity > 0 )
+            const xgpu::texture* pSkyBg = Scene.m_Sky.m_pBackground ? Scene.m_Sky.m_pBackground : Scene.m_Sky.m_pCubemap;      // (a SkyDome's own, else the lighting one)
+            const float SkyBgI = Scene.m_Sky.m_BackgroundIntensity >= 0.0f ? Scene.m_Sky.m_BackgroundIntensity : Scene.m_Sky.m_Intensity;
+            if( bMain && Scene.m_Sky.m_bVisible && pSkyBg && SkyBgI > 0 )
             {
-                if( m_pSkyBackground != Scene.m_Sky.m_pCubemap )       // its instance binds the texture
+                if( m_pSkyBackground != pSkyBg )       // its instance binds the texture
                 {
                     m_Device.Destroy(std::move(m_SkyBackgroundInstance));
-                    auto Bind = std::array{ xgpu::pipeline_instance::sampler_binding{ *const_cast<xgpu::texture*>(Scene.m_Sky.m_pCubemap) } };
-                    m_pSkyBackground = m_Device.Create(m_SkyBackgroundInstance, { .m_PipeLine = m_SkyBackgroundPipeline, .m_SamplersBindings = Bind }) == nullptr ? Scene.m_Sky.m_pCubemap : nullptr;
+                    auto Bind = std::array{ xgpu::pipeline_instance::sampler_binding{ *const_cast<xgpu::texture*>(pSkyBg) } };
+                    m_pSkyBackground = m_Device.Create(m_SkyBackgroundInstance, { .m_PipeLine = m_SkyBackgroundPipeline, .m_SamplersBindings = Bind }) == nullptr ? pSkyBg : nullptr;
                 }
                 if( m_pSkyBackground )
                 {
                     Cmd.setPipelineInstance(m_SkyBackgroundInstance);
-                    Cmd.setPushConstants(details::push_sky_background{ W2C.Inverse(), xmath::fvec4(Scene.m_Sky.m_Intensity, float(View.m_Width), float(View.m_Height), 0) });
+                    Cmd.setPushConstants(details::push_sky_background{ W2C.Inverse(), xmath::fvec4(SkyBgI, float(View.m_Width), float(View.m_Height), 0) });
                     Cmd.setBuffer(m_FullscreenVB);
                     Cmd.setBuffer(m_FullscreenIB);
                     Cmd.Draw(3);

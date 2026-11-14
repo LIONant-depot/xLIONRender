@@ -180,6 +180,8 @@ namespace xlionrender
         float           m_Intensity     = 0.0f;
         bool            m_bVisible      = false;        // the cubemap is also drawn as the background: seen from inside an infinitely far sphere, behind everything (m_Intensity times its colors)
         const xgpu::texture* m_pCubemap = nullptr;      // a cubemap texture lights instead of the gradient (its colors times m_Intensity; HDR or not)
+        const xgpu::texture* m_pBackground = nullptr;   // the background's own cubemap (a SkyDome's; null: m_pCubemap) and its intensity (< 0: m_Intensity)
+        float           m_BackgroundIntensity = -1.0f;
     };
 
     // A reflection probe: the renderer captures the scene around m_Position (6 faces, prefiltered like the sky) and surfaces in its
