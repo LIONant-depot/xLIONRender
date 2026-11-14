@@ -3570,6 +3570,11 @@ namespace xlionrender
                         const auto KeyOf = [&](const void* p, std::size_t n) { const auto* b = static_cast<const std::uint8_t*>(p); for( std::size_t k = 0; k < n; ++k ) LightsKey = (LightsKey ^ b[k]) * 16777619u; };
                         { const float Sn[7] = { Scene.m_Sun.m_Direction[0], Scene.m_Sun.m_Direction[1], Scene.m_Sun.m_Direction[2], Scene.m_Sun.m_Color[0], Scene.m_Sun.m_Color[1], Scene.m_Sun.m_Color[2], Scene.m_Sun.m_Intensity }; KeyOf(Sn, sizeof(Sn)); }
                         for( const auto& LL : Scene.m_LocalLights ) { const float Ls[5] = { LL.m_Position[0], LL.m_Position[1], LL.m_Position[2], LL.m_Intensity, LL.m_Radius }; KeyOf(Ls, sizeof(Ls)); }
+                        // (C55, 2026-11-14: the sky, the ambient, the sun's GI switch and the emissive scale too - a change of any of them left the store's old light
+                        // in place, and a settled view kept it: Bistro graded with the sky turned off still showed the sky's bounce)
+                        { const float Sk[16] = { Scene.m_Sky.m_Intensity, Scene.m_Sky.m_Zenith[0], Scene.m_Sky.m_Zenith[1], Scene.m_Sky.m_Zenith[2], Scene.m_Sky.m_Horizon[0], Scene.m_Sky.m_Horizon[1], Scene.m_Sky.m_Horizon[2]
+                                               , Scene.m_Sky.m_Ground[0], Scene.m_Sky.m_Ground[1], Scene.m_Sky.m_Ground[2], Scene.m_Ambient[0], Scene.m_Ambient[1], Scene.m_Ambient[2], Scene.m_Sun.m_bGI ? 1.0f : 0.0f, Scene.m_GI.m_EmissiveScale, Scene.m_Sky.m_pCubemap ? 1.0f : 0.0f };
+                          KeyOf(Sk, sizeof(Sk)); }
                         if( (s_Ref[0] > 0 || Scene.m_GI.m_bPathTraced || Scene.m_bDebugReflectionPathTraced) && m_pGITrace && m_pGITrace->RefStep(Window, std::size_t(View.m_GIScreenWidth) * View.m_GIScreenHeight, m_Device.getFrameIndex(), s_Ref[0] > 0 ? s_Ref[0] : 1 << 18, s_Ref[1], LightsKey) )
                         {
                             m_pGatherRefS = m_pGITrace->RefSamples(); m_pGatherRefA = m_pGITrace->RefAccum();
