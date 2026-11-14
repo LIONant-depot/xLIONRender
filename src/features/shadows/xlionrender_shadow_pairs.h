@@ -88,6 +88,8 @@ namespace xlionrender
         {
             m_bSlotUsed[m_Slot] = true;
             m_nCandidates = int(Candidates.size());
+            { static const bool s_bWork = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static double s_B = 0; static int s_N = 0;      // (A39 CPUWORK: what a shadow pairing uploads)
+              if( s_bWork ) { s_B += double(Candidates.size_bytes() + L2L.size_bytes() + Pages.size_bytes()); if( ++s_N == 120 ) { std::printf("CPUWORK shadow pairs %d candidates, %zu draws, %zu pages, upload %.0f KB a call\n", m_nCandidates, L2L.size(), Pages.size(), s_B / s_N / 1024.0); std::fflush(stdout); s_B = 0; s_N = 0; } } }
             (void)m_Pages.MemoryMapFrameRegion(m_Slot * max_pages_v, int(Pages.size()), [&](void* p) { std::memcpy(p, Pages.data(), Pages.size_bytes()); });
             if( Candidates.empty() ) return;
             (void)m_Candidates.MemoryMapFrameRegion(m_Slot * max_candidates_v, m_nCandidates, [&](void* p) { std::memcpy(p, Candidates.data(), Candidates.size_bytes()); });

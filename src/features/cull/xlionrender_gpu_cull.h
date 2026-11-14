@@ -16,7 +16,7 @@ namespace xlionrender
     public:
 
         static constexpr int max_candidates_v  = 1 << 16;     // ponytail: a frame's cap; past it the clusters take the CPU path
-        static constexpr int max_draws_v       = 1 << 14;     // their draws' local to clip
+        static constexpr int max_groups_v      = 1 << 15;     // LOD groups (a submesh of a draw each; A39 S3: the LOD picked on the GPU)
         static constexpr int max_runs_v        = 1 << 14;
         static constexpr int max_vis_v         = 1 << 20;     // visibility entries (a cluster of an instance slot each)
         static constexpr int ring_frames_v     = 3;           // (instance::ring_frames_v)
@@ -29,10 +29,16 @@ namespace xlionrender
             std::int32_t                m_VertexOffset;
             details::push_static_geom   m_Record;
             std::uint32_t               m_VisKey = 0;           // its visibility's entry (VisKey)
-            std::uint32_t               m_Pad    = 0;
+            std::uint32_t               m_Group  = ~0u;         // its LOD group | its LOD << 28 (~0: no LOD test - A39 S3)
             float                       m_Center[4], m_Half[4];
         };
         static_assert(sizeof(candidate) == 96);
+        struct lod_group        // std430 (xlionrender_cull_comp.glsl lod_group): a submesh's LOD 0 box (local), its LODs' errors (1..8; 1e30: none), count, finest resident
+        {
+            float                       m_Center[4], m_Half[4], m_Err[8];
+            std::uint32_t               m_nLODs, m_Finest, m_Pad0 = 0, m_Pad1 = 0;
+        };
+        static_assert(sizeof(lod_group) == 80);
 
         // (its GPU objects go with it: xGPU defers their release)
         bool Init( xgpu::device& Device, std::span<const std::uint32_t> CullSPIRV, std::span<const std::uint32_t> HiZSPIRV ) noexcept
@@ -43,13 +49,13 @@ namespace xlionrender
             auto* pZeros = const_cast<std::uint32_t*>(Zeros.data());
             return Device.hasDrawIndirectCount()
                 && !Device.Create(m_Shader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw(CullSPIRV) })
-                && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 7, .m_PushConstantsSize = 32, .m_pName = "gpu_cull: m_Compute" })
+                && !Device.Create(m_Compute, { .m_pShader = &m_Shader, .m_nBuffers = 8, .m_PushConstantsSize = 112, .m_pName = "gpu_cull: m_Compute" })
                 && !Device.Create(m_HiZShader, { .m_Type = xgpu::shader::type::bit::COMPUTE, .m_Sharer = Raw(HiZSPIRV) })
                 && !Device.Create(m_HiZCompute, { .m_pShader = &m_HiZShader, .m_nBuffers = 2, .m_nTextures = 1, .m_PushConstantsSize = 32, .m_pName = "gpu_cull: m_HiZCompute" })
                 && !Device.Create(m_HiZCounter, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = 1, .m_pData = pZeros, .m_pName = "Culling: HiZ counter" })
                 && !Device.Create(m_Times, { .m_Count = 4 })
                 && !Device.Create(m_Candidates, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(candidate), .m_EntryCount = ring_frames_v * max_candidates_v, .m_pName = "Culling: candidates" })
-                && !Device.Create(m_Matrices, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(xmath::fmat4), .m_EntryCount = ring_frames_v * max_draws_v, .m_pName = "Culling: matrices" })
+                && !Device.Create(m_Groups, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::CPU_WRITE_GPU_READ, .m_EntryByteSize = sizeof(lod_group), .m_EntryCount = ring_frames_v * max_groups_v, .m_pName = "Culling: LOD groups" })
                 && !Device.Create(m_Zeros, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros, .m_pName = "Culling: zeros" })
                 // a count a run and pass (pass 2's at max_runs_v), read back a ring later (a region of both a ring frame)
                 && !Device.Create(m_Counts, { .m_Type = xgpu::buffer::type::STORAGE, .m_Usage = usage::GPU_READ, .m_EntryByteSize = sizeof(std::uint32_t), .m_EntryCount = counts_v, .m_pData = pZeros, .m_pName = "Culling: counts" })
@@ -134,17 +140,30 @@ namespace xlionrender
         // This frame's candidates and their draws' local to clip into its region, the runs' counts zeroed, pass 1 (outside a render pass):
         // bOcclusion, what was visible last frame (Occlude follows); else every cluster in the view. Prepass: per run, whether it is a
         // prepass run (the stats); Second: pass 2's first command (pass 1's runs' room)
-        void Cull( xgpu::window& Window, std::span<const candidate> Candidates, std::span<const xmath::fmat4> L2C, std::span<const std::uint8_t> Prepass, std::uint32_t Second, bool bOcclusion ) noexcept
+        // (A39 S1/S3/S4, 2026-11-14: the draws' matrices are the instance buffer's (Instances), the view one matrix (View: the instance
+        // buffer's origin to clip), the LOD picked on the GPU (Eye: the eye from that origin, w: pixels per unit at 1 / the LOD's pixels, 0:
+        // none). The list (candidates, groups) goes up only when bListChanged - into the next list slot; else the last one is culled again:
+        // a frame whose scene did not change uploads nothing but the push constants)
+        void Cull( xgpu::window& Window, std::span<const candidate> Candidates, std::span<const lod_group> Groups, bool bListChanged, xgpu::buffer& Instances
+                 , const xmath::fmat4& View, const std::array<float, 4>& Eye, std::span<const std::uint8_t> Prepass, std::uint32_t Second, bool bOcclusion ) noexcept
         {
             m_SlotPrepass[m_Slot].assign(Prepass.begin(), Prepass.end());
             m_SlotOccluded[m_Slot] = bOcclusion;
             m_nCandidates = int(Candidates.size());
             m_Second      = Second;
+            m_pInstances  = &Instances;
+            std::memcpy(m_View.data(), &View, sizeof(float) * 16);
+            m_Eye         = Eye;
             if( Candidates.empty() ) return;
             const int nRuns = int(Prepass.size());
             Window.WriteTimestamp(m_Times, 0);
-            (void)m_Candidates.MemoryMapFrameRegion(m_Slot * max_candidates_v, m_nCandidates, [&](void* p) { std::memcpy(p, Candidates.data(), Candidates.size_bytes()); });
-            (void)m_Matrices.MemoryMapFrameRegion(m_Slot * max_draws_v, int(L2C.size()), [&](void* p) { std::memcpy(p, L2C.data(), L2C.size_bytes()); });
+            if( bListChanged || m_ListSlot < 0 )
+            {
+                m_ListSlot = (m_ListSlot + 1) % ring_frames_v;
+                ++m_nListUploads;
+                (void)m_Candidates.MemoryMapFrameRegion(m_ListSlot * max_candidates_v, m_nCandidates, [&](void* p) { std::memcpy(p, Candidates.data(), Candidates.size_bytes()); });
+                if( !Groups.empty() ) (void)m_Groups.MemoryMapFrameRegion(m_ListSlot * max_groups_v, int(Groups.size()), [&](void* p) { std::memcpy(p, Groups.data(), Groups.size_bytes()); });
+            }
             const std::array Z{ xgpu::buffer::copy{ 0, 0, nRuns }, xgpu::buffer::copy{ max_runs_v, max_runs_v, nRuns }, xgpu::buffer::copy{ 2 * max_runs_v, 2 * max_runs_v, 3 } };
             Window.CopyBuffer(m_Zeros, m_Counts, Z);
             Dispatch(Window, bOcclusion ? 0u : 2u, m_Zeros, 0, 0);
@@ -186,10 +205,13 @@ namespace xlionrender
 
         void Dispatch( xgpu::window& Window, std::uint32_t Mode, xgpu::buffer& HiZ, int W, int H ) noexcept
         {
-            const std::uint32_t Push[8] = { std::uint32_t(m_Slot * max_candidates_v), std::uint32_t(m_nCandidates), std::uint32_t(m_Slot * max_draws_v), Mode
-                                          , m_Second, std::uint32_t(max_runs_v), std::uint32_t(W), std::uint32_t(H) };
-            auto Buffers = std::array<xgpu::buffer*, 7>{ &m_Candidates, &m_Matrices, &m_Counts, &m_Commands, &m_Records, &m_Vis, &HiZ };
-            Window.Dispatch(m_Compute, Buffers, Push, sizeof(Push), (m_nCandidates + 63) / 64);
+            struct { std::uint32_t m_U[8]; float m_View[16]; float m_Eye[4]; } Push;
+            static_assert(sizeof(Push) == 112);
+            const std::uint32_t U[8] = { std::uint32_t(m_ListSlot * max_candidates_v), std::uint32_t(m_nCandidates), std::uint32_t(m_ListSlot * max_groups_v), Mode
+                                       , m_Second, std::uint32_t(max_runs_v), std::uint32_t(W), std::uint32_t(H) };
+            std::memcpy(Push.m_U, U, sizeof(U)); std::memcpy(Push.m_View, m_View.data(), sizeof(Push.m_View)); std::memcpy(Push.m_Eye, m_Eye.data(), sizeof(Push.m_Eye));
+            auto Buffers = std::array<xgpu::buffer*, 8>{ &m_Candidates, m_pInstances, &m_Counts, &m_Commands, &m_Records, &m_Vis, &HiZ, &m_Groups };
+            Window.Dispatch(m_Compute, Buffers, &Push, sizeof(Push), (m_nCandidates + 63) / 64);
         }
 
         void CountsBack( xgpu::window& Window ) noexcept        // (read when the slot comes round again)
@@ -200,7 +222,14 @@ namespace xlionrender
 
         xgpu::shader        m_Shader, m_HiZShader;
         xgpu::compute       m_Compute, m_HiZCompute;
-        xgpu::buffer        m_Candidates, m_Matrices, m_Zeros, m_CountsHost, m_Vis, m_HiZCounter;
+        xgpu::buffer        m_Candidates, m_Groups, m_Zeros, m_CountsHost, m_Vis, m_HiZCounter;
+        xgpu::buffer*       m_pInstances = nullptr;         // (the instance buffer: the draws' matrices - A39 S1)
+        std::array<float, 16> m_View{};
+        std::array<float, 4>  m_Eye{};
+        int                 m_ListSlot = -1;                // (the list slot the cull reads: a new one each time the list changes - A39 S4)
+    public:
+        std::int64_t        m_nListUploads = 0;             // (measurement: how often the list went up)
+    private:
         xgpu::timestamps    m_Times;
         std::array<std::vector<std::uint8_t>, ring_frames_v> m_SlotPrepass;
         std::array<bool, ring_frames_v>                      m_SlotOccluded{};

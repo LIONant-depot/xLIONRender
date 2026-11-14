@@ -809,8 +809,8 @@ namespace xlionrender
         // state (records pipeline, material, geometry, GI buffer), a prepass run a geometry (m_pInstance null). XLION_NO_GPU_CULL=1: the CPU path
         struct cull_run { xgpu::pipeline_instance* m_pInstance; material_slot* m_pMat; const cluster_geom* m_pGeom; xgpu::buffer* m_pGI; std::uint32_t m_First = 0, m_Max = 0; };
         std::unique_ptr<gpu_cull>                   m_pCull;                // null: not supported (drawIndirectCount)
-        std::vector<gpu_cull::candidate>            m_CullCandidates;
-        std::vector<xmath::fmat4>                   m_CullMatrices;
+        std::vector<gpu_cull::candidate>            m_CullCandidates, m_CullCandidatesLast;     // (Last: last frame's - the list goes up only when it changed, A39)
+        std::vector<gpu_cull::lod_group>            m_CullGroups, m_CullGroupsLast;             // (the LOD groups: the GPU picks the LOD, A39 S3)
         std::vector<cull_run>                       m_CullRuns;
         std::vector<std::uint8_t>                   m_CullPrepass;          // per run: a prepass run
         struct cull_frozen { bool m_bValid = false; std::size_t m_nRuns = 0; std::uint32_t m_Second = 0; bool m_bPass2 = false; } m_CullFrozen;   // the last cull (m_bFreezeCull)

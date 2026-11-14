@@ -236,6 +236,47 @@ int main()
                 for (int k = 0; k < 5; ++k) CHECK(App.RenderFrame(Occluded, View, Camera), "Render again %d", k);
                 CHECK(!Renderer.getCullStats().m_bOcclusionSkipped, "The view-size rule off: occlusion on again");
             }
+
+            // The LOD picked on the GPU (A39 S3, 2026-11-14): a geometry of two LODs - LOD 1 the first half of LOD 0's triangles - over the open
+            // field. Every LOD's clusters are candidates and the shader keeps the picked one; the CPU's pick (the frame budget's path) is the
+            // reference: the same picture at every error, and as the error grows the field goes from all LOD 1 toward LOD 0 through a mix
+            {
+                auto G2 = Buffers.Geom();
+                const std::uint32_t nHalf = Buffers.m_nIndices / 6u * 3u;
+                G2.m_Clusters.push_back({ 0, nHalf, 0, G2.m_BBox });
+                G2.m_LODSubmeshes = { { { 0, 1, 0 } }, { { 1, 1, 0 } } };
+                G2.m_SubBoxes     = { G2.m_BBox };
+                Camera.LookAt(xmath::fvec3{ 0, 1.5f, -2 }, xmath::fvec3{ 0, 0, 12 });
+                std::int64_t Prev = -1;
+                int nMixed = 0;
+                for (const float Err : { 1e-5f, 1e-4f, 1e-3f, 1e-2f, 1e-1f })
+                {
+                    G2.m_LODErrors = { { 0.0f }, { Err } };
+                    xlionrender::mesh_id Lods;
+                    CHECK(!Renderer.CreateClusterGeom(Lods, G2), "CreateClusterGeom with LODs");
+                    auto Field = Scene;
+                    for (auto& D : Field.m_Draws) D.m_Mesh = Lods;
+                    Renderer.m_FrameBudgetMs = 1000.0f;         // (the CPU's pick)
+                    for (int k = 0; k < 3; ++k) CHECK(App.RenderFrame(Field, View, Camera), "Render LODs, the CPU's pick %d", k);
+                    CHECK(ReadHDR(Device, View, CPU), "Read LODs, the CPU's pick");
+                    Renderer.m_FrameBudgetMs = 0;               // (the GPU's pick)
+                    for (int k = 0; k < 5; ++k) CHECK(App.RenderFrame(Field, View, Camera), "Render LODs, the GPU's pick %d", k);
+                    CHECK(ReadHDR(Device, View, GPU), "Read LODs, the GPU's pick");
+                    const auto St = Renderer.getCullStats();
+                    int nLod = 0;
+                    for (std::size_t i = 0; i < CPU.size(); ++i) nLod += CPU[i] != GPU[i];
+                    const std::int64_t All0 = std::int64_t(St.m_nDrawn) * (Buffers.m_nIndices / 3), All1 = std::int64_t(St.m_nDrawn) * (nHalf / 3);
+                    std::printf("LOD on the GPU, error %g: %d candidates, %d drawn, %lld triangles (all LOD 0 %lld, all LOD 1 %lld), %d texels differ from the CPU's pick\n"
+                               , Err, St.m_nCandidates, St.m_nDrawn, (long long)St.m_nTriangles, (long long)All0, (long long)All1, nLod);
+                    CHECK(nLod == 0, "LOD error %g: %d texels differ from the CPU's pick", Err, nLod);
+                    CHECK(St.m_nCandidates == 2 * int(Field.m_Draws.size()) && St.m_nTriangles >= All1 && St.m_nTriangles <= All0, "LOD error %g: %d candidates, %lld triangles", Err, St.m_nCandidates, (long long)St.m_nTriangles);
+                    CHECK(Prev < 0 || St.m_nTriangles >= Prev, "LOD error %g: fewer triangles (%lld) than at a smaller error (%lld) - a larger error keeps LOD 0 nearer", Err, (long long)St.m_nTriangles, (long long)Prev);
+                    nMixed += St.m_nTriangles > All1 && St.m_nTriangles < All0;
+                    Prev = St.m_nTriangles;
+                    Renderer.DestroyMesh(Lods);
+                }
+                CHECK(nMixed > 0, "No error gave a field of both LODs");
+            }
         }
 
         Renderer.m_bFrustumCull = true;

@@ -12,24 +12,33 @@ struct candidate
     uvec4   Runs;           // its run, the run's first command, its prepass run (0xFFFFFFFF: none), that run's first command
     uvec4   Draw;           // its draw's matrix, the command: index count, first index, vertex offset
     uvec4   Rec0;           // the record: cluster, instance, GI offset, GI level
-    uvec4   Rec1;           //   material base, GI vertex delta; its visibility's entry
+    uvec4   Rec1;           //   material base, GI vertex delta; its visibility's entry; w: its LOD group | its LOD << 28 (0xFFFFFFFF: no LOD test)
     vec4    Center;         // its box (local)
     vec4    Half;
 };
+// (A39 S1, 2026-11-14: the draw's matrix from the instance buffer the vertex shader reads - nothing a draw uploaded a frame; the view in
+// the push constants. Rows: local -> the instance buffer's origin, xlionrender_plan_forward.h instance_data)
+struct instance_t { vec4 L2W[3]; vec4 Material[3]; vec4 Prev[3]; };
+// (A39 S3: a LOD group - a submesh's LOD 0 box, its LODs' errors (object space, k = 1..8; 1e30: none), its LOD count and finest resident;
+// the shader picks its LOD as cluster_geom::PickLOD did on the CPU, each LOD's clusters are candidates and keep only the picked one)
+struct lod_group { vec4 Center; vec4 Half; vec4 Err[2]; uvec4 Info; };
 layout(std430, set = 0, binding = 0) readonly  buffer cand_b    { candidate C[]; };
-layout(std430, set = 0, binding = 1) readonly  buffer mat_b     { mat4 L2C[]; };
+layout(std430, set = 0, binding = 1) readonly  buffer inst_b    { instance_t Inst[]; };
 layout(std430, set = 0, binding = 2)           buffer count_b   { uint Counts[]; };     // pass 1's, then (at m_RunsCap) pass 2's; at 2 m_RunsCap: the triangles shaded,
                                                                                          // then the triangles in the view and those pass 2 hid (adaptive occlusion)
 layout(std430, set = 0, binding = 3) writeonly buffer cmd_b     { uint Cmd[]; };        // VkDrawIndexedIndirectCommand: 5 each
 layout(std430, set = 0, binding = 4) writeonly buffer rec_b     { uint Rec[]; };        // the vertex shader's DrawRecord: 6 each
 layout(std430, set = 0, binding = 5)           buffer vis_b     { uint Vis[]; };        // 1: visible last frame
 layout(std430, set = 0, binding = 6) readonly  buffer hiz_b     { float HiZ[]; };       // xlionrender_hiz_comp.glsl
+layout(std430, set = 0, binding = 7) readonly  buffer group_b   { lod_group Groups[]; };
 
 layout(push_constant) uniform push_t
 {
-    uint m_First, m_Count, m_MatBase, m_Mode;   // this frame's candidates and matrices; 0: pass 1, 1: pass 2, 2: frustum only
+    uint m_First, m_Count, m_GroupBase, m_Mode; // the candidates and LOD groups in use; 0: pass 1, 1: pass 2, 2: frustum only
     uint m_Second, m_RunsCap;                   // pass 2's commands: after pass 1's (m_Second on); its counts: m_RunsCap on
     uint m_W, m_H;                              // Hi-Z level 0's size (the view's)
+    mat4 m_View;                                // the instance buffer's origin to clip
+    vec4 m_Eye;                                 // the eye from that origin; w: pixels per unit at distance 1 / the LOD's pixels (0: no LOD test)
 } Push;
 
 void Append(uint Run, uint First, candidate K, uvec4 R0, uvec2 R1, uint Pass)
@@ -75,7 +84,29 @@ void main()
     const uint i = gl_GlobalInvocationID.x;
     if (i >= Push.m_Count) return;
     const candidate K = C[Push.m_First + i];
-    const mat4 M = L2C[Push.m_MatBase + K.Draw.x];
+    const instance_t I = Inst[K.Rec0.y];
+    const mat4 L2W = transpose(mat4(I.L2W[0], I.L2W[1], I.L2W[2], vec4(0, 0, 0, 1)));
+    const mat4 M = Push.m_View * L2W;
+
+    // Its LOD group's pick (cluster_geom::PickLOD): the coarsest LOD whose error, the draw's scale larger, stays under the pixels at the
+    // distance from the eye to the group's box; clamped to the finest resident and the last; only that LOD's clusters go on
+    if (K.Rec1.w != 0xFFFFFFFFu && Push.m_Eye.w > 0.0)
+    {
+        const lod_group G = Groups[Push.m_GroupBase + (K.Rec1.w & 0x0FFFFFFFu)];
+        const vec3  Cw = (L2W * vec4(G.Center.xyz, 1.0)).xyz;
+        const vec3  Hw = abs(L2W[0].xyz) * G.Half.x + abs(L2W[1].xyz) * G.Half.y + abs(L2W[2].xyz) * G.Half.z;
+        const float Dist  = length(clamp(Push.m_Eye.xyz, Cw - Hw, Cw + Hw) - Push.m_Eye.xyz);
+        const float Scale = max(max(length(L2W[0].xyz), length(L2W[1].xyz)), length(L2W[2].xyz));
+        const int   n = int(G.Info.x);
+        int k = 0;
+        while (k + 1 < n && k < 8 && G.Err[(k) >> 2][(k) & 3] * Scale * Push.m_Eye.w <= Dist) ++k;     // (Err[j] is LOD j + 1's)
+        const int Eff = clamp(max(k, int(G.Info.y)), 0, n - 1);
+        if (uint(Eff) != (K.Rec1.w >> 28))
+        {
+            if (Push.m_Mode == 1u) Vis[K.Rec1.z] = 0u;      // (not drawn this frame: pass 1 next frame does not take it as seen)
+            return;
+        }
+    }
 
     // The box in clip space: its center and half axes; outside a clip plane P when its nearest corner is: dot(P, center) + sum |dot(P, axis)| < 0
     const vec4 Cc = M * vec4(K.Center.xyz, 1.0);

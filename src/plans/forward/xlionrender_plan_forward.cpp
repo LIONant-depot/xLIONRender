@@ -3879,7 +3879,9 @@ namespace xlionrender
             // candidate each, in runs (a bind state each; a prepass run a geometry), culled here - outside the pass - into their runs' commands
             static const bool s_bNoGPUCull     = xlionrender::Env("XLION_NO_GPU_CULL") != nullptr;
             static const bool s_bNoGPUOcclusion = xlionrender::Env("XLION_NO_GPU_OCCLUSION") != nullptr;
-            m_CullCandidates.clear(); m_CullMatrices.clear(); m_CullRuns.clear(); m_CullRunOf.clear(); m_CullSub.clear();
+            const auto CullCpu0 = std::chrono::steady_clock::now();      // (A39 CPUWORK: the main view's candidate walk, its CPU ms and bytes)
+            std::swap(m_CullCandidates, m_CullCandidatesLast); std::swap(m_CullGroups, m_CullGroupsLast);      // (A39 S4: last frame's list, to tell whether it changed)
+            m_CullCandidates.clear(); m_CullGroups.clear(); m_CullRuns.clear(); m_CullRunOf.clear(); m_CullSub.clear();
             if( bMain ) m_LODReport = {};
             m_CullSubBase.assign(Scene.m_Draws.size(), ~0u);
             bool          bOcclude   = false;       // the two passes: pass 1 (seen last frame), the Hi-Z, pass 2 (the rest)
@@ -3899,9 +3901,9 @@ namespace xlionrender
                     const auto&         D     = Scene.m_Draws[iDraw];
                     const auto*         pMesh = Vis.m_pMesh;
                     const std::uint32_t Slot  = m_DrawSlot[iDraw];
-                    if( !pMesh->m_bCluster || Slot == instance_slots::none_v || pMesh->m_Geom.m_Kind == geom_kind::SKIN || m_CullMatrices.size() == std::size_t(gpu_cull::max_draws_v) ) continue;
+                    if( !pMesh->m_bCluster || Slot == instance_slots::none_v || pMesh->m_Geom.m_Kind == geom_kind::SKIN ) continue;
                     const auto&         G     = pMesh->m_Geom;
-                    const auto          Draw  = std::uint32_t(m_CullMatrices.size());
+                    const auto          Draw  = std::uint32_t(0);      // (A39 S1: the matrix is the instance buffer's, by the record's slot)
                     const auto          Base  = std::uint32_t(m_CullSub.size());
                     const auto          VisBase = m_pCull->VisKey(Slot, std::uint32_t(G.m_Clusters.size()));
                     const std::uint32_t SkipBase = bPlan ? m_ClusterBase[iDraw] : ~0u;
@@ -3917,10 +3919,30 @@ namespace xlionrender
                     const bool  bPick    = s_MainLOD == 0 && s_LODPixels > 0 && G.m_LODSubmeshes.size() > 1 && G.m_SubBoxes.size() == G.m_Submeshes.size() && m_LODProjScale > 0;
                     const float L2WScale = bPick ? std::max({ (D.m_L2W * xmath::fvec3{ 1, 0, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length(), (D.m_L2W * xmath::fvec3{ 0, 1, 0 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length()
                                                             , (D.m_L2W * xmath::fvec3{ 0, 0, 1 } - D.m_L2W * xmath::fvec3{ 0, 0, 0 }).Length() }) : 1.0f;
+                    // (A39 S3, 2026-11-14: the LOD picked on the GPU (xlionrender_cull_comp.glsl lod_group) - every resident LOD's clusters are
+                    // candidates, the shader keeps the picked one: the list no longer depends on the camera. The frame budget (bPlan) keeps the
+                    // CPU's pick: its skip list is the drawn LOD's)
+                    const bool bGPULOD = bPick && !bPlan;
+                    const int  nLODs   = bGPULOD ? int(std::min(G.m_LODErrors.size(), G.m_LODSubmeshes.size())) : 0;
                     for( std::size_t s = 0; s < G.m_Submeshes.size(); ++s )
+                    for( int kLOD = bGPULOD ? std::min(G.m_FinestLOD, nLODs - 1) : 0; kLOD < (bGPULOD ? nLODs : 1); ++kLOD )
                     {
-                        int Lod = s_MainLOD;
-                        if( bPick )
+                        int Lod = bGPULOD ? kLOD : s_MainLOD;
+                        std::uint32_t GroupId = ~0u;
+                        if( bGPULOD )
+                        {
+                            if( kLOD == std::min(G.m_FinestLOD, nLODs - 1) )     // (the group: once a submesh)
+                            {
+                                gpu_cull::lod_group Gr{};
+                                const auto C = G.m_SubBoxes[s].getCenter(), H = (G.m_SubBoxes[s].m_Max - G.m_SubBoxes[s].m_Min) * 0.5f;
+                                Gr.m_Center[0] = C.m_X; Gr.m_Center[1] = C.m_Y; Gr.m_Center[2] = C.m_Z; Gr.m_Half[0] = H.m_X; Gr.m_Half[1] = H.m_Y; Gr.m_Half[2] = H.m_Z;
+                                for( int j = 0; j < 8; ++j ) { const std::size_t k = std::size_t(j + 1); Gr.m_Err[j] = k < G.m_LODErrors.size() && s < G.m_LODErrors[k].size() ? G.m_LODErrors[k][s] : 1e30f; }
+                                Gr.m_nLODs = std::uint32_t(nLODs); Gr.m_Finest = std::uint32_t(std::max(G.m_FinestLOD, 0));
+                                m_CullGroups.push_back(Gr);
+                            }
+                            GroupId = std::uint32_t(m_CullGroups.size() - 1) | (std::uint32_t(kLOD) << 28);
+                        }
+                        else if( bPick )
                         {
                             const auto B = G.m_SubBoxes[s].TransformCopy(D.m_L2W);
                             const auto Near = xmath::fvec3::Max(B.m_Min, xmath::fvec3::Min(Eye, B.m_Max));
@@ -3929,7 +3951,7 @@ namespace xlionrender
                             m_LODReport.m_nLODs = std::max(m_LODReport.m_nLODs, int(G.m_LODErrors.size()));
                             for( std::size_t k = 1; k < 4 && k < G.m_LODErrors.size(); ++k ) if( s < G.m_LODErrors[k].size() ) m_LODReport.m_MinError[k] = std::min(m_LODReport.m_MinError[k], G.m_LODErrors[k][s]);
                         }
-                        const auto& Sub  = Lod > 0 ? G.LODSubmeshes(Lod)[s] : G.m_Submeshes[s];
+                        const auto& Sub  = Lod > 0 || bGPULOD ? G.LODSubmeshes(Lod)[s] : G.m_Submeshes[s];
                         auto*       pMat = Sub.m_iMaterial < D.m_Materials.size() ? findMaterial(D.m_Materials[Sub.m_iMaterial]) : nullptr;
                         // (past the caps: the CPU path; a submesh adds at most a run a cluster and its prepass run)
                         if( pMat == nullptr || !Opaque(pMat) || m_CullCandidates.size() + Sub.m_nClusters > std::size_t(gpu_cull::max_candidates_v)
@@ -3954,12 +3976,12 @@ namespace xlionrender
                             m_CullCandidates.push_back({ .m_Run = Run, .m_RunFirst = 0
                                                        , .m_PrepassRun = Prepass, .m_PrepassFirst = 0
                                                        , .m_Draw = Draw, .m_nIndices = std::uint32_t(C.m_nIndices), .m_iFirstIndex = std::uint32_t(C.m_iIndex), .m_VertexOffset = std::int32_t(C.m_iVertex)
-                                                       , .m_Record = Rec, .m_VisKey = VisBase + c, .m_Center = { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, 0 }, .m_Half = { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
+                                                       , .m_Record = Rec, .m_VisKey = VisBase + c, .m_Group = GroupId, .m_Center = { Ctr.m_X, Ctr.m_Y, Ctr.m_Z, 0 }, .m_Half = { Half.m_X, Half.m_Y, Half.m_Z, 0 } });
                         }
                         m_CullSub[Base + s] = 1;
                         bAny = true;
                     }
-                    if( bAny ) { m_CullSubBase[iDraw] = Base; m_CullMatrices.push_back(W2C * ToEye * D.m_L2W); }
+                    if( bAny ) m_CullSubBase[iDraw] = Base;
                     else m_CullSub.resize(Base);
                 }
                 std::uint32_t First = 0;        // a run's commands: its candidates' room
@@ -3983,7 +4005,18 @@ namespace xlionrender
                     m_CullPrevEye = Eye; m_CullPrevFwd = Fwd(W2C);
                     m_pCull->Begin(m_Device.getFrameIndex());
                     bOcclude = bPass2 = m_bGPUOcclusion && !s_bNoGPUOcclusion && m_pCull->WantOcclusion(bCut, m_GPUOcclusionMinTriangles) && createCullTargets(View) == nullptr;
-                    m_pCull->Cull(Window, m_CullCandidates, m_CullMatrices, m_CullPrepass, CullSecond, bOcclude);
+                    // (A39: the list goes up only when it changed; the view one matrix from the instance buffer's origin, the eye from it and
+                    // the LOD's pixels per unit for the GPU's LOD pick)
+                    const bool bListChanged = m_CullCandidates.size() != m_CullCandidatesLast.size() || m_CullGroups.size() != m_CullGroupsLast.size()
+                        || std::memcmp(m_CullCandidates.data(), m_CullCandidatesLast.data(), m_CullCandidates.size() * sizeof(m_CullCandidates[0])) != 0
+                        || std::memcmp(m_CullGroups.data(), m_CullGroupsLast.data(), m_CullGroups.size() * sizeof(m_CullGroups[0])) != 0;
+                    static const float s_LODPx = [] { const char* p = xlionrender::Env("XLION_LOD_PIXELS"); return p ? float(std::atof(p)) : 1.0f; }();
+                    const xmath::fmat4 CullView = W2C * ToEye * xmath::fmat4::fromTranslation(m_Origin);
+                    const std::array<float, 4> CullEye = { Eye.m_X - m_Origin.m_X, Eye.m_Y - m_Origin.m_Y, Eye.m_Z - m_Origin.m_Z, s_LODPx > 0 && m_LODProjScale > 0 ? m_LODProjScale / s_LODPx : 0.0f };
+                    m_pCull->Cull(Window, m_CullCandidates, m_CullGroups, bListChanged, m_InstanceBuffer, CullView, CullEye, m_CullPrepass, CullSecond, bOcclude);
+                    { static const bool s_bWork = xlionrender::Env("XLION_GPU_TIMES") != nullptr; static double s_Ms = 0, s_B = 0, s_G = 0; static int s_N = 0, s_Up = 0;      // (A39: what the CPU rebuilds and uploads a frame)
+                      if( s_bWork ) { s_Ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - CullCpu0).count(); s_B += bListChanged ? double(m_CullCandidates.size() * sizeof(m_CullCandidates[0]) + m_CullGroups.size() * sizeof(m_CullGroups[0])) : 0.0; s_Up += bListChanged ? 1 : 0; s_G += double(m_GatherTable.size() * sizeof(std::uint32_t));
+                          if( ++s_N == 120 ) { std::printf("CPUWORK main cull walk %.3f ms a frame, %zu candidates, %zu LOD groups, list uploaded %d of %d frames, upload %.1f KB a frame; gather table %.0f KB a frame\n", s_Ms / s_N, m_CullCandidates.size(), m_CullGroups.size(), s_Up, s_N, s_B / s_N / 1024.0, s_G / s_N / 1024.0); std::fflush(stdout); s_Ms = s_B = s_G = 0; s_N = 0; s_Up = 0; } } }
                     { auto& G = View.m_Graph; const int S = G.Begin("GPU cull (pass 1)", "group:copy Culling: zeros|gpu_cull: m_Compute", false);
                       G.Read(S, G.Resource("Culling: *", rg::lifetime::RETAINED), rg::usage::STORAGE); G.Read(S, G.Resource("Culling: HiZ pyramid", rg::lifetime::HISTORY), rg::usage::SAMPLED);      // (last frame's pyramid: the occlusion test)
                       G.Write(S, G.Resource("Culling: draw args", rg::lifetime::FRAME), rg::usage::STORAGE, rg::policy::FULL_OVERWRITE); }
