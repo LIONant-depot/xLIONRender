@@ -27,6 +27,16 @@
 #include "plugins/xskeleton.plugin/source/xskeleton_xgpu_rsc_loader.h"
 #include "plugins/xanim_package.plugin/source/xanim_package_xgpu_rsc_loader.h"
 #include "dependencies/xGPU/source/Tools/editors/xgpu_editor_anim_pose.h"     // the pose of a skeleton at a clip's time (the skin editor's preview poses it the same way)
+#include "dependencies/xAnimation/source/xanimation.h"                         // K0: the animation library poses the skeleton too (XLION_ANIM), bit for bit the same arithmetic
+#include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
+#if __has_include("xprofile.h")
+    #include "xprofile.h"
+#else
+    #define XPROFILE_SCOPE(NAME)
+    #define XPROFILE_GPU_SCOPE(TARGET, NAME)
+#endif
+#include <cstdlib>
+#include <cstring>
 
 #include "dependencies/xLIONRender/src/xlionrender_env.h"
 #include <cstdio>
@@ -93,7 +103,10 @@ namespace xlionrender
             float                               m_Margin = 0;       // how far its mesh reaches past those bones at rest (each side, the largest)
         };
         std::unordered_map<std::uint64_t, skinned_entity> m_Skinned;
-        std::vector<xmath::fmat4>                       m_PoseWorlds, m_SkinMatrices;
+        std::vector<xmath::fmat4>                       m_PoseWorlds, m_SkinMatrices, m_CheckWorlds;
+        xanimation::pose                                m_AnimPose;                     // (scratch: the library's local pose of the character being added)
+        std::unordered_map<const void*, xanimation::skeleton_data> m_AnimSkeleton;      // per skeleton resource: the library's copy of its hierarchy and rest pose
+        std::uint64_t                                   m_AnimChecked = 0, m_AnimMismatch = 0;     // XLION_ANIM=check
         xgpu::device*                                   m_pDevice = nullptr;
         std::unordered_set<const void*>                 m_OutlineMade;  // per geometry: its outline mesh given to the renderer (made the first time it is the selected one)      // per geometry: its surfels given to the renderer (1), or it has none (0)
         stats                                           m_Stats;
@@ -397,9 +410,29 @@ namespace xlionrender
 
             const std::uint64_t Pkg = pAnim == nullptr ? 0 : pAnim->m_Package.empty() ? pGeom->getAnimationRef().m_Instance.m_Value : pAnim->m_Package.m_Instance.m_Value;
             auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
-            if (pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && int(pPkg->getBoneNameHashes().size()) == nBones)
-                xgpu::tools::editors::ComputeAnimatedBoneWorlds(*pSkel, *pPkg, pAnim->m_Clip, pAnim->m_Time, m_PoseWorlds);
-            else xgpu::tools::editors::ComputeRestBoneWorlds(*pSkel, m_PoseWorlds);      // (no animation, its package not loaded yet, or another skeleton's)
+            const bool bClip = pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && int(pPkg->getBoneNameHashes().size()) == nBones;
+            const auto Mode  = AnimMode();
+            if (Mode == anim_mode::OLD)
+            {
+                if (bClip) xgpu::tools::editors::ComputeAnimatedBoneWorlds(*pSkel, *pPkg, pAnim->m_Clip, pAnim->m_Time, m_PoseWorlds);
+                else       xgpu::tools::editors::ComputeRestBoneWorlds(*pSkel, m_PoseWorlds);      // (no animation, its package not loaded yet, or another skeleton's)
+            }
+            else
+            {
+                {
+                    XPROFILE_SCOPE("Animation: pose");
+                    PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, m_PoseWorlds);
+                }
+                if (Mode == anim_mode::CHECK)      // both computed: the library must give exactly today's matrices
+                {
+                    if (bClip) xgpu::tools::editors::ComputeAnimatedBoneWorlds(*pSkel, *pPkg, pAnim->m_Clip, pAnim->m_Time, m_CheckWorlds);
+                    else       xgpu::tools::editors::ComputeRestBoneWorlds(*pSkel, m_CheckWorlds);
+                    ++m_AnimChecked;
+                    if (m_CheckWorlds.size() != m_PoseWorlds.size() || std::memcmp(m_CheckWorlds.data(), m_PoseWorlds.data(), m_PoseWorlds.size() * sizeof(xmath::fmat4)) != 0)
+                        if (m_AnimMismatch++ < 8) std::fprintf(stderr, "ANIMCHECK mismatch: entity %llu clip %d time %g\n", (unsigned long long)Entity, bClip ? pAnim->m_Clip : -1, bClip ? pAnim->m_Time : 0.0f);
+                    if ((m_AnimChecked & 0x3FFF) == 1) std::fprintf(stderr, "ANIMCHECK %llu poses checked, %llu mismatches\n", (unsigned long long)m_AnimChecked, (unsigned long long)m_AnimMismatch);
+                }
+            }
 
             auto& E = m_Skinned[Entity];
             if (E.m_pGeom != pGeom || E.m_nBones != nBones)
@@ -469,6 +502,29 @@ namespace xlionrender
             }
             m_Scene.m_Draws.push_back(std::move(D));
         }
+        // XLION_ANIM: who poses the skeletons. new (default): the xAnimation library (K0); old: the code the skin editor shares;
+        // check: the library, and every pose compared bit for bit against the old code (ANIMCHECK lines on stderr).
+        enum class anim_mode { OLD, NEW, CHECK };
+        static anim_mode AnimMode() noexcept
+        {
+            static const anim_mode M = []{ const char* E = std::getenv("XLION_ANIM"); return !E ? anim_mode::NEW : !std::strcmp(E, "old") ? anim_mode::OLD : !std::strcmp(E, "check") ? anim_mode::CHECK : anim_mode::NEW; }();
+            return M;
+        }
+
+        // The library's pose of a skeleton at a clip's time (no clip: its rest pose) as bone worlds. The skeleton's parent array is copied once
+        // per skeleton resource (re-checked against the resource each time: a reload with other parents rebuilds it).
+        void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, std::vector<xmath::fmat4>& Out)
+        {
+            auto& S = m_AnimSkeleton[&Skel];
+            const auto Bones = Skel.getBones();
+            bool bSame = S.m_Parent.size() == Bones.size();
+            for (std::size_t i = 0; bSame && i < Bones.size(); ++i) bSame = S.m_Parent[i] == Bones[i].m_iParent;
+            if (!bSame) S = xanimation::MakeSkeleton(Skel);
+            Out.resize(Bones.size());
+            if (pPkg && xanimation::SampleLocal(xanimation::MakeClipView(*pPkg, iClip), Time, m_AnimPose)) xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out);
+            else xanimation::ComputeBoneWorlds(S.view(), S.m_Rest, Out);
+        }
+
         void ReleaseSkinned(skinned_entity& E) noexcept
         {
             for (auto& M : E.m_Mesh) if (M.isValid()) { m_Renderer.DestroyMesh(M); M = {}; }
