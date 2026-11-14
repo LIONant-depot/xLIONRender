@@ -134,7 +134,7 @@ int main()
     // difference to the direct light is the albedo / pi x the indirect irradiance
     {
         const auto AmbientWas = Scene.m_Ambient;
-        Scene.m_Ambient = { 0, 0, 0 };
+        { const char* pA = std::getenv("C49_AMB"); const float a = pA ? float(std::atof(pA)) : 0.0f; Scene.m_Ambient = { a, a, a }; }      // (C49: C49_AMB=<ambient> keeps a sky - the open front lets it in; then compare the shown GI with the path traced view, the CPU line is the lamp's only)
         Scene.m_GI.m_bEnable = false;
         for (int f = 0; f < 4; ++f) CHECK(App.RenderFrame(Scene, View, Camera), "Render, the direct light");
         const auto Direct = ReadRGB(Device, View, W, H);

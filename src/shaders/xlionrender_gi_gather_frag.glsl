@@ -578,7 +578,21 @@ void main()
     if (bIn) Heat[4u + uint(P.y) * W + uint(P.x)] = max(clock2x32ARB().x - HeatT0, 1u);
 #endif
 
-    const uvec4 Mine = bIn ? uvec4(Kind == 0u ? 1u : 0u, Kind == 1u ? 1u : 0u, Kind == 2u ? 1u : 0u, Kind == 3u ? 1u : 0u) : uvec4(0u);
+    uvec4 Mine = bIn ? uvec4(Kind == 0u ? 1u : 0u, Kind == 1u ? 1u : 0u, Kind == 2u ? 1u : 0u, Kind == 3u ? 1u : 0u) : uvec4(0u);
+    // (C49 measurement, XLION_GI_PROBE_RECT: header entry 7 y, z the rectangle (x0 | x1 << 16, y0 | y1 << 16 half-size pixels), w 1: the counters become
+    // the rectangle's pixels with GI and the sum of their irradiance's luminance x 256 - what the read gives there)
+    if (GIScreen[7].w != 0u)
+    {
+        const uvec2 Rx = uvec2(GIScreen[7].y & 0xFFFFu, GIScreen[7].y >> 16), Ry = uvec2(GIScreen[7].z & 0xFFFFu, GIScreen[7].z >> 16);
+        const bool bR = bIn && uint(P.x) >= Rx.x && uint(P.x) < Rx.y && uint(P.y) >= Ry.x && uint(P.y) < Ry.y && (Out.w & (1u << 30)) != 0u;
+        const vec2 Er = unpackHalf2x16(Out.x), Eb = unpackHalf2x16(Out.y);
+        Mine = uvec4(bR ? 1u : 0u, bR ? uint(clamp(dot(vec3(Er, Eb.x), vec3(0.2126, 0.7152, 0.0722)), 0.0, 1000.0) * 256.0) : 0u, 0u, 0u);
+        if (bR && GITable[push.TableBase + 20u] == 3u)      // (z, w: the finest level's own read there - level 0 alone - and how many pixels had one)
+        {
+            const vec4 R0 = ClipLevel(0, S.P + vec3(TF(25u), TF(26u), TF(27u)), N, vec3(TF(22u), TF(23u), TF(24u)), TF(21u));
+            if (R0.w > 0.0) Mine.zw = uvec2(uint(clamp(dot(R0.xyz, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1000.0) * 256.0), 1u);
+        }
+    }
     const uvec4 Sum  = subgroupAdd(Mine);
     if (subgroupElect())
     {

@@ -3493,6 +3493,9 @@ namespace xlionrender
                 {
                     const auto* pC = static_cast<const std::uint32_t*>(p);
                     m_GIStats.m_nScreenFresh = int(pC[0]); m_GIStats.m_nScreenReprojected = int(pC[1]); m_GIStats.m_nScreenRejected = int(pC[2]); m_GIStats.m_nScreenAged = int(pC[3]);
+                    { static const bool s_bProbe = xlionrender::Env("XLION_GI_PROBE_RECT") != nullptr; static double s_S = 0, s_N = 0, s_S0 = 0, s_N0 = 0; static int s_F = 0;
+                      if( s_bProbe && pC[0] ) { s_S += double(pC[1]) / 256.0; s_N += double(pC[0]); s_S0 += double(pC[2]) / 256.0; s_N0 += double(pC[3]);
+                          if( ++s_F == 120 ) { std::printf("GIPROBE the read's irradiance in the rectangle: mean luminance %.4f over %.0f pixels a frame; level 0 alone %.4f (%.0f pixels)\n", s_S / s_N, s_N / 120.0, s_N0 > 0 ? s_S0 / s_N0 : 0.0, s_N0 / 120.0); std::fflush(stdout); s_S = s_N = s_S0 = s_N0 = 0; s_F = 0; } } }
                 });
                 std::swap(View.m_GIScreenHistory, View.m_GIScreenPrev);      // (the history - what stands still - is its own: the output, m_GIScreenBuffer, is cleared each frame; Tomas 2026-11-13)
                 if( View.m_bGIScreenPerPixel != Scene.m_GI.m_bPerPixel ) View.m_bGIScreenPrev = false;
@@ -3518,6 +3521,8 @@ namespace xlionrender
                         pH[0] = std::uint32_t(View.m_GIScreenWidth); pH[1] = std::uint32_t(View.m_GIScreenHeight);
                         pH[2] = View.m_GIScreenFrame; pH[3] = (bTemporal && View.m_bGIScreenPrev ? 1u : 0u) | (RateLog2 << 1);
                         pH[28] = std::uint32_t(GIScreenDivisor());      // (entry 7.x: the read's resolution divisor - the upsample's, mb_standard_pbr.frag)
+                        { static const std::array<float, 4> s_R = [] { std::array<float, 4> R{ -1, 0, 0, 0 }; if( const char* p = xlionrender::Env("XLION_GI_PROBE_RECT") ) (void)xlionrender::Scan(p, "%f %f %f %f", &R[0], &R[1], &R[2], &R[3]); return R; }();      // (C49 measurement: fractions of the view x0 y0 x1 y1)
+                          if( s_R[0] >= 0.0f ) { const auto Px = [&](float f, int n) { return std::uint32_t(std::clamp(f, 0.0f, 1.0f) * float(n)); }; pH[29] = Px(s_R[0], View.m_GIScreenWidth) | (Px(s_R[2], View.m_GIScreenWidth) << 16); pH[30] = Px(s_R[1], View.m_GIScreenHeight) | (Px(s_R[3], View.m_GIScreenHeight) << 16); pH[31] = 1u; } }      // (entry 7.x: the read's resolution divisor - the upsample's, mb_standard_pbr.frag)
                         static const bool s_bJitFixG = xlionrender::Env("XLION_JITTER_HISTORY_FIX") != nullptr;      // (C22: the GI screen's and AO's accumulated histories - last camera without its jitter, this frame's put back)
                         const xmath::fmat4 PrevG = s_bJitFixG ? xmath::fmat4::fromTranslation(View.m_JitterNdc) * View.m_GIScreenPrevW2CNoJit : View.m_GIScreenPrevW2C;
                         std::memcpy(pH + 4, &PrevG, sizeof(float) * 16);        // (entries 1-4: its columns, as the UBO's mat4)
@@ -3780,9 +3785,13 @@ namespace xlionrender
                             Movers[b] = { { Org[0], Org[1], Org[2] }, 2.0f * Hxz, Hy, M.m_bNew || bJump, 1.0f - std::exp(-Dt / Tau) };
                             std::copy(Org, Org + 3, M.m_Origin); M.m_bNew = false;
                         }
-                        m_GatherTable[30] = 0u;
+                        // (C49, 2026-11-14: word 30 is the voxels' movers' lattice only in the voxels' mode (word 20 3). In the path traced view (word 20 2) it is
+                        // the reflections' graded roughness (negative: the irradiance) - this wrote 0 over it since 2a68af9, the path tracer read 0 as a mirror's
+                        // roughness and traced a mirror lobe instead of the irradiance: every reference since 11-13 was a mirror image, ours graded 92 % off)
+                        const bool bVoxWord30 = m_GatherTable[20] == 3u;
+                        if( bVoxWord30 ) m_GatherTable[30] = 0u;
                         static const int s_MoverSplit = [] { const char* p = xlionrender::Env("XLION_MOVER_PROBES"); return p ? std::atoi(p) : 1; }();      // (C52 narrowing: 2 the probes updated but never read, 3 read but never updated)
-                        if( s_MoverSplit != 2 && !Movers.empty() && m_GatherTable.size() + 8 * Movers.size() <= std::size_t(gather_table_uints_v) )
+                        if( bVoxWord30 && s_MoverSplit != 2 && !Movers.empty() && m_GatherTable.size() + 8 * Movers.size() <= std::size_t(gather_table_uints_v) )
                         {
                             m_GatherTable[30] = std::uint32_t(m_GatherTable.size());
                             // (XLION_MOVER_DEBUG=1, plan v3.1 #5: the movers' GI painted by the path it took - probes green, their last estimates yellow,
