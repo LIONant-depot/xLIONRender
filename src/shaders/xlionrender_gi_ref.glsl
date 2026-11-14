@@ -340,7 +340,7 @@ vec3 VoxDirect(in const vec3 P, in const vec3 N)
     g_DirectNoLamps = true;
     g_DirectNoSunShadow = (Push.m_First & 32768) != 0;      // (XLION_VOX_NO_SUN_SHADOW, measurement: the sun's shadow ray's share - S1's upper bound)
     vec3 E = Direct(P, N);
-    const uint Lt = GD[2], nP = GD[3];
+    const uint Lt = GD[2], nP = ((Push.m_First >> 8) & 7) == 7 ? 0u : GD[3];      // (XLION_VOX_ABLATE=7, measurement C49: the lamps left out of the hits' direct light)
     float Q = 0.0, Dist = 0.0; vec3 Pick = vec3(0.0), Dir = vec3(0.0); float PickQ = 0.0;
     for (uint i = 0u; i < nP; ++i)
     {
