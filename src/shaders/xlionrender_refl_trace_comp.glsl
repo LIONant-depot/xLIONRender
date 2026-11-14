@@ -134,6 +134,36 @@ vec3 PTIrradiance(vec3 P, vec3 N, uint s)
     return Sum * gi_pi_v;
 }
 bool ShadowRay(vec3 O, vec3 L, float TMax) { if (!g_ShadowBySDF) return Occluded(O, L, TMax); float t; return SDFCast(O, L, t) && t < TMax; }
+// A lamp's light at P (the GI's light table, Lt + 57 + 12 k): its direction, colour with falloff and cone, distance; false: out of its reach
+bool LampAt(uint Lt, int k, vec3 P, out vec3 L, out vec3 C, out float d)
+{
+    const uint b = Lt + 57u + 12u * uint(k);
+    const vec3 Dv = GV(b) - P;
+    d = length(Dv); L = vec3(0.0); C = vec3(0.0);
+    const float s = d / GF(b + 6u);
+    if (s >= 1.0 || d < 1e-6) return false;
+    L = Dv / d;
+    const float Co = GF(b + 10u);
+    const float Cone = Co > -1.5 ? smoothstep(Co, max(GF(b + 11u), Co + 1e-6), dot(-L, GV(b + 7u))) : 1.0;
+    if (Cone <= 0.0) return false;
+    C = GV(b + 3u) * ((1.0 - s * s * s * s) / (1.0 + 2.0 * s * s) * Cone);
+    return true;
+}
+void AddLight(vec3 L, vec3 C, float c, vec3 N, vec3 V, vec3 F0, float a2, float NdotV, bool bSpec, inout vec3 E, inout vec3 S)
+{
+    E += C * c;
+    if (!bSpec) return;
+    const vec3  H  = normalize(L + V);
+    const float NdotH = max(dot(N, H), 0.0), Dd = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    const float Vis = 0.5 / max(c * sqrt(NdotV * NdotV * (1.0 - a2) + a2) + NdotV * sqrt(c * c * (1.0 - a2) + a2), 1e-6);
+    const vec3  F  = F0 + (1.0 - F0) * pow(clamp(1.0 - dot(L, H), 0.0, 1.0), 5.0);
+    S += C * c * F * (a2 / (gi_pi_v * Dd * Dd) * Vis);
+}
+// The hit's direct light: the sun with its shadow ray; the lamps - (2026-11-14, A39 reflections: their shadow rays were ~110 of a hit's
+// ~135 BVH visits, the sun's ~25) - a shadow ray only for each lamp bringing at least refl_lamp_share_v of the lamps' light here (the
+// strongest one at least); the others take those rays' mean visibility (weighted by their light): no noise, the error bounded by the
+// weak lamps' share
+const float refl_lamp_share_v = 0.4;
 void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec, out vec3 E, out vec3 S)
 {
     const uint Lt = GD[2];
@@ -142,40 +172,47 @@ void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec,
     const float a  = max(Rough, 0.045) * max(Rough, 0.045), a2 = a * a;
     const float NdotV = max(dot(N, V), 1e-4);
     const vec3 SunD = GV(Lt), SunC = GV(Lt + 3u);
-    for (int k = -1; k < (g_ShadowBySDF ? 0 : int(GD[3])); ++k)      // (through the field: the sun alone; the lamps as the voxels hold them)
+    if ((SunC.x + SunC.y + SunC.z) > 0.0)
     {
-        vec3 L, C; float d = 1e30;
-        if (k < 0)
-        {
-            if ((SunC.x + SunC.y + SunC.z) <= 0.0) continue;
-            L = -SunD; C = SunC;
-        }
-        else
-        {
-            const uint b = Lt + 57u + 12u * uint(k);
-            const vec3 Dv = GV(b) - P;
-            d = length(Dv);
-            const float s = d / GF(b + 6u);
-            if (s >= 1.0 || d < 1e-6) continue;
-            L = Dv / d;
-            const float Co = GF(b + 10u);
-            const float Cone = Co > -1.5 ? smoothstep(Co, max(GF(b + 11u), Co + 1e-6), dot(-L, GV(b + 7u))) : 1.0;
-            if (Cone <= 0.0) continue;
-            C = GV(b + 3u) * ((1.0 - s * s * s * s) / (1.0 + 2.0 * s * s) * Cone);
-        }
+        const vec3  L = -SunD;
         const float c = dot(N, L);
         const int Vb = g_GIBvhVisits;
-        const bool bShadowed = c > 0.0 && ShadowRay(O, L, k < 0 ? 1e30 : d - 2e-3);
-        if (k < 0) g_SunVisits += uint(g_GIBvhVisits - Vb);      // (measurement, Stats 11 high half: the sun's shadow rays' visits)
-        if (c <= 0.0 || bShadowed) continue;
-        E += C * c;
-        if (!bSpec) continue;
-        const vec3  H  = normalize(L + V);
-        const float NdotH = max(dot(N, H), 0.0), Dd = NdotH * NdotH * (a2 - 1.0) + 1.0;
-        const float Vis = 0.5 / max(c * sqrt(NdotV * NdotV * (1.0 - a2) + a2) + NdotV * sqrt(c * c * (1.0 - a2) + a2), 1e-6);
-        const vec3  F  = F0 + (1.0 - F0) * pow(clamp(1.0 - dot(L, H), 0.0, 1.0), 5.0);
-        S += C * c * F * (a2 / (gi_pi_v * Dd * Dd) * Vis);
+        const bool bShadowed = c > 0.0 && ShadowRay(O, L, 1e30);
+        g_SunVisits += uint(g_GIBvhVisits - Vb);      // (measurement: the sun's shadow rays' visits)
+        if (c > 0.0 && !bShadowed) AddLight(L, SunC, c, N, V, F0, a2, NdotV, bSpec, E, S);
     }
+    if (g_ShadowBySDF) return;      // (through the field: the sun alone; the lamps as the voxels hold them)
+    const int nLamps = int(GD[3]);
+    float Wt = 0.0, Wmax = 0.0;
+    for (int k = 0; k < nLamps; ++k)
+    {
+        vec3 L, C; float d;
+        if (!LampAt(Lt, k, P, L, C, d)) continue;
+        const float w = max(dot(N, L), 0.0) * dot(C, vec3(0.2126, 0.7152, 0.0722));
+        Wt += w; Wmax = max(Wmax, w);
+    }
+    if (Wt <= 0.0) return;
+    const float Cut = min(refl_lamp_share_v * Wt, Wmax);
+    float Wv = 0.0, Ws = 0.0;       // (the traced lamps' light that got through, and all of theirs)
+    vec3  Eu = vec3(0.0), Su = vec3(0.0);
+    for (int k = 0; k < nLamps; ++k)
+    {
+        vec3 L, C; float d;
+        if (!LampAt(Lt, k, P, L, C, d)) continue;
+        const float c = dot(N, L);
+        if (c <= 0.0) continue;
+        const float w = c * dot(C, vec3(0.2126, 0.7152, 0.0722));
+        if (w >= Cut)
+        {
+            Ws += w;
+            if (ShadowRay(O, L, d - 2e-3)) continue;
+            Wv += w;
+            AddLight(L, C, c, N, V, F0, a2, NdotV, bSpec, E, S);
+        }
+        else AddLight(L, C, c, N, V, F0, a2, NdotV, bSpec, Eu, Su);
+    }
+    const float Vm = Ws > 0.0 ? Wv / Ws : 1.0;
+    E += Eu * Vm; S += Su * Vm;
 }
 
 // Visible on screen (O3DE): the scene's colour at the hit (Pcam camera-centred), when its depth there is the hit's. Planar holds the view's HDR under XLION_SDF
