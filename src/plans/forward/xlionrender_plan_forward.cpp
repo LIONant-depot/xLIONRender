@@ -2836,7 +2836,7 @@ namespace xlionrender
             std::uint32_t Got[12] = {};
             (void)m_ReflStats.MemoryMapFrameRegion(Slot * 12, 12, [&](void* p) { std::memcpy(Got, p, sizeof(Got)); std::memset(p, 0, sizeof(Got)); });
             if( Got[0] ) { m_bReflSharpSeen = (Got[7] >> 31) != 0u; Got[7] &= 0x7FFFFFFFu; }
-            { static double s_Ssr = 0.0; static int s_SsrN = 0; static const bool s_bLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr; s_Ssr += Got[10]; if( s_bLog && ++s_SsrN == 120 ) { std::printf("REFLSHARPSSR sharp pixels the half-size screen trace answered certainly: %.0f a frame\n", s_Ssr / 120.0); std::fflush(stdout); s_Ssr = 0.0; s_SsrN = 0; } }      // (measurement: Stats 10)
+            { static double s_Ssr = 0.0; static int s_SsrN = 0; static const bool s_bLog = xlionrender::Env("XLION_GPU_TIMES") != nullptr; s_Ssr += Got[10]; static double s_HV = 0.0, s_PV = 0.0, s_R = 0.0, s_SV = 0.0; s_HV += Got[11]; s_SV += Got[3]; s_PV += Got[2]; s_R += Got[0]; if( s_bLog && ++s_SsrN == 120 ) { std::printf("REFLSHARPSSR sharp pixels the half-size screen trace answered certainly: %.0f a frame\n", s_Ssr / 120.0); std::printf("REFLVISITS a ray: %.1f BVH visits for the reflection ray, %.1f for its hit (shadow rays), %.1f of them the sun's (with the planar view off)\n", s_PV / std::max(s_R, 1.0), s_HV / std::max(s_R, 1.0), s_SV / std::max(s_R, 1.0)); std::fflush(stdout); s_Ssr = s_HV = s_PV = s_R = s_SV = 0.0; s_SsrN = 0; } }      // (measurement: Stats 10)
             if( std::vector<std::uint64_t> Ns; Got[0] && m_ReflTimes.getResults(Ns) && Ns.size() >= 5 && Ns[0] != ~0ull && Ns[4] > Ns[0] )
             {
                 m_ReflSum[0] += double(Ns[4] - Ns[0]) * 1e-6;

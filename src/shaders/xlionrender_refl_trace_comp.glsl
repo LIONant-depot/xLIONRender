@@ -14,6 +14,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 #define GI_BVH_ONE_LOOP
 #include "xlionrender_gi_pass_common.glsl"           // (bindings 0-4: the BVH and the GI's data)
+uint g_SunVisits = 0u;           // (measurement: the sun's shadow rays' BVH visits at the reflections' hits)
 #include "xlionrender_octahedral.glsl"
 #include "xlionrender_environment_atlas.glsl"
 
@@ -67,7 +68,8 @@ layout(push_constant) uniform push_t { uint m_Mode, m_Slot; int m_TlasRoot, m_Pr
 #include "xlionrender_vox_read.glsl"
 const uint refl_hit_v = 1u, refl_miss_v = 2u, refl_planar_v = 3u, refl_none_v = 0u;    // the hit class (bits 24-27): HIT_WORLD_SUPPORTED, MISS_WORLD, HIT_PLANAR_SUPPORTED, nothing traced
 
-shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured, s_SharpSeen, s_TlasVisits, s_Leaves;
+shared uint s_Rays, s_Hits, s_Visits, s_Planar, s_PlanarRough, s_Incomplete, s_Textured, s_SharpSeen, s_TlasVisits, s_Leaves, s_HitVisits, s_SunVisits;
+uint g_PrimaryVisits = 0u;      // (measurement, Stats 11: the BVH visits after the reflection ray - its hit's shadow rays and reads)
 shared uvec2 s_Pair[64];       // (the full-size dispatch: two pixels a record)
 shared uint  s_Listed[64];     // (a listed texel: the first dispatch keeps its half of the pair - its history - for the list's)
 
@@ -162,7 +164,10 @@ void DirectAndSpecular(vec3 P, vec3 N, vec3 V, vec3 F0, float Rough, bool bSpec,
             C = GV(b + 3u) * ((1.0 - s * s * s * s) / (1.0 + 2.0 * s * s) * Cone);
         }
         const float c = dot(N, L);
-        if (c <= 0.0 || ShadowRay(O, L, k < 0 ? 1e30 : d - 2e-3)) continue;
+        const int Vb = g_GIBvhVisits;
+        const bool bShadowed = c > 0.0 && ShadowRay(O, L, k < 0 ? 1e30 : d - 2e-3);
+        if (k < 0) g_SunVisits += uint(g_GIBvhVisits - Vb);      // (measurement, Stats 11 high half: the sun's shadow rays' visits)
+        if (c <= 0.0 || bShadowed) continue;
         E += C * c;
         if (!bSpec) continue;
         const vec3  H  = normalize(L + V);
@@ -221,7 +226,7 @@ vec4 PlanarAt(vec2 uv, float Lod)
 
 void main()
 {
-    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; s_SharpSeen = 0u; s_TlasVisits = 0u; s_Leaves = 0u; }
+    if (gl_LocalInvocationIndex == 0u) { s_Rays = 0u; s_Hits = 0u; s_Visits = 0u; s_Planar = 0u; s_PlanarRough = 0u; s_Incomplete = 0u; s_Textured = 0u; s_SharpSeen = 0u; s_TlasVisits = 0u; s_HitVisits = 0u; s_SunVisits = 0u; s_Leaves = 0u; }
     s_Listed[gl_LocalInvocationIndex] = 0u;
     barrier();
     const bool  bList = Push.m_Full.x < 0;
@@ -390,7 +395,7 @@ void main()
                 }
                 if (bExact) g_ShadowBySDF = true;
                 atomicAdd(s_Rays, 1u);
-                atomicAdd(s_Visits, uint(g_GIBvhVisits)); atomicAdd(s_TlasVisits, uint(g_GIBvhTlasVisits)); atomicAdd(s_Leaves, uint(g_GIBvhLeaves));
+                atomicAdd(s_Visits, uint(g_GIBvhVisits)); atomicAdd(s_TlasVisits, uint(g_GIBvhTlasVisits)); atomicAdd(s_Leaves, uint(g_GIBvhLeaves)); g_PrimaryVisits = uint(g_GIBvhVisits);
                 if (Push.m_Mode == 0u)
                 {
                     vec3 Lr; uint Class; float Dist = 0.0;
@@ -544,6 +549,7 @@ void main()
         const float Conf  = unpackHalf2x16(Rec.y).y;
         s_Pair[gl_LocalInvocationIndex] = Conf > 0.0 ? uvec2(Rec.x, packHalf2x16(vec2(unpackHalf2x16(Rec.y).x, Depth))) : uvec2(0u);
     }
+    if (g_PrimaryVisits != 0u) { atomicAdd(s_HitVisits, uint(g_GIBvhVisits) - g_PrimaryVisits); atomicAdd(s_SunVisits, g_SunVisits); }
     barrier();
     if (bFull && bList && bIn && Push.m_Mode == 0u)      // (a listed texel: its half of the pair)
     {
@@ -585,6 +591,8 @@ void main()
         if (s_Textured != 0u) atomicAdd(Stats[Push.m_Slot * 12u + (bFull ? 7u : 6u)], s_Textured);
         if (s_TlasVisits != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 8u], s_TlasVisits);
         if (s_Leaves != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 9u], s_Leaves);
+        if (s_HitVisits != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 11u], s_HitVisits);
+        if (s_SunVisits != 0u) atomicAdd(Stats[Push.m_Slot * 12u + 3u], s_SunVisits << 0);      // (measurement: slot 3 is the planar texels' count - planar is off on Bistro)
         if (s_SharpSeen != 0u) atomicOr(Stats[Push.m_Slot * 12u + 7u], 0x80000000u);     // (an empty group none: 94000 groups' adds on 7 addresses)     // (the textured hits: the half size's, the full size's)
     }
 }
