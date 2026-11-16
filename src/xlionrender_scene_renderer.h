@@ -106,6 +106,7 @@ namespace xlionrender
         std::unordered_map<std::uint64_t, skinned_entity> m_Skinned;
         std::vector<xmath::fmat4>                       m_PoseWorlds, m_SkinMatrices, m_CheckWorlds;
         xanimation::pose                                m_AnimPose;                     // (scratch: the library's local pose of the character being added)
+        xanimation::pose                                m_AnimScratch;                  // (scratch: the unmirrored sample of a mirrored clip)
         const xanimation::pose*                         m_pAnimUsed = nullptr;          // (the pose PoseWithLibrary posed: m_AnimPose or the rest)
         xanimation::pose                                m_RdPose;                       // (scratch: a ragdoll's local pose)
         std::vector<xanimation::rigid>                  m_RdAnim, m_RdOut;
@@ -420,7 +421,7 @@ namespace xlionrender
             if (pRagdoll)       // the bodies pose it (the clip still poses the bones they do not own)
             {
                 XPROFILE_SCOPE("Animation: ragdoll pose");
-                PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, m_PoseWorlds);
+                PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, m_PoseWorlds);
                 PoseFromRagdoll(*pSkel, *pRagdoll, Alpha, L2W, m_PoseWorlds);
             }
             else if (Mode == anim_mode::OLD)
@@ -432,9 +433,9 @@ namespace xlionrender
             {
                 {
                     XPROFILE_SCOPE("Animation: pose");
-                    PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, m_PoseWorlds);
+                    PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, m_PoseWorlds);
                 }
-                if (Mode == anim_mode::CHECK)      // both computed: the library must give exactly today's matrices
+                if (Mode == anim_mode::CHECK && !(bClip && pAnim->m_bMirror))      // both computed (a mirrored clip: the old code has no mirror): the library must give exactly today's matrices
                 {
                     if (bClip) xgpu::tools::editors::ComputeAnimatedBoneWorlds(*pSkel, *pPkg, pAnim->m_Clip, pAnim->m_Time, m_CheckWorlds);
                     else       xgpu::tools::editors::ComputeRestBoneWorlds(*pSkel, m_CheckWorlds);
@@ -524,7 +525,7 @@ namespace xlionrender
 
         // The library's pose of a skeleton at a clip's time (no clip: its rest pose) as bone worlds. The skeleton's parent array is copied once
         // per skeleton resource (re-checked against the resource each time: a reload with other parents rebuilds it).
-        void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, std::vector<xmath::fmat4>& Out)
+        void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, bool bMirror, std::vector<xmath::fmat4>& Out)
         {
             auto& S = m_AnimSkeleton[&Skel];
             const auto Bones = Skel.getBones();
@@ -532,7 +533,7 @@ namespace xlionrender
             for (std::size_t i = 0; bSame && i < Bones.size(); ++i) bSame = S.m_Parent[i] == Bones[i].m_iParent;
             if (!bSame) S = xanimation::MakeSkeleton(Skel);
             Out.resize(Bones.size());
-            if (pPkg && xanimation::SampleLocal(xanimation::MakeClipView(*pPkg, iClip), Time, m_AnimPose)) { xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose; }
+            if (pPkg && xanimation::SampleClip(S, xanimation::MakeClipView(*pPkg, iClip), Time, bMirror, m_AnimPose, m_AnimScratch)) { xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose; }
             else { xanimation::ComputeBoneWorlds(S.view(), S.m_Rest, Out); m_pAnimUsed = &S.m_Rest; }
         }
 

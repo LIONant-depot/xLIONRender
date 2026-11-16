@@ -187,7 +187,8 @@ namespace xlionrender
                     const float Len = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 0.0f;
                     float t = pAnim->m_Time - (pAnim->m_bPlaying ? Dtb * pAnim->m_Speed : 0.0f);
                     if (Len > 0) t = pAnim->m_bLoop ? t - Len * std::floor(t / Len) : std::clamp(t, 0.0f, Len);
-                    if (xanimation::SampleLocal(xanimation::MakeClipView(*pPkg, pAnim->m_Clip), t, P)) return;
+                    xanimation::pose Scratch;
+                    if (xanimation::SampleClip(S, xanimation::MakeClipView(*pPkg, pAnim->m_Clip), t, pAnim->m_bMirror, P, Scratch)) return;
                 }
                 P = S.m_Rest;
             };

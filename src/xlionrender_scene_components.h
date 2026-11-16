@@ -467,6 +467,7 @@ namespace xlionrender
         float               m_Speed     = 1;
         bool                m_bLoop     = true;
         bool                m_bPlaying  = true;
+        bool                m_bMirror   = false;    // played left/right mirrored (the skeleton's mirror table: no second clip)
 
         XPROPERTY_DEF
         ( "Animation", animation
@@ -476,6 +477,7 @@ namespace xlionrender
         , obj_member<"Speed",   &animation::m_Speed,   member_help<"How fast time moves in the clip: 1 as authored, 0 frozen, negative backwards">>
         , obj_member<"Loop",    &animation::m_bLoop,   member_help<"At the end the clip starts again; off: it stops at its last frame (Playing turns off)">>
         , obj_member<"Playing", &animation::m_bPlaying, member_help<"Whether time moves while the game runs">>
+        , obj_member<"Mirror",  &animation::m_bMirror, member_help<"Plays the clip mirrored left/right (a left-foot kick becomes a right-foot one) from the skeleton's mirror table: no second clip, no extra memory. A skeleton with no left/right pairs plays it as authored">>
         )
     };
 
