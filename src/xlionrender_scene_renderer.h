@@ -42,6 +42,7 @@
 #include "dependencies/xLIONRender/src/xlionrender_env.h"
 #include <cstdio>
 #include <unordered_map>
+#include <chrono>
 #include <unordered_set>
 
 namespace xlionrender
@@ -433,7 +434,8 @@ namespace xlionrender
             {
                 {
                     XPROFILE_SCOPE("Animation: pose");
-                    PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, m_PoseWorlds);
+                    PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, m_PoseWorlds
+                                   , Mode == anim_mode::NEW && pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f);      // (CHECK: no transitions, the bits must match)
                 }
                 if (Mode == anim_mode::CHECK && !(bClip && pAnim->m_bMirror))      // both computed (a mirrored clip: the old code has no mirror): the library must give exactly today's matrices
                 {
@@ -525,7 +527,9 @@ namespace xlionrender
 
         // The library's pose of a skeleton at a clip's time (no clip: its rest pose) as bone worlds. The skeleton's parent array is copied once
         // per skeleton resource (re-checked against the resource each time: a reload with other parents rebuilds it).
-        void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, bool bMirror, std::vector<xmath::fmat4>& Out)
+        // Entity / BlendTime (K1): when what poses the entity changes (another clip or package, mirrored or not, the rest), the new pose starts
+        // from the one shown and eases into the new source over BlendTime (inertialization: the old clip is not sampled any more; 0: a cut).
+        void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, bool bMirror, std::vector<xmath::fmat4>& Out, std::uint64_t Entity = 0, float BlendTime = 0)
         {
             auto& S = m_AnimSkeleton[&Skel];
             const auto Bones = Skel.getBones();
@@ -533,8 +537,40 @@ namespace xlionrender
             for (std::size_t i = 0; bSame && i < Bones.size(); ++i) bSame = S.m_Parent[i] == Bones[i].m_iParent;
             if (!bSame) S = xanimation::MakeSkeleton(Skel);
             Out.resize(Bones.size());
-            if (pPkg && xanimation::SampleClip(S, xanimation::MakeClipView(*pPkg, iClip), Time, bMirror, m_AnimPose, m_AnimScratch)) { xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose; }
-            else { xanimation::ComputeBoneWorlds(S.view(), S.m_Rest, Out); m_pAnimUsed = &S.m_Rest; }
+            const bool bClip = pPkg && xanimation::SampleClip(S, xanimation::MakeClipView(*pPkg, iClip), Time, bMirror, m_AnimPose, m_AnimScratch);
+            if (Entity == 0) { xanimation::ComputeBoneWorlds(S.view(), bClip ? m_AnimPose : S.m_Rest, Out); m_pAnimUsed = bClip ? &m_AnimPose : &S.m_Rest; return; }
+            if (!bClip) m_AnimPose = S.m_Rest;
+            Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0)) : 1, &Skel, BlendTime, m_AnimPose);
+            xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
+        }
+
+        // the poses an entity showed on its last two frames, what posed it, and its transition (K1)
+        struct anim_track
+        {
+            std::uint64_t                           m_Source = 0;
+            const void*                             m_pSkel  = nullptr;
+            xanimation::pose                        m_Cur, m_Prev;
+            std::chrono::steady_clock::time_point   m_T;
+            xanimation::inertializer                m_In;
+        };
+        std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
+
+        void Transition(std::uint64_t Entity, std::uint64_t Source, const void* pSkel, float BlendTime, xanimation::pose& P)
+        {
+            if (m_Tracks.size() > 4096) m_Tracks.clear();       // ponytail: entities that went away are forgotten in bulk; a per-frame sweep if levels spawn that many
+            auto& Tr = m_Tracks[Entity];
+            const auto Now = std::chrono::steady_clock::now();
+            const bool bHad = Tr.m_pSkel == pSkel && Tr.m_Cur.count() == P.count();
+            const float Dt = bHad ? std::clamp(std::chrono::duration<float>(Now - Tr.m_T).count(), 0.0f, 0.1f) : 0.0f;
+            if (bHad && Tr.m_Source != Source && BlendTime > 0.0f)
+            {
+                Tr.m_In.Start(Tr.m_Cur, Tr.m_Prev, P, P, Dt, BlendTime * 0.25f);     // (a half-life of a quarter of the blend time: ~94 % gone by its end)
+                static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+                if (bLog) { float W = 0; for (const auto& R : Tr.m_In.m_RotX) W = std::max(W, std::sqrt(R.Dot(R))); std::printf("[AnimBlend] entity %llu: a new source eases in over %.2f s (largest turn to absorb %.1f deg)\n", (unsigned long long)Entity, BlendTime, W * 57.29578f); }
+            }
+            if (bHad) Tr.m_In.Apply(P, Dt); else Tr.m_In.m_bActive = false;
+            if (bHad) Tr.m_Prev = Tr.m_Cur; else Tr.m_Prev = P;
+            Tr.m_Cur = P; Tr.m_Source = Source; Tr.m_pSkel = pSkel; Tr.m_T = Now;
         }
 
         // The skeleton posed by an active ragdoll's bodies (blended between the last two fixed steps by Alpha), right after PoseWithLibrary

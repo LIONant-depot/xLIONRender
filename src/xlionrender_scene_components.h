@@ -468,6 +468,7 @@ namespace xlionrender
         bool                m_bLoop     = true;
         bool                m_bPlaying  = true;
         bool                m_bMirror   = false;    // played left/right mirrored (the skeleton's mirror table: no second clip)
+        float               m_BlendTime = 0.15f;    // seconds a change of clip eases in (inertialization); 0: a cut
         bool                m_bRootMotion = false;  // the entity moves by the clip's root motion (clips compiled with RootMotion); off by default: existing levels (the Walking package is XYZ) keep walking in place
         std::uint32_t       m_nEvents   = 0;        // the clip's events fired so far while the game runs (T5; not saved)
         std::uint32_t       m_LastEvent = 0;        // the name hash of the last one
@@ -481,6 +482,7 @@ namespace xlionrender
         , obj_member<"Loop",    &animation::m_bLoop,   member_help<"At the end the clip starts again; off: it stops at its last frame (Playing turns off)">>
         , obj_member<"Playing", &animation::m_bPlaying, member_help<"Whether time moves while the game runs">>
         , obj_member<"Mirror",  &animation::m_bMirror, member_help<"Plays the clip mirrored left/right (a left-foot kick becomes a right-foot one) from the skeleton's mirror table: no second clip, no extra memory. A skeleton with no left/right pairs plays it as authored">>
+        , obj_member<"BlendTime", &animation::m_BlendTime, member_help<"Seconds a change of Clip (or Mirror) eases from the pose shown into the new one, without sampling the old clip (inertialization); 0: a cut">>
         , obj_member<"RootMotion", &animation::m_bRootMotion, member_help<"While the game runs the entity moves where the clip walks (a clip compiled with RootMotion keeps its root in place and stores the walk apart); off: it walks in place">>
         , obj_member<"EventsFired", &animation::m_nEvents, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many of the clip's events (markers, footsteps, contacts) fired while the game ran">>
         )
