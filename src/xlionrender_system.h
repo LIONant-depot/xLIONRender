@@ -91,7 +91,12 @@ namespace xlionrender
                     }
                     else std::printf("[Animation] no clip named '%s' in the package: the request is ignored\n", A.m_ClipName.c_str());
                 }
-            if (!A.m_bPlaying) return;
+            if (!A.m_bPlaying)                                  // (paused: the feet still stand on the ground under them)
+            {
+                if (A.m_bFootIK && pT && pSkin && pPkg && A.m_Clip >= 0 && A.m_Clip < int(pPkg->getClips().size()))
+                    if (const auto& C = pPkg->getClips()[std::size_t(A.m_Clip)]; C.m_FPS > 0 && C.m_nFrames > 0) GroundFeet(A, *pSkin, *pT, *pPkg, float(C.m_nFrames) / float(C.m_FPS));
+                return;
+            }
             const float Before = A.m_Time;
             A.m_Time += pGame->m_Time.m_DeltaTime * A.m_Speed;
             if (pPkg == nullptr || A.m_Clip < 0 || A.m_Clip >= int(pPkg->getClips().size())) return;
