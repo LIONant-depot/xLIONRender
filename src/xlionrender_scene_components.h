@@ -494,6 +494,9 @@ namespace xlionrender
         float               m_WarpStride = 1;       // (this frame's warping, set by the Animation system for the renderer; not saved)
         float               m_WarpAngle  = 0;       //   radians about +Y from the clip's travel to Move
         xmath::fvec3        m_WarpDir   {0, 0, 1};  //   the travel the stride is along (model space)
+        bool                m_bMatching = false;    // K4: motion matching picks the clip and time from the package's clips by Move (a database built once per package)
+        std::uint32_t       m_MatchJumps = 0;       // (jumps so far: the renderer eases each in; not saved)
+        float               m_MatchSince = 1e9f;    // (seconds since the last search)
         bool                m_bFootIK   = false;    // K3: the feet stand on the physics ground under them (a ray down at each foot); off by default: existing levels keep the clip's flat floor
         std::array<animation_ground, 4> m_Ground{}; // (this frame's casts, per leg, smoothed; not saved)
         std::uint8_t        m_nGround   = 0;
@@ -524,6 +527,8 @@ namespace xlionrender
         , obj_member<"RootMotion", &animation::m_bRootMotion, member_help<"While the game runs the entity moves where the clip walks (a clip compiled with RootMotion keeps its root in place and stores the walk apart); off: it walks in place">>
         , obj_member<"Move",      &animation::m_Move, member_help<"With RootMotion: the velocity the game asks (the entity's frame, units per second). The walk clip is warped to it without the feet sliding: its steps get longer or shorter, it plays faster or slower, and its legs turn toward the travel (up to 90 deg) while the chest keeps facing. Zero: the clip's own walk">>
         , obj_member<"Stride",    &animation::m_WarpStride, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"This frame's step length against the clip's (1: as authored), from Move">>
+        , obj_member<"MotionMatching", &animation::m_bMatching, member_help<"While the game runs the clip and its time are chosen by motion matching from every clip of the package: the frame whose feet, hips and next second best fit Move (the velocity asked), searched every 0.1 s, each jump eased in. Clip and Time follow it. Use with RootMotion">>
+        , obj_member<"Jumps",     &animation::m_MatchJumps, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many times motion matching jumped to another clip or time">>
         , obj_member<"FootIK",    &animation::m_bFootIK, member_help<"While the game runs the feet stand on the physics ground under them (stairs, slopes, kerbs): a ray down at each foot, each foot up or down by its ground, the hips follow the lowest, planted feet tilt to the slope. Off: the clip's flat floor">>
         , obj_member<"EventsFired", &animation::m_nEvents, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many of the clip's events (markers, footsteps, contacts) fired while the game ran">>
         )

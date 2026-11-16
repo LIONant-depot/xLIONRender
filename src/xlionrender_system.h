@@ -66,6 +66,8 @@ namespace xlionrender
         animation_system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr) {}
 
         std::unordered_map<const xskeleton::skeleton*, xanimation::skeleton_data> m_Skeletons;        // (a mirrored clip's root motion: the skeleton's mirror table)
+        struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; };
+        std::unordered_map<const xanim_package::anim_package*, match_db> m_Match;                      // K4: one database per package (ponytail: a reloaded package at the same address keeps its old database until the editor restarts)
 
         void operator()( animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT ) noexcept
         {
@@ -137,6 +139,7 @@ namespace xlionrender
                 D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)
                 pT->m_Position = pT->m_Position + pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
             }
+            if (A.m_bMatching && pT && pSkin) Match(A, *pSkin, *pPkg);
             if (A.m_bFootIK && pT && pSkin) GroundFeet(A, *pSkin, *pT, *pPkg, Length);
             else A.m_nGround = 0;
             if (A.m_bOneShot && A.m_ReturnClip >= 0)            // a one-shot: at its end the clip before it comes back where it was (Finished this frame)
@@ -150,6 +153,48 @@ namespace xlionrender
             }
             if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
             else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }
+        }
+
+        // Motion matching (K4): the package's database (every clip, built the first time), a search every 0.1 s with the wish from Move (in the
+        // character's frame: the skeleton's rest forward is its +Z), a jump sets Clip and Time (and counts: the renderer eases it in).
+        // ponytail: the wish keeps the rest's facing (no root rotation in our root motion yet); the velocity now is the last Move asked
+        void Match(animation& A, const skinned_mesh& Skin, const xanim_package::anim_package& Pkg) noexcept
+        {
+            using namespace xlioncore::resources;
+            auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
+            auto* pSkel = pGeom ? static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
+            if (!pSkel || Pkg.m_nBones != pSkel->getBones().size()) return;
+            auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
+            if (!SD.m_Warp.valid()) return;
+            auto& M = m_Match[&Pkg];
+            if (M.m_Clips.size() != std::size_t(Pkg.m_nClips))
+            {
+                M.m_Clips.clear();
+                for (int c = 0; c < int(Pkg.m_nClips); ++c)
+                {
+                    const auto& C = Pkg.getClips()[std::size_t(c)];
+                    xanimation::matching_clip Mc;
+                    Mc.m_Fps = float(std::max<int>(1, C.m_FPS)); Mc.m_Length = float(C.m_nFrames) / Mc.m_Fps; Mc.m_bLoop = C.m_bLoop;
+                    Mc.m_Sample = [V = xanimation::MakeClipView(Pkg, c)](float t, xanimation::pose& P) { xanimation::SampleLocal(V, t, P); };
+                    Mc.m_Root = [pPkg = &Pkg, c](float t) { return xanimation::RootMotionAt(*pPkg, c, t); };
+                    M.m_Clips.push_back(std::move(Mc));
+                }
+                M.m_Db = xanimation::BuildMatchingDb(SD.view(), SD.m_Warp, SD.m_Rest, M.m_Clips);
+                std::printf("[AnimMatch] database: %zu entries of %d floats from %d clips\n", M.m_Db.m_Entries.size(), M.m_Db.m_Dim, int(Pkg.m_nClips));
+            }
+            if (M.m_Db.m_Entries.empty()) return;
+            const auto* pGame = xlioncore::game::From(getGameMgr());
+            const float Dt = pGame ? pGame->m_Time.m_DeltaTime * std::max(0.0f, A.m_Speed) : 0.0f;
+            const float Yaw0 = xanimation::details::Yaw(M.m_Db.m_RestForward);
+            const auto Wish = xanimation::details::TurnY(A.m_Move, -Yaw0);
+            xanimation::matching_state St{ A.m_Clip, A.m_Time, A.m_MatchSince + Dt, int(A.m_MatchJumps) };
+            if (xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, 0), 0))
+            {
+                static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+                if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s\n", St.m_Jumps, A.m_Clip, A.m_Time, St.m_Clip, St.m_Time);
+                A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_bPlaying = true;
+            }
+            A.m_MatchSince = St.m_Since; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
         }
 
         // The ground under each foot (K3): the pose this frame (the clip at its time, mirrored and warped as the renderer will draw it), a ray

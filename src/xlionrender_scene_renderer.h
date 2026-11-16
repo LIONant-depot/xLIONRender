@@ -440,7 +440,8 @@ namespace xlionrender
                     if (bClip && pAnim->m_bFootIK) for (; nGround < pAnim->m_nGround && nGround < Ground.size(); ++nGround)
                         Ground[nGround] = { pAnim->m_Ground[nGround].m_bHit, pAnim->m_Ground[nGround].m_Height, pAnim->m_Ground[nGround].m_Normal };
                     PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, m_PoseWorlds
-                                   , Mode == anim_mode::NEW && pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f, &Wp, std::span<const xanimation::ground_contact>(Ground.data(), nGround));      // (CHECK: no transitions, the bits must match)
+                                   , Mode == anim_mode::NEW && pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f, &Wp, std::span<const xanimation::ground_contact>(Ground.data(), nGround)
+                                   , pAnim ? pAnim->m_MatchJumps : 0u);      // (CHECK: no transitions, the bits must match)
                 }
                 if (Mode == anim_mode::CHECK && !(bClip && pAnim->m_bMirror))      // both computed (a mirrored clip: the old code has no mirror): the library must give exactly today's matrices
                 {
@@ -535,7 +536,7 @@ namespace xlionrender
         // Entity / BlendTime (K1): when what poses the entity changes (another clip or package, mirrored or not, the rest), the new pose starts
         // from the one shown and eases into the new source over BlendTime (inertialization: the old clip is not sampled any more; 0: a cut).
         void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, bool bMirror, std::vector<xmath::fmat4>& Out, std::uint64_t Entity = 0, float BlendTime = 0, const xanimation::warp_params* pWarp = nullptr
-                            , std::span<const xanimation::ground_contact> Ground = {})
+                            , std::span<const xanimation::ground_contact> Ground = {}, std::uint32_t Jumps = 0)      // (Jumps: motion matching's jump count - a jump within a clip is a new source too)
         {
             auto& S = m_AnimSkeleton[&Skel];
             const auto Bones = Skel.getBones();
@@ -546,7 +547,7 @@ namespace xlionrender
             const bool bClip = pPkg && xanimation::SampleClip(S, xanimation::MakeClipView(*pPkg, iClip), Time, bMirror, m_AnimPose, m_AnimScratch);
             if (Entity == 0) { xanimation::ComputeBoneWorlds(S.view(), bClip ? m_AnimPose : S.m_Rest, Out); m_pAnimUsed = bClip ? &m_AnimPose : &S.m_Rest; return; }
             if (!bClip) m_AnimPose = S.m_Rest;
-            Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0)) : 1, &Skel, BlendTime, m_AnimPose);
+            Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0) + std::uint64_t(Jumps) * 0x9E3779B97F4A7C15ull) : 1, &Skel, BlendTime, m_AnimPose);
             if (bClip && pWarp && pWarp->active()) xanimation::WarpPose(S.view(), S.m_Warp, m_AnimPose, *pWarp);     // (after the blend: the blend's poses stay the clip's own)
             if (bClip && Ground.size() == S.m_Warp.m_Legs.size() && !Ground.empty()) xanimation::FitGround(S.view(), S.m_Warp, m_AnimPose, Ground, S.m_FootHeights);
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
