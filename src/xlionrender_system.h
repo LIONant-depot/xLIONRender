@@ -61,9 +61,11 @@ namespace xlionrender
     struct animation_system : xecs::system::instance
     {
         constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Animation" };
-        using xecs::system::instance::instance;
+        animation_system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr) {}
 
-        void operator()( animation& A, const skinned_mesh* pSkin ) noexcept
+        std::unordered_map<const xskeleton::skeleton*, xanimation::skeleton_data> m_Skeletons;        // (a mirrored clip's root motion: the skeleton's mirror table)
+
+        void operator()( animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT ) noexcept
         {
             const auto* pGame = xlioncore::game::From(getGameMgr());
             if (!A.m_bPlaying || pGame == nullptr) return;
@@ -80,6 +82,21 @@ namespace xlionrender
             const float Length = Clip.m_FPS > 0 ? float(Clip.m_nFrames) / float(Clip.m_FPS) : 0.0f;
             if (Length <= 0) return;
             FireEvents(*pPkg, A, Before, Length);
+            // root motion (K2, plan 13.7): the entity goes where the clip walks - the step the clip's root took this frame, in the entity's frame
+            // (its rotation and scale; a child's Transform is its parent's frame); mirrored: reflected through the skeleton's plane
+            if (pT && A.m_bRootMotion && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE)
+            {
+                auto D = xanimation::RootMotionDelta(*pPkg, A.m_Clip, Before, A.m_bLoop ? A.m_Time : std::clamp(A.m_Time, 0.0f, Length));
+                if (A.m_bMirror && pSkin && !pSkin->m_Geom.empty())
+                    if (auto* pGeom = static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, pSkin->m_Geom.m_Instance.m_Value)))
+                        if (auto* pSkel = static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)); pSkel && pSkel->m_nMirror)
+                        {
+                            auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
+                            const auto N = xanimation::ClipMirrorNormal(SD, *pPkg, A.m_Clip);      // (the plane turned with the clip's facing, as the pose)
+                            D = D - N * (2.0f * D.Dot(N));
+                        }
+                pT->m_Position = pT->m_Position + pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
+            }
             if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
             else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }
         }
