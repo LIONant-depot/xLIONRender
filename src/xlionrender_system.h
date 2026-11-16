@@ -44,6 +44,7 @@
 #include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"   // registering macro back for anything after
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
+#include "dependencies/xstrtool/source/xstrtool.h"           // (a clip requested by name: its hash, as the compiler makes it)
 #include "plugins/xragdoll.plugin/source/xragdoll_body_graph.h"
 #include <cstring>
 #include <format>
@@ -67,17 +68,30 @@ namespace xlionrender
 
         void operator()( animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT ) noexcept
         {
+            A.m_nFired = 0; A.m_bFinished = false;              // this frame's events and result only
             const auto* pGame = xlioncore::game::From(getGameMgr());
-            A.m_nFired = 0;                                     // this frame's events only
-            if (!A.m_bPlaying || pGame == nullptr) return;
-            const float Before = A.m_Time;
-            A.m_Time += pGame->m_Time.m_DeltaTime * A.m_Speed;
-
+            if (pGame == nullptr) return;
             using namespace xlioncore::resources;
             std::uint64_t Pkg = A.m_Package.m_Instance.m_Value;
             if (Pkg == 0 && pSkin && !pSkin->m_Geom.empty())
                 if (auto* pGeom = static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, pSkin->m_Geom.m_Instance.m_Value))) Pkg = pGeom->getAnimationRef().m_Instance.m_Value;
             auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
+            // a request by name (K1 play): a new name switches the clip (from its start; the renderer eases it in); a one-shot remembers the way back
+            if (A.m_ClipName.empty()) A.m_RequestHash = 0;     // (cleared: the same name asked again is a new request)
+            if (pPkg && !A.m_ClipName.empty())
+                if (const auto H = xstrtool::CRC32(A.m_ClipName); H != A.m_RequestHash)
+                {
+                    A.m_RequestHash = H;
+                    if (const int i = pPkg->findClipIndex(H); i >= 0)
+                    {
+                        if (A.m_bOneShot) { A.m_ReturnClip = A.m_Clip; A.m_ReturnTime = A.m_Time; }
+                        A.m_Clip = i; A.m_Time = 0; A.m_bPlaying = true;
+                    }
+                    else std::printf("[Animation] no clip named '%s' in the package: the request is ignored\n", A.m_ClipName.c_str());
+                }
+            if (!A.m_bPlaying) return;
+            const float Before = A.m_Time;
+            A.m_Time += pGame->m_Time.m_DeltaTime * A.m_Speed;
             if (pPkg == nullptr || A.m_Clip < 0 || A.m_Clip >= int(pPkg->getClips().size())) return;
             const auto& Clip = pPkg->getClips()[std::size_t(A.m_Clip)];
             const float Length = Clip.m_FPS > 0 ? float(Clip.m_nFrames) / float(Clip.m_FPS) : 0.0f;
@@ -102,6 +116,15 @@ namespace xlionrender
                     D = D - N * (2.0f * D.Dot(N));
                 }
                 pT->m_Position = pT->m_Position + pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
+            }
+            if (A.m_bOneShot && A.m_ReturnClip >= 0)            // a one-shot: at its end the clip before it comes back where it was (Finished this frame)
+            {
+                if (A.m_Time >= Length || A.m_Time < 0)
+                {
+                    A.m_Clip = A.m_ReturnClip; A.m_Time = A.m_ReturnTime; A.m_ReturnClip = -1;
+                    A.m_bOneShot = false; A.m_ClipName.clear(); A.m_RequestHash = 0; A.m_bFinished = true;
+                }
+                return;
             }
             if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
             else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }

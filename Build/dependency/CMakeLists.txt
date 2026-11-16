@@ -1,4 +1,4 @@
-﻿include(${CMAKE_BINARY_DIR}/_deps/xcmake_tools/Common.cmake)
+include(${CMAKE_BINARY_DIR}/_deps/xcmake_tools/Common.cmake)
 
 # Defensive - FetchAndPopulate is idempotent, a no-op if the host project already fetched these. Not
 # fetching xLIONCore here (unlike xECSV2/xGPU/xprim_geom): its own Build/dependency/CMakeLists.txt has
@@ -124,6 +124,7 @@ target_include_directories(xLIONRender_lib INTERFACE
 # and xLIONCore's own Build/dependency/CMakeLists.txt already use - see their own comments).
 add_library(xLIONRender SHARED
   "${CMAKE_SOURCE_DIR}/dependencies/xtextfile/source/xtextfile.cpp"
+"${CMAKE_SOURCE_DIR}/dependencies/xstrtool/source/xstrtool.cpp"     # (the Animation system hashes a clip requested by name, as the compiler does)
   "${CMAKE_SOURCE_DIR}/dependencies/xproperty/source/xcore/my_properties.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_renderer.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/xlionrender_api.cpp"
