@@ -468,6 +468,8 @@ namespace xlionrender
         bool                m_bLoop     = true;
         bool                m_bPlaying  = true;
         bool                m_bMirror   = false;    // played left/right mirrored (the skeleton's mirror table: no second clip)
+        std::uint32_t       m_nEvents   = 0;        // the clip's events fired so far while the game runs (T5; not saved)
+        std::uint32_t       m_LastEvent = 0;        // the name hash of the last one
 
         XPROPERTY_DEF
         ( "Animation", animation
@@ -478,6 +480,7 @@ namespace xlionrender
         , obj_member<"Loop",    &animation::m_bLoop,   member_help<"At the end the clip starts again; off: it stops at its last frame (Playing turns off)">>
         , obj_member<"Playing", &animation::m_bPlaying, member_help<"Whether time moves while the game runs">>
         , obj_member<"Mirror",  &animation::m_bMirror, member_help<"Plays the clip mirrored left/right (a left-foot kick becomes a right-foot one) from the skeleton's mirror table: no second clip, no extra memory. A skeleton with no left/right pairs plays it as authored">>
+        , obj_member<"EventsFired", &animation::m_nEvents, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many of the clip's events (markers, footsteps, contacts) fired while the game ran">>
         )
     };
 

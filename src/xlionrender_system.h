@@ -67,6 +67,7 @@ namespace xlionrender
         {
             const auto* pGame = xlioncore::game::From(getGameMgr());
             if (!A.m_bPlaying || pGame == nullptr) return;
+            const float Before = A.m_Time;
             A.m_Time += pGame->m_Time.m_DeltaTime * A.m_Speed;
 
             using namespace xlioncore::resources;
@@ -78,8 +79,30 @@ namespace xlionrender
             const auto& Clip = pPkg->getClips()[std::size_t(A.m_Clip)];
             const float Length = Clip.m_FPS > 0 ? float(Clip.m_nFrames) / float(Clip.m_FPS) : 0.0f;
             if (Length <= 0) return;
+            FireEvents(*pPkg, A, Before, Length);
             if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
             else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }
+        }
+
+        // The clip's events (T5) crossed by this frame's time step (Before, after], once each (xanimation::Advance: a loop fires once per pass,
+        // backwards fires nothing). Today they are counted on the Animation (m_nEvents, m_LastEvent) and, with XLION_ANIM_EVENTS=1, logged
+        // ([AnimEvent]); ponytail: the game hook (scripts, footstep sounds) comes when a game needs it.
+        void FireEvents(const xanim_package::anim_package& Pkg, animation& A, float Before, float Length) noexcept
+        {
+            const auto Ev = Pkg.getClipEvents(A.m_Clip);
+            if (Ev.empty()) return;
+            thread_local std::vector<xanimation::event_def> Defs; thread_local std::vector<xanimation::event_fire> Fired;
+            Defs.clear(); Fired.clear();
+            for (std::uint32_t i = 0; i < Ev.size(); ++i) Defs.push_back({ i, Ev[i].m_Time });
+            xanimation::event_cursor C; C.Seek(Before);
+            xanimation::Advance(C, xanimation::event_track{ Defs, Length, A.m_bLoop }, A.m_Time, Fired);
+            static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+            for (const auto& F : Fired)
+            {
+                const auto& E = Ev[F.m_Id];
+                ++A.m_nEvents; A.m_LastEvent = E.m_NameHash;
+                if (bLog) std::printf("[AnimEvent] clip %d at %.3f s: kind %d name %08X bone %d%s\n", A.m_Clip, E.m_Time, int(E.m_Kind), E.m_NameHash, E.m_iBone, A.m_bMirror ? " (mirrored: the mirror bone)" : "");
+            }
         }
     };
 
