@@ -457,6 +457,18 @@ namespace xlionrender
     // runs (Play); the renderer poses the skeleton at Time. The shape of a single-clip player (Unity's legacy Animation, Godot's AnimationPlayer,
     // Unreal's single-node mode): which clip, where in it, how fast, looping or not, playing or not - a state machine or blending would sit above
     // it later. Outside Play the pose stays at Time (edit Time to look through the clip)
+    // One of the clip's events that fired this frame (T5): what a game system reads from the Animation (a footstep sound at the foot, the ball
+    // leaving at the kick). Name: CRC32 of the event's name (xstrtool::CRC32, as the compiler hashes it); Bone: the skeleton bone (mirrored:
+    // the mirror bone), -1 none.
+    struct animation_fired
+    {
+        std::uint32_t   m_NameHash  = 0;
+        std::uint8_t    m_Kind      = 0;        // xanim_package::event_kind: 0 marker, 1 footstep, 2 contact, 3 sync
+        std::int16_t    m_Bone      = -1;
+        float           m_Time      = 0;        // seconds into the clip
+        float           m_Duration  = 0;        // a contact's length
+    };
+
     struct animation
     {
         constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "Animation" };
@@ -472,6 +484,8 @@ namespace xlionrender
         bool                m_bRootMotion = false;  // the entity moves by the clip's root motion (clips compiled with RootMotion); off by default: existing levels (the Walking package is XYZ) keep walking in place
         std::uint32_t       m_nEvents   = 0;        // the clip's events fired so far while the game runs (T5; not saved)
         std::uint32_t       m_LastEvent = 0;        // the name hash of the last one
+        std::array<animation_fired, 8> m_Fired{};   // the events that fired THIS frame (the Animation system refills it each update; a game system reads it after)
+        std::uint8_t        m_nFired    = 0;        // ponytail: 8 a frame; more in one frame (a long step over a dense clip) are counted in m_nEvents, not listed
 
         XPROPERTY_DEF
         ( "Animation", animation

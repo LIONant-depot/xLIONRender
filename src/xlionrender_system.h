@@ -68,6 +68,7 @@ namespace xlionrender
         void operator()( animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT ) noexcept
         {
             const auto* pGame = xlioncore::game::From(getGameMgr());
+            A.m_nFired = 0;                                     // this frame's events only
             if (!A.m_bPlaying || pGame == nullptr) return;
             const float Before = A.m_Time;
             A.m_Time += pGame->m_Time.m_DeltaTime * A.m_Speed;
@@ -81,20 +82,25 @@ namespace xlionrender
             const auto& Clip = pPkg->getClips()[std::size_t(A.m_Clip)];
             const float Length = Clip.m_FPS > 0 ? float(Clip.m_nFrames) / float(Clip.m_FPS) : 0.0f;
             if (Length <= 0) return;
-            FireEvents(*pPkg, A, Before, Length);
+            const xanimation::skeleton_data* pSD = nullptr;        // mirrored: the skeleton's mirror table (events' bones, root motion)
+            if (A.m_bMirror && pSkin && !pSkin->m_Geom.empty())
+                if (auto* pGeom = static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, pSkin->m_Geom.m_Instance.m_Value)))
+                    if (auto* pSkel = static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)); pSkel && pSkel->m_nMirror)
+                    {
+                        auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
+                        if (!SD.m_Mirror.empty()) pSD = &SD;
+                    }
+            FireEvents(*pPkg, A, Before, Length, pSD ? &pSD->m_Mirror : nullptr);
             // root motion (K2, plan 13.7): the entity goes where the clip walks - the step the clip's root took this frame, in the entity's frame
             // (its rotation and scale; a child's Transform is its parent's frame); mirrored: reflected through the skeleton's plane
             if (pT && A.m_bRootMotion && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE)
             {
                 auto D = xanimation::RootMotionDelta(*pPkg, A.m_Clip, Before, A.m_bLoop ? A.m_Time : std::clamp(A.m_Time, 0.0f, Length));
-                if (A.m_bMirror && pSkin && !pSkin->m_Geom.empty())
-                    if (auto* pGeom = static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, pSkin->m_Geom.m_Instance.m_Value)))
-                        if (auto* pSkel = static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)); pSkel && pSkel->m_nMirror)
-                        {
-                            auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
-                            const auto N = xanimation::ClipMirrorNormal(SD, *pPkg, A.m_Clip);      // (the plane turned with the clip's facing, as the pose)
-                            D = D - N * (2.0f * D.Dot(N));
-                        }
+                if (pSD)
+                {
+                    const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip);      // (the plane turned with the clip's facing, as the pose)
+                    D = D - N * (2.0f * D.Dot(N));
+                }
                 pT->m_Position = pT->m_Position + pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
             }
             if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
@@ -102,9 +108,9 @@ namespace xlionrender
         }
 
         // The clip's events (T5) crossed by this frame's time step (Before, after], once each (xanimation::Advance: a loop fires once per pass,
-        // backwards fires nothing). Today they are counted on the Animation (m_nEvents, m_LastEvent) and, with XLION_ANIM_EVENTS=1, logged
-        // ([AnimEvent]); ponytail: the game hook (scripts, footstep sounds) comes when a game needs it.
-        void FireEvents(const xanim_package::anim_package& Pkg, animation& A, float Before, float Length) noexcept
+        // backwards fires nothing): listed on the Animation for this frame (m_Fired: a game system reads them after this one - a footstep
+        // sound at the foot), counted (m_nEvents, m_LastEvent) and, with XLION_ANIM_EVENTS=1, logged ([AnimEvent]). Mirrored: the mirror bone.
+        void FireEvents(const xanim_package::anim_package& Pkg, animation& A, float Before, float Length, const xanimation::mirror_table* pMirror = nullptr) noexcept
         {
             const auto Ev = Pkg.getClipEvents(A.m_Clip);
             if (Ev.empty()) return;
@@ -118,7 +124,9 @@ namespace xlionrender
             {
                 const auto& E = Ev[F.m_Id];
                 ++A.m_nEvents; A.m_LastEvent = E.m_NameHash;
-                if (bLog) std::printf("[AnimEvent] clip %d at %.3f s: kind %d name %08X bone %d%s\n", A.m_Clip, E.m_Time, int(E.m_Kind), E.m_NameHash, E.m_iBone, A.m_bMirror ? " (mirrored: the mirror bone)" : "");
+                const std::int16_t Bone = (pMirror && E.m_iBone >= 0 && std::size_t(E.m_iBone) < pMirror->m_Bones.size()) ? std::int16_t(pMirror->m_Bones[std::size_t(E.m_iBone)].m_Src) : E.m_iBone;
+                if (A.m_nFired < A.m_Fired.size()) A.m_Fired[A.m_nFired++] = { E.m_NameHash, std::uint8_t(E.m_Kind), Bone, E.m_Time, E.m_Duration };
+                if (bLog) std::printf("[AnimEvent] clip %d at %.3f s: kind %d name %08X bone %d%s\n", A.m_Clip, E.m_Time, int(E.m_Kind), E.m_NameHash, Bone, pMirror ? " (mirrored: the mirror bone)" : "");
             }
         }
     };
