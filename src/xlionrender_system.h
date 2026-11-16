@@ -131,6 +131,9 @@ namespace xlionrender
             // no energy made: KE <= (at the switch + the drop's m g h) + 10 % + 1 J (test_ragdoll_runtime.cpp's bound: the 1 J keeps a still start's
             // millijoules from reading as a ratio)
             const float Bound = 1.1f * (St.m_KE0 + St.m_Mass * 9.81f * (St.m_Y0 - S.m_ComY)) + 1.0f;
+            if (S.m_KE > Bound && St.m_WorstEnergy <= 1.0f)      // the moment it first makes energy: when, how much, which body
+                std::printf("[Ragdoll] entity 0x%llX makes energy at %.3f s: KE %.1f J > bound %.1f J, fastest body %d at %.2f m/s, anchors %.1f mm\n"
+                    , (unsigned long long)Ent.m_Value, St.m_T, S.m_KE, Bound, S.m_iFastest, S.m_MaxSpeed, 1000 * S.m_MaxAnchor), std::fflush(stdout);
             St.m_WorstEnergy = std::max(St.m_WorstEnergy, S.m_KE / Bound);
             const bool bRest = S.m_nAwake == 0 || S.m_MaxSpeed < 2 * St.m_Sleep;
             if (bRest && St.m_RestAt < 0) St.m_RestAt = St.m_T;
