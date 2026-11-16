@@ -27,6 +27,7 @@
 #include "plugins/xgeom_skin.plugin/source/xgeom_skin_xgpu_rsc_loader.h"
 #include "plugins/xgeom_skin.plugin/source/xgeom_skin_xgpu_runtime.h"
 
+namespace xlioncore::physics { struct ragdoll; }     // (xlioncore_ragdoll_api.h: the handle the Ragdoll component holds)
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -43,12 +44,14 @@ namespace xlionrender
     inline constexpr auto skeleton_type_guid_v          = xresource::type_guid(xresource::guid_generator::Instance64FromString("xSkeleton"));
     inline constexpr auto anim_package_type_guid_v      = xresource::type_guid(xresource::guid_generator::Instance64FromString("xAnimPackage"));
     inline constexpr auto render_graph_type_guid_v      = xresource::type_guid(xresource::guid_generator::Instance64FromString("RenderGraph"));
+    inline constexpr auto ragdoll_type_guid_v           = xresource::type_guid(xresource::guid_generator::Instance64FromString("xRagdoll"));
     using geom_static_ref       = xresource::def_guid<geom_static_type_guid_v>;
     using geom_skin_ref         = xresource::def_guid<geom_skin_type_guid_v>;
     using anim_package_ref      = xresource::def_guid<anim_package_type_guid_v>;
     using material_instance_ref = xresource::def_guid<material_instance_type_guid_v>;
     using texture_ref           = xresource::def_guid<texture_type_guid_v>;
     using render_graph_ref      = xresource::def_guid<render_graph_type_guid_v>;
+    using ragdoll_ref           = xresource::def_guid<ragdoll_type_guid_v>;
 
     // One parameter a Mesh slot overrides (sparse): a parameter of the slot's material instance, by its id - or only by its name when game code
     // set it that way (mesh::SetColor ...): the renderer finds it in the material's parameters. Values are linear; a texture by its resource
@@ -476,6 +479,25 @@ namespace xlionrender
         )
     };
 
+    // The character as a ragdoll (ragdoll design v2 section 8): while the game runs and Active is on, its Skinned Mesh's bones are posed by the
+    // bodies of its Ragdoll resource (Box3D, in the game's physics world) instead of its Animation; turned on, the bodies start at the animated
+    // pose with the animation's motion; turned off, the Animation poses it again. The entity follows the root body (the hips) across the
+    // ground. Outside Play nothing changes (the editor's Drop is the Ragdoll editor's)
+    struct ragdoll
+    {
+        constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "Ragdoll" };
+
+        ragdoll_ref                     m_Ragdoll;
+        bool                            m_bActive   = false;
+        xlioncore::physics::ragdoll*    m_pRuntime  = nullptr;      // (while active: the physics world's; never saved, never shown)
+
+        XPROPERTY_DEF
+        ( "Ragdoll", ragdoll
+        , obj_member<"Ragdoll", &ragdoll::m_Ragdoll, member_help<"The Ragdoll resource of this character's skin and skeleton: its bodies, joints and masses">>
+        , obj_member<"Active",  &ragdoll::m_bActive, member_help<"While the game runs: on, the bodies pose the character (they start at the animated pose, moving as it moved); off, the Animation does">>
+        )
+    };
+
     // The rows' marker and revert (member_override_state): Path names the slot and the row ("...Slots[G:s]/Parameters[G:r]..." or ".../Material").
     // The levels a row inherits through: the material (and its instances), the geometry's instance or the slot's swap, a prefab (pBase: the
     // prefab's Mesh, when this one is a prefab instance's), the entity. Overridden: the entity differs from what it inherits (from the prefab
@@ -877,6 +899,7 @@ namespace xlionrender
     XSCRIPT_REGISTER_COMPONENT(environment, "Rendering", 56)
     XSCRIPT_REGISTER_COMPONENT(skinned_mesh, "Rendering", 58)
     XSCRIPT_REGISTER_COMPONENT(animation,   "Rendering", 59)
+    XSCRIPT_REGISTER_COMPONENT(ragdoll,     "Rendering", 62)
     XSCRIPT_REGISTER_COMPONENT(reflection_probe_component, "Rendering", 60)
     XSCRIPT_REGISTER_COMPONENT(mesh_material, "Deprecated", 57)     // (old files: the editor moves it into the Mesh, UpgradeOldMaterials; not offered to add)
 }

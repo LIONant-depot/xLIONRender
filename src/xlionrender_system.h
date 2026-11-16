@@ -43,6 +43,8 @@
 #undef  XSCRIPT_IMPORT_ONLY
 #include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"   // registering macro back for anything after
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
+#include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
+#include "plugins/xragdoll.plugin/source/xragdoll_body_graph.h"
 #include <cstring>
 #include <format>
 #include <functional>
@@ -78,6 +80,140 @@ namespace xlionrender
             if (Length <= 0) return;
             if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
             else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }
+        }
+    };
+
+    // The Ragdoll system (ragdoll design v2 section 8, R4 in Play): an Active Ragdoll gets its bodies at the animated pose of this frame, with
+    // the motion of the last fixed step (the clip sampled one fixed step back); the bodies live in the game's physics world (LIONCore owns
+    // Box3D) and are captured after every step; the renderer poses the skeleton from them (scene_renderer::AddSkinnedMesh). The entity follows
+    // the root body (the hips) across the ground (x, z; its height and rotation stay). Inactive: the bodies go, the Animation poses it again.
+    // Log: [Ragdoll] lines on activation and a summary 4 s after (the R4 gate's numbers: anchors, energy, time to rest)
+    struct ragdoll_system : xecs::system::instance
+    {
+        constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Ragdoll" };
+        ragdoll_system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr) {}
+
+        struct graph_entry { xragdoll::runtime_graph m_G; std::vector<xanimation::rigid> m_Rest; };
+        struct entity_state
+        {
+            xmath::fvec3        m_Offset;               // entity - hips (x, z) at the switch
+            float               m_T = 0, m_KE0 = 0, m_Y0 = 0, m_Mass = 0, m_WorstEnergy = 0, m_RestAt = -1, m_Sleep = 0;
+            std::vector<float>  m_Anchor;
+            bool                m_bReported = false;
+        };
+        std::unordered_map<const void*, graph_entry>                m_Graphs;       // per Ragdoll resource as loaded
+        std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
+        std::unordered_map<std::uint64_t, entity_state>             m_State;
+        xanimation::pose                                            m_P0, m_P1;
+
+        void operator()( const xecs::component::entity& Ent, ragdoll& R, const skinned_mesh& Skin, const animation* pAnim, xlioncore::transform& T, const xecs::component::parent* pParent ) noexcept
+        {
+            auto& GameMgr = getGameMgr();
+            const auto* pGame = xlioncore::game::From(GameMgr);
+            if (pGame == nullptr) return;
+            if (!R.m_bActive)
+            {
+                if (R.m_pRuntime) { xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pRuntime); R.m_pRuntime = nullptr; m_State.erase(Ent.m_Value); }
+                return;
+            }
+            if (R.m_pRuntime == nullptr && !Activate(Ent, R, Skin, pAnim, T, pParent, *pGame)) { R.m_bActive = false; return; }
+
+            // the entity follows the hips across the ground
+            auto& St = m_State[Ent.m_Value];
+            const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
+            if (pParent == nullptr) { T.m_Position.m_X = Hips.m_P.m_X + St.m_Offset.m_X; T.m_Position.m_Z = Hips.m_P.m_Z + St.m_Offset.m_Z; }
+
+            // the gate's numbers over the first 4 s
+            if (St.m_bReported) return;
+            St.m_T += pGame->m_Time.m_DeltaTime;
+            xlioncore::physics::ragdoll_stats S; xlioncore::physics::RagdollStats(*R.m_pRuntime, S);
+            St.m_Anchor.push_back(S.m_MaxAnchor);
+            // no energy made: KE <= (at the switch + the drop's m g h) + 10 % + 1 J (test_ragdoll_runtime.cpp's bound: the 1 J keeps a still start's
+            // millijoules from reading as a ratio)
+            const float Bound = 1.1f * (St.m_KE0 + St.m_Mass * 9.81f * (St.m_Y0 - S.m_ComY)) + 1.0f;
+            St.m_WorstEnergy = std::max(St.m_WorstEnergy, S.m_KE / Bound);
+            const bool bRest = S.m_nAwake == 0 || S.m_MaxSpeed < 2 * St.m_Sleep;
+            if (bRest && St.m_RestAt < 0) St.m_RestAt = St.m_T;
+            if (!bRest && S.m_MaxSpeed > 4 * St.m_Sleep) St.m_RestAt = -1;
+            if (St.m_T >= 4.0f)
+            {
+                auto A = St.m_Anchor; std::sort(A.begin(), A.end());
+                std::printf("[Ragdoll] summary entity 0x%llX: anchors p95 %.2f mm max %.2f mm (%zu frames); energy <= %.2f of the bound (KE0 + m g h + 10 %% + 1 J); at rest %s%.2f s; awake %d/%d\n"
+                    , (unsigned long long)Ent.m_Value, 1000 * A[std::min(A.size() - 1, A.size() * 95 / 100)], 1000 * A.back(), A.size(), St.m_WorstEnergy
+                    , St.m_RestAt < 0 ? "NOT " : "", St.m_RestAt < 0 ? St.m_T : St.m_RestAt, S.m_nAwake, S.m_nBodies);
+                std::fflush(stdout);
+                St.m_bReported = true;
+            }
+        }
+
+        bool Activate( const xecs::component::entity& Ent, ragdoll& R, const skinned_mesh& Skin, const animation* pAnim, const xlioncore::transform& T, const xecs::component::parent* pParent, const xlioncore::game& Game ) noexcept
+        {
+            using namespace xlioncore::resources;
+            auto Fail = [&](const char* Why) { std::printf("[Ragdoll] entity 0x%llX not activated: %s\n", (unsigned long long)Ent.m_Value, Why); std::fflush(stdout); return false; };
+            if (pParent) return Fail("it has a parent (a ragdoll is a root entity)");
+            auto* pRag  = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value));
+            auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
+            auto* pSkel = pGeom ? static_cast<const xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
+            if (pRag == nullptr || pSkel == nullptr) return Fail("its Ragdoll or its Skinned Mesh's skeleton is not loaded");
+            const int nB = int(pSkel->getBones().size());
+            if (int(pRag->m_nBones) != nB) return Fail("the Ragdoll was made for another skeleton (bone count)");
+
+            auto& S = m_Skeletons[pSkel];
+            if (int(S.m_Parent.size()) != nB) S = xanimation::MakeSkeleton(*pSkel);
+            const xanimation::skeleton_view View = S.view();
+            auto& GE = m_Graphs[pRag];
+            if (GE.m_Rest.size() != std::size_t(nB))
+            {
+                std::vector<float> Sc(static_cast<std::size_t>(nB));
+                GE.m_Rest.resize(std::size_t(nB)); xanimation::RigidBoneWorlds(View, S.m_Rest, {}, 1.0f, GE.m_Rest, Sc);
+                GE.m_G = xragdoll::ToBodyGraph(*pRag, GE.m_Rest);
+                std::printf("[Ragdoll] %u bodies, %u joints, %.1f kg; joint anchors at the skeleton's rest %.2f mm apart (0: the rest it was compiled with)\n"
+                    , pRag->m_nBodies, pRag->m_nJoints, pRag->m_TotalMass, 1000 * GE.m_G.m_RestAnchorGap);
+            }
+            if (!GE.m_G.m_Graph.m_bOk) return Fail("its joints name bodies it does not have");
+
+            // the animated pose now and one fixed step back (the motion it carries into the bodies)
+            const float Dt = Game.m_Time.m_FixedDeltaTime;
+            auto Sample = [&](float Dtb, xanimation::pose& P)
+            {
+                const std::uint64_t Pkg = pAnim == nullptr ? 0 : pAnim->m_Package.empty() ? pGeom->getAnimationRef().m_Instance.m_Value : pAnim->m_Package.m_Instance.m_Value;
+                auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
+                if (pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && int(pPkg->getBoneNameHashes().size()) == nB)
+                {
+                    const auto& C = pPkg->getClips()[std::size_t(pAnim->m_Clip)];
+                    const float Len = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 0.0f;
+                    float t = pAnim->m_Time - (pAnim->m_bPlaying ? Dtb * pAnim->m_Speed : 0.0f);
+                    if (Len > 0) t = pAnim->m_bLoop ? t - Len * std::floor(t / Len) : std::clamp(t, 0.0f, Len);
+                    if (xanimation::SampleLocal(xanimation::MakeClipView(*pPkg, pAnim->m_Clip), t, P)) return;
+                }
+                P = S.m_Rest;
+            };
+            Sample(Dt, m_P0); Sample(0, m_P1);
+            const xanimation::rigid E{ T.m_Position, T.m_Rotation };
+            const float Scale = T.m_Scale.m_X;
+            const auto n = static_cast<std::size_t>(nB);
+            std::vector<xanimation::rigid> W0(n), W1(n); std::vector<float> Sc(n);
+            xanimation::RigidBoneWorlds(View, m_P0, E, Scale, W0, Sc);
+            xanimation::RigidBoneWorlds(View, m_P1, E, Scale, W1, Sc);
+
+            xlioncore::physics::ragdoll_params Params;
+            Params.m_Size = 2 * (pRag->m_Capsule.m_HalfSegment + pRag->m_Capsule.m_Radius) * Scale;
+            if (Params.m_Size <= 0.01f) Params.m_Size = 1.7f;
+            std::string Note;
+            R.m_pRuntime = xlioncore::physics::ActivateRagdoll(getGameMgr(), GE.m_G.m_Graph, GE.m_Rest, W0, W1, Dt, GE.m_G.m_Filter, Params, &Note);
+            if (R.m_pRuntime == nullptr) return Fail("the game has no physics world");
+
+            auto& St = m_State[Ent.m_Value]; St = {};
+            const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
+            St.m_Offset = T.m_Position - Hips.m_P;
+            St.m_Sleep = 0.05f * std::sqrt(Params.m_Size / 1.7f);
+            xlioncore::physics::ragdoll_stats Stats; xlioncore::physics::RagdollStats(*R.m_pRuntime, Stats);
+            St.m_KE0 = Stats.m_KE; St.m_Y0 = Stats.m_ComY; St.m_Mass = Stats.m_Mass;
+            float Low = 1e30f; for (const auto& W : W1) Low = std::min(Low, W.m_P.m_Y);
+            std::printf("[Ragdoll] entity 0x%llX activated: %d bodies, %.1f kg, size %.2f m, KE %.2f J, COM speed max %.2f m/s, COM y %.3f, lowest bone y %.3f, anim time %.3f%s%s\n"
+                , (unsigned long long)Ent.m_Value, Stats.m_nBodies, Stats.m_Mass, Params.m_Size, Stats.m_KE, Stats.m_MaxSpeed, Stats.m_ComY, Low, pAnim ? pAnim->m_Time : 0.0f, Note.empty() ? "" : "; ", Note.c_str());
+            std::fflush(stdout);
+            return true;
         }
     };
 
@@ -332,11 +468,12 @@ namespace xlionrender
                 Query.m_Must.AddFromComponents<xlioncore::transform, skinned_mesh>();
                 LeaveOut(Query, View);
                 auto S = Search(Query);
-                Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const skinned_mesh& C, const animation* pAnim, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+                const float Alpha = [&] { const auto* pG = xlioncore::game::From(getGameMgr()); return pG ? pG->m_Time.m_FixedInterpolate : 1.0f; }();
+                Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const skinned_mesh& C, const animation* pAnim, const ragdoll* pRagdoll, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
                 {
                     xmath::fmat4 L2W;
                     if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
-                    R.AddSkinnedMesh(C, pAnim, L2W, Ent.m_Value);
+                    R.AddSkinnedMesh(C, pAnim, L2W, Ent.m_Value, pRagdoll && pRagdoll->m_bActive ? pRagdoll->m_pRuntime : nullptr, Alpha);
                 });
             }
             Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });

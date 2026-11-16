@@ -29,6 +29,7 @@
 #include "dependencies/xGPU/source/Tools/editors/xgpu_editor_anim_pose.h"     // the pose of a skeleton at a clip's time (the skin editor's preview poses it the same way)
 #include "dependencies/xAnimation/source/xanimation.h"                         // K0: the animation library poses the skeleton too (XLION_ANIM), bit for bit the same arithmetic
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
+#include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"          // an active Ragdoll poses the skeleton from its bodies
 #if __has_include("xprofile.h")
     #include "xprofile.h"
 #else
@@ -105,6 +106,10 @@ namespace xlionrender
         std::unordered_map<std::uint64_t, skinned_entity> m_Skinned;
         std::vector<xmath::fmat4>                       m_PoseWorlds, m_SkinMatrices, m_CheckWorlds;
         xanimation::pose                                m_AnimPose;                     // (scratch: the library's local pose of the character being added)
+        const xanimation::pose*                         m_pAnimUsed = nullptr;          // (the pose PoseWithLibrary posed: m_AnimPose or the rest)
+        xanimation::pose                                m_RdPose;                       // (scratch: a ragdoll's local pose)
+        std::vector<xanimation::rigid>                  m_RdAnim, m_RdOut;
+        std::vector<float>                              m_RdScale;
         std::unordered_map<const void*, xanimation::skeleton_data> m_AnimSkeleton;      // per skeleton resource: the library's copy of its hierarchy and rest pose
         std::uint64_t                                   m_AnimChecked = 0, m_AnimMismatch = 0;     // XLION_ANIM=check
         xgpu::device*                                   m_pDevice = nullptr;
@@ -397,7 +402,7 @@ namespace xlionrender
         // A Skinned Mesh entity into the scene (pAnim: its Animation; null: the rest pose): its skeleton posed at the clip's time (the Animation's
         // package, else the geometry's own animations), each bone's skinning matrix (its world times its inverse bind pose, as the skin editor's
         // preview) into this frame's bone buffer, its materials as the Mesh's. Not in the GI's geometry (no surfels: it moves): a RECEIVER
-        void AddSkinnedMesh(const skinned_mesh& Skin, const animation* pAnim, const xmath::fmat4& L2W, std::uint64_t Entity) noexcept
+        void AddSkinnedMesh(const skinned_mesh& Skin, const animation* pAnim, const xmath::fmat4& L2W, std::uint64_t Entity, const xlioncore::physics::ragdoll* pRagdoll = nullptr, float Alpha = 1.0f) noexcept
         {
             using namespace xlioncore::resources;
             ++m_Stats.m_Meshes;
@@ -412,7 +417,13 @@ namespace xlionrender
             auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
             const bool bClip = pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && int(pPkg->getBoneNameHashes().size()) == nBones;
             const auto Mode  = AnimMode();
-            if (Mode == anim_mode::OLD)
+            if (pRagdoll)       // the bodies pose it (the clip still poses the bones they do not own)
+            {
+                XPROFILE_SCOPE("Animation: ragdoll pose");
+                PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, m_PoseWorlds);
+                PoseFromRagdoll(*pSkel, *pRagdoll, Alpha, L2W, m_PoseWorlds);
+            }
+            else if (Mode == anim_mode::OLD)
             {
                 if (bClip) xgpu::tools::editors::ComputeAnimatedBoneWorlds(*pSkel, *pPkg, pAnim->m_Clip, pAnim->m_Time, m_PoseWorlds);
                 else       xgpu::tools::editors::ComputeRestBoneWorlds(*pSkel, m_PoseWorlds);      // (no animation, its package not loaded yet, or another skeleton's)
@@ -521,8 +532,25 @@ namespace xlionrender
             for (std::size_t i = 0; bSame && i < Bones.size(); ++i) bSame = S.m_Parent[i] == Bones[i].m_iParent;
             if (!bSame) S = xanimation::MakeSkeleton(Skel);
             Out.resize(Bones.size());
-            if (pPkg && xanimation::SampleLocal(xanimation::MakeClipView(*pPkg, iClip), Time, m_AnimPose)) xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out);
-            else xanimation::ComputeBoneWorlds(S.view(), S.m_Rest, Out);
+            if (pPkg && xanimation::SampleLocal(xanimation::MakeClipView(*pPkg, iClip), Time, m_AnimPose)) { xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose; }
+            else { xanimation::ComputeBoneWorlds(S.view(), S.m_Rest, Out); m_pAnimUsed = &S.m_Rest; }
+        }
+
+        // The skeleton posed by an active ragdoll's bodies (blended between the last two fixed steps by Alpha), right after PoseWithLibrary
+        // (its animated pose: the bones the ragdoll does not own keep it): world rigid frames -> the local pose under this entity -> model space
+        void PoseFromRagdoll(const xskeleton::skeleton& Skel, const xlioncore::physics::ragdoll& Rd, float Alpha, const xmath::fmat4& L2W, std::vector<xmath::fmat4>& Out)
+        {
+            const auto& S = m_AnimSkeleton[&Skel];
+            const auto View = S.view(); const auto n = std::size_t(View.count());
+            const xanimation::rigid E{ L2W.ExtractPosition(), L2W.ExtractRotation().NormalizeSafeCopy() };
+            const float Scale = L2W.ExtractScale().m_X;
+            m_RdAnim.resize(n); m_RdOut.resize(n); m_RdScale.resize(n);
+            xanimation::RigidBoneWorlds(View, *m_pAnimUsed, E, Scale, m_RdAnim, m_RdScale);
+            xlioncore::physics::PoseRagdoll(Rd, View, Alpha, m_RdAnim, m_RdOut);
+            m_RdPose = *m_pAnimUsed;
+            xanimation::LocalFromRigidWorlds(View, m_RdOut, m_RdScale, E, Scale, m_RdPose);
+            Out.resize(n);
+            xanimation::ComputeBoneWorlds(View, m_RdPose, Out);
         }
 
         void ReleaseSkinned(skinned_entity& E) noexcept
