@@ -469,6 +469,14 @@ namespace xlionrender
         float           m_Duration  = 0;        // a contact's length
     };
 
+    // The ground under one foot this frame (K3: the Animation system's cast; model space: the clip's floor is 0)
+    struct animation_ground
+    {
+        bool            m_bHit      = false;
+        float           m_Height    = 0;
+        xmath::fvec3    m_Normal    {0, 1, 0};
+    };
+
     struct animation
     {
         constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "Animation" };
@@ -482,6 +490,13 @@ namespace xlionrender
         bool                m_bMirror   = false;    // played left/right mirrored (the skeleton's mirror table: no second clip)
         float               m_BlendTime = 0.15f;    // seconds a change of clip eases in (inertialization); 0: a cut
         bool                m_bRootMotion = false;  // the entity moves by the clip's root motion (clips compiled with RootMotion); off by default: existing levels (the Walking package is XYZ) keep walking in place
+        xmath::fvec3        m_Move      {0, 0, 0};  // K2: the velocity the game asks (the entity's frame, world units per second; horizontal); zero: the clip's own walk
+        float               m_WarpStride = 1;       // (this frame's warping, set by the Animation system for the renderer; not saved)
+        float               m_WarpAngle  = 0;       //   radians about +Y from the clip's travel to Move
+        xmath::fvec3        m_WarpDir   {0, 0, 1};  //   the travel the stride is along (model space)
+        bool                m_bFootIK   = false;    // K3: the feet stand on the physics ground under them (a ray down at each foot); off by default: existing levels keep the clip's flat floor
+        std::array<animation_ground, 4> m_Ground{}; // (this frame's casts, per leg, smoothed; not saved)
+        std::uint8_t        m_nGround   = 0;
         std::uint32_t       m_nEvents   = 0;        // the clip's events fired so far while the game runs (T5; not saved)
         std::uint32_t       m_LastEvent = 0;        // the name hash of the last one
         std::string         m_ClipName;             // a request by name (K1 play): set it and the clip of that name plays (Clip follows); empty: Clip by index
@@ -507,6 +522,9 @@ namespace xlionrender
         , obj_member<"Finished",  &animation::m_bFinished, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"A one-shot ended this frame">>
         , obj_member<"BlendTime", &animation::m_BlendTime, member_help<"Seconds a change of Clip (or Mirror) eases from the pose shown into the new one, without sampling the old clip (inertialization); 0: a cut">>
         , obj_member<"RootMotion", &animation::m_bRootMotion, member_help<"While the game runs the entity moves where the clip walks (a clip compiled with RootMotion keeps its root in place and stores the walk apart); off: it walks in place">>
+        , obj_member<"Move",      &animation::m_Move, member_help<"With RootMotion: the velocity the game asks (the entity's frame, units per second). The walk clip is warped to it without the feet sliding: its steps get longer or shorter, it plays faster or slower, and its legs turn toward the travel (up to 90 deg) while the chest keeps facing. Zero: the clip's own walk">>
+        , obj_member<"Stride",    &animation::m_WarpStride, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"This frame's step length against the clip's (1: as authored), from Move">>
+        , obj_member<"FootIK",    &animation::m_bFootIK, member_help<"While the game runs the feet stand on the physics ground under them (stairs, slopes, kerbs): a ray down at each foot, each foot up or down by its ground, the hips follow the lowest, planted feet tilt to the slope. Off: the clip's flat floor">>
         , obj_member<"EventsFired", &animation::m_nEvents, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many of the clip's events (markers, footsteps, contacts) fired while the game ran">>
         )
     };

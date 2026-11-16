@@ -44,6 +44,7 @@
 #include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"   // registering macro back for anything after
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
+#include "dependencies/xLIONCore/src/physics/xlioncore_physics_api.h"     // CastRayClosest (the feet's ground, K3)
 #include "dependencies/xstrtool/source/xstrtool.h"           // (a clip requested by name: its hash, as the compiler makes it)
 #include "plugins/xragdoll.plugin/source/xragdoll_body_graph.h"
 #include <cstring>
@@ -69,6 +70,7 @@ namespace xlionrender
         void operator()( animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT ) noexcept
         {
             A.m_nFired = 0; A.m_bFinished = false;              // this frame's events and result only
+            A.m_WarpStride = 1; A.m_WarpAngle = 0;              // (and its warping)
             const auto* pGame = xlioncore::game::From(getGameMgr());
             if (pGame == nullptr) return;
             using namespace xlioncore::resources;
@@ -104,6 +106,17 @@ namespace xlionrender
                         auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
                         if (!SD.m_Mirror.empty()) pSD = &SD;
                     }
+            // stride and orientation warping (K2): the game asks a velocity (Move), the clip walks at its own; the clip's time runs at the Rate,
+            // its root motion turns by the Angle and stretches by the Stride, and the renderer warps the pose the same way (the feet stay planted)
+            xanimation::warp_params Wp;
+            if (pT && A.m_bRootMotion && A.m_Speed > 0 && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE && (A.m_Move.m_X != 0 || A.m_Move.m_Z != 0))
+            {
+                auto CV = xanimation::ClipVelocity(*pPkg, A.m_Clip) * (A.m_Speed * pT->m_Scale.m_X);      // ponytail: a uniform scale (X) for the clip's world speed
+                if (pSD) { const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip); CV = CV - N * (2.0f * CV.Dot(N)); }
+                Wp = xanimation::WarpFor(CV, A.m_Move);
+                A.m_Time = Before + pGame->m_Time.m_DeltaTime * A.m_Speed * Wp.m_Rate;
+                A.m_WarpStride = Wp.m_Stride; A.m_WarpAngle = Wp.m_Angle; A.m_WarpDir = Wp.m_Dir;
+            }
             FireEvents(*pPkg, A, Before, Length, pSD ? &pSD->m_Mirror : nullptr);
             // root motion (K2, plan 13.7): the entity goes where the clip walks - the step the clip's root took this frame, in the entity's frame
             // (its rotation and scale; a child's Transform is its parent's frame); mirrored: reflected through the skeleton's plane
@@ -115,8 +128,12 @@ namespace xlionrender
                     const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip);      // (the plane turned with the clip's facing, as the pose)
                     D = D - N * (2.0f * D.Dot(N));
                 }
+                if (Wp.active()) D = xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Wp.m_Angle) * D * Wp.m_Stride;
+                D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)
                 pT->m_Position = pT->m_Position + pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
             }
+            if (A.m_bFootIK && pT && pSkin) GroundFeet(A, *pSkin, *pT, *pPkg, Length);
+            else A.m_nGround = 0;
             if (A.m_bOneShot && A.m_ReturnClip >= 0)            // a one-shot: at its end the clip before it comes back where it was (Finished this frame)
             {
                 if (A.m_Time >= Length || A.m_Time < 0)
@@ -128,6 +145,50 @@ namespace xlionrender
             }
             if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
             else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }
+        }
+
+        // The ground under each foot (K3): the pose this frame (the clip at its time, mirrored and warped as the renderer will draw it), a ray
+        // down at each foot from half the hips' height above it (Box3D, the game's physics world), the hit's height and normal in the
+        // character's frame, eased in over ~0.05 s (a foot crossing a step's edge does not pop). The renderer fits the legs to it (FitGround).
+        // ponytail: the entity's Transform is taken as its world (a root entity); a child entity's parents are not applied
+        void GroundFeet(animation& A, const skinned_mesh& Skin, const xlioncore::transform& T, const xanim_package::anim_package& Pkg, float Length) noexcept
+        {
+            using namespace xlioncore::resources;
+            auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
+            auto* pSkel = pGeom ? static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
+            if (!pSkel || Pkg.m_nBones != pSkel->getBones().size()) { A.m_nGround = 0; return; }
+            auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
+            const auto& Rig = SD.m_Warp;
+            if (!Rig.valid() || Rig.m_Legs.size() > A.m_Ground.size()) { A.m_nGround = 0; return; }
+            thread_local xanimation::pose P, Scratch;
+            const float t = A.m_bLoop ? A.m_Time - Length * std::floor(A.m_Time / Length) : std::clamp(A.m_Time, 0.0f, Length);
+            if (!xanimation::SampleClip(SD, xanimation::MakeClipView(Pkg, A.m_Clip), t, A.m_bMirror, P, Scratch)) { A.m_nGround = 0; return; }
+            xanimation::warp_params Wp; Wp.m_Stride = A.m_WarpStride; Wp.m_Angle = A.m_WarpAngle; Wp.m_Dir = A.m_WarpDir;
+            xanimation::WarpPose(SD.view(), Rig, P, Wp);
+            std::array<xanimation::ground_contact, 4> Now;
+            xanimation::details::rigid_worlds W; xanimation::details::Worlds(SD.view(), P, W);
+            xanimation::CastFeet(SD.view(), Rig, P, T.m_Position, T.m_Rotation, T.m_Scale, 0.5f * W.m_P[Rig.m_Hips].m_Y * T.m_Scale.m_Y
+                , [&](const xmath::fvec3& O, const xmath::fvec3& D, xmath::fvec3& Hit, xmath::fvec3& N)
+                  { const auto H = xlioncore::physics::CastRayClosest(getGameMgr(), O, D); Hit = H.m_Point; N = H.m_Normal; return H.m_bHit; }
+                , std::span<xanimation::ground_contact>(Now.data(), Rig.m_Legs.size()));
+            const auto* pGame = xlioncore::game::From(getGameMgr());
+            const float Dt = pGame ? pGame->m_Time.m_DeltaTime : 0.0f, Ease = A.m_nGround ? 1.0f - std::exp(-Dt / 0.05f) : 1.0f;
+            for (std::size_t i = 0; i < Rig.m_Legs.size(); ++i)        // eased in (a foot crossing a step's edge does not pop)
+            {
+                auto& G = A.m_Ground[i]; const auto& C = Now[i];
+                if (!C.m_bHit) { G.m_bHit = false; continue; }
+                if (!G.m_bHit) { G.m_Height = C.m_Height; G.m_Normal = C.m_Normal; }
+                else { G.m_Height += (C.m_Height - G.m_Height) * Ease; G.m_Normal = (G.m_Normal + (C.m_Normal - G.m_Normal) * Ease).NormalizeSafeCopy(); }
+                G.m_bHit = true;
+            }
+            A.m_nGround = std::uint8_t(Rig.m_Legs.size());
+            static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+            if (thread_local int n = 0; bLog && (n++ % 30) == 0)
+            {
+                std::printf("[AnimGround] legs %u:", unsigned(A.m_nGround));
+                for (std::size_t i = 0; i < A.m_nGround; ++i) std::printf(" %s %.3f (n %.2f %.2f %.2f)", A.m_Ground[i].m_bHit ? "hit" : "none", A.m_Ground[i].m_Height, A.m_Ground[i].m_Normal.m_X, A.m_Ground[i].m_Normal.m_Y, A.m_Ground[i].m_Normal.m_Z);
+                std::printf("\n");
+            }
         }
 
         // The clip's events (T5) crossed by this frame's time step (Before, after], once each (xanimation::Advance: a loop fires once per pass,
