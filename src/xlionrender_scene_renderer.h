@@ -588,6 +588,24 @@ namespace xlionrender
                 const auto H = (L2W.ExtractRotation().NormalizeSafeCopy() * (m_PoseWorlds[std::size_t(C.m_Head)].ExtractRotation().NormalizeSafeCopy() * C.m_HeadRestInv)) * C.m_Forward;
                 std::fprintf(&F, ",\"look\":[%.4f,%.4f,%.4f]", H.m_X, H.m_Y, H.m_Z);
             }
+            // (per leg: whether the clip's own Footstep/Contact events say that foot is down now - the ground truth a slide metric needs; a
+            // height test also counts a run's swing skimming the ground)
+            if (auto SI = Src.m_AnimSkeleton.find(&Skel); SI != Src.m_AnimSkeleton.end() && !A.m_Package.empty())
+                if (auto* pPkg = [&] { using namespace xlioncore::resources; return static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, A.m_Package.m_Instance.m_Value)); }();
+                    pPkg && A.m_Clip >= 0 && A.m_Clip < int(pPkg->getClips().size()))
+                {
+                    std::fprintf(&F, ",\"contact\":[");
+                    const auto Ev = pPkg->getClipEvents(A.m_Clip);
+                    for (std::size_t l = 0; l < SI->second.m_Warp.m_Legs.size(); ++l)
+                    {
+                        bool bDown = false;
+                        for (const auto& E : Ev)
+                            if (E.m_iBone == SI->second.m_Warp.m_Legs[l].m_Foot && (E.m_Kind == xanim_package::event_kind::FOOTSTEP || E.m_Kind == xanim_package::event_kind::CONTACT)
+                                && A.m_Time >= E.m_Time && A.m_Time <= E.m_Time + E.m_Duration) bDown = true;
+                        std::fprintf(&F, l ? ",%d" : "%d", int(bDown));
+                    }
+                    std::fprintf(&F, "]");
+                }
             std::fprintf(&F, ",\"b\":[");
             for (std::size_t i = 0; i < m_PoseWorlds.size(); ++i) { const auto W = L2W * m_PoseWorlds[i].ExtractPosition(); std::fprintf(&F, i ? ",%.4f,%.4f,%.4f" : "%.4f,%.4f,%.4f", W.m_X, W.m_Y, W.m_Z); }
             std::fprintf(&F, "]}\n");
