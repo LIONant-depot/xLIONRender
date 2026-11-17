@@ -579,6 +579,29 @@ namespace xlionrender
         )
     };
 
+    // K3 runtime sockets: an entity that is a child of a character (its Parent) rides one of that character's bones - a ball in the hands,
+    // a sword in a fist. Every update, after the character is posed (K0c), its Transform (relative to the parent) becomes the bone's place
+    // and turn in the character's frame, then the Offset and Turn in the bone's frame; its own Scale stays. The hierarchy then draws it there
+    // and gameplay reads it there the same frame. ponytail: a kinematic ride - a dynamic body on it keeps simulating (hold one with physics off)
+    struct socket
+    {
+        constexpr static auto typedef_v = xecs::component::type::data{ .m_pName = "Socket" };
+
+        std::string                     m_Bone;                         // the bone's name in the parent's skeleton
+        xmath::fvec3                    m_Offset    {0, 0, 0};          // in the bone's frame (units)
+        xmath::fvec3                    m_Turn      {0, 0, 0};          // degrees about the bone's X, Y, Z
+        int                             m_iBone     = -1;               // (the bone found; -1 none yet; not saved)
+        const void*                     m_pSkel     = nullptr;          // (the skeleton it was found in)
+
+        XPROPERTY_DEF
+        ( "Socket", socket
+        , obj_member<"Bone",   &socket::m_Bone, member_help<"The name of the parent character's bone this entity rides (a hand, the head, a socket bone). The entity must be a child of the character">>
+        , obj_member<"Offset", &socket::m_Offset, member_help<"Where on the bone it sits, in the bone's own frame (units)">>
+        , obj_member<"Turn",   &socket::m_Turn, member_help<"Its turn on the bone, degrees about the bone's X, Y and Z">>
+        , obj_member<"BoneFound", +[](socket& S, bool bRead, int& V) { if (bRead) V = S.m_iBone; }, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"The bone's index in the parent's skeleton (-1: not found yet: no parent character, its skin not loaded, or no bone of that name)">>
+        )
+    };
+
     // The rows' marker and revert (member_override_state): Path names the slot and the row ("...Slots[G:s]/Parameters[G:r]..." or ".../Material").
     // The levels a row inherits through: the material (and its instances), the geometry's instance or the slot's swap, a prefab (pBase: the
     // prefab's Mesh, when this one is a prefab instance's), the entity. Overridden: the entity differs from what it inherits (from the prefab
@@ -981,6 +1004,7 @@ namespace xlionrender
     XSCRIPT_REGISTER_COMPONENT(skinned_mesh, "Rendering", 58)
     XSCRIPT_REGISTER_COMPONENT(animation,   "Rendering", 59)
     XSCRIPT_REGISTER_COMPONENT(ragdoll,     "Rendering", 62)
+    XSCRIPT_REGISTER_COMPONENT(socket,      "Rendering", 63)
     XSCRIPT_REGISTER_COMPONENT(reflection_probe_component, "Rendering", 60)
     XSCRIPT_REGISTER_COMPONENT(mesh_material, "Deprecated", 57)     // (old files: the editor moves it into the Mesh, UpgradeOldMaterials; not offered to add)
 }

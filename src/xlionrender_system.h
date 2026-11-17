@@ -99,9 +99,26 @@ namespace xlionrender
                 const bool bClip = pPkg && A.m_Clip >= 0 && A.m_Clip < int(pPkg->getClips().size()) && pPkg->getBoneNameHashes().size() == pSkel->getBones().size();
                 auto& P = m_Poser.m_Posed[Ent.m_Value];
                 m_Poser.PoseEntity(*pSkel, pPkg, bClip, &A, L2W, Ent.m_Value, P.m_Worlds);
-                P.m_Local = *m_Poser.m_pAnimUsed; P.m_Update = m_Poser.m_Update;
+                P.m_Local = *m_Poser.m_pAnimUsed; P.m_Update = m_Poser.m_Update; P.m_pSkel = pSkel;
             });
             m_Poser.SweepPosed();
+            // K3 sockets: each child with a Socket rides its parent character's bone, as posed just now (its Transform is relative to the parent:
+            // the bone's place and turn in the character's frame, then the Offset and Turn in the bone's frame; its Scale stays its own)
+            xecs::query::instance QS;
+            QS.m_Must.AddFromComponents<xlioncore::transform, socket, xecs::component::parent>();
+            Foreach(Search(QS), [&](xlioncore::transform& T, socket& S, const xecs::component::parent& Par) noexcept
+            {
+                const auto* pP = m_Poser.Posed(Par.m_Value.m_Value);
+                if (pP == nullptr || pP->m_pSkel == nullptr) { S.m_iBone = -1; return; }
+                if (S.m_pSkel != pP->m_pSkel || S.m_iBone < 0) { S.m_pSkel = pP->m_pSkel; S.m_iBone = S.m_Bone.empty() ? -1 : pP->m_pSkel->findBoneIndex(xstrtool::CRC32(S.m_Bone)); }
+                if (S.m_iBone < 0 || S.m_iBone >= int(pP->m_Worlds.size())) return;
+                const auto& M = pP->m_Worlds[std::size_t(S.m_iBone)];
+                const auto R = M.ExtractRotation().NormalizeSafeCopy();
+                auto Axis = [](float x, float y, float z, float Deg) { const float h = 0.5f * Deg * 0.017453293f, s = std::sin(h); return xmath::fquat(x * s, y * s, z * s, std::cos(h)); };
+                const auto Turn = Axis(0, 0, 1, S.m_Turn.m_Z) * Axis(0, 1, 0, S.m_Turn.m_Y) * Axis(1, 0, 0, S.m_Turn.m_X);      // (about X, then Y, then Z)
+                T.m_Position = M.ExtractPosition() + R * S.m_Offset;
+                T.m_Rotation = (R * Turn).NormalizeSafeCopy();
+            });
         }
 
         std::unordered_map<const xskeleton::skeleton*, xanimation::skeleton_data> m_Skeletons;        // (a mirrored clip's root motion: the skeleton's mirror table)

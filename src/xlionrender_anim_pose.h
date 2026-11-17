@@ -26,7 +26,7 @@ namespace xlionrender
 
         // What an update posed: per entity, its bone worlds (model space) and local pose, stamped with the update that made them
         // ponytail: a map keyed by entity, swept of entities not posed for 256 updates; a slot in the component if levels churn entities
-        struct posed { std::uint32_t m_Update = 0; std::vector<xmath::fmat4> m_Worlds; xanimation::pose m_Local; };
+        struct posed { std::uint32_t m_Update = 0; std::vector<xmath::fmat4> m_Worlds; xanimation::pose m_Local; const xskeleton::skeleton* m_pSkel = nullptr; };
         std::unordered_map<std::uint64_t, posed>        m_Posed;
         std::uint32_t                                   m_Update = 0;
         const posed* Posed(std::uint64_t Entity) const noexcept
