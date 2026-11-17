@@ -674,6 +674,8 @@ namespace xlionrender
                 }
                 const bool bReact = D.m_bNew && D.m_Chosen == xanimation::nervous::reflex::HIT_REACTION;
                 Nv.m_Running = D.m_Chosen;
+                R.m_NvSurprise = Nv.m_Drives.m_Value[xanimation::nervous::SURPRISE]; R.m_NvPain = Nv.m_Drives.m_Value[xanimation::nervous::PAIN];
+                R.m_pNvBody = xanimation::nervous::reflex_names_v[int(D.m_Chosen)];
                 if (bReact && pJolt && R.m_HitEventId == R.m_LastHitId)
                 {
                     const auto& I = *pJolt; const int Side = JoltSide; const float Dv = Jolt;
@@ -742,6 +744,7 @@ namespace xlionrender
                     if (D.m_Chosen == xanimation::nervous::reflex::CATCH_FALL && St.m_FallAt < 0) St.m_FallAt = St.m_Age;
                 }
                 Nv.m_RunningLimbs = D.m_Chosen;
+                R.m_pNvLimbs = xanimation::nervous::reflex_names_v[int(D.m_Chosen)]; R.m_NvFall = Pc.m_Fall; R.m_NvDrop = Pc.m_Drop;
                 const bool bCatch = D.m_Chosen == xanimation::nervous::reflex::CATCH_FALL;
                 // ponytail: the ground is the plane the character stood on at the switch; a ray down (CastRayClosest, filtered off its own bodies) for ledges and slopes
                 if (bCatch) St.m_Landing = xanimation::PredictLanding(Hips, Vel, St.m_E.m_P.m_Y);
