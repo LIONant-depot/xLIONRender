@@ -544,6 +544,7 @@ namespace xlionrender
         float               m_SpringHz = 2.0f, m_SpringDamping = 0.5f, m_SpringWeight = 1.0f, m_SpringMaxAngle = 35.0f, m_SpringDroop = 0.0f;
         // N2 (superset: KINEMATION's lean, Unreal's lean from acceleration): the upper body leans into the body's acceleration, atan(a/g) x Amount
         float               m_LeanAmount = 0.0f, m_LeanMaxAngle = 20.0f, m_LeanSmooth = 0.2f;
+        float               m_StabilizeWeight = 0.0f, m_StabilizeSmooth = 0.2f;     // KN4: the head kept steady in the world (0: off)
         // S2 (superset: KINEMATION's aim-at and look modifier): the look-at from angles (a stick, a mouse) and/or onto another bone (a hand's gun)
         bool                m_bLookAngles = false;
         float               m_LookYaw = 0, m_LookPitch = 0;       // deg, from the body's facing (+ toward its right... +X), + up
@@ -643,6 +644,10 @@ namespace xlionrender
             , obj_member<"Position", &animation::m_OffsetPosition>
             , obj_member<"Weight", &animation::m_OffsetWeight>
             , obj_member<"Model", &animation::m_bOffsetModel, member_help<"On: in the character's frame (turned about the bone's own position). Off: in the bone's own frame">>
+            >
+        , obj_scope<"Stabilize"
+            , obj_member<"Weight", &animation::m_StabilizeWeight, member_help<"The head keeps its gaze steady while the body bobs and sways (walking, running): its turn in the world follows an eased copy of itself. 1: fully, 0: off">>
+            , obj_member<"Smooth", &animation::m_StabilizeSmooth, member_help<"Seconds: how much the head's motion is eased (turns come through this much later)">>
             >
         , obj_scope<"Lean"
             , obj_member<"Amount", &animation::m_LeanAmount, member_help<"The spine leans into the body's acceleration as a balancing body does: forward speeding up, back braking, into turns. 1: the physical angle atan(a/g); 0: off">>

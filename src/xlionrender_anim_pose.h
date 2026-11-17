@@ -10,6 +10,7 @@
 #include "dependencies/xAnimation/source/motion/xanimation_springs.h"
 #include "dependencies/xAnimation/source/motion/xanimation_lean.h"
 #include "dependencies/xAnimation/source/motion/xanimation_bone_ops.h"
+#include "dependencies/xAnimation/source/motion/xanimation_stabilize.h"
 #include "dependencies/xstrtool/source/xstrtool.h"       // (the overlay's FromBone by name)
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
 #include "xlionrender_scene_components.h"      // (the Animation component the pose reads)
@@ -157,6 +158,7 @@ namespace xlionrender
                     }
                 }
             }
+            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_StabilizeWeight > 0 && S.m_LookAt.valid()) ApplyStabilize(S, Entity, *m_pSpringAnim, *pL2W);     // (KN4: after the aim: it eases what the look-at made)
             if (m_pSpringAnim && (!m_pSpringAnim->m_OffsetBone.empty() || !m_pSpringAnim->m_CopyTo.empty())) ApplyBoneOps(Skel, S, Entity, *m_pSpringAnim);
             if (m_pSpringAnim && pL2W && !m_pSpringAnim->m_SpringFrom.empty()) ApplySprings(Skel, S, Entity, *m_pSpringAnim, *pL2W);
             m_pSpringAnim = nullptr;
@@ -239,6 +241,29 @@ namespace xlionrender
             {
                 std::printf("[AnimCopy] entity %llu: %s from where it is kept at most %.1f cm over 120 frames (out of reach by %.1f cm)%c", (unsigned long long)Entity, Tr.m_CopyTo.c_str(), 100 * Tr.m_CopyOff, 100 * Tr.m_CopyMiss, 10);
                 std::fflush(stdout); Tr.m_CopyOff = Tr.m_CopyMiss = 0;
+            }
+        }
+
+        // KN4 (superset: KINEMATION's stabilize bone): the head kept steady in the world (motion/xanimation_stabilize.h); [AnimStabilize] compares the
+        // head's turn rate in the world before and after, every 120 frames
+        void ApplyStabilize(const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A, const xmath::fmat4& L2W)
+        {
+            auto& Tr = m_Tracks[Entity];
+            const float Dt = m_GameDt >= 0 ? std::min(m_GameDt, 0.1f) : 1.0f / 60.0f;
+            const auto E = L2W.ExtractRotation().NormalizeSafeCopy();
+            const auto HeadWorld = [&]() { xanimation::details::rigid_worlds W; xanimation::details::Worlds(S.view(), m_AnimPose, W); return (E * W.m_R[std::size_t(S.m_LookAt.m_Head)]).NormalizeCopy(); };
+            const auto In = HeadWorld();
+            xanimation::stabilize_params P; P.m_Weight = A.m_StabilizeWeight; P.m_Smooth = A.m_StabilizeSmooth;
+            xanimation::StabilizeHead(S.view(), S.m_LookAt, m_AnimPose, E, Dt, Tr.m_Stab, P);
+            const auto Out = HeadWorld();
+            const auto Turn = [](const xmath::fquat& a, const xmath::fquat& b) { return 2 * std::acos(std::min(1.0f, std::fabs(a.Dot(b)))); };
+            if (Tr.m_bStabPrev && Dt > 0) { const double a = Turn(Tr.m_StabPrevIn, In) / Dt, b = Turn(Tr.m_StabPrevOut, Out) / Dt; Tr.m_StabIn += a * a; Tr.m_StabOut += b * b; ++Tr.m_StabN; }
+            Tr.m_StabPrevIn = In; Tr.m_StabPrevOut = Out; Tr.m_bStabPrev = true;
+            if (Tr.m_StabN >= 120)
+            {
+                std::printf("[AnimStabilize] entity %llu: the head's turn rate in the world rms %.1f deg/s from the animation, %.1f deg/s stabilized%c", (unsigned long long)Entity
+                    , std::sqrt(Tr.m_StabIn / Tr.m_StabN) * 57.29578, std::sqrt(Tr.m_StabOut / Tr.m_StabN) * 57.29578, 10);
+                std::fflush(stdout); Tr.m_StabIn = Tr.m_StabOut = 0; Tr.m_StabN = 0;
             }
         }
 
@@ -343,6 +368,8 @@ namespace xlionrender
             xanimation::rigid                       m_CopyOffset; xanimation::reflex_rig m_CopyArms;
             int                                     m_CopyN = 0; float m_CopyMiss = 0, m_CopyOff = 0;
             std::string                             m_OffsetBone; int m_iOffset = -1;
+            xanimation::stabilize_state             m_Stab;         // KN4: the eased head; the measure (the head's turn rate before and after, squared, summed)
+            xmath::fquat                            m_StabPrevIn, m_StabPrevOut; bool m_bStabPrev = false; double m_StabIn = 0, m_StabOut = 0; int m_StabN = 0;
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 
