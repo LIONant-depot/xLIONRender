@@ -67,6 +67,43 @@ namespace xlionrender
         constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Animation" };
         animation_system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr) {}
 
+        // K0c: the Animation system owns the pose. After every character's update (time, root motion, matching, warp, ground casts), each
+        // skinned character with an Animation is posed once, on game time, in the frame it is drawn at (its world transform as the renderer
+        // reads it: hierarchy propagated, fixed-step interpolation); the renderer draws that pose (scene_renderer::m_pUpdated) and poses only
+        // what this did not (an active ragdoll, a world that does not update). Before: posed per view, per-entity state on the wall clock.
+        anim_poser m_Poser;
+        void OnPostUpdate(void) noexcept
+        {
+            if (scene_renderer::AnimMode() != scene_renderer::anim_mode::NEW) return;
+            const auto* pGame = xlioncore::game::From(getGameMgr());
+            if (pGame == nullptr) return;
+            XPROFILE_SCOPE("Animation: pose (update)");
+            using namespace xlioncore::resources;
+            xlioncore::PropagateHierarchy(*this);
+            ++m_Poser.m_Update; m_Poser.m_GameDt = std::max(0.0f, pGame->m_Time.m_DeltaTime);
+            const auto Interpolate = xlioncore::FixedInterpolateOf(getGameMgr());
+            xecs::query::instance Query;
+            Query.m_Must.AddFromComponents<xlioncore::transform, skinned_mesh, animation>();
+            Foreach(Search(Query), [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const skinned_mesh& Skin, const animation& A
+                                      , const xecs::component::parent* pParent, const xlioncore::render_transform* pRender, const ragdoll* pRagdoll) noexcept
+            {
+                if (pRagdoll && pRagdoll->m_bActive) return;           // (the renderer poses it from its bodies)
+                auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
+                auto* pSkel = pGeom ? static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
+                if (pGeom == nullptr || pSkel == nullptr || pSkel->getBones().empty()) return;
+                const auto T = xlioncore::WorldOf(Local, pParent, pRender, Interpolate);
+                if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return;
+                xmath::fmat4 L2W; L2W.setupSRT(T.m_Scale, T.m_Rotation, T.m_Position);
+                const std::uint64_t Pkg = A.m_Package.empty() ? pGeom->getAnimationRef().m_Instance.m_Value : A.m_Package.m_Instance.m_Value;
+                auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
+                const bool bClip = pPkg && A.m_Clip >= 0 && A.m_Clip < int(pPkg->getClips().size()) && pPkg->getBoneNameHashes().size() == pSkel->getBones().size();
+                auto& P = m_Poser.m_Posed[Ent.m_Value];
+                m_Poser.PoseEntity(*pSkel, pPkg, bClip, &A, L2W, Ent.m_Value, P.m_Worlds);
+                P.m_Local = *m_Poser.m_pAnimUsed; P.m_Update = m_Poser.m_Update;
+            });
+            m_Poser.SweepPosed();
+        }
+
         std::unordered_map<const xskeleton::skeleton*, xanimation::skeleton_data> m_Skeletons;        // (a mirrored clip's root motion: the skeleton's mirror table)
         struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; };
         std::unordered_map<const xanim_package::anim_package*, match_db> m_Match;                      // K4: one database per package (ponytail: a reloaded package at the same address keeps its old database until the editor restarts)
@@ -732,6 +769,7 @@ namespace xlionrender
             if (!m_pScene) m_pScene = std::make_unique<scene_renderer>();
             auto& R = *m_pScene;
             if (!R.Init(*pDevice)) return;
+            { auto* pAnimSys = findSystem<animation_system>(); R.m_pUpdated = pAnimSys ? &pAnimSys->m_Poser : nullptr; }     // (K0c: the poses the update made)
 
             xlioncore::PropagateHierarchy(*this);
             R.Begin();
@@ -810,6 +848,9 @@ namespace xlionrender
                     if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
                     R.AddSkinnedMesh(C, pAnim, L2W, Ent.m_Value, pRagdoll && pRagdoll->m_bActive ? pRagdoll->m_pRuntime : nullptr, Alpha);
                 });
+                static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+                if (bLog && R.m_pUpdated && (R.m_pUpdated->m_Update % 300) == 1)      // (K0c: who posed the characters)
+                    std::printf("[AnimPose] update %u: %d skinned meshes drawn, %d posed by the Animation system\n", R.m_pUpdated->m_Update, R.m_Stats.m_Meshes, R.m_Stats.m_PosedByUpdate);
             }
             Each.template operator()<light_sun>  ([&](std::uint64_t,   const light_sun& C,   const xmath::fmat4& L2W) { R.AddSun(C, L2W); });
             Each.template operator()<light_point>([&](std::uint64_t Id, const light_point& C, const xmath::fmat4& L2W) { R.AddPoint(C, L2W * xmath::fvec3(0, 0, 0), Id); });

@@ -30,7 +30,8 @@
 #include "dependencies/xGPU/source/Tools/editors/xgpu_editor_anim_pose.h"     // the pose of a skeleton at a clip's time (the skin editor's preview poses it the same way)
 #include "dependencies/xAnimation/source/xanimation.h"                         // K0: the animation library poses the skeleton too (XLION_ANIM), bit for bit the same arithmetic
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
-#include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"          // an active Ragdoll poses the skeleton from its bodies
+#include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
+#include "xlionrender_anim_pose.h"                                            // (K0c) the pose stack: sample, transition, warp, ground, foot lock, look-at          // an active Ragdoll poses the skeleton from its bodies
 #if __has_include("xprofile.h")
     #include "xprofile.h"
 #else
@@ -48,8 +49,9 @@
 
 namespace xlionrender
 {
-    struct scene_renderer
+    struct scene_renderer : anim_poser       // (K0c: the poser is shared with the Animation system, which poses once per update; this one poses what it did not)
     {
+        const anim_poser*                               m_pUpdated = nullptr;           // (K0c: the world's Animation system's poser, set by the render system each frame)
         instance                                        m_Renderer;
         render_view                                     m_View;
         scene                                           m_Scene;
@@ -80,6 +82,7 @@ namespace xlionrender
         struct stats
         {
             int m_Meshes = 0, m_Drawn = 0, m_Waiting = 0, m_Lights = 0, m_bSun = 0, m_Materials = 0, m_ConstantSlots = 0, m_GIMeshes = 0;
+            int m_PosedByUpdate = 0;     // (K0c: skinned meshes whose pose the Animation system made this frame)
         };
         double                                          m_GILoadPartMs[3] = { 0, 0, 0 };   // the first uses: decode (main), surfels (worker), renderer (main) (Phase 7)
         struct gi_load
@@ -107,13 +110,9 @@ namespace xlionrender
         };
         std::unordered_map<std::uint64_t, skinned_entity> m_Skinned;
         std::vector<xmath::fmat4>                       m_PoseWorlds, m_SkinMatrices, m_CheckWorlds;
-        xanimation::pose                                m_AnimPose;                     // (scratch: the library's local pose of the character being added)
-        xanimation::pose                                m_AnimScratch;                  // (scratch: the unmirrored sample of a mirrored clip)
-        const xanimation::pose*                         m_pAnimUsed = nullptr;          // (the pose PoseWithLibrary posed: m_AnimPose or the rest)
         xanimation::pose                                m_RdPose;                       // (scratch: a ragdoll's local pose)
         std::vector<xanimation::rigid>                  m_RdAnim, m_RdOut;
         std::vector<float>                              m_RdScale;
-        std::unordered_map<const void*, xanimation::skeleton_data> m_AnimSkeleton;      // per skeleton resource: the library's copy of its hierarchy and rest pose
         std::uint64_t                                   m_AnimChecked = 0, m_AnimMismatch = 0;     // XLION_ANIM=check
         xgpu::device*                                   m_pDevice = nullptr;
         std::unordered_set<const void*>                 m_OutlineMade;  // per geometry: its outline mesh given to the renderer (made the first time it is the selected one)      // per geometry: its surfels given to the renderer (1), or it has none (0)
@@ -433,17 +432,14 @@ namespace xlionrender
             }
             else
             {
+                // K0c: the Animation system posed it in this world's last update (once a frame, on game time): its pose as it is; otherwise
+                // (no update ran: a preview, a world not updating) posed here as before. CHECK: no transitions, the bits must match
+                if (const auto* pP = Mode == anim_mode::NEW && m_pUpdated ? m_pUpdated->Posed(Entity) : nullptr; pP && pP->m_Worlds.size() == std::size_t(nBones))
+                    { m_PoseWorlds = pP->m_Worlds; m_pAnimUsed = &pP->m_Local; ++m_Stats.m_PosedByUpdate; }
+                else
                 {
                     XPROFILE_SCOPE("Animation: pose");
-                    xanimation::warp_params Wp;          // K2: the Animation system's warping this frame
-                    if (bClip) { Wp.m_Stride = pAnim->m_WarpStride; Wp.m_Angle = pAnim->m_WarpAngle; Wp.m_Dir = pAnim->m_WarpDir; }
-                    std::array<xanimation::ground_contact, 4> Ground; std::size_t nGround = 0;        // K3: the Animation system's casts this frame
-                    if (bClip && pAnim->m_bFootIK) for (; nGround < pAnim->m_nGround && nGround < Ground.size(); ++nGround)
-                        Ground[nGround] = { pAnim->m_Ground[nGround].m_bHit, pAnim->m_Ground[nGround].m_Height, pAnim->m_Ground[nGround].m_Normal };
-                    PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, m_PoseWorlds
-                                   , Mode == anim_mode::NEW && pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f, &Wp, std::span<const xanimation::ground_contact>(Ground.data(), nGround)
-                                   , pAnim ? pAnim->m_MatchJumps : 0u, bClip && pAnim->m_bFootLock ? &L2W : nullptr
-                                   , &L2W, pAnim ? pAnim->m_LookAt : xmath::fvec3(0, 0, 0), pAnim ? pAnim->m_LookAtWeight : 0.0f);      // (CHECK: no transitions, the bits must match)
+                    PoseEntity(*pSkel, pPkg, bClip, pAnim, L2W, Mode == anim_mode::NEW && pAnim ? Entity : 0, m_PoseWorlds);
                 }
                 if (Mode == anim_mode::CHECK && !(bClip && pAnim->m_bMirror))      // both computed (a mirrored clip: the old code has no mirror): the library must give exactly today's matrices
                 {
@@ -534,49 +530,6 @@ namespace xlionrender
             return M;
         }
 
-        // The library's pose of a skeleton at a clip's time (no clip: its rest pose) as bone worlds. The skeleton's parent array is copied once
-        // per skeleton resource (re-checked against the resource each time: a reload with other parents rebuilds it).
-        // Entity / BlendTime (K1): when what poses the entity changes (another clip or package, mirrored or not, the rest), the new pose starts
-        // from the one shown and eases into the new source over BlendTime (inertialization: the old clip is not sampled any more; 0: a cut).
-        void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, bool bMirror, std::vector<xmath::fmat4>& Out, std::uint64_t Entity = 0, float BlendTime = 0, const xanimation::warp_params* pWarp = nullptr
-                            , std::span<const xanimation::ground_contact> Ground = {}, std::uint32_t Jumps = 0      // (Jumps: motion matching's jump count - a jump within a clip is a new source too)
-                            , const xmath::fmat4* pLockL2W = nullptr                                                  // (set: foot locking, in this world frame)
-                            , const xmath::fmat4* pL2W = nullptr, const xmath::fvec3& LookAt = {}, float LookAtWeight = 0)    // (look-at: a world point, in the frame pL2W)
-        {
-            auto& S = m_AnimSkeleton[&Skel];
-            const auto Bones = Skel.getBones();
-            bool bSame = S.m_Parent.size() == Bones.size();
-            for (std::size_t i = 0; bSame && i < Bones.size(); ++i) bSame = S.m_Parent[i] == Bones[i].m_iParent;
-            if (!bSame) S = xanimation::MakeSkeleton(Skel);
-            Out.resize(Bones.size());
-            const bool bClip = pPkg && xanimation::SampleClip(S, *pPkg, iClip, Time, bMirror, m_AnimPose, m_AnimScratch);
-            if (Entity == 0) { xanimation::ComputeBoneWorlds(S.view(), bClip ? m_AnimPose : S.m_Rest, Out); m_pAnimUsed = bClip ? &m_AnimPose : &S.m_Rest; return; }
-            if (!bClip) m_AnimPose = S.m_Rest;
-            Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0) + std::uint64_t(Jumps) * 0x9E3779B97F4A7C15ull) : 1, &Skel, BlendTime, m_AnimPose);
-            if (bClip && pWarp && pWarp->active()) xanimation::WarpPose(S.view(), S.m_Warp, m_AnimPose, *pWarp);     // (after the blend: the blend's poses stay the clip's own)
-            if (bClip && Ground.size() == S.m_Warp.m_Legs.size() && !Ground.empty()) xanimation::FitGround(S.view(), S.m_Warp, m_AnimPose, Ground, S.m_FootHeights);
-            if (bClip && pLockL2W)                     // foot locking: last, on the pose as drawn (per entity: its pins and when it was last drawn)
-            {
-                auto& Tr = m_Tracks[Entity];
-                const auto Now = std::chrono::steady_clock::now();
-                const float Dt = Tr.m_LockT.time_since_epoch().count() ? std::clamp(std::chrono::duration<float>(Now - Tr.m_LockT).count(), 0.0f, 0.1f) : 0.0f;
-                Tr.m_LockT = Now;
-                xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock);
-            }
-            if (bClip && pL2W && S.m_LookAt.valid())  // look-at: after the feet (the chain is above the hips), toward a world point in the entity's frame
-            {
-                auto& Tr = m_Tracks[Entity];
-                if (LookAtWeight > 0 || Tr.m_Look.m_W > 0)
-                {
-                    const auto Now = std::chrono::steady_clock::now();
-                    const float Dt = Tr.m_LookT.time_since_epoch().count() ? std::clamp(std::chrono::duration<float>(Now - Tr.m_LookT).count(), 0.0f, 0.1f) : 0.0f;
-                    Tr.m_LookT = Now;
-                    const auto Inv = pL2W->InverseSRT();
-                    xanimation::LookAt(S.view(), S.m_LookAt, m_AnimPose, Inv * LookAt, LookAtWeight, Dt, Tr.m_Look);
-                }
-            }
-            xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
-        }
 
         // XLION_ANIM_TRACE=<file>: a motion trace for an AI (or a tool) to read - JSON Lines. A header line, one line per skeleton the first
         // time it is drawn (bone parents, name hashes, body roles), then one line per drawn character per frame: the time, the clip and its
@@ -624,11 +577,12 @@ namespace xlionrender
             std::fprintf(&F, "{\"t\":%.4f,\"w\":%d,\"e\":%llu,\"sk\":%d,\"clip\":%d,\"ct\":%.4f,\"jumps\":%u,\"move\":[%.3f,%.3f],\"stride\":%.3f,\"warp\":%.2f,\"pos\":[%.4f,%.4f,%.4f],\"yaw\":%.2f,\"locked\":["
                 , T, World, (unsigned long long)Entity, It->second, A.m_Clip, A.m_Time, A.m_MatchJumps, A.m_Move.m_X, A.m_Move.m_Z, A.m_WarpStride, A.m_WarpAngle * 57.29578f
                 , P.m_X, P.m_Y, P.m_Z, std::atan2(Fwd.m_X, Fwd.m_Z) * 57.29578f);
-            if (auto TI = m_Tracks.find(Entity); TI != m_Tracks.end()) for (std::size_t i = 0; i < TI->second.m_Lock.m_Legs.size(); ++i) std::fprintf(&F, i ? ",%d" : "%d", int(TI->second.m_Lock.m_Legs[i].m_bLocked));
+            const anim_poser& Src = m_pUpdated && m_pUpdated->Posed(Entity) ? *m_pUpdated : static_cast<const anim_poser&>(*this);      // (K0c: whoever posed it holds its state)
+            if (auto TI = Src.m_Tracks.find(Entity); TI != Src.m_Tracks.end()) for (std::size_t i = 0; i < TI->second.m_Lock.m_Legs.size(); ++i) std::fprintf(&F, i ? ",%d" : "%d", int(TI->second.m_Lock.m_Legs[i].m_bLocked));
             std::fprintf(&F, "],\"events\":[");
             for (int i = 0; i < A.m_nFired; ++i) std::fprintf(&F, i ? ",[%d,%d,%u]" : "[%d,%d,%u]", int(A.m_Fired[std::size_t(i)].m_Kind), int(A.m_Fired[std::size_t(i)].m_Bone), A.m_Fired[std::size_t(i)].m_NameHash);
             std::fprintf(&F, "]");
-            if (auto SI = m_AnimSkeleton.find(&Skel); SI != m_AnimSkeleton.end() && SI->second.m_LookAt.valid() && int(m_PoseWorlds.size()) > SI->second.m_LookAt.m_Head)
+            if (auto SI = Src.m_AnimSkeleton.find(&Skel); SI != Src.m_AnimSkeleton.end() && SI->second.m_LookAt.valid() && int(m_PoseWorlds.size()) > SI->second.m_LookAt.m_Head)
             {   // (the head's forward, world: where it looks - the look-at's result; the bones' positions alone do not show a head's turn)
                 const auto& C = SI->second.m_LookAt;
                 const auto H = (L2W.ExtractRotation().NormalizeSafeCopy() * (m_PoseWorlds[std::size_t(C.m_Head)].ExtractRotation().NormalizeSafeCopy() * C.m_HeadRestInv)) * C.m_Forward;
@@ -640,38 +594,6 @@ namespace xlionrender
             if ((++m_Trace.m_Lines & 63) == 0) std::fflush(&F);
         }
 
-        // the poses an entity showed on its last two frames, what posed it, and its transition (K1)
-        struct anim_track
-        {
-            std::uint64_t                           m_Source = 0;
-            const void*                             m_pSkel  = nullptr;
-            xanimation::pose                        m_Cur, m_Prev;
-            std::chrono::steady_clock::time_point   m_T;
-            xanimation::inertializer                m_In;
-            xanimation::foot_lock_state             m_Lock;         // (FootLock: the feet's pins)
-            std::chrono::steady_clock::time_point   m_LockT{};
-            xanimation::look_at_state               m_Look;         // (LookAt: the aim's eased angles and weight)
-            std::chrono::steady_clock::time_point   m_LookT{};
-        };
-        std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
-
-        void Transition(std::uint64_t Entity, std::uint64_t Source, const void* pSkel, float BlendTime, xanimation::pose& P)
-        {
-            if (m_Tracks.size() > 4096) m_Tracks.clear();       // ponytail: entities that went away are forgotten in bulk; a per-frame sweep if levels spawn that many
-            auto& Tr = m_Tracks[Entity];
-            const auto Now = std::chrono::steady_clock::now();
-            const bool bHad = Tr.m_pSkel == pSkel && Tr.m_Cur.count() == P.count();
-            const float Dt = bHad ? std::clamp(std::chrono::duration<float>(Now - Tr.m_T).count(), 0.0f, 0.1f) : 0.0f;
-            if (bHad && Tr.m_Source != Source && BlendTime > 0.0f)
-            {
-                Tr.m_In.Start(Tr.m_Cur, Tr.m_Prev, P, P, Dt, BlendTime * 0.25f);     // (a half-life of a quarter of the blend time: ~94 % gone by its end)
-                static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
-                if (bLog) { float W = 0; for (const auto& R : Tr.m_In.m_RotX) W = std::max(W, std::sqrt(R.Dot(R))); std::printf("[AnimBlend] entity %llu: a new source eases in over %.2f s (largest turn to absorb %.1f deg)\n", (unsigned long long)Entity, BlendTime, W * 57.29578f); }
-            }
-            if (bHad) Tr.m_In.Apply(P, Dt); else Tr.m_In.m_bActive = false;
-            if (bHad) Tr.m_Prev = Tr.m_Cur; else Tr.m_Prev = P;
-            Tr.m_Cur = P; Tr.m_Source = Source; Tr.m_pSkel = pSkel; Tr.m_T = Now;
-        }
 
         // The skeleton posed by an active ragdoll's bodies (blended between the last two fixed steps by Alpha), right after PoseWithLibrary
         // (its animated pose: the bones the ragdoll does not own keep it): world rigid frames -> the local pose under this entity -> model space
