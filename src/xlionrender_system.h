@@ -271,6 +271,7 @@ namespace xlionrender
                 const auto F = xanimation::details::TurnY(pT->m_Rotation.ConjugateCopy() * A.m_Face, -Yaw0);
                 YawAsked = std::atan2(F.m_X, F.m_Z);
             }
+            Wish = xanimation::ReachableWish(M.m_Db, Wish);        // (toward a direction the clips walk; warping turns them the rest)
             xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
             if (xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, YawAsked), 0))
             {
