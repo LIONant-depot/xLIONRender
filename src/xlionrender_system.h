@@ -155,7 +155,17 @@ namespace xlionrender
                 }
                 return;
             }
-            if (A.m_bLoop) { A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length; }
+            if (A.m_bLoop)
+            {
+                const float Prev = A.m_Time;
+                A.m_Time = std::fmod(A.m_Time, Length); if (A.m_Time < 0) A.m_Time += Length;
+                if (A.m_bResetPushed && A.m_nPushed && A.m_Time < Prev - 0.5f * Length)       // (the clip started again: a drill's pushed bodies go back)
+                {
+                    for (int k = 0; k < A.m_nPushed; ++k)
+                        { xecs::component::entity E; E.m_Value = A.m_Pushed[std::size_t(k)].m_Entity; xlioncore::physics::TeleportDynamicBody(getGameMgr(), E, A.m_Pushed[std::size_t(k)].m_Position, A.m_Pushed[std::size_t(k)].m_Rotation); }
+                    A.m_nPushed = 0;
+                }
+            }
             else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }
         }
 
@@ -201,14 +211,14 @@ namespace xlionrender
                 const auto M = xanimation::details::TurnY(A.m_Move, -Yaw0); Wish = xmath::fvec3(M.m_X, 0, M.m_Z);
                 YawAsked = std::atan2(M.m_X, M.m_Z);
             }
-            xanimation::matching_state St{ A.m_Clip, A.m_Time, A.m_MatchSince + Dt, int(A.m_MatchJumps) };
+            xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
             if (xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, YawAsked), 0))
             {
                 static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s\n", St.m_Jumps, A.m_Clip, A.m_Time, St.m_Clip, St.m_Time);
                 A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_bPlaying = true;
             }
-            A.m_MatchSince = St.m_Since; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
+            A.m_MatchSince = St.m_Since; A.m_MatchSinceJump = St.m_SinceJump; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
         }
 
         // Contact events push (a kick): for each Contact event with a bone fired this frame, the bone's world position and velocity (the clip
@@ -234,7 +244,11 @@ namespace xlionrender
                 const auto& Sc = T.m_Scale;
                 auto ToWorld = [&](const xmath::fvec3& M) { return T.m_Position + T.m_Rotation * xmath::fvec3(M.m_X * Sc.m_X, M.m_Y * Sc.m_Y, M.m_Z * Sc.m_Z); };
                 const auto P = ToWorld(W1.m_P[std::size_t(F.m_Bone)]), V = (P - ToWorld(W0.m_P[std::size_t(F.m_Bone)])) * (1.0f / Dt);
-                const int n = xlioncore::physics::PushBodies(getGameMgr(), P, 0.15f * Sc.m_X, V * 1.1f);
+                xlioncore::physics::pushed_body Got[4];
+                const int n = xlioncore::physics::PushBodies(getGameMgr(), P, 0.15f * Sc.m_X, V * 1.1f, Got, 4);
+                for (int k = 0; k < std::min(n, 4) && A.m_bResetPushed; ++k)       // (a drill remembers where they were, the first time)
+                    if (std::none_of(A.m_Pushed.begin(), A.m_Pushed.begin() + A.m_nPushed, [&](const auto& B) { return B.m_Entity == Got[k].m_Entity; }) && A.m_nPushed < A.m_Pushed.size())
+                        A.m_Pushed[A.m_nPushed++] = Got[k];
                 if (bLog) std::printf("[AnimPush] contact at %.2f s: bone %d at (%.2f %.2f %.2f) moving %.2f units/s pushed %d bodies\n", F.m_Time, F.m_Bone, P.m_X, P.m_Y, P.m_Z, V.Length(), n);
             }
         }

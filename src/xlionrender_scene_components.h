@@ -15,7 +15,8 @@
 #include "dependencies/xmath/source/xmath.h"
 #include "scene/xlionrender_scene.h"         // gi_debug
 #include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"
-#include "dependencies/xLIONCore/src/resources/xlioncore_resources_api.h"     // the Mesh's slots and their parameters, as loaded (the inspector's rows)
+#include "dependencies/xLIONCore/src/resources/xlioncore_resources_api.h"
+#include "dependencies/xLIONCore/src/physics/xlioncore_physics_api.h"     // pushed_body (PushOnContact's drill)     // the Mesh's slots and their parameters, as loaded (the inspector's rows)
 #include "plugins/xmaterial.plugin/source/xmaterial_xgpu_rsc_loader.h"
 #include "plugins/xmaterial_instance.plugin/source/xmaterial_instance_xgpu_rsc_loader.h"
 #include "plugins/xmaterial.plugin/source/xmaterial_runtime.h"
@@ -499,6 +500,10 @@ namespace xlionrender
         std::uint32_t       m_MatchJumps = 0;       // (jumps so far: the renderer eases each in; not saved)
         float               m_MatchSince = 1e9f;    // (seconds since the last search)
         bool                m_bPushOnContact = false;   // a Contact event's bone pushes the dynamic bodies it touches with its own speed (a kick, a shove)
+        bool                m_bResetPushed = false;     // a drill: what it pushed goes back where it was each time its looping clip starts again
+        std::array<xlioncore::physics::pushed_body, 4> m_Pushed{}; // (not saved)
+        std::uint8_t        m_nPushed = 0;
+        float               m_MatchSinceJump = 1e9f;    // (matching: seconds since the last jump)
         bool                m_bFootLock = false;    // a foot that is down and nearly still stays where it landed until it lifts (no slide from warps, blends, matching jumps)
         bool                m_bFootIK   = false;    // K3: the feet stand on the physics ground under them (a ray down at each foot); off by default: existing levels keep the clip's flat floor
         std::array<animation_ground, 4> m_Ground{}; // (this frame's casts, per leg, smoothed; not saved)
@@ -534,6 +539,7 @@ namespace xlionrender
         , obj_member<"FaceMove",  &animation::m_bFaceMove, member_help<"With MotionMatching: the character turns to face where it moves (motion matching picks the turning clips; the clips' root turn turns it). Off: it keeps facing ahead and its legs turn toward the move (orientation warping, up to 90 deg)">>
         , obj_member<"Jumps",     &animation::m_MatchJumps, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many times motion matching jumped to another clip or time">>
         , obj_member<"PushOnContact", &animation::m_bPushOnContact, member_help<"While the game runs, when a Contact event of the clip fires, the event's bone pushes the dynamic physics bodies it touches with its own speed (x1.1, an instep kick's transfer): a kick moves the ball, a shove a crate">>
+        , obj_member<"ResetPushed", &animation::m_bResetPushed, member_help<"With PushOnContact and a looping clip: what it pushed goes back where it was each time the clip starts again (a kick drill, a demo)">>
         , obj_member<"FootLock",  &animation::m_bFootLock, member_help<"While the game runs a foot that is down and nearly still stays exactly where it landed until it lifts (what is left of a clip's skate, a warp or a matching jump does not slide it)">>
         , obj_member<"FootIK",    &animation::m_bFootIK, member_help<"While the game runs the feet stand on the physics ground under them (stairs, slopes, kerbs): a ray down at each foot, each foot up or down by its ground, the hips follow the lowest, planted feet tilt to the slope. Off: the clip's flat floor">>
         , obj_member<"EventsFired", &animation::m_nEvents, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many of the clip's events (markers, footsteps, contacts) fired while the game ran">>
