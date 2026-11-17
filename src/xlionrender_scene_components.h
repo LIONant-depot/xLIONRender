@@ -532,6 +532,9 @@ namespace xlionrender
         bool                m_bWarpTurn   = false;
         bool                m_bWarpHeight = false;    // off: the height stays the clip's (the ground's)
         float               m_WarpFrom    = 0, m_WarpTo = 0;    // clip seconds
+        // N1 (superset): a spring chain - secondary motion (a ponytail, a tail, the upper body's sway)
+        std::string         m_SpringFrom;             // the chain's first bone (it and its first-child descendants); empty: off
+        float               m_SpringHz = 2.0f, m_SpringDamping = 0.5f, m_SpringWeight = 1.0f, m_SpringMaxAngle = 35.0f, m_SpringDroop = 0.0f;
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
@@ -587,6 +590,14 @@ namespace xlionrender
         , obj_member<"PlayerRunSpeed", &animation::m_PlayerRunSpeed, member_help<"Player: the speed with Run held (Shift, or the pad's stick pushed fully)">>
         , obj_member<"LookAtWeight", &animation::m_LookAtWeight, member_help<"How much the head turns toward LookAt: 0 off (eases back to the clip's own head), 1 full">>
         , obj_member<"FootIK",    &animation::m_bFootIK, member_help<"While the game runs the feet stand on the physics ground under them (stairs, slopes, kerbs): a ray down at each foot, each foot up or down by its ground, the hips follow the lowest, planted feet tilt to the slope. Off: the clip's flat floor">>
+        , obj_scope<"Springs"
+            , obj_member<"From", &animation::m_SpringFrom, member_help<"The first bone of a chain that lags behind the body's motion and swings back (it and its first-child descendants: a ponytail, a tail). Empty: off">>
+            , obj_member<"Hz", &animation::m_SpringHz, member_help<"How stiff: the spring's frequency">>
+            , obj_member<"Damping", &animation::m_SpringDamping, member_help<"1: no overshoot; lower: it swings">>
+            , obj_member<"Weight", &animation::m_SpringWeight>
+            , obj_member<"MaxAngle", &animation::m_SpringMaxAngle, member_help<"Degrees: the most each bone swings away from the animation">>
+            , obj_member<"Droop", &animation::m_SpringDroop, member_help<"Extra downward pull (units/s^2): a heavy tail hangs">>
+            >
         , obj_scope<"Warp"
             , obj_member<"Active", &animation::m_bWarp, member_help<"Root motion: between From and To (clip seconds) the clip's root motion is bent so the character stands on Target when the clip reaches To (a vault lands on the box, a dive meets the ball). The target may move meanwhile">>
             , obj_member<"Target", &animation::m_WarpTarget>

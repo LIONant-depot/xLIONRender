@@ -7,6 +7,7 @@
 // did not pose (no update ran, a preview). Moved verbatim from xlionrender_scene_renderer.h; only the clock is new (m_GameDt).
 #include "dependencies/xAnimation/source/xanimation.h"
 #include "dependencies/xAnimation/source/blend/xanimation_overlay.h"
+#include "dependencies/xAnimation/source/motion/xanimation_springs.h"
 #include "dependencies/xstrtool/source/xstrtool.h"       // (the overlay's FromBone by name)
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
 #include "xlionrender_scene_components.h"      // (the Animation component the pose reads)
@@ -52,7 +53,7 @@ namespace xlionrender
             std::array<xanimation::ground_contact, 4> Ground; std::size_t nGround = 0;        // K3: the Animation system's casts this frame
             if (bClip && pAnim->m_bFootIK) for (; nGround < pAnim->m_nGround && nGround < Ground.size(); ++nGround)
                 Ground[nGround] = { pAnim->m_Ground[nGround].m_bHit, pAnim->m_Ground[nGround].m_Height, pAnim->m_Ground[nGround].m_Normal };
-            m_pOverlayAnim = bClip ? pAnim : nullptr;
+            m_pOverlayAnim = bClip ? pAnim : nullptr; m_pSpringAnim = pAnim;
             PoseWithLibrary(Skel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, Out
                            , pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f, &Wp, std::span<const xanimation::ground_contact>(Ground.data(), nGround)
                            , pAnim ? pAnim->m_MatchJumps : 0u, bClip && pAnim->m_bFootLock ? &L2W : nullptr
@@ -121,7 +122,44 @@ namespace xlionrender
                     xanimation::LookAt(S.view(), S.m_LookAt, m_AnimPose, Inv * LookAt, LookAtWeight, Dt, Tr.m_Look);
                 }
             }
+            if (m_pSpringAnim && pL2W && !m_pSpringAnim->m_SpringFrom.empty()) ApplySprings(Skel, S, Entity, *m_pSpringAnim, *pL2W);
+            m_pSpringAnim = nullptr;
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
+        }
+
+        // N1 (superset: KINEMATION's sway, Unreal's Spring Bone / AnimDynamics): the Animation's spring chain - SpringFrom and its first-child
+        // descendants lag behind the body's accelerations and swing back (motion/xanimation_springs.h). Last in the stack: it moves what was posed.
+        // ponytail: one chain per character; a list of chains when a character needs hair and a tail at once
+        const animation*                            m_pSpringAnim = nullptr;
+        void ApplySprings(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A, const xmath::fmat4& L2W)
+        {
+            auto& Tr = m_Tracks[Entity];
+            if (Tr.m_SpringFrom != A.m_SpringFrom)
+            {
+                Tr.m_SpringFrom = A.m_SpringFrom; Tr.m_SpringChain.clear(); Tr.m_SpringTip = -1; Tr.m_Spring = {};
+                int B = Skel.findBoneIndex(xstrtool::CRC32(A.m_SpringFrom));
+                const auto Par = S.view().m_Parent;
+                while (B >= 0 && Tr.m_SpringChain.size() < 32)
+                {
+                    Tr.m_SpringChain.push_back(B);
+                    int Child = -1; for (int c = B + 1; c < int(Par.size()); ++c) if (Par[std::size_t(c)] == B) { Child = c; break; }
+                    B = Child;
+                }
+                if (Tr.m_SpringChain.size() >= 2) { Tr.m_SpringTip = Tr.m_SpringChain.back(); Tr.m_SpringChain.pop_back(); }
+            }
+            if (Tr.m_SpringChain.empty()) return;
+            xanimation::spring_params P; P.m_Hz = A.m_SpringHz; P.m_Damping = A.m_SpringDamping; P.m_Weight = A.m_SpringWeight; P.m_MaxAngle = A.m_SpringMaxAngle * 0.017453293f;
+            P.m_Gravity = xmath::fvec3(0, -A.m_SpringDroop, 0);
+            const xanimation::rigid E{ L2W.ExtractPosition(), L2W.ExtractRotation().NormalizeSafeCopy() };
+            std::vector<xmath::fquat> Before; for (int b : Tr.m_SpringChain) Before.push_back(m_AnimPose.m_Rotation[std::size_t(b)]);
+            xanimation::UpdateSprings(S.view(), Tr.m_SpringChain, Tr.m_SpringTip, m_AnimPose, E, L2W.ExtractScale().m_X, m_GameDt >= 0 ? std::min(m_GameDt, 0.1f) : 1.0f / 60.0f, P, Tr.m_Spring);
+            for (std::size_t k = 0; k < Before.size(); ++k)
+                Tr.m_SpringMax = std::max(Tr.m_SpringMax, 2 * std::acos(std::min(1.0f, std::abs(Before[k].Dot(m_AnimPose.m_Rotation[std::size_t(Tr.m_SpringChain[k])])))) * 57.29578f);
+            if (++Tr.m_SpringN % 120 == 0)
+            {
+                std::printf("[AnimSprings] entity %llu: chain of %zu bones from %s, largest swing over the last 120 frames %.1f deg%c", (unsigned long long)Entity, Tr.m_SpringChain.size() + 1, Tr.m_SpringFrom.c_str(), Tr.m_SpringMax, 10);
+                std::fflush(stdout); Tr.m_SpringMax = 0;
+            }
         }
 
         // S1 (KINEMATION superset): the Animation's overlay slot on m_AnimPose - a new Play starts it, Clip -1 eases it out; its mask is FromBone and
@@ -183,6 +221,11 @@ namespace xlionrender
             std::string                             m_OvFrom;
             std::vector<float>                      m_OvMask;
             float                                   m_OvPeak = 0;
+            xanimation::spring_state                m_Spring;       // N1: the secondary-motion chain (its bones by name, its points)
+            std::string                             m_SpringFrom;
+            std::vector<int>                        m_SpringChain;
+            int                                     m_SpringTip = -1;
+            float                                   m_SpringMax = 0; int m_SpringN = 0;
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 
