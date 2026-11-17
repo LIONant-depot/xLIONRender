@@ -407,6 +407,12 @@ namespace xlionrender
             if (!A.m_bFollowParent) WishNow = Wish;
             xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
             xanimation::matching_params Pm;
+            {   // (experiments: XLION_ANIM_CLIPCHANGE / XLION_ANIM_MINGAP override the jump cost and the shortest time between jumps)
+                static const float CC = [] { const char* e = std::getenv("XLION_ANIM_CLIPCHANGE"); return e && *e ? float(std::atof(e)) : -1.0f; }();
+                static const float MG = [] { const char* e = std::getenv("XLION_ANIM_MINGAP"); return e && *e ? float(std::atof(e)) : -1.0f; }();
+                if (CC >= 0) Pm.m_ClipChange = CC;
+                if (MG >= 0) Pm.m_MinGap = MG;
+            }
             if (m_Searches >= SearchBudget()) { Pm.m_Interval = 1e9f; ++m_SearchWaits; }       // (over the budget: no search unless the clip is ending)
             const bool bJumped = xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(WishNow, Wish, YawAsked), 0, Pm);
             if (St.m_Since == 0) ++m_Searches;
