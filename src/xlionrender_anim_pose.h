@@ -6,6 +6,8 @@
 // one per world and poses every animated character once per update (its game time); the scene renderer is one too, for what the system
 // did not pose (no update ran, a preview). Moved verbatim from xlionrender_scene_renderer.h; only the clock is new (m_GameDt).
 #include "dependencies/xAnimation/source/xanimation.h"
+#include "dependencies/xAnimation/source/blend/xanimation_overlay.h"
+#include "dependencies/xstrtool/source/xstrtool.h"       // (the overlay's FromBone by name)
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
 #include "xlionrender_scene_components.h"      // (the Animation component the pose reads)
 #include <array>
@@ -50,6 +52,7 @@ namespace xlionrender
             std::array<xanimation::ground_contact, 4> Ground; std::size_t nGround = 0;        // K3: the Animation system's casts this frame
             if (bClip && pAnim->m_bFootIK) for (; nGround < pAnim->m_nGround && nGround < Ground.size(); ++nGround)
                 Ground[nGround] = { pAnim->m_Ground[nGround].m_bHit, pAnim->m_Ground[nGround].m_Height, pAnim->m_Ground[nGround].m_Normal };
+            m_pOverlayAnim = bClip ? pAnim : nullptr;
             PoseWithLibrary(Skel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, Out
                            , pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f, &Wp, std::span<const xanimation::ground_contact>(Ground.data(), nGround)
                            , pAnim ? pAnim->m_MatchJumps : 0u, bClip && pAnim->m_bFootLock ? &L2W : nullptr
@@ -77,6 +80,8 @@ namespace xlionrender
             if (Entity == 0) { xanimation::ComputeBoneWorlds(S.view(), bClip ? m_AnimPose : S.m_Rest, Out); m_pAnimUsed = bClip ? &m_AnimPose : &S.m_Rest; return; }
             if (!bClip) m_AnimPose = S.m_Rest;
             Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0) + std::uint64_t(Jumps) * 0x9E3779B97F4A7C15ull) : 1, &Skel, BlendTime, m_AnimPose);
+            if (bClip && m_pOverlayAnim) ApplyOverlaySlot(Skel, S, *pPkg, Entity, *m_pOverlayAnim);     // (S1: after the blend, before the fix-ups: warping and the feet see the overlaid pose)
+            m_pOverlayAnim = nullptr;
             if (bClip && pWarp && pWarp->active()) xanimation::WarpPose(S.view(), S.m_Warp, m_AnimPose, *pWarp);     // (after the blend: the blend's poses stay the clip's own)
             if (bClip && Ground.size() == S.m_Warp.m_Legs.size() && !Ground.empty()) xanimation::FitGround(S.view(), S.m_Warp, m_AnimPose, Ground, S.m_FootHeights);
             if (bClip && pLockL2W)                     // foot locking: last, on the pose as drawn (per entity: its pins and when it was last drawn)
@@ -119,6 +124,46 @@ namespace xlionrender
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
         }
 
+        // S1 (KINEMATION superset): the Animation's overlay slot on m_AnimPose - a new Play starts it, Clip -1 eases it out; its mask is FromBone and
+        // everything under it, faded in over the first two bones (blend/xanimation_overlay.h, the authoring layers' own mix)
+        const animation*                            m_pOverlayAnim = nullptr;
+        xanimation::pose                            m_OvPose, m_OvRef;
+        void ApplyOverlaySlot(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, const xanim_package::anim_package& Pkg, std::uint64_t Entity, const animation& A)
+        {
+            auto& Tr = m_Tracks[Entity];
+            if (A.m_OverlayPlay != Tr.m_OvPlay)
+            {
+                Tr.m_OvPlay = A.m_OverlayPlay;
+                if (A.m_OverlayClip >= 0)
+                {
+                    Tr.m_Ov.Start(); Tr.m_OvClip = A.m_OverlayClip;
+                    std::printf("[AnimOverlay] entity %llu: clip %d over the pose from %s (%s%s)%c", (unsigned long long)Entity, A.m_OverlayClip, A.m_OverlayFrom.empty() ? "the root" : A.m_OverlayFrom.c_str(), A.m_bOverlayAdditive ? "additive" : "override", A.m_bOverlayLoop ? ", loop" : "", 10);
+                    std::fflush(stdout);
+                }
+            }
+            const bool bWasActive = Tr.m_Ov.m_bActive;
+            if (A.m_OverlayClip < 0 || A.m_OverlayClip != Tr.m_OvClip) Tr.m_Ov.Stop();
+            if (!Tr.m_Ov.m_bActive || Tr.m_OvClip < 0 || Tr.m_OvClip >= int(Pkg.getClips().size())) return;
+            const auto& C = Pkg.getClips()[std::size_t(Tr.m_OvClip)];
+            const float Len = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 0.0f;
+            xanimation::overlay_params P; P.m_BlendIn = A.m_OverlayBlendIn; P.m_BlendOut = A.m_OverlayBlendOut; P.m_Speed = A.m_OverlaySpeed; P.m_bLoop = A.m_bOverlayLoop;
+            const float W = xanimation::AdvanceOverlay(Tr.m_Ov, P, Len, m_GameDt >= 0 ? std::min(m_GameDt, 0.1f) : 1.0f / 60.0f);
+            Tr.m_OvPeak = Tr.m_Ov.m_Age <= 0.05f ? W : std::max(Tr.m_OvPeak, W);
+            if (bWasActive && !Tr.m_Ov.m_bActive) { std::printf("[AnimOverlay] entity %llu: clip %d done after %.2f s (peak weight %.2f)%c", (unsigned long long)Entity, Tr.m_OvClip, Tr.m_Ov.m_Age, Tr.m_OvPeak, 10); std::fflush(stdout); }
+            if (W <= 0) return;
+            if (Tr.m_OvMask.size() != std::size_t(S.view().count()) || Tr.m_OvFrom != A.m_OverlayFrom)
+            {
+                Tr.m_OvFrom = A.m_OverlayFrom;
+                xanimation::mask_rules M;
+                const int B = A.m_OverlayFrom.empty() ? 0 : Skel.findBoneIndex(xstrtool::CRC32(A.m_OverlayFrom));
+                if (B >= 0) M.m_Entries.push_back({ B, 1.0f, true, A.m_OverlayFrom.empty() ? 0 : 2 });
+                Tr.m_OvMask = xanimation::FlattenMask(S.view(), M);
+            }
+            if (!xanimation::SampleClip(S, Pkg, Tr.m_OvClip, Tr.m_Ov.m_Time, false, m_OvPose, m_AnimScratch)) return;
+            if (A.m_bOverlayAdditive && !xanimation::SampleClip(S, Pkg, Tr.m_OvClip, 0.0f, false, m_OvRef, m_AnimScratch)) return;
+            xanimation::ApplyOverlay(m_AnimPose, m_OvPose, Tr.m_OvMask, W, A.m_bOverlayAdditive, &m_OvRef);
+        }
+
         // the poses an entity showed on its last two frames, what posed it, and its transition (K1)
         struct anim_track
         {
@@ -132,6 +177,12 @@ namespace xlionrender
             xanimation::look_at_state               m_Look;         // (LookAt: the aim's eased angles and weight)
             std::chrono::steady_clock::time_point   m_LookT{};
             float                                   m_ForceBlend = 0, m_StartDt = 0;    // (HandOver: the next transition's blend and its poses' spacing)
+            xanimation::overlay_state               m_Ov;           // S1: the overlay slot (its time and weight), what started it, its mask
+            std::uint32_t                           m_OvPlay = 0;
+            int                                     m_OvClip = -1;
+            std::string                             m_OvFrom;
+            std::vector<float>                      m_OvMask;
+            float                                   m_OvPeak = 0;
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 

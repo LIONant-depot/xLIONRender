@@ -518,6 +518,13 @@ namespace xlionrender
         bool                m_bRootToVelocity = false; // G0 (b): root motion is not applied to the entity but given as RootVelocity (world units/s) for a game's mover - a physics body driven by the animation
         xmath::fvec3        m_RootVelocity {0, 0, 0}; // (RootToVelocity: this update's root motion as a world velocity; not saved)
         std::string         m_LocoAction;           // (Locomotion: the action last asked, so it plays once; not saved)
+        // S1 (KINEMATION superset): an overlay slot - a second clip of the package played over the pose on a part of the body
+        int                 m_OverlayClip   = -1;     // -1: none (a playing overlay eases out)
+        std::string         m_OverlayFrom;            // the bone the overlay starts at (it and everything under it; empty: the whole body)
+        bool                m_bOverlayAdditive = false;
+        bool                m_bOverlayLoop  = false;
+        float               m_OverlayBlendIn = 0.2f, m_OverlayBlendOut = 0.2f, m_OverlaySpeed = 1.0f;
+        std::uint32_t       m_OverlayPlay   = 0;      // a new value (re)starts it from its beginning
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
@@ -573,6 +580,16 @@ namespace xlionrender
         , obj_member<"PlayerRunSpeed", &animation::m_PlayerRunSpeed, member_help<"Player: the speed with Run held (Shift, or the pad's stick pushed fully)">>
         , obj_member<"LookAtWeight", &animation::m_LookAtWeight, member_help<"How much the head turns toward LookAt: 0 off (eases back to the clip's own head), 1 full">>
         , obj_member<"FootIK",    &animation::m_bFootIK, member_help<"While the game runs the feet stand on the physics ground under them (stairs, slopes, kerbs): a ray down at each foot, each foot up or down by its ground, the hips follow the lowest, planted feet tilt to the slope. Off: the clip's flat floor">>
+        , obj_scope<"Overlay"
+            , obj_member<"Clip", &animation::m_OverlayClip, member_help<"A clip of the package played over the pose on a part of the body (a reload over a run, a wave while walking). -1: none (a playing overlay eases out)">>
+            , obj_member<"FromBone", &animation::m_OverlayFrom, member_help<"The bone the overlay starts at: it and everything under it (a spine bone: the upper body). Empty: the whole body">>
+            , obj_member<"Additive", &animation::m_bOverlayAdditive, member_help<"On: the clip's motion is added to the pose below (measured from its first frame). Off: it replaces the pose below">>
+            , obj_member<"Loop", &animation::m_bOverlayLoop, member_help<"Off: a one-shot that eases out by itself before its end">>
+            , obj_member<"BlendIn", &animation::m_OverlayBlendIn>
+            , obj_member<"BlendOut", &animation::m_OverlayBlendOut>
+            , obj_member<"Speed", &animation::m_OverlaySpeed>
+            , obj_member<"Play", &animation::m_OverlayPlay, member_help<"Change it (any new number) to start the overlay from its beginning">>
+            >
         , obj_member<"EventsFired", &animation::m_nEvents, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many of the clip's events (markers, footsteps, contacts) fired while the game ran">>
         )
     };
