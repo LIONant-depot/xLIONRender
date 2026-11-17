@@ -591,6 +591,12 @@ namespace xlionrender
         float                           m_Tracking    = 0.0f;       // R1: > 0, the joints pull toward the Animation (the gain); 0, a limp ragdoll
         bool                            m_bSupported  = true;       // R1: tracking, the root body follows the Animation (held up)
         float                           m_FeedForward = 0.3f;
+        std::uint64_t                   m_HitEventId  = 0;          // R3b': a new id = a hit (Impulse at Point) on this character: a tracking one is promoted to physics,
+        xmath::fvec3                    m_HitPoint    = {};         //  takes it once (the same id again is the same event) and returns to its Animation when settled
+        xmath::fvec3                    m_HitImpulse  = {};
+        float                           m_ReturnBelow = 15.0f;      // deg: settled when its joints are this close to the Animation (for 0.3 s)
+        std::uint64_t                   m_LastHitId   = 0;          // (runtime)
+        bool                            m_bReaction   = false;      // (runtime: active because of a hit; it returns)
 
         XPROPERTY_DEF
         ( "Ragdoll", ragdoll
@@ -599,6 +605,13 @@ namespace xlionrender
         , obj_member<"Tracking", &ragdoll::m_Tracking, member_help<"While Active: 0, a limp ragdoll; above 0, every joint pulls toward the Animation as it plays on (the stiffness in units of the joint's own gravity load: 30 follows closely)">>
         , obj_member<"Supported", &ragdoll::m_bSupported, member_help<"While tracking: the hips follow the Animation (held up). Off: the body must hold itself up, and falls">>
         , obj_member<"FeedForward", &ragdoll::m_FeedForward, member_help<"While tracking: how hard the joints also follow the Animation's own speed (0: the spring alone, which lags)">>
+        , obj_scope<"Hit"
+            , obj_member<"EventId", &ragdoll::m_HitEventId, member_help<"A new id is a hit: Impulse (N s) at Point (world). A character with Tracking above 0 becomes physical for it, takes it once (the same id again is the same event: ignored) and returns to its Animation when settled">>
+            , obj_member<"Point",   &ragdoll::m_HitPoint>
+            , obj_member<"Impulse", &ragdoll::m_HitImpulse>
+            , obj_member<"ReturnBelow", &ragdoll::m_ReturnBelow, member_help<"Degrees: back to the Animation once every joint is this close to it on average for 0.3 s (2 s at most)">>
+            >
+        , obj_member<"Reacting", +[](ragdoll& O, bool bRead, bool& V) { if (bRead) V = O.m_bReaction; }, member_flags<flags::SHOW_READONLY>>
         )
     };
 

@@ -579,6 +579,9 @@ namespace xlionrender
             double              m_TrackSum = 0, m_TrackSumW = 0;    // R1: the joints' (and the bodies' world) rotation from the animation (deg, squared, summed); the joints' worst
             int                 m_nTrack = 0;
             float               m_TrackMax = 0;
+            float               m_Age = 0, m_HitAt = 0, m_Settled = 0, m_LastE = 1e9f;    // R3b': time since activation, of the last hit, settled for; the last tracking error
+            const xanimation::body_graph* m_pGraph = nullptr;       // (the graph it was activated with: m_Graphs keeps it)
+            std::vector<std::uint64_t>    m_Hits;                   // the hit events this activation took
         };
         std::unordered_map<const void*, graph_entry>                m_Graphs;       // per Ragdoll resource as loaded
         std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
@@ -590,6 +593,9 @@ namespace xlionrender
             auto& GameMgr = getGameMgr();
             const auto* pGame = xlioncore::game::From(GameMgr);
             if (pGame == nullptr) return;
+            // R3b' slice 1: a new hit (a HitEventId not seen yet) promotes a tracking character to physics; it returns when settled
+            const bool bHit = R.m_HitEventId != 0 && R.m_HitEventId != R.m_LastHitId;
+            if (bHit && !R.m_bActive && R.m_Tracking > 0) { R.m_bActive = true; R.m_bReaction = true; }
             if (!R.m_bActive)
             {
                 if (R.m_pRuntime) { xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pRuntime); R.m_pRuntime = nullptr; m_State.erase(Ent.m_Value); }
@@ -598,6 +604,13 @@ namespace xlionrender
             if (R.m_pRuntime == nullptr && !Activate(Ent, R, Skin, pAnim, T, pParent, *pGame)) { R.m_bActive = false; return; }
 
             auto& St = m_State[Ent.m_Value];
+            St.m_Age += pGame->m_Time.m_DeltaTime;
+            if (bHit)       // (the impulse: LIONCore applies it right before the next step, once per event id - its ledger)
+            {
+                xlioncore::physics::HitRagdoll(GameMgr, *R.m_pRuntime, R.m_HitEventId, R.m_HitPoint, R.m_HitImpulse);
+                if (std::find(St.m_Hits.begin(), St.m_Hits.end(), R.m_HitEventId) == St.m_Hits.end()) { St.m_Hits.push_back(R.m_HitEventId); St.m_HitAt = St.m_Age; St.m_Settled = 0; }   // (a repeat does not restart the settling)
+                R.m_LastHitId = R.m_HitEventId;
+            }
             // R1 supported tracking: the joints pull toward the animation as it plays on, where the character was at the switch
             if (R.m_Tracking > 0)
             {
@@ -608,6 +621,30 @@ namespace xlionrender
                     float EW = 0;
                     const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);
                     if (E >= 0) { St.m_TrackSum += double(E) * E; St.m_TrackSumW += double(EW) * EW; ++St.m_nTrack; St.m_TrackMax = std::max(St.m_TrackMax, E); }
+
+                    // R3b' return to cheap (contract 2.4 demotion): settled = joints within ReturnBelow of the animation for 0.3 s (from 0.3 s
+                    // after the hit), or 2 s at most; then the Animation poses it again. The pose jump at the switch is measured (AN10)
+                    if (R.m_bReaction && St.m_Age - St.m_HitAt > 0.3f)
+                    {
+                        if (E >= 0) St.m_LastE = E;
+                        St.m_Settled = St.m_LastE < R.m_ReturnBelow ? St.m_Settled + pGame->m_Time.m_DeltaTime : 0.0f;
+                        if (St.m_Settled >= 0.3f || St.m_Age - St.m_HitAt > 2.0f)
+                        {
+                            float Pop = 0;
+                            if (St.m_pGraph)
+                                for (std::size_t i = 0; i < St.m_pGraph->m_Bodies.size(); ++i)
+                                {
+                                    xanimation::rigid F;
+                                    const auto b = std::size_t(St.m_pGraph->m_Bodies[i].m_Bone);
+                                    if (b < W1.size() && xlioncore::physics::RagdollBodyFrame(*R.m_pRuntime, int(i), F))
+                                        Pop = std::max(Pop, (F.m_P - xanimation::BodyFromBone(W1[b], St.m_pGraph->m_Bodies[i]).m_P).Length());
+                                }
+                            std::printf("[Ragdoll] entity 0x%llX returns to its animation %.2f s after its last new hit (%zu hits; %s; joints %.1f deg from it): pose jump %.1f cm\n"
+                                , (unsigned long long)Ent.m_Value, St.m_Age - St.m_HitAt, St.m_Hits.size(), St.m_Settled >= 0.3f ? "settled" : "time limit", St.m_LastE, 100 * Pop);
+                            std::fflush(stdout);
+                            R.m_bActive = false; R.m_bReaction = false;
+                        }
+                    }
                 }
             }
 
@@ -721,7 +758,7 @@ namespace xlionrender
             auto& St = m_State[Ent.m_Value]; St = {};
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
             St.m_Offset = T.m_Position - Hips.m_P;
-            St.m_E = { T.m_Position, T.m_Rotation }; St.m_Scale = Scale;
+            St.m_E = { T.m_Position, T.m_Rotation }; St.m_Scale = Scale; St.m_pGraph = &GE.m_G.m_Graph;
             St.m_Sleep = 0.05f * std::sqrt(Params.m_Size / 1.7f);
             xlioncore::physics::ragdoll_stats Stats; xlioncore::physics::RagdollStats(*R.m_pRuntime, Stats);
             St.m_KE0 = Stats.m_KE; St.m_Y0 = Stats.m_ComY; St.m_Mass = Stats.m_Mass;
