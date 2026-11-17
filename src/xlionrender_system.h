@@ -118,7 +118,7 @@ namespace xlionrender
             xanimation::warp_params Wp;
             if (pT && A.m_bRootMotion && A.m_Speed > 0 && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE && (A.m_Move.m_X != 0 || A.m_Move.m_Z != 0))
             {
-                auto CV = xanimation::ClipVelocity(*pPkg, A.m_Clip) * (A.m_Speed * pT->m_Scale.m_X);      // ponytail: a uniform scale (X) for the clip's world speed
+                auto CV = (A.m_bMatching ? xanimation::ClipVelocityAt(*pPkg, A.m_Clip, Before) : xanimation::ClipVelocity(*pPkg, A.m_Clip)) * (A.m_Speed * pT->m_Scale.m_X);      // (matching: around the frame playing - starts and stops do not walk evenly)      // ponytail: a uniform scale (X) for the clip's world speed
                 if (pSD) { const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip); CV = CV - N * (2.0f * CV.Dot(N)); }
                 Wp = xanimation::WarpFor(CV, A.m_Move);
                 A.m_Time = Before + pGame->m_Time.m_DeltaTime * A.m_Speed * Wp.m_Rate;
@@ -186,7 +186,10 @@ namespace xlionrender
             const auto* pGame = xlioncore::game::From(getGameMgr());
             const float Dt = pGame ? pGame->m_Time.m_DeltaTime * std::max(0.0f, A.m_Speed) : 0.0f;
             const float Yaw0 = xanimation::details::Yaw(M.m_Db.m_RestForward);
-            const auto Wish = xanimation::details::TurnY(A.m_Move, -Yaw0);
+            // the wish is the speed asked, straight ahead: the direction is orientation warping's (up to 90 deg) - our root motion carries no
+            // turn yet, so a turning clip cannot turn the entity
+            const xmath::fvec3 Wish(0, 0, std::hypot(A.m_Move.m_X, A.m_Move.m_Z));
+            (void)Yaw0;
             xanimation::matching_state St{ A.m_Clip, A.m_Time, A.m_MatchSince + Dt, int(A.m_MatchJumps) };
             if (xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, 0), 0))
             {
