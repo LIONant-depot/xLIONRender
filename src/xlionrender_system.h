@@ -579,7 +579,7 @@ namespace xlionrender
             double              m_TrackSum = 0, m_TrackSumW = 0;    // R1: the joints' (and the bodies' world) rotation from the animation (deg, squared, summed); the joints' worst
             int                 m_nTrack = 0;
             float               m_TrackMax = 0;
-            float               m_Age = 0, m_HitAt = 0, m_Settled = 0, m_LastE = 1e9f;    // R3b': time since activation, of the last hit, settled for; the last tracking error
+            float               m_Age = 0, m_HitAt = 0, m_Settled = 0, m_LastE = 1e9f, m_MinE = 1e9f, m_MinAt = 0;    // R3b': time since activation, of the last hit, settled for; the last tracking error
             const xanimation::body_graph* m_pGraph = nullptr;       // (the graph it was activated with: m_Graphs keeps it)
             std::vector<std::uint64_t>    m_Hits;                   // the hit events this activation took
         };
@@ -606,13 +606,20 @@ namespace xlionrender
             if (R.m_ReactSpeed > 0 && R.m_HitEventId == R.m_LastHitId)
                 for (const auto& I : m_Impacts)
                 {
-                    if (I.m_Speed < R.m_ReactSpeed) continue;
                     const std::uint64_t Me = Ent.m_Value, Up = pParent ? pParent->m_Value.m_Value : 0;
                     const int Side = (I.m_A == Me || (Up && I.m_A == Up)) ? 0 : (I.m_B == Me || (Up && I.m_B == Up)) ? 1 : -1;
                     if (Side < 0) continue;
+                    // the speed change this side gets in a perfectly inelastic hit, mu v / m_own (mu: the reduced mass; a static or kinematic
+                    // other: v), given to the ragdoll's own mass: the body moves as its carrier was pushed. A ball barely moves a player: no
+                    // reaction under ReactSpeed of speed CHANGE
+                    const float Mo = Side == 0 ? I.m_MassA : I.m_MassB, Mt = Side == 0 ? I.m_MassB : I.m_MassA;
+                    const float Dv = Mo <= 0 ? 0.0f : Mt <= 0 ? I.m_Speed : I.m_Speed * Mt / (Mo + Mt);
+                    if (Dv < R.m_ReactSpeed) continue;
                     R.m_HitEventId = I.m_Id * 2 + std::uint64_t(Side); R.m_HitPoint = I.m_Point;
-                    R.m_HitImpulse = I.m_Normal * ((Side == 0 ? -1.0f : 1.0f) * R.m_ImpactGain * I.m_Speed);
-                    std::printf("[Ragdoll] entity 0x%llX: impact %llu at %.1f m/s becomes hit %llu\n", (unsigned long long)Ent.m_Value, (unsigned long long)I.m_Id, I.m_Speed, (unsigned long long)R.m_HitEventId);
+                    float RagMass = 60.0f;
+                    if (auto* pRag = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(xlioncore::resources::GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value))) RagMass = pRag->m_TotalMass;
+                    R.m_HitImpulse = I.m_Normal * ((Side == 0 ? -1.0f : 1.0f) * R.m_ImpactGain * RagMass * Dv);
+                    std::printf("[Ragdoll] entity 0x%llX: impact %llu at %.1f m/s becomes hit %llu (side %c, masses %.0f/%.0f kg: speed change %.2f m/s on its %.0f kg, impulse %.0f N s)\n", (unsigned long long)Ent.m_Value, (unsigned long long)I.m_Id, I.m_Speed, (unsigned long long)R.m_HitEventId, Side == 0 ? 'A' : 'B', I.m_MassA, I.m_MassB, Dv, RagMass, R.m_HitImpulse.Length());
                     std::fflush(stdout);
                     break;
                 }
@@ -632,7 +639,7 @@ namespace xlionrender
             if (bHit)       // (the impulse: LIONCore applies it right before the next step, once per event id - its ledger)
             {
                 xlioncore::physics::HitRagdoll(GameMgr, *R.m_pRuntime, R.m_HitEventId, R.m_HitPoint, R.m_HitImpulse);
-                if (std::find(St.m_Hits.begin(), St.m_Hits.end(), R.m_HitEventId) == St.m_Hits.end()) { St.m_Hits.push_back(R.m_HitEventId); St.m_HitAt = St.m_Age; St.m_Settled = 0; }   // (a repeat does not restart the settling)
+                if (std::find(St.m_Hits.begin(), St.m_Hits.end(), R.m_HitEventId) == St.m_Hits.end()) { St.m_Hits.push_back(R.m_HitEventId); St.m_HitAt = St.m_Age; St.m_Settled = 0; St.m_MinE = 1e9f; St.m_MinAt = St.m_Age; }   // (a repeat does not restart the settling)
                 R.m_LastHitId = R.m_HitEventId;
             }
             // R1 supported tracking: the joints pull toward the animation as it plays on, where the character was at the switch
@@ -650,8 +657,11 @@ namespace xlionrender
                     // after the hit), or 2 s at most; then the Animation poses it again. The pose jump at the switch is measured (AN10)
                     if (R.m_bReaction && St.m_Age - St.m_HitAt > 0.3f)
                     {
-                        if (E >= 0) St.m_LastE = E;
-                        St.m_Settled = St.m_LastE < R.m_ReturnBelow ? St.m_Settled + pGame->m_Time.m_DeltaTime : 0.0f;
+                        if (E >= 0) { St.m_LastE = E; if (E < 0.95f * St.m_MinE) { St.m_MinE = E; St.m_MinAt = St.m_Age; } }
+                        // settled: under ReturnBelow for 0.3 s, or on a plateau - no new low (by 5 %) for 0.3 s and near the lowest it reached since
+                        // the hit (a running clip never gets under ReturnBelow: its tracking floor is higher)
+                        const bool bPlateau = St.m_MinE < 1e8f && St.m_Age - St.m_MinAt > 0.3f && St.m_LastE < 1.25f * St.m_MinE;     // (a measured error first)
+                        St.m_Settled = St.m_LastE < R.m_ReturnBelow ? St.m_Settled + pGame->m_Time.m_DeltaTime : bPlateau ? 0.3f : 0.0f;
                         if (St.m_Settled >= 0.3f || St.m_Age - St.m_HitAt > 2.0f)
                         {
                             float Pop = 0;
