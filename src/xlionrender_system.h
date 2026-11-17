@@ -192,10 +192,16 @@ namespace xlionrender
             const float Yaw0 = xanimation::details::Yaw(M.m_Db.m_RestForward);
             // the wish is the speed asked, straight ahead: the direction is orientation warping's (up to 90 deg) - our root motion carries no
             // turn yet, so a turning clip cannot turn the entity
-            const xmath::fvec3 Wish(0, 0, std::hypot(A.m_Move.m_X, A.m_Move.m_Z));
-            (void)Yaw0;
+            // FaceMove: the whole move in the character's frame and a facing asked toward it (the turn clips win; their root turn turns it)
+            xmath::fvec3 Wish(0, 0, std::hypot(A.m_Move.m_X, A.m_Move.m_Z));
+            float YawAsked = 0;
+            if (A.m_bFaceMove && Wish.m_Z > 1e-3f)
+            {
+                const auto M = xanimation::details::TurnY(A.m_Move, -Yaw0); Wish = xmath::fvec3(M.m_X, 0, M.m_Z);
+                YawAsked = std::atan2(M.m_X, M.m_Z);
+            }
             xanimation::matching_state St{ A.m_Clip, A.m_Time, A.m_MatchSince + Dt, int(A.m_MatchJumps) };
-            if (xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, 0), 0))
+            if (xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, YawAsked), 0))
             {
                 static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s\n", St.m_Jumps, A.m_Clip, A.m_Time, St.m_Clip, St.m_Time);
