@@ -45,6 +45,7 @@
 #include "plugins/xscript_module.plugin/source/Runtime/xscript_registration.h"   // registering macro back for anything after
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
+#include "dependencies/xAnimation/source/nervous/xanimation_nervous.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics_api.h"     // CastRayClosest (the feet's ground, K3)
 #include "dependencies/xstrtool/source/xstrtool.h"           // (a clip requested by name: its hash, as the compiler makes it)
 #include "plugins/xragdoll.plugin/source/xragdoll_body_graph.h"
@@ -590,6 +591,8 @@ namespace xlionrender
         std::unordered_map<std::uint64_t, entity_state>             m_State;
         xanimation::pose                                            m_P0, m_P1;
         std::vector<xlioncore::physics::impact>                     m_Impacts;      // this frame's solid hits (TakeImpacts, read once per update)
+        struct nerves { xanimation::nervous::drive_state m_Drives; xanimation::nervous::reflex m_Running = xanimation::nervous::reflex::NONE; std::uint64_t m_Tick = 0; };
+        std::unordered_map<std::uint64_t, nerves>                   m_Nerves;       // the nervous system of each character with a Ragdoll that reacts (its drives outlive an activation)
 
         void OnPreUpdate(void) noexcept
         {
@@ -605,26 +608,48 @@ namespace xlionrender
             if (pGame == nullptr) return;
             // R3b' (G0 stage 2): a solid hit on this entity or on its parent (a player's capsule) becomes this character's Hit: one event per side
             // of each impact (the impact's id, A or B), pushed away from the other along the contact normal
-            if (R.m_ReactSpeed > 0 && R.m_HitEventId == R.m_LastHitId)
+            // The nervous system decides (plan 3.5, contract 5.7; nervous/xanimation_nervous.h): every jolt raises the character's drives (surprise,
+            // pain), and the hit reaction is a reflex chosen by utility scoring with hysteresis; ReactSpeed sets how big a jolt surprises it enough
+            auto& Nv = m_Nerves[Ent.m_Value];
+            if (R.m_ReactSpeed > 0)
+            {
+                xanimation::nervous::drive_params NP; NP.m_SurprisePerMps = 0.5f / R.m_ReactSpeed;
+                Nv.m_Drives.Decay(NP, pGame->m_Time.m_DeltaTime);
+                const xlioncore::physics::impact* pJolt = nullptr; float Jolt = 0; int JoltSide = -1;
                 for (const auto& I : m_Impacts)
                 {
                     const std::uint64_t Me = Ent.m_Value, Up = pParent ? pParent->m_Value.m_Value : 0;
                     const int Side = (I.m_A == Me || (Up && I.m_A == Up)) ? 0 : (I.m_B == Me || (Up && I.m_B == Up)) ? 1 : -1;
                     if (Side < 0) continue;
                     // the speed change this side gets in a perfectly inelastic hit, mu v / m_own (mu: the reduced mass; a static or kinematic
-                    // other: v), given to the ragdoll's own mass: the body moves as its carrier was pushed. A ball barely moves a player: no
-                    // reaction under ReactSpeed of speed CHANGE
+                    // other: v): a ball barely moves a player
                     const float Mo = Side == 0 ? I.m_MassA : I.m_MassB, Mt = Side == 0 ? I.m_MassB : I.m_MassA;
                     const float Dv = Mo <= 0 ? 0.0f : Mt <= 0 ? I.m_Speed : I.m_Speed * Mt / (Mo + Mt);
-                    if (Dv < R.m_ReactSpeed) continue;
+                    Nv.m_Drives.Impact(NP, Dv);
+                    if (Dv > Jolt) { Jolt = Dv; pJolt = &I; JoltSide = Side; }
+                }
+                static const auto s_Reflexes = xanimation::nervous::DefaultReflexes();
+                xanimation::nervous::percepts Pc; Pc.m_Impact = Jolt; Pc.m_Support = R.m_bSupported ? 1.0f : 0.0f;
+                const auto D = xanimation::nervous::Choose(s_Reflexes, Nv.m_Drives, Pc, Nv.m_Running, ++Nv.m_Tick);
+                if (D.m_bNew)
+                {
+                    std::printf("[Nervous] entity 0x%llX: surprise %.2f pain %.2f -> %s (scores:", (unsigned long long)Ent.m_Value, D.m_Drives[xanimation::nervous::SURPRISE], D.m_Drives[xanimation::nervous::PAIN], xanimation::nervous::reflex_names_v[int(D.m_Chosen)]);
+                    for (const auto& [Rx, Sc] : D.m_Scores) std::printf(" %s %.2f", xanimation::nervous::reflex_names_v[int(Rx)], Sc);
+                    std::printf(")%c", 10); std::fflush(stdout);
+                }
+                const bool bReact = D.m_bNew && D.m_Chosen == xanimation::nervous::reflex::HIT_REACTION;
+                Nv.m_Running = D.m_Chosen;
+                if (bReact && pJolt && R.m_HitEventId == R.m_LastHitId)
+                {
+                    const auto& I = *pJolt; const int Side = JoltSide; const float Dv = Jolt;
                     R.m_HitEventId = I.m_Id * 2 + std::uint64_t(Side); R.m_HitPoint = I.m_Point;
                     float RagMass = 60.0f;
                     if (auto* pRag = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(xlioncore::resources::GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value))) RagMass = pRag->m_TotalMass;
                     R.m_HitImpulse = I.m_Normal * ((Side == 0 ? -1.0f : 1.0f) * R.m_ImpactGain * RagMass * Dv);
                     std::printf("[Ragdoll] entity 0x%llX: impact %llu at %.1f m/s becomes hit %llu (side %c, masses %.0f/%.0f kg: speed change %.2f m/s on its %.0f kg, impulse %.0f N s)\n", (unsigned long long)Ent.m_Value, (unsigned long long)I.m_Id, I.m_Speed, (unsigned long long)R.m_HitEventId, Side == 0 ? 'A' : 'B', I.m_MassA, I.m_MassB, Dv, RagMass, R.m_HitImpulse.Length());
                     std::fflush(stdout);
-                    break;
                 }
+            }
             // R3b' slice 1: a new hit (a HitEventId not seen yet) promotes a tracking character to physics; it returns when settled
             const bool bHit = R.m_HitEventId != 0 && R.m_HitEventId != R.m_LastHitId;
             if (bHit && !R.m_bActive && R.m_Tracking > 0) { R.m_bActive = true; R.m_bReaction = true; }
