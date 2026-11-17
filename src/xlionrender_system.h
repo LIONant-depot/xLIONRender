@@ -571,9 +571,14 @@ namespace xlionrender
         struct entity_state
         {
             xmath::fvec3        m_Offset;               // entity - hips (x, z) at the switch
+            xanimation::rigid   m_E;                    // the entity's frame and scale at the switch: where the tracked animation is played (R1)
+            float               m_Scale = 1;
             float               m_T = 0, m_KE0 = 0, m_Y0 = 0, m_Mass = 0, m_WorstEnergy = 0, m_RestAt = -1, m_Sleep = 0;
             std::vector<float>  m_Anchor;
             bool                m_bReported = false;
+            double              m_TrackSum = 0;         // R1: the bodies' rotation from the animation (deg, squared, summed) and its worst
+            int                 m_nTrack = 0;
+            float               m_TrackMax = 0;
         };
         std::unordered_map<const void*, graph_entry>                m_Graphs;       // per Ragdoll resource as loaded
         std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
@@ -592,8 +597,20 @@ namespace xlionrender
             }
             if (R.m_pRuntime == nullptr && !Activate(Ent, R, Skin, pAnim, T, pParent, *pGame)) { R.m_bActive = false; return; }
 
-            // the entity follows the hips across the ground
             auto& St = m_State[Ent.m_Value];
+            // R1 supported tracking: the joints pull toward the animation as it plays on, where the character was at the switch
+            if (R.m_Tracking > 0)
+            {
+                std::vector<xanimation::rigid> W0, W1;
+                if (AnimatedWorlds(Skin, pAnim, St.m_E, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, W0, W1))
+                {
+                    xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward;
+                    const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P);
+                    if (E >= 0) { St.m_TrackSum += double(E) * E; ++St.m_nTrack; St.m_TrackMax = std::max(St.m_TrackMax, E); }
+                }
+            }
+
+            // the entity follows the hips across the ground
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
             if (pParent == nullptr) { T.m_Position.m_X = Hips.m_P.m_X + St.m_Offset.m_X; T.m_Position.m_Z = Hips.m_P.m_Z + St.m_Offset.m_Z; }
 
@@ -605,7 +622,7 @@ namespace xlionrender
             // no energy made: KE <= (at the switch + the drop's m g h) + 10 % + 1 J (test_ragdoll_runtime.cpp's bound: the 1 J keeps a still start's
             // millijoules from reading as a ratio)
             const float Bound = 1.1f * (St.m_KE0 + St.m_Mass * 9.81f * (St.m_Y0 - S.m_ComY)) + 1.0f;
-            if (S.m_KE > Bound && St.m_WorstEnergy <= 1.0f)      // the moment it first makes energy: when, how much, which body
+            if (S.m_KE > Bound && St.m_WorstEnergy <= 1.0f && R.m_Tracking <= 0)      // (a tracking ragdoll is powered: the bound is a limp one's)      // the moment it first makes energy: when, how much, which body
                 std::printf("[Ragdoll] entity 0x%llX makes energy at %.3f s: KE %.1f J > bound %.1f J, fastest body %d at %.2f m/s, anchors %.1f mm\n"
                     , (unsigned long long)Ent.m_Value, St.m_T, S.m_KE, Bound, S.m_iFastest, S.m_MaxSpeed, 1000 * S.m_MaxAnchor), std::fflush(stdout);
             St.m_WorstEnergy = std::max(St.m_WorstEnergy, S.m_KE / Bound);
@@ -618,9 +635,46 @@ namespace xlionrender
                 std::printf("[Ragdoll] summary entity 0x%llX: anchors p95 %.2f mm max %.2f mm (%zu frames); energy <= %.2f of the bound (KE0 + m g h + 10 %% + 1 J); at rest %s%.2f s; awake %d/%d\n"
                     , (unsigned long long)Ent.m_Value, 1000 * A[std::min(A.size() - 1, A.size() * 95 / 100)], 1000 * A.back(), A.size(), St.m_WorstEnergy
                     , St.m_RestAt < 0 ? "NOT " : "", St.m_RestAt < 0 ? St.m_T : St.m_RestAt, S.m_nAwake, S.m_nBodies);
+                if (St.m_nTrack) std::printf("[Ragdoll] tracking entity 0x%llX: gain %.1f, %s, bodies from the animation rms %.2f deg, worst %.2f deg (%d frames)\n"
+                    , (unsigned long long)Ent.m_Value, R.m_Tracking, R.m_bSupported ? "supported" : "unsupported", std::sqrt(St.m_TrackSum / St.m_nTrack), St.m_TrackMax, St.m_nTrack);
                 std::fflush(stdout);
                 St.m_bReported = true;
             }
+        }
+
+        // The animated world rigid bone frames of a character played at E (its frame) and Scale: now (W1) and Dtb back (W0); the rest pose
+        // when it has no clip. False: its skin or skeleton is not loaded.
+        bool AnimatedWorlds( const skinned_mesh& Skin, const animation* pAnim, const xanimation::rigid& E, float Scale, float Dtb
+                           , std::vector<xanimation::rigid>& W0, std::vector<xanimation::rigid>& W1 ) noexcept
+        {
+            using namespace xlioncore::resources;
+            auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
+            auto* pSkel = pGeom ? static_cast<const xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
+            if (pSkel == nullptr) return false;
+            const int nB = int(pSkel->getBones().size());
+            auto& S = m_Skeletons[pSkel];
+            if (int(S.m_Parent.size()) != nB) S = xanimation::MakeSkeleton(*pSkel);
+            auto Sample = [&](float Back, xanimation::pose& P)
+            {
+                const std::uint64_t Pkg = pAnim == nullptr ? 0 : pAnim->m_Package.empty() ? pGeom->getAnimationRef().m_Instance.m_Value : pAnim->m_Package.m_Instance.m_Value;
+                auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
+                if (pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && int(pPkg->getBoneNameHashes().size()) == nB)
+                {
+                    const auto& C = pPkg->getClips()[std::size_t(pAnim->m_Clip)];
+                    const float Len = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 0.0f;
+                    float t = pAnim->m_Time - (pAnim->m_bPlaying ? Back * pAnim->m_Speed : 0.0f);
+                    if (Len > 0) t = pAnim->m_bLoop ? t - Len * std::floor(t / Len) : std::clamp(t, 0.0f, Len);
+                    xanimation::pose Scratch;
+                    if (xanimation::SampleClip(S, *pPkg, pAnim->m_Clip, t, pAnim->m_bMirror, P, Scratch)) return;
+                }
+                P = S.m_Rest;
+            };
+            Sample(Dtb, m_P0); Sample(0, m_P1);
+            const auto n = static_cast<std::size_t>(nB);
+            W0.resize(n); W1.resize(n); std::vector<float> Sc(n);
+            xanimation::RigidBoneWorlds(S.view(), m_P0, E, Scale, W0, Sc);
+            xanimation::RigidBoneWorlds(S.view(), m_P1, E, Scale, W1, Sc);
+            return true;
         }
 
         bool Activate( const xecs::component::entity& Ent, ragdoll& R, const skinned_mesh& Skin, const animation* pAnim, const xlioncore::transform& T, const xecs::component::parent* pParent, const xlioncore::game& Game ) noexcept
@@ -651,28 +705,9 @@ namespace xlionrender
 
             // the animated pose now and one fixed step back (the motion it carries into the bodies)
             const float Dt = Game.m_Time.m_FixedDeltaTime;
-            auto Sample = [&](float Dtb, xanimation::pose& P)
-            {
-                const std::uint64_t Pkg = pAnim == nullptr ? 0 : pAnim->m_Package.empty() ? pGeom->getAnimationRef().m_Instance.m_Value : pAnim->m_Package.m_Instance.m_Value;
-                auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
-                if (pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && int(pPkg->getBoneNameHashes().size()) == nB)
-                {
-                    const auto& C = pPkg->getClips()[std::size_t(pAnim->m_Clip)];
-                    const float Len = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 0.0f;
-                    float t = pAnim->m_Time - (pAnim->m_bPlaying ? Dtb * pAnim->m_Speed : 0.0f);
-                    if (Len > 0) t = pAnim->m_bLoop ? t - Len * std::floor(t / Len) : std::clamp(t, 0.0f, Len);
-                    xanimation::pose Scratch;
-                    if (xanimation::SampleClip(S, *pPkg, pAnim->m_Clip, t, pAnim->m_bMirror, P, Scratch)) return;
-                }
-                P = S.m_Rest;
-            };
-            Sample(Dt, m_P0); Sample(0, m_P1);
-            const xanimation::rigid E{ T.m_Position, T.m_Rotation };
+            std::vector<xanimation::rigid> W0, W1;
+            if (!AnimatedWorlds(Skin, pAnim, xanimation::rigid{ T.m_Position, T.m_Rotation }, T.m_Scale.m_X, Dt, W0, W1)) return Fail("its skeleton is not loaded");
             const float Scale = T.m_Scale.m_X;
-            const auto n = static_cast<std::size_t>(nB);
-            std::vector<xanimation::rigid> W0(n), W1(n); std::vector<float> Sc(n);
-            xanimation::RigidBoneWorlds(View, m_P0, E, Scale, W0, Sc);
-            xanimation::RigidBoneWorlds(View, m_P1, E, Scale, W1, Sc);
 
             xlioncore::physics::ragdoll_params Params;
             Params.m_Size = 2 * (pRag->m_Capsule.m_HalfSegment + pRag->m_Capsule.m_Radius) * Scale;
@@ -684,6 +719,7 @@ namespace xlionrender
             auto& St = m_State[Ent.m_Value]; St = {};
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
             St.m_Offset = T.m_Position - Hips.m_P;
+            St.m_E = { T.m_Position, T.m_Rotation }; St.m_Scale = Scale;
             St.m_Sleep = 0.05f * std::sqrt(Params.m_Size / 1.7f);
             xlioncore::physics::ragdoll_stats Stats; xlioncore::physics::RagdollStats(*R.m_pRuntime, Stats);
             St.m_KE0 = Stats.m_KE; St.m_Y0 = Stats.m_ComY; St.m_Mass = Stats.m_Mass;

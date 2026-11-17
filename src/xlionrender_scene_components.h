@@ -588,11 +588,17 @@ namespace xlionrender
         ragdoll_ref                     m_Ragdoll;
         bool                            m_bActive   = false;
         xlioncore::physics::ragdoll*    m_pRuntime  = nullptr;      // (while active: the physics world's; never saved, never shown)
+        float                           m_Tracking    = 0.0f;       // R1: > 0, the joints pull toward the Animation (the gain); 0, a limp ragdoll
+        bool                            m_bSupported  = true;       // R1: tracking, the root body follows the Animation (held up)
+        float                           m_FeedForward = 0.3f;
 
         XPROPERTY_DEF
         ( "Ragdoll", ragdoll
         , obj_member<"Ragdoll", &ragdoll::m_Ragdoll, member_help<"The Ragdoll resource of this character's skin and skeleton: its bodies, joints and masses">>
         , obj_member<"Active",  &ragdoll::m_bActive, member_help<"While the game runs: on, the bodies pose the character (they start at the animated pose, moving as it moved); off, the Animation does">>
+        , obj_member<"Tracking", &ragdoll::m_Tracking, member_help<"While Active: 0, a limp ragdoll; above 0, every joint pulls toward the Animation as it plays on (the stiffness in units of the joint's own gravity load: 30 follows closely)">>
+        , obj_member<"Supported", &ragdoll::m_bSupported, member_help<"While tracking: the hips follow the Animation (held up). Off: the body must hold itself up, and falls">>
+        , obj_member<"FeedForward", &ragdoll::m_FeedForward, member_help<"While tracking: how hard the joints also follow the Animation's own speed (0: the spring alone, which lags)">>
         )
     };
 
