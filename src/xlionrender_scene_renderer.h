@@ -545,7 +545,7 @@ namespace xlionrender
             for (std::size_t i = 0; bSame && i < Bones.size(); ++i) bSame = S.m_Parent[i] == Bones[i].m_iParent;
             if (!bSame) S = xanimation::MakeSkeleton(Skel);
             Out.resize(Bones.size());
-            const bool bClip = pPkg && xanimation::SampleClip(S, xanimation::MakeClipView(*pPkg, iClip), Time, bMirror, m_AnimPose, m_AnimScratch);
+            const bool bClip = pPkg && xanimation::SampleClip(S, *pPkg, iClip, Time, bMirror, m_AnimPose, m_AnimScratch);
             if (Entity == 0) { xanimation::ComputeBoneWorlds(S.view(), bClip ? m_AnimPose : S.m_Rest, Out); m_pAnimUsed = bClip ? &m_AnimPose : &S.m_Rest; return; }
             if (!bClip) m_AnimPose = S.m_Rest;
             Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0) + std::uint64_t(Jumps) * 0x9E3779B97F4A7C15ull) : 1, &Skel, BlendTime, m_AnimPose);

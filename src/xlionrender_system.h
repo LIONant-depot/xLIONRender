@@ -178,7 +178,7 @@ namespace xlionrender
                     const auto& C = Pkg.getClips()[std::size_t(c)];
                     xanimation::matching_clip Mc;
                     Mc.m_Fps = float(std::max<int>(1, C.m_FPS)); Mc.m_Length = float(C.m_nFrames) / Mc.m_Fps; Mc.m_bLoop = C.m_bLoop;
-                    Mc.m_Sample = [V = xanimation::MakeClipView(Pkg, c)](float t, xanimation::pose& P) { xanimation::SampleLocal(V, t, P); };
+                    Mc.m_Sample = [pPkg = &Pkg, c, pS = &SD](float t, xanimation::pose& P) { xanimation::pose Scr; xanimation::SampleClip(*pS, *pPkg, c, t, false, P, Scr); };
                     Mc.m_Root = [pPkg = &Pkg, c](float t) { return xanimation::RootMotionAt(*pPkg, c, t); };
                     Mc.m_Turn = [pPkg = &Pkg, c](float t) { return xanimation::RootTurnAt(*pPkg, c, t); };
                     M.m_Clips.push_back(std::move(Mc));
@@ -225,7 +225,7 @@ namespace xlionrender
             if (!Rig.valid() || Rig.m_Legs.size() > A.m_Ground.size()) { A.m_nGround = 0; return; }
             thread_local xanimation::pose P, Scratch;
             const float t = A.m_bLoop ? A.m_Time - Length * std::floor(A.m_Time / Length) : std::clamp(A.m_Time, 0.0f, Length);
-            if (!xanimation::SampleClip(SD, xanimation::MakeClipView(Pkg, A.m_Clip), t, A.m_bMirror, P, Scratch)) { A.m_nGround = 0; return; }
+            if (!xanimation::SampleClip(SD, Pkg, A.m_Clip, t, A.m_bMirror, P, Scratch)) { A.m_nGround = 0; return; }
             xanimation::warp_params Wp; Wp.m_Stride = A.m_WarpStride; Wp.m_Angle = A.m_WarpAngle; Wp.m_Dir = A.m_WarpDir;
             xanimation::WarpPose(SD.view(), Rig, P, Wp);
             std::array<xanimation::ground_contact, 4> Now;
@@ -383,7 +383,7 @@ namespace xlionrender
                     float t = pAnim->m_Time - (pAnim->m_bPlaying ? Dtb * pAnim->m_Speed : 0.0f);
                     if (Len > 0) t = pAnim->m_bLoop ? t - Len * std::floor(t / Len) : std::clamp(t, 0.0f, Len);
                     xanimation::pose Scratch;
-                    if (xanimation::SampleClip(S, xanimation::MakeClipView(*pPkg, pAnim->m_Clip), t, pAnim->m_bMirror, P, Scratch)) return;
+                    if (xanimation::SampleClip(S, *pPkg, pAnim->m_Clip, t, pAnim->m_bMirror, P, Scratch)) return;
                 }
                 P = S.m_Rest;
             };
