@@ -543,6 +543,11 @@ namespace xlionrender
         float               m_SpringHz = 2.0f, m_SpringDamping = 0.5f, m_SpringWeight = 1.0f, m_SpringMaxAngle = 35.0f, m_SpringDroop = 0.0f;
         // N2 (superset: KINEMATION's lean, Unreal's lean from acceleration): the upper body leans into the body's acceleration, atan(a/g) x Amount
         float               m_LeanAmount = 0.0f, m_LeanMaxAngle = 20.0f, m_LeanSmooth = 0.2f;
+        // S2 (superset: KINEMATION's aim-at and look modifier): the look-at from angles (a stick, a mouse) and/or onto another bone (a hand's gun)
+        bool                m_bLookAngles = false;
+        float               m_LookYaw = 0, m_LookPitch = 0;       // deg, from the body's facing (+ toward its right... +X), + up
+        std::string         m_AimBone;                            // empty: the head
+        xmath::fvec3        m_AimAxis{ 0, 0, 1 };                 // the aimed axis in the aim bone's own frame
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
@@ -605,6 +610,13 @@ namespace xlionrender
             , obj_member<"Weight", &animation::m_SpringWeight>
             , obj_member<"MaxAngle", &animation::m_SpringMaxAngle, member_help<"Degrees: the most each bone swings away from the animation">>
             , obj_member<"Droop", &animation::m_SpringDroop, member_help<"Extra downward pull (units/s^2): a heavy tail hangs">>
+            >
+        , obj_scope<"Aim"
+            , obj_member<"Angles", &animation::m_bLookAngles, member_help<"The look-at aims by Yaw and Pitch (from the body's facing, as a stick or a mouse gives them) instead of the LookAt point; LookAtWeight still sets how much">>
+            , obj_member<"Yaw", &animation::m_LookYaw, member_help<"Degrees about up from the body's facing (toward its +X side positive)">>
+            , obj_member<"Pitch", &animation::m_LookPitch, member_help<"Degrees, up positive">>
+            , obj_member<"Bone", &animation::m_AimBone, member_help<"The bone that points at the target (a hand holding a gun, a torch): the spine turns it there. Empty: the head (the head, neck and spine turn)">>
+            , obj_member<"Axis", &animation::m_AimAxis, member_help<"The direction that points, in the Bone's own frame (a gun's barrel)">>
             >
         , obj_scope<"Lean"
             , obj_member<"Amount", &animation::m_LeanAmount, member_help<"The spine leans into the body's acceleration as a balancing body does: forward speeding up, back braking, into turns. 1: the physical angle atan(a/g); 0: off">>

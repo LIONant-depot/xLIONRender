@@ -120,7 +120,32 @@ namespace xlionrender
                     const float Dt = Tr.m_LookT.time_since_epoch().count() ? Elapsed(Tr.m_LookT, Now) : 0.0f;
                     Tr.m_LookT = Now;
                     const auto Inv = pL2W->InverseSRT();
-                    xanimation::LookAt(S.view(), S.m_LookAt, m_AnimPose, Inv * LookAt, LookAtWeight, Dt, Tr.m_Look);
+                    // S2: onto another bone (the spine turns it) and/or from angles; the head's chain otherwise
+                    const auto* pChain = &S.m_LookAt;
+                    if (m_pSpringAnim && !m_pSpringAnim->m_AimBone.empty())
+                    {
+                        if (Tr.m_AimBone != m_pSpringAnim->m_AimBone || (Tr.m_AimAxis - m_pSpringAnim->m_AimAxis).LengthSq() > 0)
+                        {
+                            Tr.m_AimBone = m_pSpringAnim->m_AimBone; Tr.m_AimAxis = m_pSpringAnim->m_AimAxis;
+                            const auto Ro = Skel.getRoles();
+                            Tr.m_AimChain = xanimation::FindAimChain(S.view(), Ro, S.m_LookAt, S.m_Rest, Skel.findBoneIndex(xstrtool::CRC32(Tr.m_AimBone)), Tr.m_AimAxis);
+                            std::printf("[AnimAim] entity %llu: aiming %s (axis %.2f %.2f %.2f) with %zu spine bones%s%c", (unsigned long long)Entity, Tr.m_AimBone.c_str(), Tr.m_AimAxis.m_X, Tr.m_AimAxis.m_Y, Tr.m_AimAxis.m_Z
+                                , Tr.m_AimChain.m_Bones.size(), Tr.m_AimChain.valid() ? "" : ": NO such bone or no spine - the head aims instead", 10);
+                            std::fflush(stdout);
+                        }
+                        if (Tr.m_AimChain.valid()) pChain = &Tr.m_AimChain;
+                    }
+                    if (m_pSpringAnim && m_pSpringAnim->m_bLookAngles)
+                        xanimation::LookAtAngles(S.view(), *pChain, m_AnimPose, m_pSpringAnim->m_LookYaw * 0.017453293f, m_pSpringAnim->m_LookPitch * 0.017453293f, LookAtWeight, Dt, Tr.m_Look);
+                    else
+                        xanimation::LookAt(S.view(), *pChain, m_AnimPose, Inv * LookAt, LookAtWeight, Dt, Tr.m_Look);
+                    if (pChain != &S.m_LookAt && !m_pSpringAnim->m_bLookAngles)      // (S2's measure: how far the aimed axis is from the target, every 120 frames)
+                    {
+                        xanimation::details::rigid_worlds Wa; xanimation::details::Worlds(S.view(), m_AnimPose, Wa);
+                        const auto Ax = (Wa.m_R[std::size_t(pChain->m_Head)] * Tr.m_AimAxis).NormalizeSafeCopy(), To = (Inv * LookAt - Wa.m_P[std::size_t(pChain->m_Head)]).NormalizeSafeCopy();
+                        Tr.m_AimErr = std::max(Tr.m_AimErr, std::acos(std::clamp(Ax.Dot(To), -1.0f, 1.0f)) * 57.29578f);
+                        if (++Tr.m_AimN % 120 == 0) { std::printf("[AnimAim] entity %llu: %s points %.1f deg from the target at most over 120 frames%c", (unsigned long long)Entity, Tr.m_AimBone.c_str(), Tr.m_AimErr, 10); std::fflush(stdout); Tr.m_AimErr = 0; }
+                    }
                 }
             }
             if (m_pSpringAnim && pL2W && m_pSpringAnim->m_LeanAmount > 0) ApplyLeanTo(Skel, S, Entity, *m_pSpringAnim, *pL2W);       // (N2: before the springs, which swing from the leaned body)
@@ -258,6 +283,9 @@ namespace xlionrender
             const xskeleton::skeleton*              m_pLeanSkel = nullptr;
             std::vector<int>                        m_LeanChain;
             float                                   m_LeanMax = 0; int m_LeanN = 0; std::vector<float> m_LeanSeen;
+            std::string                             m_AimBone; xmath::fvec3 m_AimAxis{ 0, 0, 0 };     // S2: the aim chain for this bone and axis (rebuilt when they change)
+            xanimation::look_at_chain               m_AimChain;
+            int                                     m_AimN = 0; float m_AimErr = 0;
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 
