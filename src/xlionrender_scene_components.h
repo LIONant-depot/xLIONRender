@@ -498,6 +498,10 @@ namespace xlionrender
         float               m_WarpAngleEased = 0, m_WarpStrideEased = 1; bool m_bWarpEased = false;     // (the warp eased toward what is asked: no snap at a jump)
         bool                m_bMatching = false;    // K4: motion matching picks the clip and time from the package's clips by Move (a database built once per package)
         bool                m_bFaceMove = false;    // with MotionMatching: the character turns to face where it moves (the turn clips are chosen); off: it keeps its facing, the legs warp toward the move
+        bool                m_bMoveInWorld = false; // Move is a world direction (not the entity's frame): "go there" stays there while the character turns
+        xmath::fvec3        m_Face      {0, 0, 0};  // a world direction to face (zero: none) - "go there, face the goal": wins over FaceMove; the turn clips are asked, the rest turns in place
+        bool                m_bCollide  = false;    // root motion moves a capsule through the physics world (walls, kerbs above the step) and around other colliding characters
+        float               m_CapsuleRadius = 0.3f, m_CapsuleHeight = 1.8f;     // world units
         std::uint32_t       m_MatchJumps = 0;       // (jumps so far: the renderer eases each in; not saved)
         float               m_MatchSince = 1e9f;    // (seconds since the last search)
         bool                m_bPushOnContact = false;   // a Contact event's bone pushes the dynamic bodies it touches with its own speed (a kick, a shove)
@@ -538,6 +542,11 @@ namespace xlionrender
         , obj_member<"Stride",    &animation::m_WarpStride, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"This frame's step length against the clip's (1: as authored), from Move">>
         , obj_member<"MotionMatching", &animation::m_bMatching, member_help<"While the game runs the clip and its time are chosen by motion matching from every clip of the package: the frame whose feet, hips and next second best fit Move (the velocity asked), searched every 0.1 s, each jump eased in. Clip and Time follow it. Use with RootMotion">>
         , obj_member<"FaceMove",  &animation::m_bFaceMove, member_help<"With MotionMatching: the character turns to face where it moves (motion matching picks the turning clips; the clips' root turn turns it). Off: it keeps facing ahead and its legs turn toward the move (orientation warping, up to 90 deg)">>
+        , obj_member<"MoveInWorld", &animation::m_bMoveInWorld, member_help<"Move is a world direction instead of the entity's frame: the character keeps going where it was asked while it turns (with Face)">>
+        , obj_member<"Face",      &animation::m_Face, member_help<"A world direction to face while the game runs (zero: none): wins over FaceMove. Motion matching asks the turn clips for it; what they leave the character turns in place (up to 180 deg/s). Go one way and face another: Face + Move (+ MoveInWorld)">>
+        , obj_member<"Collide",   &animation::m_bCollide, member_help<"With RootMotion: the character is a capsule (CapsuleRadius, CapsuleHeight) that slides along walls and does not walk into other colliding characters (Box3D's character mover). Steps lower than 0.35 units pass under it (FootIK puts the feet on them); dynamic bodies (a ball) do not stop it">>
+        , obj_member<"CapsuleRadius", &animation::m_CapsuleRadius, member_help<"Collide: the capsule's radius (world units)">>
+        , obj_member<"CapsuleHeight", &animation::m_CapsuleHeight, member_help<"Collide: the capsule's height from the feet (world units)">>
         , obj_member<"Jumps",     &animation::m_MatchJumps, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many times motion matching jumped to another clip or time">>
         , obj_member<"PushOnContact", &animation::m_bPushOnContact, member_help<"While the game runs, when a Contact event of the clip fires, the event's bone pushes the dynamic physics bodies it touches with its own speed (x1.1, an instep kick's transfer): a kick moves the ball, a shove a crate">>
         , obj_member<"ResetPushed", &animation::m_bResetPushed, member_help<"With PushOnContact and a looping clip: what it pushed goes back where it was each time the clip starts again (a kick drill, a demo)">>

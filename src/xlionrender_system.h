@@ -51,6 +51,8 @@
 #include <format>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <chrono>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -69,7 +71,7 @@ namespace xlionrender
         struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; };
         std::unordered_map<const xanim_package::anim_package*, match_db> m_Match;                      // K4: one database per package (ponytail: a reloaded package at the same address keeps its old database until the editor restarts)
 
-        void operator()( animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT ) noexcept
+        void operator()( const xecs::component::entity& Ent, animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT ) noexcept
         {
             A.m_nFired = 0; A.m_bFinished = false;              // this frame's events and result only
             A.m_WarpStride = 1; A.m_WarpAngle = 0;              // (and its warping)
@@ -113,6 +115,9 @@ namespace xlionrender
                         auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
                         if (!SD.m_Mirror.empty()) pSD = &SD;
                     }
+            const xmath::fvec3 MoveAsked = A.m_Move;              // (MoveInWorld: turned into the entity's frame for this frame's work, given back after)
+            if (A.m_bMoveInWorld && pT) A.m_Move = pT->m_Rotation.ConjugateCopy() * A.m_Move;
+            struct restore_move { animation& A; xmath::fvec3 M; ~restore_move() { A.m_Move = M; } } RestoreMove{ A, MoveAsked };
             // stride and orientation warping (K2): the game asks a velocity (Move), the clip walks at its own; the clip's time runs at the Rate,
             // its root motion turns by the Angle and stretches by the Stride, and the renderer warps the pose the same way (the feet stay planted)
             xanimation::warp_params Wp;
@@ -148,10 +153,19 @@ namespace xlionrender
                 }
                 if (Wp.active()) D = xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Wp.m_Angle) * D * Wp.m_Stride;
                 D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)
-                pT->m_Position = pT->m_Position + pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
+                auto WD = pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
+                if (A.m_bCollide) WD = Collide(Ent.m_Value, A, *pT, WD);
+                pT->m_Position = pT->m_Position + WD;
                 if (Turn != 0) pT->m_Rotation = (pT->m_Rotation * xmath::fquat(0.0f, std::sin(0.5f * Turn), 0.0f, std::cos(0.5f * Turn))).NormalizeSafeCopy();     // (after the move: the move is in the facing it had)
             }
-            if (A.m_bMatching && pT && pSkin) Match(A, *pSkin, *pPkg);
+            if (pT && (A.m_Face.m_X != 0 || A.m_Face.m_Z != 0))      // Face: what the clips' turn did not do, in place (at most 180 deg/s)
+            {
+                const auto F = pT->m_Rotation.ConjugateCopy() * A.m_Face;
+                const float Err = std::atan2(F.m_X, F.m_Z), Max = 3.14159265f * pGame->m_Time.m_DeltaTime;
+                const float Turn = std::clamp(Err, -Max, Max);
+                if (std::abs(Turn) > 1e-5f) pT->m_Rotation = (pT->m_Rotation * xmath::fquat(0.0f, std::sin(0.5f * Turn), 0.0f, std::cos(0.5f * Turn))).NormalizeSafeCopy();
+            }
+            if (A.m_bMatching && pT && pSkin) Match(A, *pSkin, *pPkg, pT);
             if (A.m_bFootIK && pT && pSkin) GroundFeet(A, *pSkin, *pT, *pPkg, Length);
             else A.m_nGround = 0;
             if (A.m_bOneShot && A.m_ReturnClip >= 0)            // a one-shot: at its end the clip before it comes back where it was (Finished this frame)
@@ -177,10 +191,42 @@ namespace xlionrender
             else if (A.m_Time >= Length || A.m_Time < 0) { A.m_Time = std::clamp(A.m_Time, 0.0f, Length); A.m_bPlaying = false; }
         }
 
+        // Collide (plan 13.4): the root motion's world step through Box3D's character mover (LIONCore MoveCapsule), with the other colliding
+        // characters as planes (their capsules where they stood last; a vertical-axis pair: the plane between them).
+        // ponytail: other characters by a list under a lock, all against all; a grid when crowds collide
+        struct mover_info { xmath::fvec3 m_Pos; float m_Radius; std::chrono::steady_clock::time_point m_T; };
+        std::mutex                                       m_MoversLock;
+        std::unordered_map<std::uint64_t, mover_info> m_Movers;      // (by entity: the component handed to operator() may not keep its address)
+        xmath::fvec3 Collide(std::uint64_t Entity, const animation& A, const xlioncore::transform& T, const xmath::fvec3& Step) noexcept
+        {
+            const auto Now = std::chrono::steady_clock::now();
+            std::vector<xlioncore::physics::mover_plane> Planes;
+            {
+                std::scoped_lock Lk(m_MoversLock);
+                for (auto It = m_Movers.begin(); It != m_Movers.end(); )
+                {
+                    if (Now - It->second.m_T > std::chrono::milliseconds(500)) { It = m_Movers.erase(It); continue; }       // (gone, or stopped colliding)
+                    if (It->first != Entity)
+                    {
+                        xmath::fvec3 N(T.m_Position.m_X - It->second.m_Pos.m_X, 0, T.m_Position.m_Z - It->second.m_Pos.m_Z);
+                        const float D = N.Length(), Reach = A.m_CapsuleRadius + It->second.m_Radius;
+                        if (D > 1e-4f && D < Reach + Step.Length() + 0.1f) Planes.push_back({ N * (1.0f / D), Reach - D });      // (normal . move >= overlap)
+                    }
+                    ++It;
+                }
+            }
+            const auto Out = xlioncore::physics::MoveCapsule(getGameMgr(), T.m_Position, A.m_CapsuleRadius, A.m_CapsuleHeight, 0.35f, Step, Planes);
+            std::scoped_lock Lk(m_MoversLock);
+            static const bool bDbg = std::getenv("XLION_ANIM_MOVER_DEBUG") != nullptr;
+            if (bDbg) std::printf("[AnimMover] %llu at (%.2f %.2f) step (%.3f %.3f) -> (%.3f %.3f), %zu others, %zu planes\n", (unsigned long long)Entity, T.m_Position.m_X, T.m_Position.m_Z, Step.m_X, Step.m_Z, Out.m_X, Out.m_Z, m_Movers.size(), Planes.size());
+            m_Movers[Entity] = { T.m_Position + Out, A.m_CapsuleRadius, Now };
+            return Out;
+        }
+
         // Motion matching (K4): the package's database (every clip, built the first time), a search every 0.1 s with the wish from Move (in the
         // character's frame: the skeleton's rest forward is its +Z), a jump sets Clip and Time (and counts: the renderer eases it in).
         // ponytail: the wish keeps the rest's facing (no root rotation in our root motion yet); the velocity now is the last Move asked
-        void Match(animation& A, const skinned_mesh& Skin, const xanim_package::anim_package& Pkg) noexcept
+        void Match(animation& A, const skinned_mesh& Skin, const xanim_package::anim_package& Pkg, const xlioncore::transform* pT) noexcept
         {
             using namespace xlioncore::resources;
             auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
@@ -218,6 +264,12 @@ namespace xlionrender
             {
                 const auto M = xanimation::details::TurnY(A.m_Move, -Yaw0); Wish = xmath::fvec3(M.m_X, 0, M.m_Z);
                 YawAsked = std::atan2(M.m_X, M.m_Z);
+            }
+            if (pT && (A.m_Face.m_X != 0 || A.m_Face.m_Z != 0))     // Face wins: the move as it is in the character's frame, the facing asked
+            {
+                const auto M = xanimation::details::TurnY(A.m_Move, -Yaw0); Wish = xmath::fvec3(M.m_X, 0, M.m_Z);
+                const auto F = xanimation::details::TurnY(pT->m_Rotation.ConjugateCopy() * A.m_Face, -Yaw0);
+                YawAsked = std::atan2(F.m_X, F.m_Z);
             }
             xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
             if (xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, YawAsked), 0))
