@@ -183,6 +183,8 @@ namespace xlionrender
             if (pLoco)
             {
                 A.m_bMoveInWorld = true; A.m_Move = xmath::fvec3(pLoco->m_Move.m_X, 0, pLoco->m_Move.m_Z); A.m_bRootToVelocity = true;
+                if (pLoco->m_Action.empty()) A.m_LocoAction.clear();       // (an action asked once by the game: a one-shot by clip name; asked again after it was cleared)
+                else if (pLoco->m_Action != A.m_LocoAction) { A.m_LocoAction = pLoco->m_Action; A.m_ClipName = pLoco->m_Action; A.m_bOneShot = true; A.m_RequestHash = 0; }
                 if (pLoco->m_Face.m_X != 0 || pLoco->m_Face.m_Z != 0) { A.m_Face = pLoco->m_Face; A.m_bFaceMove = false; } else { A.m_Face = xmath::fvec3(0, 0, 0); A.m_bFaceMove = true; }
             }
             if (A.m_bPlayer)                                    // K4: the player's stick is the move (world, camera-relative); it faces where it goes
@@ -293,7 +295,7 @@ namespace xlionrender
                 const float Turn = std::clamp(Err, -Max, Max);
                 if (std::abs(Turn) > 1e-5f) pT->m_Rotation = (pT->m_Rotation * xmath::fquat(0.0f, std::sin(0.5f * Turn), 0.0f, std::cos(0.5f * Turn))).NormalizeSafeCopy();
             }
-            if (A.m_bMatching && pT && pSkin) Match(A, *pSkin, *pPkg, pT);
+            if (A.m_bMatching && pT && pSkin && !A.m_bOneShot) Match(A, *pSkin, *pPkg, pT);     // (an action requested as a one-shot plays out; matching resumes after)
             if (A.m_bFootIK && pT && pSkin) GroundFeet(A, *pSkin, *pT, *pPkg, Length);
             else A.m_nGround = 0;
             if (A.m_bOneShot && A.m_ReturnClip >= 0)            // a one-shot: at its end the clip before it comes back where it was (Finished this frame)
@@ -372,6 +374,10 @@ namespace xlionrender
                     const auto& C = Pkg.getClips()[std::size_t(c)];
                     xanimation::matching_clip Mc;
                     Mc.m_Fps = float(std::max<int>(1, C.m_FPS)); Mc.m_Length = float(C.m_nFrames) / Mc.m_Fps; Mc.m_bLoop = C.m_bLoop;
+                    {   // (a clip with a "NoMatch" marker is an action, played on request - a kick, a dive - never a matching candidate: no entries)
+                        static const std::uint32_t NoMatch = xstrtool::CRC32("NoMatch");
+                        for (const auto& E : Pkg.getClipEvents(c)) if (E.m_Kind == xanim_package::event_kind::MARKER && E.m_NameHash == NoMatch) Mc.m_Length = 0;
+                    }
                     Mc.m_Sample = [pPkg = &Pkg, c, pS = &SD](float t, xanimation::pose& P) { xanimation::pose Scr; xanimation::SampleClip(*pS, *pPkg, c, t, false, P, Scr); };
                     if (C.m_RootMotionMode != xanim_package::root_motion_mode::NONE) Mc.m_Root = [pPkg = &Pkg, c](float t) { return xanimation::RootMotionAt(*pPkg, c, t); };      // (none: the trajectory from the hips)
                     Mc.m_Turn = [pPkg = &Pkg, c](float t) { return xanimation::RootTurnAt(*pPkg, c, t); };

@@ -517,6 +517,7 @@ namespace xlionrender
         bool                m_bFollowParent = false; // G0: the character is the look of a parent that something else moves (a physics body): Move is the parent's own velocity, it turns toward where it goes, no root motion
         bool                m_bRootToVelocity = false; // G0 (b): root motion is not applied to the entity but given as RootVelocity (world units/s) for a game's mover - a physics body driven by the animation
         xmath::fvec3        m_RootVelocity {0, 0, 0}; // (RootToVelocity: this update's root motion as a world velocity; not saved)
+        std::string         m_LocoAction;           // (Locomotion: the action last asked, so it plays once; not saved)
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
