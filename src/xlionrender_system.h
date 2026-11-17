@@ -72,6 +72,13 @@ namespace xlionrender
         // reads it: hierarchy propagated, fixed-step interpolation); the renderer draws that pose (scene_renderer::m_pUpdated) and poses only
         // what this did not (an active ragdoll, a world that does not update). Before: posed per view, per-entity state on the wall clock.
         anim_poser m_Poser;
+        // K4's budgeted search queue: at most SearchBudget motion matching searches an update (XLION_ANIM_SEARCH_BUDGET, default 64); a character
+        // due for a search past it waits for the next update (its clip plays on; one that is ending still searches). A crowd's searches spread
+        // over frames instead of piling on one. ponytail: the same entity order every update - past ~6x the budget in characters searching at 10 Hz the
+        // last ones would starve; a round-robin start when crowds get there
+        int m_Searches = 0, m_SearchWaits = 0;
+        static int SearchBudget(void) noexcept { static const int B = [] { const char* e = std::getenv("XLION_ANIM_SEARCH_BUDGET"); return e && *e ? std::max(1, std::atoi(e)) : 64; }(); return B; }
+        void OnPreUpdate(void) noexcept { m_Searches = 0; }
         void OnPostUpdate(void) noexcept
         {
             if (scene_renderer::AnimMode() != scene_renderer::anim_mode::NEW) return;
@@ -347,7 +354,11 @@ namespace xlionrender
             }
             Wish = xanimation::ReachableWish(M.m_Db, Wish);        // (toward a direction the clips walk; warping turns them the rest)
             xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
-            if (xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, YawAsked), 0))
+            xanimation::matching_params Pm;
+            if (m_Searches >= SearchBudget()) { Pm.m_Interval = 1e9f; ++m_SearchWaits; }       // (over the budget: no search unless the clip is ending)
+            const bool bJumped = xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, YawAsked), 0, Pm);
+            if (St.m_Since == 0) ++m_Searches;
+            if (bJumped)
             {
                 static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s\n", St.m_Jumps, A.m_Clip, A.m_Time, St.m_Clip, St.m_Time);
