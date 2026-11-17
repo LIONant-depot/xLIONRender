@@ -10,6 +10,7 @@
 // become a mesh of the renderer (referenced, not copied), a MaterialInstance its material (the Material's HDR shader + the instance's textures).
 // A resource not loaded yet is asked for again next frame; until then a mesh is not drawn and a material slot draws with the constant material.
 // ponytail: renderer meshes/materials are kept until the world closes (a recompiled resource is a new pointer: a new entry); evict when it shows.
+#include <mutex>
 #include "xlionrender_instance.h"
 #include "xlionrender_scene_components.h"
 #include "scene/xlionrender_material_overrides.h"
@@ -453,6 +454,7 @@ namespace xlionrender
                     if ((m_AnimChecked & 0x3FFF) == 1) std::fprintf(stderr, "ANIMCHECK %llu poses checked, %llu mismatches\n", (unsigned long long)m_AnimChecked, (unsigned long long)m_AnimMismatch);
                 }
             }
+            if (pAnim) TraceAnimation(Entity, *pSkel, *pAnim, L2W);
 
             auto& E = m_Skinned[Entity];
             if (E.m_pGeom != pGeom || E.m_nBones != nBones)
@@ -560,6 +562,61 @@ namespace xlionrender
                 xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock);
             }
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
+        }
+
+        // XLION_ANIM_TRACE=<file>: a motion trace for an AI (or a tool) to read - JSON Lines. A header line, one line per skeleton the first
+        // time it is drawn (bone parents, name hashes, body roles), then one line per drawn character per frame: the time, the clip and its
+        // time, the entity's frame, every bone's WORLD position (the pose as drawn: warps, ground, locks, blends), the feet locked, the events
+        // fired, the warp. A reader turns it into numbers (slides, pops) and pictures (onion skins, foot paths).
+        // One trace per process, shared by every renderer (the edit world and each Play copy draw through their own renderer): "w" tells
+        // the worlds apart, "e" is the entity's handle in its world.
+        struct anim_trace { std::mutex m_Lock; std::FILE* m_pFile = nullptr; bool m_bTried = false; std::unordered_map<const void*, int> m_Skeletons, m_Worlds; std::chrono::steady_clock::time_point m_T0; std::uint64_t m_Lines = 0; };
+        static anim_trace& AnimTrace() noexcept { static anim_trace T; return T; }
+        void TraceAnimation(std::uint64_t Entity, const xskeleton::skeleton& Skel, const animation& A, const xmath::fmat4& L2W) noexcept
+        {
+            auto& m_Trace = AnimTrace();
+            if (m_Trace.m_bTried && !m_Trace.m_pFile) return;
+            std::scoped_lock Lk(m_Trace.m_Lock);
+            if (!m_Trace.m_bTried)
+            {
+                m_Trace.m_bTried = true;
+                if (const char* pPath = std::getenv("XLION_ANIM_TRACE"); pPath && *pPath)
+                {
+                    m_Trace.m_pFile = std::fopen(pPath, "w");
+                    m_Trace.m_T0 = std::chrono::steady_clock::now();
+                    if (m_Trace.m_pFile) std::fprintf(m_Trace.m_pFile, "{\"format\":\"xlion.animtrace\",\"version\":1,\"up\":\"+Y\",\"units\":\"m\",\"roles\":[\"none\",\"root\",\"hips\",\"spine\",\"neck\",\"head\",\"clavicle\",\"upperarm\",\"lowerarm\",\"hand\",\"thigh\",\"calf\",\"foot\",\"toe\"]}\n");
+                }
+            }
+            if (!m_Trace.m_pFile || m_PoseWorlds.empty()) return;
+            auto& F = *m_Trace.m_pFile;
+            auto It = m_Trace.m_Skeletons.find(&Skel);
+            const auto Bones = Skel.getBones(); const auto Names = Skel.getBoneNames(); const auto Roles = Skel.getRoles();
+            if (It == m_Trace.m_Skeletons.end())
+            {
+                const int Id = int(m_Trace.m_Skeletons.size());
+                It = m_Trace.m_Skeletons.emplace(&Skel, Id).first;
+                std::fprintf(&F, "{\"skeleton\":%d,\"bones\":%d,\"parents\":[", Id, int(Bones.size()));
+                for (std::size_t i = 0; i < Bones.size(); ++i) std::fprintf(&F, i ? ",%d" : "%d", int(Bones[i].m_iParent));
+                std::fprintf(&F, "],\"name_hash\":[");
+                for (std::size_t i = 0; i < Names.size(); ++i) std::fprintf(&F, i ? ",%u" : "%u", Names[i].m_NameHash);
+                std::fprintf(&F, "],\"role\":[");
+                for (std::size_t i = 0; i < Bones.size(); ++i) std::fprintf(&F, i ? ",%d" : "%d", Roles.size() == Bones.size() ? int(Roles[i]) : 0);
+                std::fprintf(&F, "]}\n");
+            }
+            const float T = std::chrono::duration<float>(std::chrono::steady_clock::now() - m_Trace.m_T0).count();
+            const auto P = L2W.ExtractPosition(); const auto Q = L2W.ExtractRotation().NormalizeSafeCopy();
+            const auto Fwd = Q * xmath::fvec3(0, 0, 1);
+            const int World = m_Trace.m_Worlds.try_emplace(this, int(m_Trace.m_Worlds.size())).first->second;
+            std::fprintf(&F, "{\"t\":%.4f,\"w\":%d,\"e\":%llu,\"sk\":%d,\"clip\":%d,\"ct\":%.4f,\"jumps\":%u,\"move\":[%.3f,%.3f],\"stride\":%.3f,\"warp\":%.2f,\"pos\":[%.4f,%.4f,%.4f],\"yaw\":%.2f,\"locked\":["
+                , T, World, (unsigned long long)Entity, It->second, A.m_Clip, A.m_Time, A.m_MatchJumps, A.m_Move.m_X, A.m_Move.m_Z, A.m_WarpStride, A.m_WarpAngle * 57.29578f
+                , P.m_X, P.m_Y, P.m_Z, std::atan2(Fwd.m_X, Fwd.m_Z) * 57.29578f);
+            if (auto TI = m_Tracks.find(Entity); TI != m_Tracks.end()) for (std::size_t i = 0; i < TI->second.m_Lock.m_Legs.size(); ++i) std::fprintf(&F, i ? ",%d" : "%d", int(TI->second.m_Lock.m_Legs[i].m_bLocked));
+            std::fprintf(&F, "],\"events\":[");
+            for (int i = 0; i < A.m_nFired; ++i) std::fprintf(&F, i ? ",[%d,%d,%u]" : "[%d,%d,%u]", int(A.m_Fired[std::size_t(i)].m_Kind), int(A.m_Fired[std::size_t(i)].m_Bone), A.m_Fired[std::size_t(i)].m_NameHash);
+            std::fprintf(&F, "],\"b\":[");
+            for (std::size_t i = 0; i < m_PoseWorlds.size(); ++i) { const auto W = L2W * m_PoseWorlds[i].ExtractPosition(); std::fprintf(&F, i ? ",%.4f,%.4f,%.4f" : "%.4f,%.4f,%.4f", W.m_X, W.m_Y, W.m_Z); }
+            std::fprintf(&F, "]}\n");
+            if ((++m_Trace.m_Lines & 63) == 0) std::fflush(&F);
         }
 
         // the poses an entity showed on its last two frames, what posed it, and its transition (K1)
