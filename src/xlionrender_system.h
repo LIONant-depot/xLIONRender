@@ -605,6 +605,7 @@ namespace xlionrender
 
             auto& St = m_State[Ent.m_Value];
             St.m_Age += pGame->m_Time.m_DeltaTime;
+            if (pParent) St.m_E = WorldFrame(T, pParent, St.m_Scale);       // (a child: the animation is played where its parent carries it now)
             if (bHit)       // (the impulse: LIONCore applies it right before the next step, once per event id - its ledger)
             {
                 xlioncore::physics::HitRagdoll(GameMgr, *R.m_pRuntime, R.m_HitEventId, R.m_HitPoint, R.m_HitImpulse);
@@ -642,7 +643,7 @@ namespace xlionrender
                             std::printf("[Ragdoll] entity 0x%llX returns to its animation %.2f s after its last new hit (%zu hits; %s; joints %.1f deg from it): pose jump %.1f cm\n"
                                 , (unsigned long long)Ent.m_Value, St.m_Age - St.m_HitAt, St.m_Hits.size(), St.m_Settled >= 0.3f ? "settled" : "time limit", St.m_LastE, 100 * Pop);
                             std::fflush(stdout);
-                            HandOverToAnimation(Ent, R, Skin, T, W1);
+                            HandOverToAnimation(Ent, R, Skin, T, pParent, W1);
                             R.m_bActive = false; R.m_bReaction = false;
                         }
                     }
@@ -681,10 +682,19 @@ namespace xlionrender
             }
         }
 
+        // The entity's world frame and scale: its Transform for a root, the pose the transform system left in its Parent for a child
+        static xanimation::rigid WorldFrame( const xlioncore::transform& T, const xecs::component::parent* pParent, float& Scale ) noexcept
+        {
+            if (pParent == nullptr) { Scale = T.m_Scale.m_X; return { T.m_Position, T.m_Rotation }; }
+            Scale = pParent->m_WorldScale[0];
+            return { xmath::fvec3(pParent->m_WorldPosition[0], pParent->m_WorldPosition[1], pParent->m_WorldPosition[2])
+                   , xmath::fquat(pParent->m_WorldRotation[0], pParent->m_WorldRotation[1], pParent->m_WorldRotation[2], pParent->m_WorldRotation[3]) };
+        }
+
         // R3b' return to cheap without a pop: the ragdoll's last two captures as local poses become the Animation's starting point, which then
         // eases into the clip over 0.3 s (the poser's inertialization: anim_poser::HandOver). Animated: this frame's animated world rigid frames
         // (the bones the ragdoll does not own keep them).
-        void HandOverToAnimation( const xecs::component::entity& Ent, const ragdoll& R, const skinned_mesh& Skin, const xlioncore::transform& T, std::span<const xanimation::rigid> Animated ) noexcept
+        void HandOverToAnimation( const xecs::component::entity& Ent, const ragdoll& R, const skinned_mesh& Skin, const xlioncore::transform& T, const xecs::component::parent* pParent, std::span<const xanimation::rigid> Animated ) noexcept
         {
             using namespace xlioncore::resources;
             auto* pAnimSys = findSystem<animation_system>();
@@ -695,12 +705,12 @@ namespace xlionrender
             auto& S = m_Skeletons[pSkel];
             const auto n = std::size_t(S.m_Parent.size());
             if (n == 0 || Animated.size() != n) return;
-            std::vector<xanimation::rigid> W(n); std::vector<float> Sc(n, T.m_Scale.m_X);
+            float Es = 1; const auto E = WorldFrame(T, pParent, Es);
+            std::vector<xanimation::rigid> W(n); std::vector<float> Sc(n, Es);
             xanimation::pose Cur = m_P1, Prev = m_P1;       // (the scales: the animation's)
             if (Cur.count() != int(n)) return;
-            const xanimation::rigid E{ T.m_Position, T.m_Rotation };
-            xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 1.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, T.m_Scale.m_X, Cur);
-            xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 0.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, T.m_Scale.m_X, Prev);
+            xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 1.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, Es, Cur);
+            xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 0.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, Es, Prev);
             pAnimSys->m_Poser.HandOver(Ent.m_Value, pSkel, Cur, Prev, pGame->m_Time.m_FixedDeltaTime, 0.3f);
         }
 
@@ -743,7 +753,6 @@ namespace xlionrender
         {
             using namespace xlioncore::resources;
             auto Fail = [&](const char* Why) { std::printf("[Ragdoll] entity 0x%llX not activated: %s\n", (unsigned long long)Ent.m_Value, Why); std::fflush(stdout); return false; };
-            if (pParent) return Fail("it has a parent (a ragdoll is a root entity)");
             auto* pRag  = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value));
             auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
             auto* pSkel = pGeom ? static_cast<const xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
@@ -768,8 +777,8 @@ namespace xlionrender
             // the animated pose now and one fixed step back (the motion it carries into the bodies)
             const float Dt = Game.m_Time.m_FixedDeltaTime;
             std::vector<xanimation::rigid> W0, W1;
-            if (!AnimatedWorlds(Skin, pAnim, xanimation::rigid{ T.m_Position, T.m_Rotation }, T.m_Scale.m_X, Dt, W0, W1)) return Fail("its skeleton is not loaded");
-            const float Scale = T.m_Scale.m_X;
+            float Scale = 1; const auto EW = WorldFrame(T, pParent, Scale);       // (a child (a player's Lilly on its capsule): its world pose)
+            if (!AnimatedWorlds(Skin, pAnim, EW, Scale, Dt, W0, W1)) return Fail("its skeleton is not loaded");
 
             xlioncore::physics::ragdoll_params Params;
             Params.m_Size = 2 * (pRag->m_Capsule.m_HalfSegment + pRag->m_Capsule.m_Radius) * Scale;
@@ -782,7 +791,7 @@ namespace xlionrender
             auto& St = m_State[Ent.m_Value]; St = {};
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
             St.m_Offset = T.m_Position - Hips.m_P;
-            St.m_E = { T.m_Position, T.m_Rotation }; St.m_Scale = Scale; St.m_pGraph = &GE.m_G.m_Graph;
+            St.m_E = EW; St.m_Scale = Scale; St.m_pGraph = &GE.m_G.m_Graph;
             St.m_Sleep = 0.05f * std::sqrt(Params.m_Size / 1.7f);
             xlioncore::physics::ragdoll_stats Stats; xlioncore::physics::RagdollStats(*R.m_pRuntime, Stats);
             St.m_KE0 = Stats.m_KE; St.m_Y0 = Stats.m_ComY; St.m_Mass = Stats.m_Mass;
