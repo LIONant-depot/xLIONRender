@@ -175,7 +175,7 @@ namespace xlionrender
             if (Tr.m_SpringFrom != A.m_SpringFrom)
             {
                 Tr.m_SpringFrom = A.m_SpringFrom; Tr.m_SpringChain.clear(); Tr.m_SpringTip = -1; Tr.m_Spring = {};
-                int B = Skel.findBoneIndex(xstrtool::CRC32(A.m_SpringFrom));
+                int B = BoneOrSay(Skel, A.m_SpringFrom, Entity, "Springs.From");
                 const auto Par = S.view().m_Parent;
                 while (B >= 0 && Tr.m_SpringChain.size() < 32)
                 {
@@ -200,12 +200,21 @@ namespace xlionrender
             }
         }
 
+        // KUX (R66): a bone named in an Animation field, or a line saying it is not one (the runtime skeleton keeps only the names' hashes:
+        // the editor's skeleton lists the names). Called when the field changes, so once per change.
+        static int BoneOrSay(const xskeleton::skeleton& Skel, const std::string& Name, std::uint64_t Entity, const char* pField) noexcept
+        {
+            const int B = Skel.findBoneIndex(xstrtool::CRC32(Name));
+            if (B < 0) { std::printf("[AnimBones] entity %llu: %s '%s' is not a bone of its skeleton (names are exact, case included)%c", (unsigned long long)Entity, pField, Name.c_str(), 10); std::fflush(stdout); }
+            return B;
+        }
+
         // S3 (superset: KINEMATION's copy/modify bone, Unreal's Copy Bone / Transform Bone; motion/xanimation_bone_ops.h): the Animation's offset on
         // one bone, then its copy (To follows From, with the offset it had when the copy started); [AnimCopy] reports how well To follows
         void ApplyBoneOps(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A)
         {
             auto& Tr = m_Tracks[Entity];
-            if (Tr.m_OffsetBone != A.m_OffsetBone) { Tr.m_OffsetBone = A.m_OffsetBone; Tr.m_iOffset = A.m_OffsetBone.empty() ? -1 : Skel.findBoneIndex(xstrtool::CRC32(A.m_OffsetBone)); }
+            if (Tr.m_OffsetBone != A.m_OffsetBone) { Tr.m_OffsetBone = A.m_OffsetBone; Tr.m_iOffset = A.m_OffsetBone.empty() ? -1 : BoneOrSay(Skel, A.m_OffsetBone, Entity, "Offset.Bone"); }
             if (Tr.m_iOffset >= 0)
             {
                 const auto& R = A.m_OffsetRotation;
@@ -323,7 +332,7 @@ namespace xlionrender
             {
                 Tr.m_OvFrom = A.m_OverlayFrom;
                 xanimation::mask_rules M;
-                const int B = A.m_OverlayFrom.empty() ? 0 : Skel.findBoneIndex(xstrtool::CRC32(A.m_OverlayFrom));
+                const int B = A.m_OverlayFrom.empty() ? 0 : BoneOrSay(Skel, A.m_OverlayFrom, Entity, "Overlay.FromBone");
                 if (B >= 0) M.m_Entries.push_back({ B, 1.0f, true, A.m_OverlayFrom.empty() ? 0 : 2 });
                 Tr.m_OvMask = xanimation::FlattenMask(S.view(), M);
             }
