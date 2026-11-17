@@ -125,6 +125,7 @@ namespace xlionrender
                 A.m_WarpStride = Wp.m_Stride; A.m_WarpAngle = Wp.m_Angle; A.m_WarpDir = Wp.m_Dir;
             }
             FireEvents(*pPkg, A, Before, Length, pSD ? &pSD->m_Mirror : nullptr);
+            if (A.m_bPushOnContact && pT && pSkin && A.m_nFired) PushOnContact(A, *pSkin, *pT, *pPkg, Length);
             // root motion (K2, plan 13.7): the entity goes where the clip walks - the step the clip's root took this frame, in the entity's frame
             // (its rotation and scale; a child's Transform is its parent's frame); mirrored: reflected through the skeleton's plane
             if (pT && A.m_bRootMotion && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE)
@@ -208,6 +209,34 @@ namespace xlionrender
                 A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_bPlaying = true;
             }
             A.m_MatchSince = St.m_Since; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
+        }
+
+        // Contact events push (a kick): for each Contact event with a bone fired this frame, the bone's world position and velocity (the clip
+        // sampled now and 1/60 s before, in the entity's frame) push the dynamic bodies within 15 cm (LIONCore PushBodies) at 1.1x its speed.
+        // ponytail: the entity's own motion is not added to the bone's (a kick from standing); the entity's Transform as its world (a root entity)
+        void PushOnContact(animation& A, const skinned_mesh& Skin, const xlioncore::transform& T, const xanim_package::anim_package& Pkg, float Length) noexcept
+        {
+            using namespace xlioncore::resources;
+            auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
+            auto* pSkel = pGeom ? static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
+            if (!pSkel || Pkg.m_nBones != pSkel->getBones().size()) return;
+            auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
+            thread_local xanimation::pose P0, P1, Scratch; thread_local xanimation::details::rigid_worlds W0, W1;
+            const float Dt = 1.0f / 60.0f;
+            auto Wrap = [&](float t) { return A.m_bLoop ? t - Length * std::floor(t / Length) : std::clamp(t, 0.0f, Length); };
+            static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+            for (int i = 0; i < A.m_nFired; ++i)
+            {
+                const auto& F = A.m_Fired[std::size_t(i)];
+                if (F.m_Kind != std::uint8_t(xanim_package::event_kind::CONTACT) || F.m_Bone < 0 || F.m_Bone >= int(SD.m_Parent.size())) continue;
+                if (!xanimation::SampleClip(SD, Pkg, A.m_Clip, Wrap(F.m_Time), A.m_bMirror, P1, Scratch) || !xanimation::SampleClip(SD, Pkg, A.m_Clip, Wrap(F.m_Time - Dt), A.m_bMirror, P0, Scratch)) continue;
+                xanimation::details::Worlds(SD.view(), P1, W1); xanimation::details::Worlds(SD.view(), P0, W0);
+                const auto& Sc = T.m_Scale;
+                auto ToWorld = [&](const xmath::fvec3& M) { return T.m_Position + T.m_Rotation * xmath::fvec3(M.m_X * Sc.m_X, M.m_Y * Sc.m_Y, M.m_Z * Sc.m_Z); };
+                const auto P = ToWorld(W1.m_P[std::size_t(F.m_Bone)]), V = (P - ToWorld(W0.m_P[std::size_t(F.m_Bone)])) * (1.0f / Dt);
+                const int n = xlioncore::physics::PushBodies(getGameMgr(), P, 0.15f * Sc.m_X, V * 1.1f);
+                if (bLog) std::printf("[AnimPush] contact at %.2f s: bone %d at (%.2f %.2f %.2f) moving %.2f units/s pushed %d bodies\n", F.m_Time, F.m_Bone, P.m_X, P.m_Y, P.m_Z, V.Length(), n);
+            }
         }
 
         // The ground under each foot (K3): the pose this frame (the clip at its time, mirrored and warped as the renderer will draw it), a ray
