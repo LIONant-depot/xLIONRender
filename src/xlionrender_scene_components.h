@@ -510,6 +510,7 @@ namespace xlionrender
         std::uint8_t        m_nPushed = 0;
         float               m_MatchSinceJump = 1e9f;    // (matching: seconds since the last jump)
         bool                m_bFootLock = false;    // a foot that is down and nearly still stays where it landed until it lifts (no slide from warps, blends, matching jumps)
+        bool                m_bFootSteps = false;   // KS5: with FootLock, a planted foot pulled or twisted too far steps (turning on the spot) instead of sliding
         bool                m_bFootIK   = false;
         xmath::fvec3        m_LookAt    {0, 0, 0};  // K3: a world point the head turns toward (spine, neck, head share it; limits 70 deg either side, 35 up, 45 down)
         float               m_LookAtWeight = 0;     //   0: off (eases out), 1: full
@@ -603,6 +604,7 @@ namespace xlionrender
         , obj_member<"PushOnContact", &animation::m_bPushOnContact, member_help<"While the game runs, when a Contact event of the clip fires, the event's bone pushes the dynamic physics bodies it touches with its own speed (x1.1, an instep kick's transfer): a kick moves the ball, a shove a crate">>
         , obj_member<"ResetPushed", &animation::m_bResetPushed, member_help<"With PushOnContact and a looping clip: what it pushed goes back where it was each time the clip starts again (a kick drill, a demo)">>
         , obj_member<"FootLock",  &animation::m_bFootLock, member_help<"While the game runs a foot that is down and nearly still stays exactly where it landed until it lifts (what is left of a clip's skate, a warp or a matching jump does not slide it)">>
+        , obj_member<"FootSteps", &animation::m_bFootSteps, member_help<"With FootLock: a planted foot the body pulls 12 cm away or turns 35 deg from steps - it lifts and re-plants under the body, one foot at a time (turning or shuffling on the spot without a clip for it)">>
         , obj_member<"LookAt",    &animation::m_LookAt, member_help<"A world point the head turns toward while LookAtWeight is above 0: the spine, neck and head share the turn, held within 70 deg either side of the body (35 up, 45 down), eased in and out">>
         , obj_member<"FollowParent", &animation::m_bFollowParent, member_help<"The character is the look of its parent entity, which something else moves (a physics body, a script): its Move is the parent's own velocity, the clip is fitted to it (motion matching, stride and orientation warping, foot lock) and it turns toward where it goes. Root motion is not applied">>
         , obj_member<"RootToVelocity", &animation::m_bRootToVelocity, member_help<"With RootMotion: the clip's travel (warped, matched) is not applied to this entity but given as RootVelocity for the game to move something with (a physics body: the body goes where the feet go). Its turn still turns this entity">>
