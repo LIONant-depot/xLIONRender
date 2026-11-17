@@ -532,6 +532,12 @@ namespace xlionrender
         bool                m_bWarpTurn   = false;
         bool                m_bWarpHeight = false;    // off: the height stays the clip's (the ground's)
         float               m_WarpFrom    = 0, m_WarpTo = 0;    // clip seconds
+        // U1 (superset: Unreal's distance matching): the clip's time from the distance to a point, not from the clock (starts and stops whose
+        // feet never slide while the game moves the body)
+        bool                m_bDist       = false;
+        bool                m_bDistStop   = true;     // on: a stop at Target (time from the distance left); off: a start from Target (from the distance gone)
+        xmath::fvec3        m_DistTarget  {0, 0, 0};  // world
+        float               m_DistLogAt   = -1;       // (runtime: the clip time of the last [AnimDistance] line)
         // N1 (superset): a spring chain - secondary motion (a ponytail, a tail, the upper body's sway)
         std::string         m_SpringFrom;             // the chain's first bone (it and its first-child descendants); empty: off
         float               m_SpringHz = 2.0f, m_SpringDamping = 0.5f, m_SpringWeight = 1.0f, m_SpringMaxAngle = 35.0f, m_SpringDroop = 0.0f;
@@ -606,6 +612,11 @@ namespace xlionrender
             , obj_member<"Height", &animation::m_bWarpHeight, member_help<"Also reach the target's height (a climb). Off: the clip's own height">>
             , obj_member<"From", &animation::m_WarpFrom>
             , obj_member<"To", &animation::m_WarpTo>
+            >
+        , obj_scope<"Distance"
+            , obj_member<"Active", &animation::m_bDist, member_help<"Distance matching: the clip plays by where the body is, not by the clock - the game moves the body (Root Motion off) and the clip's feet stay planted. For starts and stops">>
+            , obj_member<"Stop", &animation::m_bDistStop, member_help<"On: a stop at Target - the clip's time is where its root still has as far to go as the body has to Target (never backward). Off: a start from Target - where its root has gone as far as the body has">>
+            , obj_member<"Target", &animation::m_DistTarget, member_help<"The stop point (Stop on) or the start point (off), world">>
             >
         , obj_scope<"Overlay"
             , obj_member<"Clip", &animation::m_OverlayClip, member_help<"A clip of the package played over the pose on a part of the body (a reload over a run, a wave while walking). -1: none (a playing overlay eases out)">>

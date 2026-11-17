@@ -47,6 +47,7 @@
 #include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
 #include "dependencies/xAnimation/source/nervous/xanimation_nervous.h"
 #include "dependencies/xAnimation/source/motion/xanimation_warp_window.h"
+#include "dependencies/xAnimation/source/motion/xanimation_distance_match.h"
 #include "dependencies/xAnimation/source/motion/xanimation_reflex_pose.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics_api.h"     // CastRayClosest (the feet's ground, K3)
 #include "dependencies/xstrtool/source/xstrtool.h"           // (a clip requested by name: its hash, as the compiler makes it)
@@ -254,6 +255,24 @@ namespace xlionrender
                 // the feet were stretched along one direction while they travelled along another - SoccerAnim's feet slid 250 cm/s at warp 15-75 deg)
                 if (ClipDir.LengthSq() > 0) Wp.m_Dir = xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Wp.m_Angle) * ClipDir;
                 A.m_WarpStride = Wp.m_Stride; A.m_WarpAngle = Wp.m_Angle; A.m_WarpDir = Wp.m_Dir;
+            }
+            // U1 distance matching (motion/xanimation_distance_match.h): the time where the clip's root has as far left to go (a stop) or has gone
+            // as far (a start) as the body has to or from Target, on the ground plane; the clip's root motion is the distance curve
+            if (A.m_bDist && pT && Length > 0)
+            {
+                auto Off = A.m_DistTarget - pT->m_Position; Off.m_Y = 0;
+                const float Have = Off.Length() / std::max(pT->m_Scale.m_X, 1e-6f);        // ponytail: a uniform scale (X), as the clip's world speed above
+                // ponytail: the straight distance between the two times, not the path length: a start/stop is straight; a curved one needs the path summed
+                const auto Flat = [&](float a, float b) { const auto M = xanimation::RootStep(*pPkg, A.m_Clip, a, b).m_Move; return std::sqrt(M.m_X * M.m_X + M.m_Z * M.m_Z); };
+                A.m_Time = A.m_bDistStop ? xanimation::DistanceMatchStop(std::clamp(Before, 0.0f, Length), xanimation::DistanceMatchTime([&](float t) { return Flat(t, Length); }, Have, 0.0f, Length))
+                                         : xanimation::DistanceMatchTime([&](float t) { return Flat(0.0f, t); }, Have, 0.0f, Length);
+                if (A.m_DistLogAt < 0 || std::fabs(A.m_Time - A.m_DistLogAt) >= 0.1f || (A.m_Time >= Length && A.m_DistLogAt < Length))
+                {
+                    A.m_DistLogAt = A.m_Time;
+                    std::printf("[AnimDistance] entity 0x%llX: %s, clip %.3f s of %.3f: the clip's root has %.1f cm %s, the body %.1f cm (the clip %.1f cm in all)%c", (unsigned long long)Ent.m_Value, A.m_bDistStop ? "stop" : "start"
+                        , A.m_Time, Length, 100 * (A.m_bDistStop ? Flat(A.m_Time, Length) : Flat(0.0f, A.m_Time)) * pT->m_Scale.m_X, A.m_bDistStop ? "left" : "gone", 100 * Have * pT->m_Scale.m_X, 100 * Flat(0.0f, Length) * pT->m_Scale.m_X, 10);
+                    std::fflush(stdout);
+                }
             }
             FireEvents(*pPkg, A, Before, Length, pSD ? &pSD->m_Mirror : nullptr);
             if (A.m_bPushOnContact && pT && pSkin && A.m_nFired) PushOnContact(A, *pSkin, *pT, *pPkg, Length);
