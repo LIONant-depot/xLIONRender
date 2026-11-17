@@ -656,7 +656,7 @@ namespace xlionrender
             , obj_member<"EventId", &ragdoll::m_HitEventId, member_help<"A new id is a hit: Impulse (N s) at Point (world). A character with Tracking above 0 becomes physical for it, takes it once (the same id again is the same event: ignored) and returns to its Animation when settled">>
             , obj_member<"Point",   &ragdoll::m_HitPoint>
             , obj_member<"Impulse", &ragdoll::m_HitImpulse>
-            , obj_member<"Reflexes", &ragdoll::m_bReflexes, member_help<"A hit also plays a reflex on the body: the hands come up toward where it came from and the head turns away (tracking only)">>
+            , obj_member<"Reflexes", &ragdoll::m_bReflexes, member_help<"Reflexes on the body (tracking only): a hit brings the hands up toward where it came from and turns the head away; a fall (not Supported) reaches the hands for where it will land">>
             , obj_member<"ReturnBelow", &ragdoll::m_ReturnBelow, member_help<"Degrees: back to the Animation once every joint is this close to it on average for 0.3 s (2 s at most)">>
             , obj_member<"ReactSpeed", &ragdoll::m_ReactSpeed, member_help<"m/s: a solid hit on this entity or its carrier (a player's capsule; its collider needs ContactEvents) that changes its speed at least this much (from both masses) becomes a Hit by itself: a tackle, not a ball. 0: off">>
             , obj_member<"ImpactGain", &ragdoll::m_ImpactGain, member_help<"How much of the collision's momentum reaches the body: 1 = the speed change the hit gives this side (from both masses: reduced mass x approach speed / own mass), applied to the whole ragdoll's mass">>

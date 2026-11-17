@@ -610,17 +610,23 @@ namespace xlionrender
             xmath::fvec3                  m_Threat{ 0, 0, 0 };
             float                         m_HandStart = -1, m_HandMin = 0;
             bool                          m_bAssistLogged = false;
+            // D4 catch fall (the limbs' reflex set): the hips' last position (their velocity), the reflex weight now and a step back, where the
+            // hands reach (the predicted landing, world), and its measure: when a hand and the head first reached the ground, the head's speed then
+            xmath::fvec3                  m_PrevHips{ 0, 0, 0 }, m_PrevHead{ 0, 0, 0 }, m_Landing{ 0, 0, 0 };
+            float                         m_HipsUp = -1;            // the hips' height above the stand plane at the switch (its standing height)
+            bool                          m_bPrevHips = false, m_bFallLogged = false;
+            float                         m_FallW = 0, m_FallWPrev = 0, m_FallAt = -1, m_HandDownAt = -1, m_HeadLow = 1e9f, m_HeadFall = 0;
         };
         std::unordered_map<const void*, graph_entry>                m_Graphs;       // per Ragdoll resource as loaded
         std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
         std::unordered_map<std::uint64_t, entity_state>             m_State;
         xanimation::pose                                            m_P0, m_P1;
-        struct reflex_now { xmath::fvec3 m_Threat; float m_Weight = 0, m_WeightPrev = 0; };
+        struct reflex_now { xmath::fvec3 m_Threat; float m_Weight = 0, m_WeightPrev = 0; xanimation::reflex_pose_params m_Params; };
         const reflex_now*                                           m_pReflex = nullptr;    // (set around AnimatedWorlds while a reflex pose plays)
         struct reflex_rig_entry { xanimation::reflex_rig m_Rig; bool m_bInit = false; };
         std::unordered_map<const void*, reflex_rig_entry>           m_ReflexRigs;
         std::vector<xlioncore::physics::impact>                     m_Impacts;      // this frame's solid hits (TakeImpacts, read once per update)
-        struct nerves { xanimation::nervous::drive_state m_Drives; xanimation::nervous::reflex m_Running = xanimation::nervous::reflex::NONE; std::uint64_t m_Tick = 0; };
+        struct nerves { xanimation::nervous::drive_state m_Drives; xanimation::nervous::reflex m_Running = xanimation::nervous::reflex::NONE, m_RunningLimbs = xanimation::nervous::reflex::NONE; std::uint64_t m_Tick = 0; };
         std::unordered_map<std::uint64_t, nerves>                   m_Nerves;       // the nervous system of each character with a Ragdoll that reacts (its drives outlive an activation)
 
         void OnPreUpdate(void) noexcept
@@ -715,6 +721,33 @@ namespace xlionrender
                 }   // (a repeat does not restart the settling)
                 R.m_LastHitId = R.m_HitEventId;
             }
+            // D4 (superset: delirium's catch fall): the limbs' reflex set decides from how fast the hips go down and whether the body is held up;
+            // a catch reaches both hands for where the fall will land (the hips' ballistic arc to the ground) and turns the head away from it
+            if (R.m_Tracking > 0)       // (perceived even with Reflexes off: the [Fall] measure compares)
+            {
+                const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P;
+                const float Dt = std::max(pGame->m_Time.m_DeltaTime, 1e-4f);
+                const auto Vel = St.m_bPrevHips ? (Hips - St.m_PrevHips) * (1.0f / Dt) : xmath::fvec3(0, 0, 0);
+                St.m_PrevHips = Hips; St.m_bPrevHips = true;
+                if (St.m_HipsUp < 0) St.m_HipsUp = std::max(Hips.m_Y - St.m_E.m_P.m_Y, 1e-3f);
+                xanimation::nervous::percepts Pc; Pc.m_Support = R.m_bSupported ? 1.0f : 0.0f; Pc.m_Fall = std::max(0.0f, -Vel.m_Y);
+                Pc.m_Drop = std::clamp(1.0f - (Hips.m_Y - St.m_E.m_P.m_Y) / St.m_HipsUp, 0.0f, 1.0f);
+                static const auto s_Limbs = xanimation::nervous::LimbReflexes();
+                const auto D = xanimation::nervous::Choose(s_Limbs, Nv.m_Drives, Pc, Nv.m_RunningLimbs, ++Nv.m_Tick);
+                if (D.m_bNew)
+                {
+                    std::printf("[Nervous] entity 0x%llX limbs: falling %.2f m/s, hips %.0f %% down, %s -> %s (scores:", (unsigned long long)Ent.m_Value, Pc.m_Fall, 100 * Pc.m_Drop, R.m_bSupported ? "held up" : "unsupported", xanimation::nervous::reflex_names_v[int(D.m_Chosen)]);
+                    for (const auto& [Rf, Sc] : D.m_Scores) std::printf(" %s %.2f", xanimation::nervous::reflex_names_v[int(Rf)], Sc);
+                    std::printf(")%c", 10); std::fflush(stdout);
+                    if (D.m_Chosen == xanimation::nervous::reflex::CATCH_FALL && St.m_FallAt < 0) St.m_FallAt = St.m_Age;
+                }
+                Nv.m_RunningLimbs = D.m_Chosen;
+                const bool bCatch = D.m_Chosen == xanimation::nervous::reflex::CATCH_FALL;
+                // ponytail: the ground is the plane the character stood on at the switch; a ray down (CastRayClosest, filtered off its own bodies) for ledges and slopes
+                if (bCatch) St.m_Landing = xanimation::PredictLanding(Hips, Vel, St.m_E.m_P.m_Y);
+                St.m_FallWPrev = St.m_FallW;
+                St.m_FallW = bCatch && R.m_bReflexes ? std::min(1.0f, St.m_FallW + Dt / 0.12f) : std::max(0.0f, St.m_FallW - Dt / 0.5f);     // (fast in, slower out)
+            }
             // R1 supported tracking: the joints pull toward the animation as it plays on, where the character was at the switch
             if (R.m_Tracking > 0)
             {
@@ -727,6 +760,12 @@ namespace xlionrender
                     Rx.m_WeightPrev = xanimation::ReflexEnvelope(Rp, St.m_Age - St.m_ReflexAt - pGame->m_Time.m_FixedDeltaTime);
                     if (Rx.m_Weight > 0) m_pReflex = &Rx;
                     if (St.m_Age - St.m_ReflexAt > Rp.m_In + Rp.m_Hold + Rp.m_Out) St.m_ReflexAt = -1;
+                }
+                if (St.m_FallW > 0 && St.m_FallW >= Rx.m_Weight)      // D4: the catch outweighs the hit's protect: the hands go to the landing instead
+                {
+                    Rx.m_Threat = St.m_Landing; Rx.m_Weight = St.m_FallW; Rx.m_WeightPrev = St.m_FallWPrev;
+                    Rx.m_Params.m_Reach = 1.0f; Rx.m_Params.m_Flinch = 0.6f;
+                    m_pReflex = &Rx;
                 }
                 const bool bReflexOn = m_pReflex != nullptr;
                 const bool bGot = AnimatedWorlds(Skin, pAnim, St.m_E, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, W0, W1);
@@ -751,6 +790,34 @@ namespace xlionrender
                             std::printf("[Reflex] entity 0x%llX: protect + flinch done; the nearer hand came from %.0f to %.0f cm of the threat%c", (unsigned long long)Ent.m_Value, 100 * St.m_HandStart, 100 * St.m_HandMin, 10);
                             std::fflush(stdout); St.m_HandStart = -1;
                         }
+                    }
+                }
+                // D4's measure over the fall: when a hand first came within 12 cm of the ground (the stand plane), the head's lowest height and its
+                // fastest speed down; logged 2.5 s after it first chose to catch. A good catch: a hand down first, the head kept up and slow
+                if (St.m_FallAt >= 0 && !St.m_bFallLogged && St.m_pGraph)
+                {
+                    const float G = St.m_E.m_P.m_Y, Dt = std::max(pGame->m_Time.m_DeltaTime, 1e-4f);
+                    auto Sk = m_Skeletons.end();
+                    for (auto It = m_Skeletons.begin(); It != m_Skeletons.end(); ++It) if (It->second.m_LookAt.valid() && It->second.m_Parent.size() == W1.size()) Sk = It;
+                    for (std::size_t i = 0; i < St.m_pGraph->m_Bodies.size(); ++i)
+                    {
+                        const int b = St.m_pGraph->m_Bodies[i].m_Bone; bool bHand = false;
+                        for (const auto& [K, Rg] : m_ReflexRigs) for (int a = 0; a < Rg.m_Rig.m_nArms; ++a) bHand = bHand || Rg.m_Rig.m_Arms[std::size_t(a)].m_Hand == b;
+                        const bool bHead = Sk != m_Skeletons.end() && Sk->second.m_LookAt.m_Head == b;
+                        xanimation::rigid F;
+                        if (!(bHand || bHead) || !xlioncore::physics::RagdollBodyFrame(*R.m_pRuntime, int(i), F)) continue;
+                        if (bHand && St.m_HandDownAt < 0 && F.m_P.m_Y - G < 0.12f) St.m_HandDownAt = St.m_Age;
+                        if (bHead)
+                        {
+                            if (St.m_HeadLow < 1e8f) St.m_HeadFall = std::max(St.m_HeadFall, (St.m_PrevHead.m_Y - F.m_P.m_Y) / Dt);
+                            St.m_HeadLow = std::min(St.m_HeadLow, F.m_P.m_Y - G); St.m_PrevHead = F.m_P;
+                        }
+                    }
+                    if (St.m_Age - St.m_FallAt > 2.5f)       // (the whole fall, also for a body that catches more than once)
+                    {
+                        std::printf("[Fall] entity 0x%llX: catch %s; a hand reached the ground %s%.2f s after the fall started; the head's lowest %.0f cm, fastest down %.2f m/s%c", (unsigned long long)Ent.m_Value
+                            , R.m_bReflexes ? "on" : "off", St.m_HandDownAt < 0 ? "never " : "", St.m_HandDownAt < 0 ? 0.0f : St.m_HandDownAt - St.m_FallAt, 100 * St.m_HeadLow, St.m_HeadFall, 10);
+                        std::fflush(stdout); St.m_bFallLogged = true;
                     }
                 }
                 if (bGot)
@@ -894,8 +961,8 @@ namespace xlionrender
                 if (!Rig.m_bInit) { Rig.m_bInit = true; if (const auto Ro = pSkel->getRoles(); int(Ro.size()) == nB) Rig.m_Rig = xanimation::FindReflexRig(S.view(), Ro); }
                 const auto ThreatModel = E.Inverse().m_Q * (m_pReflex->m_Threat - E.m_P) * (1.0f / std::max(Scale, 1e-6f));
                 xanimation::look_at_state L0, L1;
-                xanimation::ApplyReflexPose(S.view(), Rig.m_Rig, S.m_LookAt, m_P0, ThreatModel, m_pReflex->m_WeightPrev, {}, L0);
-                xanimation::ApplyReflexPose(S.view(), Rig.m_Rig, S.m_LookAt, m_P1, ThreatModel, m_pReflex->m_Weight, {}, L1);
+                xanimation::ApplyReflexPose(S.view(), Rig.m_Rig, S.m_LookAt, m_P0, ThreatModel, m_pReflex->m_WeightPrev, m_pReflex->m_Params, L0);
+                xanimation::ApplyReflexPose(S.view(), Rig.m_Rig, S.m_LookAt, m_P1, ThreatModel, m_pReflex->m_Weight, m_pReflex->m_Params, L1);
             }
             const auto n = static_cast<std::size_t>(nB);
             W0.resize(n); W1.resize(n); std::vector<float> Sc(n);
