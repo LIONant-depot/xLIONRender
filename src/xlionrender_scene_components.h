@@ -498,6 +498,7 @@ namespace xlionrender
         bool                m_bFaceMove = false;    // with MotionMatching: the character turns to face where it moves (the turn clips are chosen); off: it keeps its facing, the legs warp toward the move
         std::uint32_t       m_MatchJumps = 0;       // (jumps so far: the renderer eases each in; not saved)
         float               m_MatchSince = 1e9f;    // (seconds since the last search)
+        bool                m_bFootLock = false;    // a foot that is down and nearly still stays where it landed until it lifts (no slide from warps, blends, matching jumps)
         bool                m_bFootIK   = false;    // K3: the feet stand on the physics ground under them (a ray down at each foot); off by default: existing levels keep the clip's flat floor
         std::array<animation_ground, 4> m_Ground{}; // (this frame's casts, per leg, smoothed; not saved)
         std::uint8_t        m_nGround   = 0;
@@ -531,6 +532,7 @@ namespace xlionrender
         , obj_member<"MotionMatching", &animation::m_bMatching, member_help<"While the game runs the clip and its time are chosen by motion matching from every clip of the package: the frame whose feet, hips and next second best fit Move (the velocity asked), searched every 0.1 s, each jump eased in. Clip and Time follow it. Use with RootMotion">>
         , obj_member<"FaceMove",  &animation::m_bFaceMove, member_help<"With MotionMatching: the character turns to face where it moves (motion matching picks the turning clips; the clips' root turn turns it). Off: it keeps facing ahead and its legs turn toward the move (orientation warping, up to 90 deg)">>
         , obj_member<"Jumps",     &animation::m_MatchJumps, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many times motion matching jumped to another clip or time">>
+        , obj_member<"FootLock",  &animation::m_bFootLock, member_help<"While the game runs a foot that is down and nearly still stays exactly where it landed until it lifts (what is left of a clip's skate, a warp or a matching jump does not slide it)">>
         , obj_member<"FootIK",    &animation::m_bFootIK, member_help<"While the game runs the feet stand on the physics ground under them (stairs, slopes, kerbs): a ray down at each foot, each foot up or down by its ground, the hips follow the lowest, planted feet tilt to the slope. Off: the clip's flat floor">>
         , obj_member<"EventsFired", &animation::m_nEvents, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many of the clip's events (markers, footsteps, contacts) fired while the game ran">>
         )

@@ -441,7 +441,7 @@ namespace xlionrender
                         Ground[nGround] = { pAnim->m_Ground[nGround].m_bHit, pAnim->m_Ground[nGround].m_Height, pAnim->m_Ground[nGround].m_Normal };
                     PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, m_PoseWorlds
                                    , Mode == anim_mode::NEW && pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f, &Wp, std::span<const xanimation::ground_contact>(Ground.data(), nGround)
-                                   , pAnim ? pAnim->m_MatchJumps : 0u);      // (CHECK: no transitions, the bits must match)
+                                   , pAnim ? pAnim->m_MatchJumps : 0u, bClip && pAnim->m_bFootLock ? &L2W : nullptr);      // (CHECK: no transitions, the bits must match)
                 }
                 if (Mode == anim_mode::CHECK && !(bClip && pAnim->m_bMirror))      // both computed (a mirrored clip: the old code has no mirror): the library must give exactly today's matrices
                 {
@@ -536,7 +536,8 @@ namespace xlionrender
         // Entity / BlendTime (K1): when what poses the entity changes (another clip or package, mirrored or not, the rest), the new pose starts
         // from the one shown and eases into the new source over BlendTime (inertialization: the old clip is not sampled any more; 0: a cut).
         void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, bool bMirror, std::vector<xmath::fmat4>& Out, std::uint64_t Entity = 0, float BlendTime = 0, const xanimation::warp_params* pWarp = nullptr
-                            , std::span<const xanimation::ground_contact> Ground = {}, std::uint32_t Jumps = 0)      // (Jumps: motion matching's jump count - a jump within a clip is a new source too)
+                            , std::span<const xanimation::ground_contact> Ground = {}, std::uint32_t Jumps = 0      // (Jumps: motion matching's jump count - a jump within a clip is a new source too)
+                            , const xmath::fmat4* pLockL2W = nullptr)                                                 // (set: foot locking, in this world frame)
         {
             auto& S = m_AnimSkeleton[&Skel];
             const auto Bones = Skel.getBones();
@@ -550,6 +551,14 @@ namespace xlionrender
             Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0) + std::uint64_t(Jumps) * 0x9E3779B97F4A7C15ull) : 1, &Skel, BlendTime, m_AnimPose);
             if (bClip && pWarp && pWarp->active()) xanimation::WarpPose(S.view(), S.m_Warp, m_AnimPose, *pWarp);     // (after the blend: the blend's poses stay the clip's own)
             if (bClip && Ground.size() == S.m_Warp.m_Legs.size() && !Ground.empty()) xanimation::FitGround(S.view(), S.m_Warp, m_AnimPose, Ground, S.m_FootHeights);
+            if (bClip && pLockL2W)                     // foot locking: last, on the pose as drawn (per entity: its pins and when it was last drawn)
+            {
+                auto& Tr = m_Tracks[Entity];
+                const auto Now = std::chrono::steady_clock::now();
+                const float Dt = Tr.m_LockT.time_since_epoch().count() ? std::clamp(std::chrono::duration<float>(Now - Tr.m_LockT).count(), 0.0f, 0.1f) : 0.0f;
+                Tr.m_LockT = Now;
+                xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock);
+            }
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
         }
 
@@ -561,6 +570,8 @@ namespace xlionrender
             xanimation::pose                        m_Cur, m_Prev;
             std::chrono::steady_clock::time_point   m_T;
             xanimation::inertializer                m_In;
+            xanimation::foot_lock_state             m_Lock;         // (FootLock: the feet's pins)
+            std::chrono::steady_clock::time_point   m_LockT{};
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 
