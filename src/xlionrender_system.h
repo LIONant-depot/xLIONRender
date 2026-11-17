@@ -579,7 +579,9 @@ namespace xlionrender
             double              m_TrackSum = 0, m_TrackSumW = 0;    // R1: the joints' (and the bodies' world) rotation from the animation (deg, squared, summed); the joints' worst
             int                 m_nTrack = 0;
             float               m_TrackMax = 0;
-            float               m_Age = 0, m_HitAt = 0, m_Settled = 0, m_LastE = 1e9f, m_MinE = 1e9f, m_MinAt = 0;    // R3b': time since activation, of the last hit, settled for; the last tracking error
+            float               m_Age = 0, m_HitAt = 0, m_Settled = 0, m_LastE = 1e9f, m_MinE = 1e9f, m_MinAt = 0;
+            float               m_Supported = 0;            // the assistance ledger: seconds its root was held (kinematic, supported tracking)
+            bool                m_bForced = false;          //  and a return forced by the time limit    // R3b': time since activation, of the last hit, settled for; the last tracking error
             const xanimation::body_graph* m_pGraph = nullptr;       // (the graph it was activated with: m_Graphs keeps it)
             std::vector<std::uint64_t>    m_Hits;                   // the hit events this activation took
         };
@@ -628,7 +630,18 @@ namespace xlionrender
             if (bHit && !R.m_bActive && R.m_Tracking > 0) { R.m_bActive = true; R.m_bReaction = true; }
             if (!R.m_bActive)
             {
-                if (R.m_pRuntime) { xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pRuntime); R.m_pRuntime = nullptr; m_State.erase(Ent.m_Value); }
+                if (R.m_pRuntime)
+                {
+                    // the assistance ledger (contract 2.6 req. 5, 2.8; v0: logged per activation): how long its root was held by the animation
+                    // (supported tracking is assistance, never hidden) and whether it was sent back to the animation by the time limit
+                    if (auto It = m_State.find(Ent.m_Value); It != m_State.end() && (It->second.m_Supported > 0 || It->second.m_bForced))
+                    {
+                        std::printf("[Assist] entity 0x%llX: root held by the animation %.2f s of %.2f s active%s\n", (unsigned long long)Ent.m_Value, It->second.m_Supported, It->second.m_Age
+                            , It->second.m_bForced ? "; sent back to its animation by the time limit (not settled)" : "");
+                        std::fflush(stdout);
+                    }
+                    xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pRuntime); R.m_pRuntime = nullptr; m_State.erase(Ent.m_Value);
+                }
                 return;
             }
             if (R.m_pRuntime == nullptr && !Activate(Ent, R, Skin, pAnim, T, pParent, *pGame)) { R.m_bActive = false; return; }
@@ -649,6 +662,7 @@ namespace xlionrender
                 if (AnimatedWorlds(Skin, pAnim, St.m_E, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, W0, W1))
                 {
                     xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward;
+                    if (R.m_bSupported) St.m_Supported += pGame->m_Time.m_DeltaTime;
                     float EW = 0;
                     const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);
                     if (E >= 0) { St.m_TrackSum += double(E) * E; St.m_TrackSumW += double(EW) * EW; ++St.m_nTrack; St.m_TrackMax = std::max(St.m_TrackMax, E); }
@@ -676,6 +690,7 @@ namespace xlionrender
                             std::printf("[Ragdoll] entity 0x%llX returns to its animation %.2f s after its last new hit (%zu hits; %s; joints %.1f deg from it): pose jump %.1f cm\n"
                                 , (unsigned long long)Ent.m_Value, St.m_Age - St.m_HitAt, St.m_Hits.size(), St.m_Settled >= 0.3f ? "settled" : "time limit", St.m_LastE, 100 * Pop);
                             std::fflush(stdout);
+                            St.m_bForced = St.m_Settled < 0.3f;
                             HandOverToAnimation(Ent, R, Skin, T, pParent, W1);
                             R.m_bActive = false; R.m_bReaction = false;
                         }
