@@ -634,7 +634,7 @@ namespace xlionrender
             xmath::fvec3                  m_PrevHips{ 0, 0, 0 }, m_PrevHead{ 0, 0, 0 }, m_Landing{ 0, 0, 0 };
             float                         m_HipsUp = -1;            // the hips' height above the stand plane at the switch (its standing height)
             bool                          m_bPrevHips = false, m_bFallLogged = false;
-            float                         m_FallW = 0, m_FallWPrev = 0, m_FallAt = -1, m_HandDownAt = -1, m_HeadLow = 1e9f, m_HeadFall = 0;
+            float                         m_FallW = 0, m_FallWPrev = 0, m_FallAt = -1, m_HandDownAt = -1, m_HeadLow = 1e9f, m_HeadFall = 0, m_HandLow = 1e9f;
         };
         std::unordered_map<const void*, graph_entry>                m_Graphs;       // per Ragdoll resource as loaded
         std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
@@ -829,6 +829,7 @@ namespace xlionrender
                         xanimation::rigid F;
                         if (!(bHand || bHead) || !xlioncore::physics::RagdollBodyFrame(*R.m_pRuntime, int(i), F)) continue;
                         if (bHand && St.m_HandDownAt < 0 && F.m_P.m_Y - G < 0.12f) St.m_HandDownAt = St.m_Age;
+                        if (bHand) St.m_HandLow = std::min(St.m_HandLow, F.m_P.m_Y - G);
                         if (bHead)
                         {
                             if (St.m_HeadLow < 1e8f) St.m_HeadFall = std::max(St.m_HeadFall, (St.m_PrevHead.m_Y - F.m_P.m_Y) / Dt);
@@ -837,8 +838,8 @@ namespace xlionrender
                     }
                     if (St.m_Age - St.m_FallAt > 2.5f)       // (the whole fall, also for a body that catches more than once)
                     {
-                        std::printf("[Fall] entity 0x%llX: catch %s; a hand reached the ground %s%.2f s after the fall started; the head's lowest %.0f cm, fastest down %.2f m/s%c", (unsigned long long)Ent.m_Value
-                            , R.m_bReflexes ? "on" : "off", St.m_HandDownAt < 0 ? "never " : "", St.m_HandDownAt < 0 ? 0.0f : St.m_HandDownAt - St.m_FallAt, 100 * St.m_HeadLow, St.m_HeadFall, 10);
+                        std::printf("[Fall] entity 0x%llX: catch %s; a hand reached the ground %s%.2f s after the fall started; the hands' lowest %.0f cm; the head's lowest %.0f cm, fastest down %.2f m/s%c", (unsigned long long)Ent.m_Value
+                            , R.m_bReflexes ? "on" : "off", St.m_HandDownAt < 0 ? "never " : "", St.m_HandDownAt < 0 ? 0.0f : St.m_HandDownAt - St.m_FallAt, 100 * St.m_HandLow, 100 * St.m_HeadLow, St.m_HeadFall, 10);
                         std::fflush(stdout); St.m_bFallLogged = true;
                     }
                 }
