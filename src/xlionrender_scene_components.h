@@ -495,6 +495,7 @@ namespace xlionrender
         float               m_WarpStride = 1;       // (this frame's warping, set by the Animation system for the renderer; not saved)
         float               m_WarpAngle  = 0;       //   radians about +Y from the clip's travel to Move
         xmath::fvec3        m_WarpDir   {0, 0, 1};  //   the travel the stride is along (model space)
+        float               m_WarpAngleEased = 0, m_WarpStrideEased = 1; bool m_bWarpEased = false;     // (the warp eased toward what is asked: no snap at a jump)
         bool                m_bMatching = false;    // K4: motion matching picks the clip and time from the package's clips by Move (a database built once per package)
         bool                m_bFaceMove = false;    // with MotionMatching: the character turns to face where it moves (the turn clips are chosen); off: it keeps its facing, the legs warp toward the move
         std::uint32_t       m_MatchJumps = 0;       // (jumps so far: the renderer eases each in; not saved)

@@ -122,6 +122,14 @@ namespace xlionrender
                 if (pSD) { const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip); CV = CV - N * (2.0f * CV.Dot(N)); }
                 Wp = xanimation::WarpFor(CV, A.m_Move);
                 A.m_Time = Before + pGame->m_Time.m_DeltaTime * A.m_Speed * Wp.m_Rate;
+            }
+            // (eased, not snapped: a matching jump changes the clip's travel and with it the angle - up to 90 deg in a frame swung the legs:
+            // the AnimDemo pops, seen in the motion trace. The pose and the root motion both take the eased values)
+            {
+                const float K = A.m_bWarpEased ? 1.0f - std::exp(-pGame->m_Time.m_DeltaTime / 0.15f) : 1.0f;
+                float d = Wp.m_Angle - A.m_WarpAngleEased; while (d > 3.14159265f) d -= 6.2831853f; while (d < -3.14159265f) d += 6.2831853f;
+                A.m_WarpAngleEased += d * K; A.m_WarpStrideEased += (Wp.m_Stride - A.m_WarpStrideEased) * K; A.m_bWarpEased = true;
+                Wp.m_Angle = A.m_WarpAngleEased; Wp.m_Stride = A.m_WarpStrideEased;
                 A.m_WarpStride = Wp.m_Stride; A.m_WarpAngle = Wp.m_Angle; A.m_WarpDir = Wp.m_Dir;
             }
             FireEvents(*pPkg, A, Before, Length, pSD ? &pSD->m_Mirror : nullptr);
