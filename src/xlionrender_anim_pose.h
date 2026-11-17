@@ -131,6 +131,7 @@ namespace xlionrender
             std::chrono::steady_clock::time_point   m_LockT{};
             xanimation::look_at_state               m_Look;         // (LookAt: the aim's eased angles and weight)
             std::chrono::steady_clock::time_point   m_LookT{};
+            float                                   m_ForceBlend = 0, m_StartDt = 0;    // (HandOver: the next transition's blend and its poses' spacing)
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 
@@ -141,15 +142,35 @@ namespace xlionrender
             const auto Now = std::chrono::steady_clock::now();
             const bool bHad = Tr.m_pSkel == pSkel && Tr.m_Cur.count() == P.count();
             const float Dt = bHad ? Elapsed(Tr.m_T, Now) : 0.0f;
+            if (Tr.m_ForceBlend > 0.0f) BlendTime = Tr.m_ForceBlend;          // (a hand-over's own blend: HandOver)
             if (bHad && Tr.m_Source != Source && BlendTime > 0.0f)
             {
-                Tr.m_In.Start(Tr.m_Cur, Tr.m_Prev, P, P, Dt, BlendTime * 0.25f);     // (a half-life of a quarter of the blend time: ~94 % gone by its end)
+                Tr.m_In.Start(Tr.m_Cur, Tr.m_Prev, P, P, Tr.m_StartDt > 0.0f ? Tr.m_StartDt : Dt, BlendTime * 0.25f);     // (a half-life of a quarter of the blend time: ~94 % gone by its end)
                 static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) { float W = 0; for (const auto& R : Tr.m_In.m_RotX) W = std::max(W, std::sqrt(R.Dot(R))); std::printf("[AnimBlend] entity %llu: a new source eases in over %.2f s (largest turn to absorb %.1f deg)\n", (unsigned long long)Entity, BlendTime, W * 57.29578f); }
             }
+            const bool bHandOver = Tr.m_ForceBlend > 0.0f && bHad;
+            float RawJump = 0;
+            if (bHandOver) for (int i = 0; i < P.count(); ++i) RawJump = std::max(RawJump, 2 * std::acos(std::min(1.0f, std::abs(P.m_Rotation[i].Dot(Tr.m_Cur.m_Rotation[i])))));
             if (bHad) Tr.m_In.Apply(P, Dt); else Tr.m_In.m_bActive = false;
+            if (bHandOver)      // (R3b' AN10: how far the first animated pose is from the last ragdoll pose, with the blend and without it)
+            {
+                float Jump = 0;
+                for (int i = 0; i < P.count(); ++i) Jump = std::max(Jump, 2 * std::acos(std::min(1.0f, std::abs(P.m_Rotation[i].Dot(Tr.m_Cur.m_Rotation[i])))));
+                std::printf("[AnimBlend] entity %llu: hand-over from a ragdoll, largest bone turn at the switch %.1f deg (without the blend %.1f deg)\n", (unsigned long long)Entity, Jump * 57.29578f, RawJump * 57.29578f);
+                std::fflush(stdout);
+            }
             if (bHad) Tr.m_Prev = Tr.m_Cur; else Tr.m_Prev = P;
-            Tr.m_Cur = P; Tr.m_Source = Source; Tr.m_pSkel = pSkel; Tr.m_T = Now;
+            Tr.m_Cur = P; Tr.m_Source = Source; Tr.m_pSkel = pSkel; Tr.m_T = Now; Tr.m_ForceBlend = 0.0f; Tr.m_StartDt = 0.0f;
+        }
+
+        // R3b' return to cheap: the poses another source showed last (a ragdoll's two last captures: Cur, Prev, StepDt apart, local) become
+        // the entity's track, so its next animated pose starts from them with their velocity and eases in over Blend (inertialization)
+        void HandOver(std::uint64_t Entity, const void* pSkel, const xanimation::pose& Cur, const xanimation::pose& Prev, float StepDt, float Blend)
+        {
+            auto& Tr = m_Tracks[Entity];
+            Tr.m_Cur = Cur; Tr.m_Prev = Prev; Tr.m_pSkel = pSkel; Tr.m_Source = 0;     // (0: no clip's source: the next pose is a new source)
+            Tr.m_T = std::chrono::steady_clock::now(); Tr.m_ForceBlend = Blend; Tr.m_StartDt = StepDt;
         }
     };
 }

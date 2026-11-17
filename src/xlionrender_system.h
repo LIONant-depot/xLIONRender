@@ -642,6 +642,7 @@ namespace xlionrender
                             std::printf("[Ragdoll] entity 0x%llX returns to its animation %.2f s after its last new hit (%zu hits; %s; joints %.1f deg from it): pose jump %.1f cm\n"
                                 , (unsigned long long)Ent.m_Value, St.m_Age - St.m_HitAt, St.m_Hits.size(), St.m_Settled >= 0.3f ? "settled" : "time limit", St.m_LastE, 100 * Pop);
                             std::fflush(stdout);
+                            HandOverToAnimation(Ent, R, Skin, T, W1);
                             R.m_bActive = false; R.m_bReaction = false;
                         }
                     }
@@ -678,6 +679,29 @@ namespace xlionrender
                 std::fflush(stdout);
                 St.m_bReported = true;
             }
+        }
+
+        // R3b' return to cheap without a pop: the ragdoll's last two captures as local poses become the Animation's starting point, which then
+        // eases into the clip over 0.3 s (the poser's inertialization: anim_poser::HandOver). Animated: this frame's animated world rigid frames
+        // (the bones the ragdoll does not own keep them).
+        void HandOverToAnimation( const xecs::component::entity& Ent, const ragdoll& R, const skinned_mesh& Skin, const xlioncore::transform& T, std::span<const xanimation::rigid> Animated ) noexcept
+        {
+            using namespace xlioncore::resources;
+            auto* pAnimSys = findSystem<animation_system>();
+            auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
+            auto* pSkel = pGeom ? static_cast<const xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
+            const auto* pGame = xlioncore::game::From(getGameMgr());
+            if (pAnimSys == nullptr || pSkel == nullptr || pGame == nullptr || R.m_pRuntime == nullptr) return;
+            auto& S = m_Skeletons[pSkel];
+            const auto n = std::size_t(S.m_Parent.size());
+            if (n == 0 || Animated.size() != n) return;
+            std::vector<xanimation::rigid> W(n); std::vector<float> Sc(n, T.m_Scale.m_X);
+            xanimation::pose Cur = m_P1, Prev = m_P1;       // (the scales: the animation's)
+            if (Cur.count() != int(n)) return;
+            const xanimation::rigid E{ T.m_Position, T.m_Rotation };
+            xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 1.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, T.m_Scale.m_X, Cur);
+            xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 0.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, T.m_Scale.m_X, Prev);
+            pAnimSys->m_Poser.HandOver(Ent.m_Value, pSkel, Cur, Prev, pGame->m_Time.m_FixedDeltaTime, 0.3f);
         }
 
         // The animated world rigid bone frames of a character played at E (its frame) and Scale: now (W1) and Dtb back (W0); the rest pose
