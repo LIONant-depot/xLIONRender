@@ -715,6 +715,7 @@ namespace xlionrender
         };
         std::unordered_map<std::uint64_t, cached_text>  m_Texts;
         int                                             m_Frame = 0;
+        std::pair<int, view>                            m_PrimitivesInScene{ -1, view::SCENE };     // (the frame and view whose RenderScene drew the Primitives: Collect leaves them out)
         std::unique_ptr<scene_renderer>                 m_pScene;       // the forward renderer of this world (Meshes, lights, Environment), made the first time it is asked to render
         view_options                                    m_ViewOptions;  // the editor's viewing choices (xRenderEditor::SetViewOptions): on top of the Environment, never saved
 
@@ -836,6 +837,7 @@ namespace xlionrender
         {
             xlioncore::PropagateHierarchy(*this);       // the world pose of every child, from the Transforms as they are now (this is after everything that moves things)
             CollectText(View, pRoles);
+            if (m_PrimitivesInScene.second == View && m_Frame - m_PrimitivesInScene.first <= 3) return;     // (the scene of this view draws them: RenderScene, a Collect or two ago - views collect in turn)
             xecs::query::instance Query;
             Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
             LeaveOut(Query, View);
@@ -941,6 +943,20 @@ namespace xlionrender
                     if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
                     R.AddMesh(C, pMaterial, L2W, Ent.m_Value);
                 });
+            }
+            {   // the Primitives, as Meshes of this scene (one depth with everything else); Collect leaves them out of the old overlay for this view
+                xecs::query::instance Query;
+                Query.m_Must.AddFromComponents<xlioncore::transform, primitive>();
+                LeaveOut(Query, View);
+                auto S = Search(Query);
+                Foreach(S, [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const primitive& Prim, const xecs::component::parent* pParent, const xlioncore::render_transform* pRender) noexcept
+                {
+                    if (Hidden(Ent.m_Value)) return;
+                    const auto T = xlioncore::WorldOf(Local, pParent, pRender, Interpolate);
+                    if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return;     // (the same guard as Collect)
+                    R.AddPrimitive(Prim.m_Shape, Prim.m_Color, T, Ent.m_Value);
+                });
+                m_PrimitivesInScene = { m_Frame, View };
             }
             {   // the Skinned Meshes, posed by their Animation when they have one
                 xecs::query::instance Query;

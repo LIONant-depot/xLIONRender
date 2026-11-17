@@ -31,7 +31,10 @@
 #include "dependencies/xAnimation/source/xanimation.h"                         // K0: the animation library poses the skeleton too (XLION_ANIM), bit for bit the same arithmetic
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
-#include "xlionrender_anim_pose.h"                                            // (K0c) the pose stack: sample, transition, warp, ground, foot lock, look-at          // an active Ragdoll poses the skeleton from its bodies
+#include "xlionrender_primitive.h"
+#include "dependencies/xprim_geom/source/xprim_geom.h"                         // (AddPrimitive: the shapes the old overlay drew)
+#include "dependencies/xLIONCore/src/transform/xlioncore_hierarchy.h"
+#include "xlionrender_anim_pose.h"                                          // (K0c) the pose stack: sample, transition, warp, ground, foot lock, look-at          // an active Ragdoll poses the skeleton from its bodies
 #if __has_include("xprofile.h")
     #include "xprofile.h"
 #else
@@ -61,6 +64,8 @@ namespace xlionrender
         // the reference it was asked by (what it resolves to now)
         struct geom_mesh { mesh_id m_Id; std::uint64_t m_Ref = 0; };
         std::unordered_map<const void*, geom_mesh>      m_Meshes;
+        // Primitives (AddPrimitive): one mesh per shape (a capsule: one per size - its caps stay round, as the old overlay's vertex shader made them)
+        std::unordered_map<std::uint64_t, mesh_id>      m_PrimMeshes;
         struct made_material { material_id m_Id; std::vector<const void*> m_From; };     // m_From: the instance, its material, its textures it was made from
         std::unordered_map<std::uint64_t, made_material> m_Materials;  // per material instance (instance guid)
         std::uint64_t                                   m_RenderGraph = 0;              // the Environment's RenderGraph (instance; 0: the built-in post chain)
@@ -346,6 +351,51 @@ namespace xlionrender
                 From.push_back(pTexture);
             }
             return true;
+        }
+
+        // A Primitive entity into the scene (2026-11-18, Tomas: the soccer stadium's primitives hid the characters): drawn by the same renderer as the
+        // Meshes - one depth, shadows, GI - instead of over the scene picture with their own depth (they covered every Mesh, near or far). The
+        // shapes are the old overlay's (xlionrender_renderer.cpp Init: the same xprim_geom calls); a capsule's size is baked into its mesh as
+        // xlionrender_capsule_vert.glsl did (round caps at any scale), the others scale by L2W. The color is a constant material's base color.
+        void AddPrimitive(shape Shape, const xmath::fvec3& Color, const xlioncore::world_pose& T, std::uint64_t Entity) noexcept
+        {
+            constexpr float CapsuleR = 0.25f;           // (renderer.cpp kCapsuleUnitRadius)
+            const bool bCapsule = Shape == shape::CAPSULE;
+            std::uint64_t Key = std::uint64_t(Shape);
+            if (bCapsule)
+                for (int a = 0; a < 3; ++a) Key = Key * 1000003ull + std::uint64_t(std::llround(double((&T.m_Scale.m_X)[a]) * 1000.0)) + 1;     // (millimetres)
+            auto It = m_PrimMeshes.find(Key);
+            if (It == m_PrimMeshes.end())
+            {
+                const xprim_geom::mesh G = Shape == shape::CUBE    ? xprim_geom::cube::Generate(0, 0, 0, 0, { 1.0f, 1.0f, 1.0f })
+                                         : Shape == shape::CAPSULE ? xprim_geom::capsule::Generate(4, 12, CapsuleR, 1.0f)
+                                         : Shape == shape::SPHERE  ? xprim_geom::uvsphere::Generate(8, 12, 1.0f, 0.5f)
+                                         :                           xprim_geom::cylinder::Generate(4, 12, 1.0f, 0.5f, 0.5f);
+                std::vector<vertex> V(G.m_Vertices.size());
+                for (std::size_t i = 0; i < V.size(); ++i)
+                {
+                    const auto& S = G.m_Vertices[i]; auto& D = V[i];
+                    xmath::fvec3 P{ S.m_Position.m_X, S.m_Position.m_Y, S.m_Position.m_Z };
+                    if (bCapsule)           // (the spine point scaled by y, the radial offset by x and z - the old vertex shader, on the CPU once)
+                    {
+                        const xmath::fvec3 N{ S.m_Normal.m_X, S.m_Normal.m_Y, S.m_Normal.m_Z };
+                        const float Sy = (P - N * CapsuleR).m_Y * T.m_Scale.m_Y;
+                        P = xmath::fvec3(CapsuleR * N.m_X * T.m_Scale.m_X, Sy + CapsuleR * N.m_Y * 0.5f * (T.m_Scale.m_X + T.m_Scale.m_Z), CapsuleR * N.m_Z * T.m_Scale.m_Z);
+                    }
+                    D = { { P.m_X, P.m_Y, P.m_Z }, { S.m_Texcoord.m_X, S.m_Texcoord.m_Y }, 0xFFFFFFFFu, { S.m_Normal.m_X, S.m_Normal.m_Y, S.m_Normal.m_Z }
+                        , { S.m_Tangent.m_X, S.m_Tangent.m_Y, S.m_Tangent.m_Z, S.m_Tangent.m_D } };
+                }
+                mesh_id Id;
+                if (m_Renderer.CreateMesh(Id, V, G.m_Indices)) return;
+                It = m_PrimMeshes.emplace(Key, Id).first;
+            }
+            xmath::fmat4 L2W;
+            L2W.setupSRT(bCapsule ? xmath::fvec3::fromOne() : T.m_Scale, T.m_Rotation, T.m_Position);
+            draw D{ .m_Mesh = It->second, .m_L2W = L2W, .m_UserID = Entity, .m_Instance = std::uint64_t(m_InstanceIds.Of(Entity)) };
+            const auto Lin = [](float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); };     // (the old overlay wrote the color as the display's: sRGB; the scene's base color is linear)
+            D.m_Material.m_BaseColor = xmath::fvec3(Lin(Color.m_X), Lin(Color.m_Y), Lin(Color.m_Z));
+            ++m_Stats.m_Drawn;
+            m_Scene.m_Draws.push_back(std::move(D));
         }
 
         // A Mesh entity into the scene: its geometry's mesh and per slot its MeshMaterial's material instance, else the Mesh's deprecated
@@ -800,6 +850,7 @@ namespace xlionrender
             m_Overrides.Clear(m_Renderer);
             for (auto& [Key, M] : m_Materials) m_Renderer.DestroyMaterial(M.m_Id);
             for (auto& [Key, M] : m_Meshes)     m_Renderer.DestroyMesh(M.m_Id);
+            for (auto& [Key, M] : m_PrimMeshes) m_Renderer.DestroyMesh(M);
             for (auto& [Key, E] : m_Skinned)    ReleaseSkinned(E);
         }
     };
