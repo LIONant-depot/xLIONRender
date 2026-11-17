@@ -515,6 +515,8 @@ namespace xlionrender
         float               m_LookAtWeight = 0;     //   0: off (eases out), 1: full
         bool                m_bPlayer   = false;    // K4: the player drives it (the game's input: Move in the world, FaceMove) - ponytail: game logic in the animation component, until a controller component exists
         bool                m_bFollowParent = false; // G0: the character is the look of a parent that something else moves (a physics body): Move is the parent's own velocity, it turns toward where it goes, no root motion
+        bool                m_bRootToVelocity = false; // G0 (b): root motion is not applied to the entity but given as RootVelocity (world units/s) for a game's mover - a physics body driven by the animation
+        xmath::fvec3        m_RootVelocity {0, 0, 0}; // (RootToVelocity: this update's root motion as a world velocity; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
         xmath::fvec3        m_LastVel   {0, 0, 0}, m_Accel {0, 0, 0};    // (FollowParent: the parent's velocity last update and its eased acceleration, world; not saved)
@@ -562,6 +564,8 @@ namespace xlionrender
         , obj_member<"FootLock",  &animation::m_bFootLock, member_help<"While the game runs a foot that is down and nearly still stays exactly where it landed until it lifts (what is left of a clip's skate, a warp or a matching jump does not slide it)">>
         , obj_member<"LookAt",    &animation::m_LookAt, member_help<"A world point the head turns toward while LookAtWeight is above 0: the spine, neck and head share the turn, held within 70 deg either side of the body (35 up, 45 down), eased in and out">>
         , obj_member<"FollowParent", &animation::m_bFollowParent, member_help<"The character is the look of its parent entity, which something else moves (a physics body, a script): its Move is the parent's own velocity, the clip is fitted to it (motion matching, stride and orientation warping, foot lock) and it turns toward where it goes. Root motion is not applied">>
+        , obj_member<"RootToVelocity", &animation::m_bRootToVelocity, member_help<"With RootMotion: the clip's travel (warped, matched) is not applied to this entity but given as RootVelocity for the game to move something with (a physics body: the body goes where the feet go). Its turn still turns this entity">>
+        , obj_member<"RootVelocity", &animation::m_RootVelocity, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"RootToVelocity: this update's root motion as a world velocity (units per second)">>
         , obj_member<"Player",    &animation::m_bPlayer, member_help<"While the game runs the player drives this character: the left stick / WASD (camera-relative, from the Play view) is the Move in the world, Shift or a full stick runs; it faces where it goes. Use with RootMotion + MotionMatching (+ FootLock, Collide)">>
         , obj_member<"PlayerSpeed", &animation::m_PlayerSpeed, member_help<"Player: the walking speed at full stick (units per second)">>
         , obj_member<"PlayerRunSpeed", &animation::m_PlayerRunSpeed, member_help<"Player: the speed with Run held (Shift, or the pad's stick pushed fully)">>

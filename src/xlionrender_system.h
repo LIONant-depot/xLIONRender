@@ -37,6 +37,7 @@
 #define XSCRIPT_IMPORT_ONLY
 #include "dependencies/xLIONCore/src/transform/xlioncore_transform.h"
 #include "dependencies/xLIONCore/src/transform/xlioncore_hierarchy.h"
+#include "dependencies/xLIONCore/src/transform/xlioncore_locomotion.h"
 #include "dependencies/xLIONCore/src/tags/xlioncore_tags.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics.h"
 #include "dependencies/xLIONCore/src/game/xlioncore_game.h"
@@ -135,7 +136,7 @@ namespace xlionrender
         void operator()( const xecs::component::entity& Ent, animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT, const xecs::component::parent* pParent ) noexcept
         {
             A.m_nFired = 0; A.m_bFinished = false;              // this frame's events and result only
-            A.m_WarpStride = 1; A.m_WarpAngle = 0;              // (and its warping)
+            A.m_WarpStride = 1; A.m_WarpAngle = 0;              // (and its warping) A.m_RootVelocity = xmath::fvec3(0, 0, 0);
             const auto* pGame = xlioncore::game::From(getGameMgr());
             if (pGame == nullptr) return;
             using namespace xlioncore::resources;
@@ -176,6 +177,14 @@ namespace xlionrender
                         auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
                         if (!SD.m_Mirror.empty()) pSD = &SD;
                     }
+            xlioncore::locomotion* pLoco = nullptr;             // (G0: the game's Locomotion, on this entity or its parent: it says where to go, its feet's velocity goes back)
+            if (hasComponents<xlioncore::locomotion>(Ent)) (void)findEntity(Ent, [&](xlioncore::locomotion& L) noexcept { pLoco = &L; });      // (findEntity asserts the entity has them)
+            if (!pLoco && pParent && hasComponents<xlioncore::locomotion>(pParent->m_Value)) (void)findEntity(pParent->m_Value, [&](xlioncore::locomotion& L) noexcept { pLoco = &L; });
+            if (pLoco)
+            {
+                A.m_bMoveInWorld = true; A.m_Move = xmath::fvec3(pLoco->m_Move.m_X, 0, pLoco->m_Move.m_Z); A.m_bRootToVelocity = true;
+                if (pLoco->m_Face.m_X != 0 || pLoco->m_Face.m_Z != 0) { A.m_Face = pLoco->m_Face; A.m_bFaceMove = false; } else { A.m_Face = xmath::fvec3(0, 0, 0); A.m_bFaceMove = true; }
+            }
             if (A.m_bPlayer)                                    // K4: the player's stick is the move (world, camera-relative); it faces where it goes
             {
                 const auto& In = pGame->m_Input;
@@ -190,7 +199,7 @@ namespace xlionrender
                 xmath::fvec3 V = A.m_bHasLastWorld ? (W - A.m_LastWorld) * (1.0f / pGame->m_Time.m_DeltaTime) : xmath::fvec3(0, 0, 0);
                 // (a physics body's own velocity when the parent has one: the world position the hierarchy last derived is the drawn,
                 // fixed-step-interpolated one of the last frame, and its difference jittered the move - SoccerAnim's players churned clips)
-                (void)findEntity(pParent->m_Value, [&](const xlioncore::physics::physics_dynamics& D) noexcept { V = D.m_LinearVelocity; });
+                if (hasComponents<xlioncore::physics::physics_dynamics>(pParent->m_Value)) (void)findEntity(pParent->m_Value, [&](const xlioncore::physics::physics_dynamics& D) noexcept { V = D.m_LinearVelocity; });
                 V.m_Y = 0; if (V.Length() > 20.0f) V = xmath::fvec3(0, 0, 0);         // (a teleport: no speed)
                 A.m_LastWorld = W; A.m_bHasLastWorld = true;
                 A.m_bMoveInWorld = true; A.m_bFaceMove = false; A.m_Move = V;
@@ -251,10 +260,16 @@ namespace xlionrender
                     Turn = -Turn;                                   // (a vertical mirror turns the other way)
                 }
                 if (Wp.active()) D = xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Wp.m_Angle) * D * Wp.m_Stride;
-                D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)
+                if (!A.m_bRootToVelocity) D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)      // (RootToVelocity: the feet only - the body goes where they go, never faster)
                 auto WD = pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
-                if (A.m_bCollide) WD = Collide(Ent.m_Value, A, *pT, WD);
-                pT->m_Position = pT->m_Position + WD;
+                if (A.m_bRootToVelocity)                     // (G0 (b): the game moves its body with it; the entity itself stays where its parent puts it)
+                    A.m_RootVelocity = pGame->m_Time.m_DeltaTime > 0 ? WD * (1.0f / pGame->m_Time.m_DeltaTime) : xmath::fvec3(0, 0, 0);
+                if (A.m_bRootToVelocity && pLoco) pLoco->m_FeetVelocity = A.m_RootVelocity;
+                else
+                {
+                    if (A.m_bCollide) WD = Collide(Ent.m_Value, A, *pT, WD);
+                    pT->m_Position = pT->m_Position + WD;
+                }
                 if (Turn != 0) pT->m_Rotation = (pT->m_Rotation * xmath::fquat(0.0f, std::sin(0.5f * Turn), 0.0f, std::cos(0.5f * Turn))).NormalizeSafeCopy();     // (after the move: the move is in the facing it had)
             }
             struct restore_face { animation& A; xmath::fvec3 F; bool b; ~restore_face() { if (b) A.m_Face = F; } } RestoreFace{ A, A.m_Face, FollowFace.LengthSq() > 0 };
