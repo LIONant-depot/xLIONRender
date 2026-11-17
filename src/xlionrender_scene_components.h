@@ -541,6 +541,8 @@ namespace xlionrender
         // N1 (superset): a spring chain - secondary motion (a ponytail, a tail, the upper body's sway)
         std::string         m_SpringFrom;             // the chain's first bone (it and its first-child descendants); empty: off
         float               m_SpringHz = 2.0f, m_SpringDamping = 0.5f, m_SpringWeight = 1.0f, m_SpringMaxAngle = 35.0f, m_SpringDroop = 0.0f;
+        // N2 (superset: KINEMATION's lean, Unreal's lean from acceleration): the upper body leans into the body's acceleration, atan(a/g) x Amount
+        float               m_LeanAmount = 0.0f, m_LeanMaxAngle = 20.0f, m_LeanSmooth = 0.2f;
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
@@ -603,6 +605,11 @@ namespace xlionrender
             , obj_member<"Weight", &animation::m_SpringWeight>
             , obj_member<"MaxAngle", &animation::m_SpringMaxAngle, member_help<"Degrees: the most each bone swings away from the animation">>
             , obj_member<"Droop", &animation::m_SpringDroop, member_help<"Extra downward pull (units/s^2): a heavy tail hangs">>
+            >
+        , obj_scope<"Lean"
+            , obj_member<"Amount", &animation::m_LeanAmount, member_help<"The spine leans into the body's acceleration as a balancing body does: forward speeding up, back braking, into turns. 1: the physical angle atan(a/g); 0: off">>
+            , obj_member<"MaxAngle", &animation::m_LeanMaxAngle, member_help<"Degrees: the most it leans">>
+            , obj_member<"Smooth", &animation::m_LeanSmooth, member_help<"Seconds: how quickly the lean follows a change of acceleration">>
             >
         , obj_scope<"Warp"
             , obj_member<"Active", &animation::m_bWarp, member_help<"Root motion: between From and To (clip seconds) the clip's root motion is bent so the character stands on Target when the clip reaches To (a vault lands on the box, a dive meets the ball). The target may move meanwhile">>

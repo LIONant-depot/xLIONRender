@@ -8,6 +8,7 @@
 #include "dependencies/xAnimation/source/xanimation.h"
 #include "dependencies/xAnimation/source/blend/xanimation_overlay.h"
 #include "dependencies/xAnimation/source/motion/xanimation_springs.h"
+#include "dependencies/xAnimation/source/motion/xanimation_lean.h"
 #include "dependencies/xstrtool/source/xstrtool.h"       // (the overlay's FromBone by name)
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
 #include "xlionrender_scene_components.h"      // (the Animation component the pose reads)
@@ -122,6 +123,7 @@ namespace xlionrender
                     xanimation::LookAt(S.view(), S.m_LookAt, m_AnimPose, Inv * LookAt, LookAtWeight, Dt, Tr.m_Look);
                 }
             }
+            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_LeanAmount > 0) ApplyLeanTo(Skel, S, Entity, *m_pSpringAnim, *pL2W);       // (N2: before the springs, which swing from the leaned body)
             if (m_pSpringAnim && pL2W && !m_pSpringAnim->m_SpringFrom.empty()) ApplySprings(Skel, S, Entity, *m_pSpringAnim, *pL2W);
             m_pSpringAnim = nullptr;
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
@@ -159,6 +161,31 @@ namespace xlionrender
             {
                 std::printf("[AnimSprings] entity %llu: chain of %zu bones from %s, largest swing over the last 120 frames %.1f deg%c", (unsigned long long)Entity, Tr.m_SpringChain.size() + 1, Tr.m_SpringFrom.c_str(), Tr.m_SpringMax, 10);
                 std::fflush(stdout); Tr.m_SpringMax = 0;
+            }
+        }
+
+        // N2 (superset: KINEMATION's pivot/lean, Unreal's lean): the spine leans into the body's acceleration (motion/xanimation_lean.h), the body's
+        // velocity from its frame's position update to update, in its own frame
+        void ApplyLeanTo(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A, const xmath::fmat4& L2W)
+        {
+            auto& Tr = m_Tracks[Entity];
+            if (Tr.m_pLeanSkel != &Skel) { Tr.m_pLeanSkel = &Skel; const auto Ro = Skel.getRoles(); Tr.m_LeanChain = int(Ro.size()) == S.view().count() ? xanimation::FindLeanChain(S.view(), Ro) : std::vector<int>{}; Tr.m_Lean = {}; Tr.m_bLeanPos = false; }
+            if (Tr.m_LeanChain.empty()) return;
+            const float Dt = m_GameDt >= 0 ? std::min(m_GameDt, 0.1f) : 1.0f / 60.0f;
+            const auto Pos = L2W.ExtractPosition(); const auto Q = L2W.ExtractRotation().NormalizeSafeCopy();
+            const float Sc = std::max(L2W.ExtractScale().m_X, 1e-6f);
+            auto V = Tr.m_bLeanPos && Dt > 0 ? (Pos - Tr.m_LeanPrevPos) * (1.0f / Dt) : xmath::fvec3(0, 0, 0);
+            if (V.Length() > 20.0f * Sc) V = Tr.m_Lean.m_PrevVel * Sc;      // (a teleport: no acceleration)
+            Tr.m_LeanPrevPos = Pos; Tr.m_bLeanPos = true;
+            xanimation::lean_params P; P.m_Amount = A.m_LeanAmount; P.m_MaxAngle = A.m_LeanMaxAngle * 0.017453293f; P.m_Smooth = A.m_LeanSmooth;
+            xmath::fvec3 Axis;
+            const float Angle = xanimation::UpdateLean(Tr.m_Lean, Q.ConjugateCopy() * V * (1.0f / Sc), Dt, P, Axis);      // (model space: the character's own units, g in them)
+            xanimation::ApplyLean(S.view(), Tr.m_LeanChain, m_AnimPose, Axis, Angle);
+            Tr.m_LeanMax = std::max(Tr.m_LeanMax, Angle * 57.29578f); Tr.m_LeanSeen.push_back(Angle * 57.29578f);
+            if (++Tr.m_LeanN % 120 == 0)
+            {
+                std::printf("[AnimLean] entity %llu: %zu spine bones, largest lean over the last 120 frames %.1f deg (median %.1f)%c", (unsigned long long)Entity, Tr.m_LeanChain.size(), Tr.m_LeanMax, (std::nth_element(Tr.m_LeanSeen.begin(), Tr.m_LeanSeen.begin() + std::ptrdiff_t(Tr.m_LeanSeen.size() / 2), Tr.m_LeanSeen.end()), Tr.m_LeanSeen[Tr.m_LeanSeen.size() / 2]), 10);
+                std::fflush(stdout); Tr.m_LeanMax = 0; Tr.m_LeanSeen.clear();
             }
         }
 
@@ -226,6 +253,11 @@ namespace xlionrender
             std::vector<int>                        m_SpringChain;
             int                                     m_SpringTip = -1;
             float                                   m_SpringMax = 0; int m_SpringN = 0;
+            xanimation::lean_state                  m_Lean;         // N2: the eased acceleration, the body's last position, the spine chain (for its skeleton)
+            xmath::fvec3                            m_LeanPrevPos{ 0, 0, 0 }; bool m_bLeanPos = false;
+            const xskeleton::skeleton*              m_pLeanSkel = nullptr;
+            std::vector<int>                        m_LeanChain;
+            float                                   m_LeanMax = 0; int m_LeanN = 0; std::vector<float> m_LeanSeen;
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 
