@@ -514,6 +514,9 @@ namespace xlionrender
         xmath::fvec3        m_LookAt    {0, 0, 0};  // K3: a world point the head turns toward (spine, neck, head share it; limits 70 deg either side, 35 up, 45 down)
         float               m_LookAtWeight = 0;     //   0: off (eases out), 1: full
         bool                m_bPlayer   = false;    // K4: the player drives it (the game's input: Move in the world, FaceMove) - ponytail: game logic in the animation component, until a controller component exists
+        bool                m_bFollowParent = false; // G0: the character is the look of a parent that something else moves (a physics body): Move is the parent's own velocity, it turns toward where it goes, no root motion
+        xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
+        bool                m_bHasLastWorld = false;
         float               m_PlayerSpeed = 1.4f, m_PlayerRunSpeed = 2.0f;     // units/s: the stick's full walk, and with Run held    // K3: the feet stand on the physics ground under them (a ray down at each foot); off by default: existing levels keep the clip's flat floor
         std::array<animation_ground, 4> m_Ground{}; // (this frame's casts, per leg, smoothed; not saved)
         std::uint8_t        m_nGround   = 0;
@@ -556,6 +559,7 @@ namespace xlionrender
         , obj_member<"ResetPushed", &animation::m_bResetPushed, member_help<"With PushOnContact and a looping clip: what it pushed goes back where it was each time the clip starts again (a kick drill, a demo)">>
         , obj_member<"FootLock",  &animation::m_bFootLock, member_help<"While the game runs a foot that is down and nearly still stays exactly where it landed until it lifts (what is left of a clip's skate, a warp or a matching jump does not slide it)">>
         , obj_member<"LookAt",    &animation::m_LookAt, member_help<"A world point the head turns toward while LookAtWeight is above 0: the spine, neck and head share the turn, held within 70 deg either side of the body (35 up, 45 down), eased in and out">>
+        , obj_member<"FollowParent", &animation::m_bFollowParent, member_help<"The character is the look of its parent entity, which something else moves (a physics body, a script): its Move is the parent's own velocity, the clip is fitted to it (motion matching, stride and orientation warping, foot lock) and it turns toward where it goes. Root motion is not applied">>
         , obj_member<"Player",    &animation::m_bPlayer, member_help<"While the game runs the player drives this character: the left stick / WASD (camera-relative, from the Play view) is the Move in the world, Shift or a full stick runs; it faces where it goes. Use with RootMotion + MotionMatching (+ FootLock, Collide)">>
         , obj_member<"PlayerSpeed", &animation::m_PlayerSpeed, member_help<"Player: the walking speed at full stick (units per second)">>
         , obj_member<"PlayerRunSpeed", &animation::m_PlayerRunSpeed, member_help<"Player: the speed with Run held (Shift, or the pad's stick pushed fully)">>

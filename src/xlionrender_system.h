@@ -132,7 +132,7 @@ namespace xlionrender
         struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; };
         std::unordered_map<const xanim_package::anim_package*, match_db> m_Match;                      // K4: one database per package (ponytail: a reloaded package at the same address keeps its old database until the editor restarts)
 
-        void operator()( const xecs::component::entity& Ent, animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT ) noexcept
+        void operator()( const xecs::component::entity& Ent, animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT, const xecs::component::parent* pParent ) noexcept
         {
             A.m_nFired = 0; A.m_bFinished = false;              // this frame's events and result only
             A.m_WarpStride = 1; A.m_WarpAngle = 0;              // (and its warping)
@@ -183,6 +183,19 @@ namespace xlionrender
                 A.m_bMoveInWorld = true; A.m_bFaceMove = true;
                 A.m_Move = In.m_bActive ? xmath::fvec3(In.m_MoveWorld[0] * Sp, 0, In.m_MoveWorld[1] * Sp) : xmath::fvec3(0, 0, 0);
             }
+            xmath::fvec3 FollowFace(0, 0, 0);                  // G0 FollowParent: the parent's velocity (world) is the move, and where it goes is the facing asked
+            if (A.m_bFollowParent && pParent && pGame->m_Time.m_DeltaTime > 0)
+            {
+                const xmath::fvec3 W(pParent->m_WorldPosition[0], pParent->m_WorldPosition[1], pParent->m_WorldPosition[2]);
+                xmath::fvec3 V = A.m_bHasLastWorld ? (W - A.m_LastWorld) * (1.0f / pGame->m_Time.m_DeltaTime) : xmath::fvec3(0, 0, 0);
+                // (a physics body's own velocity when the parent has one: the world position the hierarchy last derived is the drawn,
+                // fixed-step-interpolated one of the last frame, and its difference jittered the move - SoccerAnim's players churned clips)
+                (void)findEntity(pParent->m_Value, [&](const xlioncore::physics::physics_dynamics& D) noexcept { V = D.m_LinearVelocity; });
+                V.m_Y = 0; if (V.Length() > 20.0f) V = xmath::fvec3(0, 0, 0);         // (a teleport: no speed)
+                A.m_LastWorld = W; A.m_bHasLastWorld = true;
+                A.m_bMoveInWorld = true; A.m_bFaceMove = false; A.m_Move = V;
+                if (V.Length() > 0.3f) FollowFace = V;
+            }
             const xmath::fvec3 MoveAsked = A.m_Move;              // (MoveInWorld: turned into the entity's frame for this frame's work, given back after)
             if (A.m_bMoveInWorld && pT) A.m_Move = pT->m_Rotation.ConjugateCopy() * A.m_Move;
             struct restore_move { animation& A; xmath::fvec3 M; ~restore_move() { A.m_Move = M; } } RestoreMove{ A, MoveAsked };
@@ -198,7 +211,7 @@ namespace xlionrender
             // stride and orientation warping (K2): the game asks a velocity (Move), the clip walks at its own; the clip's time runs at the Rate,
             // its root motion turns by the Angle and stretches by the Stride, and the renderer warps the pose the same way (the feet stay planted)
             xanimation::warp_params Wp;
-            if (pT && A.m_bRootMotion && A.m_Speed > 0 && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE && (A.m_Move.m_X != 0 || A.m_Move.m_Z != 0))
+            if (pT && (A.m_bRootMotion || A.m_bFollowParent) && A.m_Speed > 0 && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE && (A.m_Move.m_X != 0 || A.m_Move.m_Z != 0))
             {
                 auto CV = (A.m_bMatching ? xanimation::ClipVelocityAt(*pPkg, A.m_Clip, Before) : xanimation::ClipVelocity(*pPkg, A.m_Clip)) * (A.m_Speed * pT->m_Scale.m_X);      // (matching: around the frame playing - starts and stops do not walk evenly)      // ponytail: a uniform scale (X) for the clip's world speed
                 if (pSD) { const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip); CV = CV - N * (2.0f * CV.Dot(N)); }
@@ -235,6 +248,8 @@ namespace xlionrender
                 pT->m_Position = pT->m_Position + WD;
                 if (Turn != 0) pT->m_Rotation = (pT->m_Rotation * xmath::fquat(0.0f, std::sin(0.5f * Turn), 0.0f, std::cos(0.5f * Turn))).NormalizeSafeCopy();     // (after the move: the move is in the facing it had)
             }
+            struct restore_face { animation& A; xmath::fvec3 F; bool b; ~restore_face() { if (b) A.m_Face = F; } } RestoreFace{ A, A.m_Face, FollowFace.LengthSq() > 0 };
+            if (FollowFace.LengthSq() > 0) A.m_Face = FollowFace;  // (FollowParent: it turns toward where it goes, as Face; given back after the frame)
             if (pT && (A.m_Face.m_X != 0 || A.m_Face.m_Z != 0))      // Face: what the clips' turn did not do, in place (at most 180 deg/s)
             {
                 const auto F = pT->m_Rotation.ConjugateCopy() * A.m_Face;
