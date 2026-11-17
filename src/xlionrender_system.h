@@ -129,15 +129,18 @@ namespace xlionrender
             // (its rotation and scale; a child's Transform is its parent's frame); mirrored: reflected through the skeleton's plane
             if (pT && A.m_bRootMotion && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE)
             {
-                auto D = xanimation::RootMotionDelta(*pPkg, A.m_Clip, Before, A.m_bLoop ? A.m_Time : std::clamp(A.m_Time, 0.0f, Length));
+                const auto Step = xanimation::RootStep(*pPkg, A.m_Clip, Before, A.m_bLoop ? A.m_Time : std::clamp(A.m_Time, 0.0f, Length));
+                auto D = Step.m_Move; float Turn = Step.m_Turn;        // (the move in the character's frame now, the turn: a turning clip turns the entity)
                 if (pSD)
                 {
                     const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip);      // (the plane turned with the clip's facing, as the pose)
                     D = D - N * (2.0f * D.Dot(N));
+                    Turn = -Turn;                                   // (a vertical mirror turns the other way)
                 }
                 if (Wp.active()) D = xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Wp.m_Angle) * D * Wp.m_Stride;
                 D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)
                 pT->m_Position = pT->m_Position + pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
+                if (Turn != 0) pT->m_Rotation = (pT->m_Rotation * xmath::fquat(0.0f, std::sin(0.5f * Turn), 0.0f, std::cos(0.5f * Turn))).NormalizeSafeCopy();     // (after the move: the move is in the facing it had)
             }
             if (A.m_bMatching && pT && pSkin) Match(A, *pSkin, *pPkg);
             if (A.m_bFootIK && pT && pSkin) GroundFeet(A, *pSkin, *pT, *pPkg, Length);
@@ -177,6 +180,7 @@ namespace xlionrender
                     Mc.m_Fps = float(std::max<int>(1, C.m_FPS)); Mc.m_Length = float(C.m_nFrames) / Mc.m_Fps; Mc.m_bLoop = C.m_bLoop;
                     Mc.m_Sample = [V = xanimation::MakeClipView(Pkg, c)](float t, xanimation::pose& P) { xanimation::SampleLocal(V, t, P); };
                     Mc.m_Root = [pPkg = &Pkg, c](float t) { return xanimation::RootMotionAt(*pPkg, c, t); };
+                    Mc.m_Turn = [pPkg = &Pkg, c](float t) { return xanimation::RootTurnAt(*pPkg, c, t); };
                     M.m_Clips.push_back(std::move(Mc));
                 }
                 M.m_Db = xanimation::BuildMatchingDb(SD.view(), SD.m_Warp, SD.m_Rest, M.m_Clips);
