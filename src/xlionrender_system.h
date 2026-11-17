@@ -195,6 +195,15 @@ namespace xlionrender
                 A.m_LastWorld = W; A.m_bHasLastWorld = true;
                 A.m_bMoveInWorld = true; A.m_bFaceMove = false; A.m_Move = V;
                 if (V.Length() > 0.3f) FollowFace = V;
+                {   // (where the velocity is heading: matching searched with the velocity now only and the clip lagged the body's starts and
+                    // brakes - SoccerAnim feet ~130 cm/s; Fable's order: an acceleration-aware wish first)
+                    const float Dt = pGame->m_Time.m_DeltaTime, K = 1.0f - std::exp(-Dt / 0.1f);
+                    const auto Ac = A.m_bHasLastWorld ? (V - A.m_LastVel) * (1.0f / Dt) : xmath::fvec3(0, 0, 0);
+                    A.m_Accel = A.m_Accel + (Ac - A.m_Accel) * K; A.m_LastVel = V;
+                    auto Ahead = V + A.m_Accel * 0.5f; Ahead.m_Y = 0;
+                    if (const float L = Ahead.Length(); L > 6.0f) Ahead = Ahead * (6.0f / L);
+                    A.m_MoveAhead = Ahead;
+                }
             }
             const xmath::fvec3 MoveAsked = A.m_Move;              // (MoveInWorld: turned into the entity's frame for this frame's work, given back after)
             if (A.m_bMoveInWorld && pT) A.m_Move = pT->m_Rotation.ConjugateCopy() * A.m_Move;
@@ -367,11 +376,19 @@ namespace xlionrender
                 const auto F = xanimation::details::TurnY(pT->m_Rotation.ConjugateCopy() * A.m_Face, -Yaw0);
                 YawAsked = std::atan2(F.m_X, F.m_Z);
             }
+            xmath::fvec3 WishNow = Wish;                            // (FollowParent: the velocity now, and the wish where it is heading)
+            if (A.m_bFollowParent && pT)
+            {
+                const auto Ah = xanimation::details::TurnY(pT->m_Rotation.ConjugateCopy() * A.m_MoveAhead, -Yaw0);
+                Wish = xmath::fvec3(Ah.m_X, 0, Ah.m_Z);
+                WishNow = xanimation::ReachableWish(M.m_Db, WishNow);
+            }
             Wish = xanimation::ReachableWish(M.m_Db, Wish);        // (toward a direction the clips walk; warping turns them the rest)
+            if (!A.m_bFollowParent) WishNow = Wish;
             xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
             xanimation::matching_params Pm;
             if (m_Searches >= SearchBudget()) { Pm.m_Interval = 1e9f; ++m_SearchWaits; }       // (over the budget: no search unless the clip is ending)
-            const bool bJumped = xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(Wish, Wish, YawAsked), 0, Pm);
+            const bool bJumped = xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(WishNow, Wish, YawAsked), 0, Pm);
             if (St.m_Since == 0) ++m_Searches;
             if (bJumped)
             {
@@ -384,7 +401,7 @@ namespace xlionrender
             if (bDbg && St.m_Since == 0)
             {
                 std::vector<float> Q(std::size_t(M.m_Db.m_Dim));
-                xanimation::MakeQuery(M.m_Db, xanimation::PlayingEntry(M.m_Db, St), xanimation::PredictWish(Wish, Wish, YawAsked), Q.data());
+                xanimation::MakeQuery(M.m_Db, xanimation::PlayingEntry(M.m_Db, St), xanimation::PredictWish(WishNow, Wish, YawAsked), Q.data());
                 std::string S; char B[64];
                 for (int c = 0; c + 1 < int(M.m_Db.m_ClipFirst.size()); ++c)
                 {

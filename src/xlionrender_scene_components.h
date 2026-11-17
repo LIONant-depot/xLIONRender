@@ -517,6 +517,8 @@ namespace xlionrender
         bool                m_bFollowParent = false; // G0: the character is the look of a parent that something else moves (a physics body): Move is the parent's own velocity, it turns toward where it goes, no root motion
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
+        xmath::fvec3        m_LastVel   {0, 0, 0}, m_Accel {0, 0, 0};    // (FollowParent: the parent's velocity last update and its eased acceleration, world; not saved)
+        xmath::fvec3        m_MoveAhead {0, 0, 0};  // (FollowParent: where its velocity is heading - now + acceleration x 0.5 s, world - for matching's wish; not saved)
         float               m_PlayerSpeed = 1.4f, m_PlayerRunSpeed = 2.0f;     // units/s: the stick's full walk, and with Run held    // K3: the feet stand on the physics ground under them (a ray down at each foot); off by default: existing levels keep the clip's flat floor
         std::array<animation_ground, 4> m_Ground{}; // (this frame's casts, per leg, smoothed; not saved)
         std::uint8_t        m_nGround   = 0;
