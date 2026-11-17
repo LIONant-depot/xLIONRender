@@ -169,6 +169,13 @@ namespace xlionrender
                         auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
                         if (!SD.m_Mirror.empty()) pSD = &SD;
                     }
+            if (A.m_bPlayer)                                    // K4: the player's stick is the move (world, camera-relative); it faces where it goes
+            {
+                const auto& In = pGame->m_Input;
+                const float Sp = (In.m_Buttons & xlioncore::game::input::RUN) ? A.m_PlayerRunSpeed : A.m_PlayerSpeed;
+                A.m_bMoveInWorld = true; A.m_bFaceMove = true;
+                A.m_Move = In.m_bActive ? xmath::fvec3(In.m_MoveWorld[0] * Sp, 0, In.m_MoveWorld[1] * Sp) : xmath::fvec3(0, 0, 0);
+            }
             const xmath::fvec3 MoveAsked = A.m_Move;              // (MoveInWorld: turned into the entity's frame for this frame's work, given back after)
             if (A.m_bMoveInWorld && pT) A.m_Move = pT->m_Rotation.ConjugateCopy() * A.m_Move;
             struct restore_move { animation& A; xmath::fvec3 M; ~restore_move() { A.m_Move = M; } } RestoreMove{ A, MoveAsked };
