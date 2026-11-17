@@ -548,6 +548,15 @@ namespace xlionrender
         float               m_LookYaw = 0, m_LookPitch = 0;       // deg, from the body's facing (+ toward its right... +X), + up
         std::string         m_AimBone;                            // empty: the head
         xmath::fvec3        m_AimAxis{ 0, 0, 1 };                 // the aimed axis in the aim bone's own frame
+        // S3 (superset: KINEMATION's copy/modify bone, Unreal's Copy Bone / Transform Bone): a bone that follows another, and an offset a game drives
+        std::string         m_CopyFrom, m_CopyTo;                 // empty: off
+        bool                m_bCopyRotation = true, m_bCopyPosition = true, m_bCopyKeepOffset = true;
+        float               m_CopyWeight = 1.0f;
+        std::string         m_OffsetBone;                         // empty: off
+        xmath::fvec3        m_OffsetRotation{ 0, 0, 0 };          // deg, about X then Y then Z
+        xmath::fvec3        m_OffsetPosition{ 0, 0, 0 };
+        float               m_OffsetWeight = 1.0f;
+        bool                m_bOffsetModel = false;
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
@@ -617,6 +626,21 @@ namespace xlionrender
             , obj_member<"Pitch", &animation::m_LookPitch, member_help<"Degrees, up positive">>
             , obj_member<"Bone", &animation::m_AimBone, member_help<"The bone that points at the target (a hand holding a gun, a torch): the spine turns it there. Empty: the head (the head, neck and spine turn)">>
             , obj_member<"Axis", &animation::m_AimAxis, member_help<"The direction that points, in the Bone's own frame (a gun's barrel)">>
+            >
+        , obj_scope<"Copy"
+            , obj_member<"From", &animation::m_CopyFrom, member_help<"The bone followed (a gun held in one hand)">>
+            , obj_member<"To", &animation::m_CopyTo, member_help<"The bone that follows it (the other hand): a hand reaches with its arm, any other bone is moved alone. Empty: off">>
+            , obj_member<"Rotation", &animation::m_bCopyRotation>
+            , obj_member<"Position", &animation::m_bCopyPosition>
+            , obj_member<"KeepOffset", &animation::m_bCopyKeepOffset, member_help<"On: To keeps the place it had on From when the copy started (a hand stays where it holds the gun). Off: To goes onto From">>
+            , obj_member<"Weight", &animation::m_CopyWeight>
+            >
+        , obj_scope<"Offset"
+            , obj_member<"Bone", &animation::m_OffsetBone, member_help<"A bone turned and moved on top of the animation (procedural recoil, breathing, a flinch): set Rotation/Position from the game each frame. Empty: off">>
+            , obj_member<"Rotation", &animation::m_OffsetRotation, member_help<"Degrees about X, then Y, then Z (the bone's own axes, or the model's with Model on)">>
+            , obj_member<"Position", &animation::m_OffsetPosition>
+            , obj_member<"Weight", &animation::m_OffsetWeight>
+            , obj_member<"Model", &animation::m_bOffsetModel, member_help<"On: in the character's frame (turned about the bone's own position). Off: in the bone's own frame">>
             >
         , obj_scope<"Lean"
             , obj_member<"Amount", &animation::m_LeanAmount, member_help<"The spine leans into the body's acceleration as a balancing body does: forward speeding up, back braking, into turns. 1: the physical angle atan(a/g); 0: off">>

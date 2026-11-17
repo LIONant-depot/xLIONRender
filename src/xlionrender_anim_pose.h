@@ -9,6 +9,7 @@
 #include "dependencies/xAnimation/source/blend/xanimation_overlay.h"
 #include "dependencies/xAnimation/source/motion/xanimation_springs.h"
 #include "dependencies/xAnimation/source/motion/xanimation_lean.h"
+#include "dependencies/xAnimation/source/motion/xanimation_bone_ops.h"
 #include "dependencies/xstrtool/source/xstrtool.h"       // (the overlay's FromBone by name)
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
 #include "xlionrender_scene_components.h"      // (the Animation component the pose reads)
@@ -111,6 +112,9 @@ namespace xlionrender
                 xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock, LockPm
                                     , std::span<const std::uint8_t>(Down.data(), nDown));
             }
+            // N2 lean, then the aim (an aimed gun stays on target), then S3's offset (a recoil kicks the aim) and copy (the support hand follows the
+            // gun), the springs last (they swing from all of it)
+            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_LeanAmount > 0) ApplyLeanTo(Skel, S, Entity, *m_pSpringAnim, *pL2W);
             if (bClip && pL2W && S.m_LookAt.valid())  // look-at: after the feet (the chain is above the hips), toward a world point in the entity's frame
             {
                 auto& Tr = m_Tracks[Entity];
@@ -148,7 +152,7 @@ namespace xlionrender
                     }
                 }
             }
-            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_LeanAmount > 0) ApplyLeanTo(Skel, S, Entity, *m_pSpringAnim, *pL2W);       // (N2: before the springs, which swing from the leaned body)
+            if (m_pSpringAnim && (!m_pSpringAnim->m_OffsetBone.empty() || !m_pSpringAnim->m_CopyTo.empty())) ApplyBoneOps(Skel, S, Entity, *m_pSpringAnim);
             if (m_pSpringAnim && pL2W && !m_pSpringAnim->m_SpringFrom.empty()) ApplySprings(Skel, S, Entity, *m_pSpringAnim, *pL2W);
             m_pSpringAnim = nullptr;
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
@@ -186,6 +190,50 @@ namespace xlionrender
             {
                 std::printf("[AnimSprings] entity %llu: chain of %zu bones from %s, largest swing over the last 120 frames %.1f deg%c", (unsigned long long)Entity, Tr.m_SpringChain.size() + 1, Tr.m_SpringFrom.c_str(), Tr.m_SpringMax, 10);
                 std::fflush(stdout); Tr.m_SpringMax = 0;
+            }
+        }
+
+        // S3 (superset: KINEMATION's copy/modify bone, Unreal's Copy Bone / Transform Bone; motion/xanimation_bone_ops.h): the Animation's offset on
+        // one bone, then its copy (To follows From, with the offset it had when the copy started); [AnimCopy] reports how well To follows
+        void ApplyBoneOps(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A)
+        {
+            auto& Tr = m_Tracks[Entity];
+            if (Tr.m_OffsetBone != A.m_OffsetBone) { Tr.m_OffsetBone = A.m_OffsetBone; Tr.m_iOffset = A.m_OffsetBone.empty() ? -1 : Skel.findBoneIndex(xstrtool::CRC32(A.m_OffsetBone)); }
+            if (Tr.m_iOffset >= 0)
+            {
+                const auto& R = A.m_OffsetRotation;
+                const auto Q = xanimation::details::AxisAngle(xmath::fvec3(0, 0, 1), R.m_Z * 0.017453293f) * xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), R.m_Y * 0.017453293f) * xanimation::details::AxisAngle(xmath::fvec3(1, 0, 0), R.m_X * 0.017453293f);
+                xanimation::OffsetBone(S.view(), m_AnimPose, Tr.m_iOffset, Q, A.m_OffsetPosition, A.m_OffsetWeight, A.m_bOffsetModel);
+            }
+            if (Tr.m_CopyFrom != A.m_CopyFrom || Tr.m_CopyTo != A.m_CopyTo)
+            {
+                Tr.m_CopyFrom = A.m_CopyFrom; Tr.m_CopyTo = A.m_CopyTo; Tr.m_bCopyOffset = false;
+                Tr.m_iCopyFrom = A.m_CopyFrom.empty() ? -1 : Skel.findBoneIndex(xstrtool::CRC32(A.m_CopyFrom));
+                Tr.m_iCopyTo = A.m_CopyTo.empty() ? -1 : Skel.findBoneIndex(xstrtool::CRC32(A.m_CopyTo));
+                const auto Ro = Skel.getRoles(); Tr.m_CopyArms = int(Ro.size()) == S.view().count() ? xanimation::FindReflexRig(S.view(), Ro) : xanimation::reflex_rig{};
+                if (!A.m_CopyTo.empty())
+                {
+                    bool bArm = false; for (int a = 0; a < Tr.m_CopyArms.m_nArms; ++a) bArm = bArm || Tr.m_CopyArms.m_Arms[std::size_t(a)].m_Hand == Tr.m_iCopyTo;
+                    std::printf("[AnimCopy] entity %llu: %s follows %s%s%c", (unsigned long long)Entity, A.m_CopyTo.c_str(), A.m_CopyFrom.c_str()
+                        , Tr.m_iCopyFrom < 0 || Tr.m_iCopyTo < 0 ? ": NO such bone - off" : bArm ? " (a hand: its arm reaches)" : " (moved alone)", 10);
+                    std::fflush(stdout);
+                }
+            }
+            if (Tr.m_iCopyFrom < 0 || Tr.m_iCopyTo < 0) return;
+            if (!Tr.m_bCopyOffset) { Tr.m_CopyOffset = A.m_bCopyKeepOffset ? xanimation::CopyOffset(S.view(), m_AnimPose, Tr.m_iCopyFrom, Tr.m_iCopyTo) : xanimation::rigid{}; Tr.m_bCopyOffset = true; }
+            const xanimation::reflex_arm* pArm = nullptr;
+            for (int a = 0; a < Tr.m_CopyArms.m_nArms; ++a) if (Tr.m_CopyArms.m_Arms[std::size_t(a)].m_Hand == Tr.m_iCopyTo) pArm = &Tr.m_CopyArms.m_Arms[std::size_t(a)];
+            xanimation::bone_copy_params P; P.m_bRotation = A.m_bCopyRotation; P.m_bPosition = A.m_bCopyPosition; P.m_Weight = A.m_CopyWeight;
+            Tr.m_CopyMiss = std::max(Tr.m_CopyMiss, xanimation::CopyBone(S.view(), m_AnimPose, Tr.m_iCopyFrom, Tr.m_iCopyTo, Tr.m_CopyOffset, P, pArm));
+            {   // the measure: where To is against where the copy puts it
+                xanimation::details::rigid_worlds W; xanimation::details::Worlds(S.view(), m_AnimPose, W);
+                const auto Want = W.m_P[std::size_t(Tr.m_iCopyFrom)] + W.m_R[std::size_t(Tr.m_iCopyFrom)] * Tr.m_CopyOffset.m_P;
+                Tr.m_CopyOff = std::max(Tr.m_CopyOff, (W.m_P[std::size_t(Tr.m_iCopyTo)] - Want).Length());
+            }
+            if (++Tr.m_CopyN % 120 == 0)
+            {
+                std::printf("[AnimCopy] entity %llu: %s from where it is kept at most %.1f cm over 120 frames (out of reach by %.1f cm)%c", (unsigned long long)Entity, Tr.m_CopyTo.c_str(), 100 * Tr.m_CopyOff, 100 * Tr.m_CopyMiss, 10);
+                std::fflush(stdout); Tr.m_CopyOff = Tr.m_CopyMiss = 0;
             }
         }
 
@@ -286,6 +334,10 @@ namespace xlionrender
             std::string                             m_AimBone; xmath::fvec3 m_AimAxis{ 0, 0, 0 };     // S2: the aim chain for this bone and axis (rebuilt when they change)
             xanimation::look_at_chain               m_AimChain;
             int                                     m_AimN = 0; float m_AimErr = 0;
+            std::string                             m_CopyFrom, m_CopyTo; int m_iCopyFrom = -1, m_iCopyTo = -1; bool m_bCopyOffset = false;     // S3
+            xanimation::rigid                       m_CopyOffset; xanimation::reflex_rig m_CopyArms;
+            int                                     m_CopyN = 0; float m_CopyMiss = 0, m_CopyOff = 0;
+            std::string                             m_OffsetBone; int m_iOffset = -1;
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 
