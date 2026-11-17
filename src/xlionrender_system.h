@@ -48,6 +48,7 @@
 #include "dependencies/xAnimation/source/nervous/xanimation_nervous.h"
 #include "dependencies/xAnimation/source/motion/xanimation_warp_window.h"
 #include "dependencies/xAnimation/source/motion/xanimation_distance_match.h"
+#include "dependencies/xAnimation/source/physical/xanimation_get_up.h"
 #include "dependencies/xAnimation/source/motion/xanimation_reflex_pose.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics_api.h"     // CastRayClosest (the feet's ground, K3)
 #include "dependencies/xstrtool/source/xstrtool.h"           // (a clip requested by name: its hash, as the compiler makes it)
@@ -632,7 +633,9 @@ namespace xlionrender
             // D4 catch fall (the limbs' reflex set): the hips' last position (their velocity), the reflex weight now and a step back, where the
             // hands reach (the predicted landing, world), and its measure: when a hand and the head first reached the ground, the head's speed then
             xmath::fvec3                  m_PrevHips{ 0, 0, 0 }, m_PrevHead{ 0, 0, 0 }, m_Landing{ 0, 0, 0 };
+            const xanimation::skeleton_data* m_pSD = nullptr;       // (its skeleton, as the system keeps it)
             float                         m_HipsUp = -1;            // the hips' height above the stand plane at the switch (its standing height)
+            float                         m_DownStill = 0;          // KD5: seconds fallen (hips more than half down) and still
             bool                          m_bPrevHips = false, m_bFallLogged = false;
             float                         m_FallW = 0, m_FallWPrev = 0, m_FallAt = -1, m_HandDownAt = -1, m_HeadLow = 1e9f, m_HeadFall = 0, m_HandLow = 1e9f;
         };
@@ -655,7 +658,7 @@ namespace xlionrender
             m_Impacts.resize(std::size_t(std::min(n, 256)));
         }
 
-        void operator()( const xecs::component::entity& Ent, ragdoll& R, const skinned_mesh& Skin, const animation* pAnim, xlioncore::transform& T, const xecs::component::parent* pParent ) noexcept
+        void operator()( const xecs::component::entity& Ent, ragdoll& R, const skinned_mesh& Skin, animation* pAnim, xlioncore::transform& T, const xecs::component::parent* pParent ) noexcept
         {
             auto& GameMgr = getGameMgr();
             const auto* pGame = xlioncore::game::From(GameMgr);
@@ -886,6 +889,13 @@ namespace xlionrender
                 }
             }
 
+            // KD5 get-up (contract v2 7.8; physical/xanimation_get_up.h): fallen (hips more than half down) and still for 0.5 s, with a get-up clip
+            // for how it lies: the character is laid along the body, the ragdoll hands over to the clip (blended) and it plays once
+            if (pAnim && pParent == nullptr && (!R.m_GetUpFaceDown.empty() || !R.m_GetUpFaceUp.empty()) && R.m_NvDrop > 0.5f && St.m_pSD && St.m_pSD->m_LookAt.valid())
+            {
+                St.m_DownStill = R.m_NvFall < 0.15f ? St.m_DownStill + pGame->m_Time.m_DeltaTime : 0.0f;
+                if (St.m_DownStill >= 0.5f && TryGetUp(Ent, R, Skin, *pAnim, T, St)) return;
+            }
             // the entity follows the hips across the ground
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
             if (pParent == nullptr) { T.m_Position.m_X = Hips.m_P.m_X + St.m_Offset.m_X; T.m_Position.m_Z = Hips.m_P.m_Z + St.m_Offset.m_Z; }
@@ -916,6 +926,42 @@ namespace xlionrender
                 std::fflush(stdout);
                 St.m_bReported = true;
             }
+        }
+
+        // KD5: the clip for how the body lies, the character laid along it (its hips under the ragdoll's, turned so the clip's first pose's
+        // hips->head lies along the body's), the ragdoll handed over to the clip and the clip requested once. False: no clip for it (it stays down)
+        bool TryGetUp( const xecs::component::entity& Ent, ragdoll& R, const skinned_mesh& Skin, animation& A, xlioncore::transform& T, entity_state& St ) noexcept
+        {
+            using namespace xlioncore::resources;
+            const auto& S = *St.m_pSD; const int nB = int(S.m_Parent.size());
+            std::vector<xanimation::rigid> Now(static_cast<std::size_t>(nB)), Fill(static_cast<std::size_t>(nB), St.m_E);      // (not size_t(nB): that declares a function)
+            xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 1.0f, Fill, Now);
+            const int Hb = S.m_Warp.m_Hips >= 0 ? S.m_Warp.m_Hips : 0, Hd = S.m_LookAt.m_Head;
+            // the body's front: the rest forward carried by the hips' rotation since the rest
+            xanimation::details::rigid_worlds Wr; xanimation::details::Worlds(S.view(), S.m_Rest, Wr);
+            const auto Front = Now[std::size_t(Hb)].m_Q * (Wr.m_R[std::size_t(Hb)].ConjugateCopy() * S.m_LookAt.m_Forward);
+            const bool bDown = xanimation::IsFaceDown(Front);
+            const std::string& Name = bDown ? R.m_GetUpFaceDown : R.m_GetUpFaceUp;
+            if (Name.empty()) return false;
+            const std::uint64_t Pkg = A.m_Package.m_Instance.m_Value;
+            auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
+            const int iClip = pPkg ? pPkg->findClipIndex(xstrtool::CRC32(Name)) : -1;
+            if (iClip < 0) { std::printf("[GetUp] entity 0x%llX: no clip '%s' in its Animation's package: it stays down%c", (unsigned long long)Ent.m_Value, Name.c_str(), 10); std::fflush(stdout); St.m_DownStill = -1e9f; return false; }
+            xanimation::pose P0, Scratch;
+            if (!xanimation::SampleClip(S, *pPkg, iClip, 0.0f, false, P0, Scratch)) return false;
+            xanimation::details::rigid_worlds Wc; xanimation::details::Worlds(S.view(), P0, Wc);
+            const float Yaw = xanimation::GetUpYaw(Now[std::size_t(Hd)].m_P - Now[std::size_t(Hb)].m_P, Wc.m_P[std::size_t(Hd)] - Wc.m_P[std::size_t(Hb)]);
+            const xmath::fquat Q(0.0f, std::sin(0.5f * Yaw), 0.0f, std::cos(0.5f * Yaw));
+            const auto ClipHips = Q * (Wc.m_P[std::size_t(Hb)] * St.m_Scale);
+            T.m_Rotation = Q;
+            T.m_Position = xmath::fvec3(Now[std::size_t(Hb)].m_P.m_X - ClipHips.m_X, St.m_E.m_P.m_Y, Now[std::size_t(Hb)].m_P.m_Z - ClipHips.m_Z);
+            std::printf("[GetUp] entity 0x%llX: down %.1f s, face %s: '%s' (clip %d), turned %.0f deg%c", (unsigned long long)Ent.m_Value, St.m_DownStill, bDown ? "down" : "up", Name.c_str(), iClip, Yaw * 57.29578f, 10);
+            std::fflush(stdout);
+            std::vector<xanimation::rigid> W0, W1;
+            if (AnimatedWorlds(Skin, &A, xanimation::rigid{ T.m_Position, T.m_Rotation }, St.m_Scale, 0, W0, W1)) HandOverToAnimation(Ent, R, Skin, T, nullptr, W1);
+            A.m_ClipName = Name; A.m_RequestHash = 0; A.m_bOneShot = true; A.m_bPlaying = true;
+            R.m_bActive = false; R.m_bReaction = false;
+            return true;
         }
 
         // The entity's world frame and scale: its Transform for a root, the pose the transform system left in its Parent for a child
@@ -1037,7 +1083,7 @@ namespace xlionrender
             auto& St = m_State[Ent.m_Value]; St = {};
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
             St.m_Offset = T.m_Position - Hips.m_P;
-            St.m_E = EW; St.m_Scale = Scale; St.m_pGraph = &GE.m_G.m_Graph;
+            St.m_E = EW; St.m_Scale = Scale; St.m_pGraph = &GE.m_G.m_Graph; St.m_pSD = &S;
             St.m_Sleep = 0.05f * std::sqrt(Params.m_Size / 1.7f);
             xlioncore::physics::ragdoll_stats Stats; xlioncore::physics::RagdollStats(*R.m_pRuntime, Stats);
             St.m_KE0 = Stats.m_KE; St.m_Y0 = Stats.m_ComY; St.m_Mass = Stats.m_Mass;

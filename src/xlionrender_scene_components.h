@@ -701,6 +701,7 @@ namespace xlionrender
         xmath::fvec3                    m_HitImpulse  = {};
         float                           m_ReturnBelow = 15.0f;      // deg: settled when its joints are this close to the Animation (for 0.3 s)
         bool                            m_bReflexes   = true;       // D2: a hit also plays the reflex pose (hands up toward the threat, head away) on what the body tracks
+        std::string                     m_GetUpFaceDown, m_GetUpFaceUp;     // KD5: the Animation package's get-up clips by name (empty: it stays down)
         float                           m_ReactSpeed  = 0.0f;       // m/s: a solid hit on this entity or its carrier (ContactEvents on) that changes its speed this much becomes a Hit (0: off)
         float                           m_ImpactGain  = 1.0f;       // x the momentum the collision gives the carrier (from both masses), handed to the ragdoll
         std::uint64_t                   m_LastHitId   = 0;          // (runtime)
@@ -724,6 +725,8 @@ namespace xlionrender
             , obj_member<"Reflexes", &ragdoll::m_bReflexes, member_help<"Reflexes on the body (tracking only): a hit brings the hands up toward where it came from and turns the head away; a fall (not Supported) reaches the hands for where it will land">>
             , obj_member<"ReturnBelow", &ragdoll::m_ReturnBelow, member_help<"Degrees: back to the Animation once every joint is this close to it on average for 0.3 s (2 s at most)">>
             , obj_member<"ReactSpeed", &ragdoll::m_ReactSpeed, member_help<"m/s: a solid hit on this entity or its carrier (a player's capsule; its collider needs ContactEvents) that changes its speed at least this much (from both masses) becomes a Hit by itself: a tackle, not a ball. 0: off">>
+            , obj_member<"GetUpFaceDown", &ragdoll::m_GetUpFaceDown, member_help<"The clip (by name, in the Animation's package) that gets it up when it has fallen face down and come to rest: the character is laid along the body, the ragdoll hands over to the clip (blended) and it plays once. Empty: it stays down">>
+            , obj_member<"GetUpFaceUp", &ragdoll::m_GetUpFaceUp, member_help<"The same, fallen on its back">>
             , obj_member<"ImpactGain", &ragdoll::m_ImpactGain, member_help<"How much of the collision's momentum reaches the body: 1 = the speed change the hit gives this side (from both masses: reduced mass x approach speed / own mass), applied to the whole ragdoll's mass">>
             >
         , obj_member<"Reacting", +[](ragdoll& O, bool bRead, bool& V) { if (bRead) V = O.m_bReaction; }, member_flags<flags::SHOW_READONLY>>
