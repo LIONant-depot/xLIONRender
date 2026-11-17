@@ -639,6 +639,7 @@ namespace xlionrender
         xmath::fvec3                    m_HitPoint    = {};         //  takes it once (the same id again is the same event) and returns to its Animation when settled
         xmath::fvec3                    m_HitImpulse  = {};
         float                           m_ReturnBelow = 15.0f;      // deg: settled when its joints are this close to the Animation (for 0.3 s)
+        bool                            m_bReflexes   = true;       // D2: a hit also plays the reflex pose (hands up toward the threat, head away) on what the body tracks
         float                           m_ReactSpeed  = 0.0f;       // m/s: a solid hit on this entity or its carrier (ContactEvents on) that changes its speed this much becomes a Hit (0: off)
         float                           m_ImpactGain  = 1.0f;       // x the momentum the collision gives the carrier (from both masses), handed to the ragdoll
         std::uint64_t                   m_LastHitId   = 0;          // (runtime)
@@ -655,6 +656,7 @@ namespace xlionrender
             , obj_member<"EventId", &ragdoll::m_HitEventId, member_help<"A new id is a hit: Impulse (N s) at Point (world). A character with Tracking above 0 becomes physical for it, takes it once (the same id again is the same event: ignored) and returns to its Animation when settled">>
             , obj_member<"Point",   &ragdoll::m_HitPoint>
             , obj_member<"Impulse", &ragdoll::m_HitImpulse>
+            , obj_member<"Reflexes", &ragdoll::m_bReflexes, member_help<"A hit also plays a reflex on the body: the hands come up toward where it came from and the head turns away (tracking only)">>
             , obj_member<"ReturnBelow", &ragdoll::m_ReturnBelow, member_help<"Degrees: back to the Animation once every joint is this close to it on average for 0.3 s (2 s at most)">>
             , obj_member<"ReactSpeed", &ragdoll::m_ReactSpeed, member_help<"m/s: a solid hit on this entity or its carrier (a player's capsule; its collider needs ContactEvents) that changes its speed at least this much (from both masses) becomes a Hit by itself: a tackle, not a ball. 0: off">>
             , obj_member<"ImpactGain", &ragdoll::m_ImpactGain, member_help<"How much of the collision's momentum reaches the body: 1 = the speed change the hit gives this side (from both masses: reduced mass x approach speed / own mass), applied to the whole ragdoll's mass">>

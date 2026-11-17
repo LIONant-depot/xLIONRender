@@ -47,6 +47,7 @@
 #include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
 #include "dependencies/xAnimation/source/nervous/xanimation_nervous.h"
 #include "dependencies/xAnimation/source/motion/xanimation_warp_window.h"
+#include "dependencies/xAnimation/source/motion/xanimation_reflex_pose.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics_api.h"     // CastRayClosest (the feet's ground, K3)
 #include "dependencies/xstrtool/source/xstrtool.h"           // (a clip requested by name: its hash, as the compiler makes it)
 #include "plugins/xragdoll.plugin/source/xragdoll_body_graph.h"
@@ -605,11 +606,18 @@ namespace xlionrender
             bool                m_bForced = false;          //  and a return forced by the time limit    // R3b': time since activation, of the last hit, settled for; the last tracking error
             const xanimation::body_graph* m_pGraph = nullptr;       // (the graph it was activated with: m_Graphs keeps it)
             std::vector<std::uint64_t>    m_Hits;                   // the hit events this activation took
+            float                         m_ReflexAt = -1;          // D2: when the reflex pose started (-1: none) and where the threat is (world)
+            xmath::fvec3                  m_Threat{ 0, 0, 0 };
+            float                         m_HandStart = -1, m_HandMin = 0;
         };
         std::unordered_map<const void*, graph_entry>                m_Graphs;       // per Ragdoll resource as loaded
         std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
         std::unordered_map<std::uint64_t, entity_state>             m_State;
         xanimation::pose                                            m_P0, m_P1;
+        struct reflex_now { xmath::fvec3 m_Threat; float m_Weight = 0, m_WeightPrev = 0; };
+        const reflex_now*                                           m_pReflex = nullptr;    // (set around AnimatedWorlds while a reflex pose plays)
+        struct reflex_rig_entry { xanimation::reflex_rig m_Rig; bool m_bInit = false; };
+        std::unordered_map<const void*, reflex_rig_entry>           m_ReflexRigs;
         std::vector<xlioncore::physics::impact>                     m_Impacts;      // this frame's solid hits (TakeImpacts, read once per update)
         struct nerves { xanimation::nervous::drive_state m_Drives; xanimation::nervous::reflex m_Running = xanimation::nervous::reflex::NONE; std::uint64_t m_Tick = 0; };
         std::unordered_map<std::uint64_t, nerves>                   m_Nerves;       // the nervous system of each character with a Ragdoll that reacts (its drives outlive an activation)
@@ -697,14 +705,54 @@ namespace xlionrender
             if (bHit)       // (the impulse: LIONCore applies it right before the next step, once per event id - its ledger)
             {
                 xlioncore::physics::HitRagdoll(GameMgr, *R.m_pRuntime, R.m_HitEventId, R.m_HitPoint, R.m_HitImpulse);
-                if (std::find(St.m_Hits.begin(), St.m_Hits.end(), R.m_HitEventId) == St.m_Hits.end()) { St.m_Hits.push_back(R.m_HitEventId); St.m_HitAt = St.m_Age; St.m_Settled = 0; St.m_MinE = 1e9f; St.m_MinAt = St.m_Age; }   // (a repeat does not restart the settling)
+                if (std::find(St.m_Hits.begin(), St.m_Hits.end(), R.m_HitEventId) == St.m_Hits.end())
+                {
+                    St.m_Hits.push_back(R.m_HitEventId); St.m_HitAt = St.m_Age; St.m_Settled = 0; St.m_MinE = 1e9f; St.m_MinAt = St.m_Age;
+                    // D2: the body protects itself from where the push came (0.5 m back along it from the point) and turns its head away
+                    const float Il = R.m_HitImpulse.Length();
+                    if (R.m_bReflexes && Il > 1e-4f) { St.m_ReflexAt = St.m_Age; St.m_Threat = R.m_HitPoint - R.m_HitImpulse * (0.5f / Il); }
+                }   // (a repeat does not restart the settling)
                 R.m_LastHitId = R.m_HitEventId;
             }
             // R1 supported tracking: the joints pull toward the animation as it plays on, where the character was at the switch
             if (R.m_Tracking > 0)
             {
                 std::vector<xanimation::rigid> W0, W1;
-                if (AnimatedWorlds(Skin, pAnim, St.m_E, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, W0, W1))
+                reflex_now Rx;
+                if (St.m_ReflexAt >= 0)
+                {
+                    const xanimation::reflex_pose_params Rp;
+                    Rx.m_Threat = St.m_Threat; Rx.m_Weight = xanimation::ReflexEnvelope(Rp, St.m_Age - St.m_ReflexAt);
+                    Rx.m_WeightPrev = xanimation::ReflexEnvelope(Rp, St.m_Age - St.m_ReflexAt - pGame->m_Time.m_FixedDeltaTime);
+                    if (Rx.m_Weight > 0) m_pReflex = &Rx;
+                    if (St.m_Age - St.m_ReflexAt > Rp.m_In + Rp.m_Hold + Rp.m_Out) St.m_ReflexAt = -1;
+                }
+                const bool bReflexOn = m_pReflex != nullptr;
+                const bool bGot = AnimatedWorlds(Skin, pAnim, St.m_E, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, W0, W1);
+                m_pReflex = nullptr;
+                // D2's measure: how close the ragdoll's hands came to the threat during the reflex, against where they were when it started
+                if (St.m_pGraph && (bReflexOn || St.m_HandStart >= 0))
+                {
+                    float D = 1e9f;
+                    for (std::size_t i = 0; i < St.m_pGraph->m_Bodies.size(); ++i)
+                    {
+                        const int b = St.m_pGraph->m_Bodies[i].m_Bone; bool bHand = false;
+                        for (const auto& [K, Rg] : m_ReflexRigs) for (int a = 0; a < Rg.m_Rig.m_nArms; ++a) bHand = bHand || Rg.m_Rig.m_Arms[std::size_t(a)].m_Hand == b;
+                        xanimation::rigid F;
+                        if (bHand && xlioncore::physics::RagdollBodyFrame(*R.m_pRuntime, int(i), F)) D = std::min(D, (F.m_P - St.m_Threat).Length());
+                    }
+                    if (D < 1e8f)
+                    {
+                        if (St.m_HandStart < 0) { St.m_HandStart = D; St.m_HandMin = D; }
+                        St.m_HandMin = std::min(St.m_HandMin, D);
+                        if (!bReflexOn)
+                        {
+                            std::printf("[Reflex] entity 0x%llX: protect + flinch done; the nearer hand came from %.0f to %.0f cm of the threat%c", (unsigned long long)Ent.m_Value, 100 * St.m_HandStart, 100 * St.m_HandMin, 10);
+                            std::fflush(stdout); St.m_HandStart = -1;
+                        }
+                    }
+                }
+                if (bGot)
                 {
                     xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward;
                     if (R.m_bSupported) St.m_Supported += pGame->m_Time.m_DeltaTime;
@@ -835,6 +883,15 @@ namespace xlionrender
                 P = S.m_Rest;
             };
             Sample(Dtb, m_P0); Sample(0, m_P1);
+            if (m_pReflex && m_pReflex->m_Weight > 0)     // D2: a reflex pose on the animation the ragdoll tracks (protect, flinch)
+            {
+                auto& Rig = m_ReflexRigs[pSkel];
+                if (!Rig.m_bInit) { Rig.m_bInit = true; if (const auto Ro = pSkel->getRoles(); int(Ro.size()) == nB) Rig.m_Rig = xanimation::FindReflexRig(S.view(), Ro); }
+                const auto ThreatModel = E.Inverse().m_Q * (m_pReflex->m_Threat - E.m_P) * (1.0f / std::max(Scale, 1e-6f));
+                xanimation::look_at_state L0, L1;
+                xanimation::ApplyReflexPose(S.view(), Rig.m_Rig, S.m_LookAt, m_P0, ThreatModel, m_pReflex->m_WeightPrev, {}, L0);
+                xanimation::ApplyReflexPose(S.view(), Rig.m_Rig, S.m_LookAt, m_P1, ThreatModel, m_pReflex->m_Weight, {}, L1);
+            }
             const auto n = static_cast<std::size_t>(nB);
             W0.resize(n); W1.resize(n); std::vector<float> Sc(n);
             xanimation::RigidBoneWorlds(S.view(), m_P0, E, Scale, W0, Sc);
