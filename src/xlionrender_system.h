@@ -713,6 +713,7 @@ namespace xlionrender
             xlioncore::physics::ragdoll_params Params;
             Params.m_Size = 2 * (pRag->m_Capsule.m_HalfSegment + pRag->m_Capsule.m_Radius) * Scale;
             if (Params.m_Size <= 0.01f) Params.m_Size = 1.7f;
+            if (const char* p = std::getenv("XLION_RAGDOLL_SUBSTEPS"); p && *p) Params.m_SubSteps = std::max(1, std::atoi(p));      // (a narrowing switch)
             std::string Note;
             R.m_pRuntime = xlioncore::physics::ActivateRagdoll(getGameMgr(), GE.m_G.m_Graph, GE.m_Rest, W0, W1, Dt, GE.m_G.m_Filter, Params, &Note);
             if (R.m_pRuntime == nullptr) return Fail("the game has no physics world");
