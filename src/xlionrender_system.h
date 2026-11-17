@@ -609,6 +609,7 @@ namespace xlionrender
             float                         m_ReflexAt = -1;          // D2: when the reflex pose started (-1: none) and where the threat is (world)
             xmath::fvec3                  m_Threat{ 0, 0, 0 };
             float                         m_HandStart = -1, m_HandMin = 0;
+            bool                          m_bAssistLogged = false;
         };
         std::unordered_map<const void*, graph_entry>                m_Graphs;       // per Ragdoll resource as loaded
         std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
@@ -687,7 +688,7 @@ namespace xlionrender
                 {
                     // the assistance ledger (contract 2.6 req. 5, 2.8; v0: logged per activation): how long its root was held by the animation
                     // (supported tracking is assistance, never hidden) and whether it was sent back to the animation by the time limit
-                    if (auto It = m_State.find(Ent.m_Value); It != m_State.end() && (It->second.m_Supported > 0 || It->second.m_bForced))
+                    if (auto It = m_State.find(Ent.m_Value); It != m_State.end() && !It->second.m_bAssistLogged && (It->second.m_Supported > 0 || It->second.m_bForced))
                     {
                         std::printf("[Assist] entity 0x%llX: root held by the animation %.2f s of %.2f s active%s\n", (unsigned long long)Ent.m_Value, It->second.m_Supported, It->second.m_Age
                             , It->second.m_bForced ? "; sent back to its animation by the time limit (not settled)" : "");
@@ -784,6 +785,10 @@ namespace xlionrender
                                 , (unsigned long long)Ent.m_Value, St.m_Age - St.m_HitAt, St.m_Hits.size(), St.m_Settled >= 0.3f ? "settled" : "time limit", St.m_LastE, 100 * Pop);
                             std::fflush(stdout);
                             St.m_bForced = St.m_Settled < 0.3f;
+                            // (the ledger line now, in the frame of the return: the deactivation comes a frame later, and a game stopped in between lost it)
+                            std::printf("[Assist] entity 0x%llX: root held by the animation %.2f s of %.2f s active%s%c", (unsigned long long)Ent.m_Value, St.m_Supported, St.m_Age
+                                , St.m_bForced ? "; sent back to its animation by the time limit (not settled)" : "", 10);
+                            std::fflush(stdout); St.m_bAssistLogged = true;
                             HandOverToAnimation(Ent, R, Skin, T, pParent, W1);
                             R.m_bActive = false; R.m_bReaction = false;
                         }
