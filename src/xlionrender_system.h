@@ -46,6 +46,7 @@
 #include "dependencies/xeditor_tools/src/xeditor_tools_picking.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
 #include "dependencies/xAnimation/source/nervous/xanimation_nervous.h"
+#include "dependencies/xAnimation/source/motion/xanimation_warp_window.h"
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics_api.h"     // CastRayClosest (the feet's ground, K3)
 #include "dependencies/xstrtool/source/xstrtool.h"           // (a clip requested by name: its hash, as the compiler makes it)
 #include "plugins/xragdoll.plugin/source/xragdoll_body_graph.h"
@@ -270,6 +271,25 @@ namespace xlionrender
                 if (Wp.active()) D = xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Wp.m_Angle) * D * Wp.m_Stride;
                 if (!A.m_bRootToVelocity) D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)      // (RootToVelocity: the feet only - the body goes where they go, never faster)
                 auto WD = pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
+                // S6 warp window: inside Warp.From..To (clip seconds) the root motion is bent so the entity stands on Warp.Target (and faces
+                // Warp.Yaw) when the clip reaches To (motion/xanimation_warp_window.h); a target moved meanwhile is still met
+                if (A.m_bWarp && Before < A.m_WarpTo && A.m_Time > A.m_WarpFrom && A.m_Speed > 0)
+                {
+                    const float End = A.m_WarpTo;
+                    const auto Rest = xanimation::RootStep(*pPkg, A.m_Clip, std::min(A.m_Time, End), End);
+                    const auto RestW = pT->m_Rotation * xmath::fvec3(Rest.m_Move.m_X * pT->m_Scale.m_X, Rest.m_Move.m_Y * pT->m_Scale.m_Y, Rest.m_Move.m_Z * pT->m_Scale.m_Z);
+                    const auto F = pT->m_Rotation * xmath::fvec3(0, 0, 1);
+                    const float Yaw = std::atan2(F.m_X, F.m_Z), Dt = pGame->m_Time.m_DeltaTime;
+                    const float TimeLeft = (End - Before) / A.m_Speed;
+                    auto ToTarget = A.m_WarpTarget - pT->m_Position; ToTarget.m_Y = A.m_bWarpHeight ? ToTarget.m_Y : WD.m_Y + RestW.m_Y;
+                    const auto W = xanimation::WarpWindowStep(WD, Turn, RestW, Rest.m_Turn, ToTarget, A.m_WarpYaw * 0.017453293f - Yaw, Dt, TimeLeft, A.m_bWarpTurn);
+                    WD = W.m_Move; Turn = W.m_Turn;
+                    if (A.m_Time >= End)
+                    {
+                        std::printf("[AnimWarp] entity 0x%llX: window ends at clip %.2f s, %.1f cm from the target\n", (unsigned long long)Ent.m_Value, End, 100 * (pT->m_Position + WD - A.m_WarpTarget).Length());
+                        std::fflush(stdout);
+                    }
+                }
                 if (A.m_bRootToVelocity)                     // (G0 (b): the game moves its body with it; the entity itself stays where its parent puts it)
                     A.m_RootVelocity = pGame->m_Time.m_DeltaTime > 0 ? WD * (1.0f / pGame->m_Time.m_DeltaTime) : xmath::fvec3(0, 0, 0);
                     {   // (inertialized as the pose is: at a matching jump the new clip's velocity would move the body at once while the drawn

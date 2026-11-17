@@ -525,6 +525,13 @@ namespace xlionrender
         bool                m_bOverlayLoop  = false;
         float               m_OverlayBlendIn = 0.2f, m_OverlayBlendOut = 0.2f, m_OverlaySpeed = 1.0f;
         std::uint32_t       m_OverlayPlay   = 0;      // a new value (re)starts it from its beginning
+        // S6 (KINEMATION superset): a warp window - root motion bent so the clip lands the character on a target at a time of the clip
+        bool                m_bWarp       = false;
+        xmath::fvec3        m_WarpTarget  {0, 0, 0};  // world
+        float               m_WarpYaw     = 0;        // deg, the facing to land with (Turn on)
+        bool                m_bWarpTurn   = false;
+        bool                m_bWarpHeight = false;    // off: the height stays the clip's (the ground's)
+        float               m_WarpFrom    = 0, m_WarpTo = 0;    // clip seconds
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
@@ -580,6 +587,15 @@ namespace xlionrender
         , obj_member<"PlayerRunSpeed", &animation::m_PlayerRunSpeed, member_help<"Player: the speed with Run held (Shift, or the pad's stick pushed fully)">>
         , obj_member<"LookAtWeight", &animation::m_LookAtWeight, member_help<"How much the head turns toward LookAt: 0 off (eases back to the clip's own head), 1 full">>
         , obj_member<"FootIK",    &animation::m_bFootIK, member_help<"While the game runs the feet stand on the physics ground under them (stairs, slopes, kerbs): a ray down at each foot, each foot up or down by its ground, the hips follow the lowest, planted feet tilt to the slope. Off: the clip's flat floor">>
+        , obj_scope<"Warp"
+            , obj_member<"Active", &animation::m_bWarp, member_help<"Root motion: between From and To (clip seconds) the clip's root motion is bent so the character stands on Target when the clip reaches To (a vault lands on the box, a dive meets the ball). The target may move meanwhile">>
+            , obj_member<"Target", &animation::m_WarpTarget>
+            , obj_member<"Turn", &animation::m_bWarpTurn, member_help<"Also land facing Yaw">>
+            , obj_member<"Yaw", &animation::m_WarpYaw, member_help<"Degrees about up (0: +Z)">>
+            , obj_member<"Height", &animation::m_bWarpHeight, member_help<"Also reach the target's height (a climb). Off: the clip's own height">>
+            , obj_member<"From", &animation::m_WarpFrom>
+            , obj_member<"To", &animation::m_WarpTo>
+            >
         , obj_scope<"Overlay"
             , obj_member<"Clip", &animation::m_OverlayClip, member_help<"A clip of the package played over the pose on a part of the body (a reload over a run, a wave while walking). -1: none (a playing overlay eases out)">>
             , obj_member<"FromBone", &animation::m_OverlayFrom, member_help<"The bone the overlay starts at: it and everything under it (a spine bone: the upper body). Empty: the whole body">>
