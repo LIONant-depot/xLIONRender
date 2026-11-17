@@ -118,6 +118,15 @@ namespace xlionrender
             const xmath::fvec3 MoveAsked = A.m_Move;              // (MoveInWorld: turned into the entity's frame for this frame's work, given back after)
             if (A.m_bMoveInWorld && pT) A.m_Move = pT->m_Rotation.ConjugateCopy() * A.m_Move;
             struct restore_move { animation& A; xmath::fvec3 M; ~restore_move() { A.m_Move = M; } } RestoreMove{ A, MoveAsked };
+            // Collide: the move the world lets through (a probe of the asked move through the mover: into a wall, only its part along it) is what
+            // warping and matching fit the clip to - asked as it was, the wall walker kept walking into the wall and her feet slid 115-125 cm/s
+            // (motion trace) while the capsule slid along it (as Unreal's anim graph reads the movement component's velocity after collision)
+            if (A.m_bCollide && pT && (A.m_Move.m_X != 0 || A.m_Move.m_Z != 0) && pGame->m_Time.m_DeltaTime > 0)
+            {
+                const float Dt = pGame->m_Time.m_DeltaTime;
+                auto Out = Collide(Ent.m_Value, A, *pT, pT->m_Rotation * (A.m_Move * Dt), true) * (1.0f / Dt);
+                Out = pT->m_Rotation.ConjugateCopy() * Out; A.m_Move = xmath::fvec3(Out.m_X, 0, Out.m_Z);
+            }
             // stride and orientation warping (K2): the game asks a velocity (Move), the clip walks at its own; the clip's time runs at the Rate,
             // its root motion turns by the Angle and stretches by the Stride, and the renderer warps the pose the same way (the feet stay planted)
             xanimation::warp_params Wp;
@@ -197,7 +206,7 @@ namespace xlionrender
         struct mover_info { xmath::fvec3 m_Pos; float m_Radius; std::chrono::steady_clock::time_point m_T; };
         std::mutex                                       m_MoversLock;
         std::unordered_map<std::uint64_t, mover_info> m_Movers;      // (by entity: the component handed to operator() may not keep its address)
-        xmath::fvec3 Collide(std::uint64_t Entity, const animation& A, const xlioncore::transform& T, const xmath::fvec3& Step) noexcept
+        xmath::fvec3 Collide(std::uint64_t Entity, const animation& A, const xlioncore::transform& T, const xmath::fvec3& Step, bool bProbe = false) noexcept      // (bProbe: only asks, nothing recorded)
         {
             const auto Now = std::chrono::steady_clock::now();
             std::vector<xlioncore::physics::mover_plane> Planes;
@@ -216,6 +225,7 @@ namespace xlionrender
                 }
             }
             const auto Out = xlioncore::physics::MoveCapsule(getGameMgr(), T.m_Position, A.m_CapsuleRadius, A.m_CapsuleHeight, 0.35f, Step, Planes);
+            if (bProbe) return Out;
             std::scoped_lock Lk(m_MoversLock);
             static const bool bDbg = std::getenv("XLION_ANIM_MOVER_DEBUG") != nullptr;
             if (bDbg) std::printf("[AnimMover] %llu at (%.2f %.2f) step (%.3f %.3f) -> (%.3f %.3f), %zu others, %zu planes\n", (unsigned long long)Entity, T.m_Position.m_X, T.m_Position.m_Z, Step.m_X, Step.m_Z, Out.m_X, Out.m_Z, m_Movers.size(), Planes.size());
@@ -244,12 +254,15 @@ namespace xlionrender
                     xanimation::matching_clip Mc;
                     Mc.m_Fps = float(std::max<int>(1, C.m_FPS)); Mc.m_Length = float(C.m_nFrames) / Mc.m_Fps; Mc.m_bLoop = C.m_bLoop;
                     Mc.m_Sample = [pPkg = &Pkg, c, pS = &SD](float t, xanimation::pose& P) { xanimation::pose Scr; xanimation::SampleClip(*pS, *pPkg, c, t, false, P, Scr); };
-                    Mc.m_Root = [pPkg = &Pkg, c](float t) { return xanimation::RootMotionAt(*pPkg, c, t); };
+                    if (C.m_RootMotionMode != xanim_package::root_motion_mode::NONE) Mc.m_Root = [pPkg = &Pkg, c](float t) { return xanimation::RootMotionAt(*pPkg, c, t); };      // (none: the trajectory from the hips)
                     Mc.m_Turn = [pPkg = &Pkg, c](float t) { return xanimation::RootTurnAt(*pPkg, c, t); };
                     M.m_Clips.push_back(std::move(Mc));
                 }
                 M.m_Db = xanimation::BuildMatchingDb(SD.view(), SD.m_Warp, SD.m_Rest, M.m_Clips);
-                std::printf("[AnimMatch] database: %zu entries of %d floats from %d clips\n", M.m_Db.m_Entries.size(), M.m_Db.m_Dim, int(Pkg.m_nClips));
+                std::printf("[AnimMatch] database: %zu entries of %d floats from %d clips; travel directions (deg@m/s):", M.m_Db.m_Entries.size(), M.m_Db.m_Dim, int(Pkg.m_nClips));
+                for (std::size_t i = 0; i < M.m_Db.m_TravelYaws.size(); ++i) std::printf(" %.0f@%.2f", M.m_Db.m_TravelYaws[i] * 57.29578f, M.m_Db.m_TravelSpeeds[i]);
+                std::printf("\n");
+                for (int c = 0; c < int(Pkg.m_nClips); ++c) { const auto& C = Pkg.getClips()[std::size_t(c)]; std::printf("[AnimMatch]   clip %d: %.2f m/s at %.0f deg, turning %.0f deg/s, %.2f s%s\n", c, C.m_Speed, C.m_Direction, C.m_TurnRate, float(C.m_nFrames) / float(std::max<int>(1, C.m_FPS)), C.m_bLoop ? " loop" : ""); }
             }
             if (M.m_Db.m_Entries.empty()) return;
             const auto* pGame = xlioncore::game::From(getGameMgr());
@@ -280,6 +293,25 @@ namespace xlionrender
                 A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_bPlaying = true;
             }
             A.m_MatchSince = St.m_Since; A.m_MatchSinceJump = St.m_SinceJump; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
+            static const bool bDbg = std::getenv("XLION_ANIM_MATCH_DEBUG") != nullptr;      // (each search: the wish and every clip's best cost)
+            if (bDbg && St.m_Since == 0)
+            {
+                std::vector<float> Q(std::size_t(M.m_Db.m_Dim));
+                xanimation::MakeQuery(M.m_Db, xanimation::PlayingEntry(M.m_Db, St), xanimation::PredictWish(Wish, Wish, YawAsked), Q.data());
+                std::string S; char B[64];
+                for (int c = 0; c + 1 < int(M.m_Db.m_ClipFirst.size()); ++c)
+                {
+                    float Bc = 1e30f, Bp = 0, Bt = 0;      // (the best entry's cost: pose part + trajectory part)
+                    for (int i = M.m_Db.m_ClipFirst[std::size_t(c)]; i < M.m_Db.m_ClipFirst[std::size_t(c) + 1]; ++i)
+                    {
+                        float Cp = 0, Ct = 0;
+                        for (int d = 0; d < M.m_Db.m_Dim; ++d) { const float x = M.m_Db.At(i)[d] - Q[std::size_t(d)]; (d < M.m_Db.TrajPos() ? Cp : Ct) += x * x; }
+                        if (Cp + Ct < Bc) { Bc = Cp + Ct; Bp = Cp; Bt = Ct; }
+                    }
+                    std::snprintf(B, sizeof(B), " %d:%.1f+%.1f", c, Bp, Bt); S += B;
+                }
+                std::printf("[AnimMatchDbg] at (%.1f %.1f) clip %d t %.2f wish (%.2f %.2f) yaw %.0f costs (pose+trajectory)%s\n", pT ? pT->m_Position.m_X : 0.0f, pT ? pT->m_Position.m_Z : 0.0f, A.m_Clip, A.m_Time, Wish.m_X, Wish.m_Z, YawAsked * 57.29578f, S.c_str());
+            }
         }
 
         // Contact events push (a kick): for each Contact event with a bone fired this frame, the bone's world position and velocity (the clip
