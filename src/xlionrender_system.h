@@ -576,7 +576,7 @@ namespace xlionrender
             float               m_T = 0, m_KE0 = 0, m_Y0 = 0, m_Mass = 0, m_WorstEnergy = 0, m_RestAt = -1, m_Sleep = 0;
             std::vector<float>  m_Anchor;
             bool                m_bReported = false;
-            double              m_TrackSum = 0;         // R1: the bodies' rotation from the animation (deg, squared, summed) and its worst
+            double              m_TrackSum = 0, m_TrackSumW = 0;    // R1: the joints' (and the bodies' world) rotation from the animation (deg, squared, summed); the joints' worst
             int                 m_nTrack = 0;
             float               m_TrackMax = 0;
         };
@@ -605,8 +605,9 @@ namespace xlionrender
                 if (AnimatedWorlds(Skin, pAnim, St.m_E, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, W0, W1))
                 {
                     xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward;
-                    const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P);
-                    if (E >= 0) { St.m_TrackSum += double(E) * E; ++St.m_nTrack; St.m_TrackMax = std::max(St.m_TrackMax, E); }
+                    float EW = 0;
+                    const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);
+                    if (E >= 0) { St.m_TrackSum += double(E) * E; St.m_TrackSumW += double(EW) * EW; ++St.m_nTrack; St.m_TrackMax = std::max(St.m_TrackMax, E); }
                 }
             }
 
@@ -635,8 +636,8 @@ namespace xlionrender
                 std::printf("[Ragdoll] summary entity 0x%llX: anchors p95 %.2f mm max %.2f mm (%zu frames); energy <= %.2f of the bound (KE0 + m g h + 10 %% + 1 J); at rest %s%.2f s; awake %d/%d\n"
                     , (unsigned long long)Ent.m_Value, 1000 * A[std::min(A.size() - 1, A.size() * 95 / 100)], 1000 * A.back(), A.size(), St.m_WorstEnergy
                     , St.m_RestAt < 0 ? "NOT " : "", St.m_RestAt < 0 ? St.m_T : St.m_RestAt, S.m_nAwake, S.m_nBodies);
-                if (St.m_nTrack) std::printf("[Ragdoll] tracking entity 0x%llX: gain %.1f, %s, bodies from the animation rms %.2f deg, worst %.2f deg (%d frames)\n"
-                    , (unsigned long long)Ent.m_Value, R.m_Tracking, R.m_bSupported ? "supported" : "unsupported", std::sqrt(St.m_TrackSum / St.m_nTrack), St.m_TrackMax, St.m_nTrack);
+                if (St.m_nTrack) std::printf("[Ragdoll] tracking entity 0x%llX: gain %.1f, %s, joints from the animation rms %.2f deg, worst %.2f deg; bodies in the world rms %.2f deg (%d frames)\n"
+                    , (unsigned long long)Ent.m_Value, R.m_Tracking, R.m_bSupported ? "supported" : "unsupported", std::sqrt(St.m_TrackSum / St.m_nTrack), St.m_TrackMax, std::sqrt(St.m_TrackSumW / St.m_nTrack), St.m_nTrack);
                 std::fflush(stdout);
                 St.m_bReported = true;
             }
