@@ -442,7 +442,8 @@ namespace xlionrender
                         Ground[nGround] = { pAnim->m_Ground[nGround].m_bHit, pAnim->m_Ground[nGround].m_Height, pAnim->m_Ground[nGround].m_Normal };
                     PoseWithLibrary(*pSkel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, m_PoseWorlds
                                    , Mode == anim_mode::NEW && pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f, &Wp, std::span<const xanimation::ground_contact>(Ground.data(), nGround)
-                                   , pAnim ? pAnim->m_MatchJumps : 0u, bClip && pAnim->m_bFootLock ? &L2W : nullptr);      // (CHECK: no transitions, the bits must match)
+                                   , pAnim ? pAnim->m_MatchJumps : 0u, bClip && pAnim->m_bFootLock ? &L2W : nullptr
+                                   , &L2W, pAnim ? pAnim->m_LookAt : xmath::fvec3(0, 0, 0), pAnim ? pAnim->m_LookAtWeight : 0.0f);      // (CHECK: no transitions, the bits must match)
                 }
                 if (Mode == anim_mode::CHECK && !(bClip && pAnim->m_bMirror))      // both computed (a mirrored clip: the old code has no mirror): the library must give exactly today's matrices
                 {
@@ -539,7 +540,8 @@ namespace xlionrender
         // from the one shown and eases into the new source over BlendTime (inertialization: the old clip is not sampled any more; 0: a cut).
         void PoseWithLibrary(const xskeleton::skeleton& Skel, const xanim_package::anim_package* pPkg, int iClip, float Time, bool bMirror, std::vector<xmath::fmat4>& Out, std::uint64_t Entity = 0, float BlendTime = 0, const xanimation::warp_params* pWarp = nullptr
                             , std::span<const xanimation::ground_contact> Ground = {}, std::uint32_t Jumps = 0      // (Jumps: motion matching's jump count - a jump within a clip is a new source too)
-                            , const xmath::fmat4* pLockL2W = nullptr)                                                 // (set: foot locking, in this world frame)
+                            , const xmath::fmat4* pLockL2W = nullptr                                                  // (set: foot locking, in this world frame)
+                            , const xmath::fmat4* pL2W = nullptr, const xmath::fvec3& LookAt = {}, float LookAtWeight = 0)    // (look-at: a world point, in the frame pL2W)
         {
             auto& S = m_AnimSkeleton[&Skel];
             const auto Bones = Skel.getBones();
@@ -560,6 +562,18 @@ namespace xlionrender
                 const float Dt = Tr.m_LockT.time_since_epoch().count() ? std::clamp(std::chrono::duration<float>(Now - Tr.m_LockT).count(), 0.0f, 0.1f) : 0.0f;
                 Tr.m_LockT = Now;
                 xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock);
+            }
+            if (bClip && pL2W && S.m_LookAt.valid())  // look-at: after the feet (the chain is above the hips), toward a world point in the entity's frame
+            {
+                auto& Tr = m_Tracks[Entity];
+                if (LookAtWeight > 0 || Tr.m_Look.m_W > 0)
+                {
+                    const auto Now = std::chrono::steady_clock::now();
+                    const float Dt = Tr.m_LookT.time_since_epoch().count() ? std::clamp(std::chrono::duration<float>(Now - Tr.m_LookT).count(), 0.0f, 0.1f) : 0.0f;
+                    Tr.m_LookT = Now;
+                    const auto Inv = pL2W->InverseSRT();
+                    xanimation::LookAt(S.view(), S.m_LookAt, m_AnimPose, Inv * LookAt, LookAtWeight, Dt, Tr.m_Look);
+                }
             }
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
         }
@@ -613,7 +627,14 @@ namespace xlionrender
             if (auto TI = m_Tracks.find(Entity); TI != m_Tracks.end()) for (std::size_t i = 0; i < TI->second.m_Lock.m_Legs.size(); ++i) std::fprintf(&F, i ? ",%d" : "%d", int(TI->second.m_Lock.m_Legs[i].m_bLocked));
             std::fprintf(&F, "],\"events\":[");
             for (int i = 0; i < A.m_nFired; ++i) std::fprintf(&F, i ? ",[%d,%d,%u]" : "[%d,%d,%u]", int(A.m_Fired[std::size_t(i)].m_Kind), int(A.m_Fired[std::size_t(i)].m_Bone), A.m_Fired[std::size_t(i)].m_NameHash);
-            std::fprintf(&F, "],\"b\":[");
+            std::fprintf(&F, "]");
+            if (auto SI = m_AnimSkeleton.find(&Skel); SI != m_AnimSkeleton.end() && SI->second.m_LookAt.valid() && int(m_PoseWorlds.size()) > SI->second.m_LookAt.m_Head)
+            {   // (the head's forward, world: where it looks - the look-at's result; the bones' positions alone do not show a head's turn)
+                const auto& C = SI->second.m_LookAt;
+                const auto H = (L2W.ExtractRotation().NormalizeSafeCopy() * (m_PoseWorlds[std::size_t(C.m_Head)].ExtractRotation().NormalizeSafeCopy() * C.m_HeadRestInv)) * C.m_Forward;
+                std::fprintf(&F, ",\"look\":[%.4f,%.4f,%.4f]", H.m_X, H.m_Y, H.m_Z);
+            }
+            std::fprintf(&F, ",\"b\":[");
             for (std::size_t i = 0; i < m_PoseWorlds.size(); ++i) { const auto W = L2W * m_PoseWorlds[i].ExtractPosition(); std::fprintf(&F, i ? ",%.4f,%.4f,%.4f" : "%.4f,%.4f,%.4f", W.m_X, W.m_Y, W.m_Z); }
             std::fprintf(&F, "]}\n");
             if ((++m_Trace.m_Lines & 63) == 0) std::fflush(&F);
@@ -629,6 +650,8 @@ namespace xlionrender
             xanimation::inertializer                m_In;
             xanimation::foot_lock_state             m_Lock;         // (FootLock: the feet's pins)
             std::chrono::steady_clock::time_point   m_LockT{};
+            xanimation::look_at_state               m_Look;         // (LookAt: the aim's eased angles and weight)
+            std::chrono::steady_clock::time_point   m_LookT{};
         };
         std::unordered_map<std::uint64_t, anim_track>   m_Tracks;
 

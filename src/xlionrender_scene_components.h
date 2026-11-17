@@ -510,7 +510,9 @@ namespace xlionrender
         std::uint8_t        m_nPushed = 0;
         float               m_MatchSinceJump = 1e9f;    // (matching: seconds since the last jump)
         bool                m_bFootLock = false;    // a foot that is down and nearly still stays where it landed until it lifts (no slide from warps, blends, matching jumps)
-        bool                m_bFootIK   = false;    // K3: the feet stand on the physics ground under them (a ray down at each foot); off by default: existing levels keep the clip's flat floor
+        bool                m_bFootIK   = false;
+        xmath::fvec3        m_LookAt    {0, 0, 0};  // K3: a world point the head turns toward (spine, neck, head share it; limits 70 deg either side, 35 up, 45 down)
+        float               m_LookAtWeight = 0;     //   0: off (eases out), 1: full    // K3: the feet stand on the physics ground under them (a ray down at each foot); off by default: existing levels keep the clip's flat floor
         std::array<animation_ground, 4> m_Ground{}; // (this frame's casts, per leg, smoothed; not saved)
         std::uint8_t        m_nGround   = 0;
         std::uint32_t       m_nEvents   = 0;        // the clip's events fired so far while the game runs (T5; not saved)
@@ -551,6 +553,8 @@ namespace xlionrender
         , obj_member<"PushOnContact", &animation::m_bPushOnContact, member_help<"While the game runs, when a Contact event of the clip fires, the event's bone pushes the dynamic physics bodies it touches with its own speed (x1.1, an instep kick's transfer): a kick moves the ball, a shove a crate">>
         , obj_member<"ResetPushed", &animation::m_bResetPushed, member_help<"With PushOnContact and a looping clip: what it pushed goes back where it was each time the clip starts again (a kick drill, a demo)">>
         , obj_member<"FootLock",  &animation::m_bFootLock, member_help<"While the game runs a foot that is down and nearly still stays exactly where it landed until it lifts (what is left of a clip's skate, a warp or a matching jump does not slide it)">>
+        , obj_member<"LookAt",    &animation::m_LookAt, member_help<"A world point the head turns toward while LookAtWeight is above 0: the spine, neck and head share the turn, held within 70 deg either side of the body (35 up, 45 down), eased in and out">>
+        , obj_member<"LookAtWeight", &animation::m_LookAtWeight, member_help<"How much the head turns toward LookAt: 0 off (eases back to the clip's own head), 1 full">>
         , obj_member<"FootIK",    &animation::m_bFootIK, member_help<"While the game runs the feet stand on the physics ground under them (stairs, slopes, kerbs): a ray down at each foot, each foot up or down by its ground, the hips follow the lowest, planted feet tilt to the slope. Off: the clip's flat floor">>
         , obj_member<"EventsFired", &animation::m_nEvents, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"How many of the clip's events (markers, footsteps, contacts) fired while the game ran">>
         )
