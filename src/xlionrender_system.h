@@ -229,11 +229,13 @@ namespace xlionrender
             // stride and orientation warping (K2): the game asks a velocity (Move), the clip walks at its own; the clip's time runs at the Rate,
             // its root motion turns by the Angle and stretches by the Stride, and the renderer warps the pose the same way (the feet stay planted)
             xanimation::warp_params Wp;
+            xmath::fvec3 ClipDir(0, 0, 0);                      // (the clip's travel, unit, before the turn: the eased turn is applied to it below)
             if (pT && (A.m_bRootMotion || A.m_bFollowParent) && A.m_Speed > 0 && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE && (A.m_Move.m_X != 0 || A.m_Move.m_Z != 0))
             {
                 auto CV = (A.m_bMatching ? xanimation::ClipVelocityAt(*pPkg, A.m_Clip, Before) : xanimation::ClipVelocity(*pPkg, A.m_Clip)) * (A.m_Speed * pT->m_Scale.m_X);      // (matching: around the frame playing - starts and stops do not walk evenly)      // ponytail: a uniform scale (X) for the clip's world speed
                 if (pSD) { const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip); CV = CV - N * (2.0f * CV.Dot(N)); }
                 Wp = xanimation::WarpFor(CV, A.m_Move);
+                if (const float L = CV.Length(); L > 1e-4f) ClipDir = CV * (1.0f / L);
                 A.m_Time = Before + pGame->m_Time.m_DeltaTime * A.m_Speed * Wp.m_Rate;
             }
             // (eased, not snapped: a matching jump changes the clip's travel and with it the angle - up to 90 deg in a frame swung the legs:
@@ -243,6 +245,9 @@ namespace xlionrender
                 float d = Wp.m_Angle - A.m_WarpAngleEased; while (d > 3.14159265f) d -= 6.2831853f; while (d < -3.14159265f) d += 6.2831853f;
                 A.m_WarpAngleEased += d * K; A.m_WarpStrideEased += (Wp.m_Stride - A.m_WarpStrideEased) * K; A.m_bWarpEased = true;
                 Wp.m_Angle = A.m_WarpAngleEased; Wp.m_Stride = A.m_WarpStrideEased;
+                // (the stride's direction turned by the EASED angle, as the legs and the root motion are: from the target angle, during every turn
+                // the feet were stretched along one direction while they travelled along another - SoccerAnim's feet slid 250 cm/s at warp 15-75 deg)
+                if (ClipDir.LengthSq() > 0) Wp.m_Dir = xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Wp.m_Angle) * ClipDir;
                 A.m_WarpStride = Wp.m_Stride; A.m_WarpAngle = Wp.m_Angle; A.m_WarpDir = Wp.m_Dir;
             }
             FireEvents(*pPkg, A, Before, Length, pSD ? &pSD->m_Mirror : nullptr);
