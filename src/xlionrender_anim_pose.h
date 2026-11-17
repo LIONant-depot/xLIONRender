@@ -85,7 +85,10 @@ namespace xlionrender
                 const auto Now = std::chrono::steady_clock::now();
                 const float Dt = Tr.m_LockT.time_since_epoch().count() ? Elapsed(Tr.m_LockT, Now) : 0.0f;
                 Tr.m_LockT = Now;
-                xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock);
+                // (through a transition's blend a planted foot is held farther: the blend moves the pose's foot between two clips while the body
+                // goes on, and at the usual 25 cm the lock let go mid-blend - SoccerAnim's feet slid ~125 cm/s around matching jumps)
+                xanimation::foot_lock_params LockPm; if (Tr.m_In.m_bActive) LockPm.m_MaxPull = 0.6f;
+                xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock, LockPm);
             }
             if (bClip && pL2W && S.m_LookAt.valid())  // look-at: after the feet (the chain is above the hips), toward a world point in the entity's frame
             {
