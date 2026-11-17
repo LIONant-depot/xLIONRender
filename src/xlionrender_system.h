@@ -269,6 +269,13 @@ namespace xlionrender
                 auto WD = pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
                 if (A.m_bRootToVelocity)                     // (G0 (b): the game moves its body with it; the entity itself stays where its parent puts it)
                     A.m_RootVelocity = pGame->m_Time.m_DeltaTime > 0 ? WD * (1.0f / pGame->m_Time.m_DeltaTime) : xmath::fvec3(0, 0, 0);
+                    {   // (inertialized as the pose is: at a matching jump the new clip's velocity would move the body at once while the drawn
+                        // pose still blends from the old clip, and the planted foot dragged - SoccerAnim: 141 cm/s near jumps, 7 away from them)
+                        const float Dt = pGame->m_Time.m_DeltaTime, Half = std::max(1e-3f, A.m_BlendTime * 0.25f);
+                        if (A.m_MatchJumps != A.m_RootVelJumps) { A.m_RootVelOffset = A.m_RootVelLast - A.m_RootVelocity; A.m_RootVelJumps = A.m_MatchJumps; }
+                        else A.m_RootVelOffset = A.m_RootVelOffset * std::exp(-0.69314718f * Dt / Half);
+                        A.m_RootVelocity = A.m_RootVelocity + A.m_RootVelOffset; A.m_RootVelLast = A.m_RootVelocity;
+                    }
                 if (A.m_bRootToVelocity && pLoco) pLoco->m_FeetVelocity = A.m_RootVelocity;
                 else
                 {
