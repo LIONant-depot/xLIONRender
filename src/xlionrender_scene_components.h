@@ -595,6 +595,8 @@ namespace xlionrender
         xmath::fvec3                    m_HitPoint    = {};         //  takes it once (the same id again is the same event) and returns to its Animation when settled
         xmath::fvec3                    m_HitImpulse  = {};
         float                           m_ReturnBelow = 15.0f;      // deg: settled when its joints are this close to the Animation (for 0.3 s)
+        float                           m_ReactSpeed  = 0.0f;       // m/s: a solid hit on this entity or its parent (ContactEvents on) this fast becomes a Hit (0: off)
+        float                           m_ImpactGain  = 15.0f;      // N s per m/s of approach speed: the Hit's impulse (ponytail: not from the masses yet)
         std::uint64_t                   m_LastHitId   = 0;          // (runtime)
         bool                            m_bReaction   = false;      // (runtime: active because of a hit; it returns)
 
@@ -610,6 +612,8 @@ namespace xlionrender
             , obj_member<"Point",   &ragdoll::m_HitPoint>
             , obj_member<"Impulse", &ragdoll::m_HitImpulse>
             , obj_member<"ReturnBelow", &ragdoll::m_ReturnBelow, member_help<"Degrees: back to the Animation once every joint is this close to it on average for 0.3 s (2 s at most)">>
+            , obj_member<"ReactSpeed", &ragdoll::m_ReactSpeed, member_help<"m/s: a solid hit on this entity or its parent (a player's capsule; its collider needs ContactEvents) at least this fast becomes a Hit by itself (a tackle, a ball in the face). 0: off">>
+            , obj_member<"ImpactGain", &ragdoll::m_ImpactGain, member_help<"N s of impulse per m/s of the hit's approach speed">>
             >
         , obj_member<"Reacting", +[](ragdoll& O, bool bRead, bool& V) { if (bRead) V = O.m_bReaction; }, member_flags<flags::SHOW_READONLY>>
         )

@@ -587,12 +587,35 @@ namespace xlionrender
         std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
         std::unordered_map<std::uint64_t, entity_state>             m_State;
         xanimation::pose                                            m_P0, m_P1;
+        std::vector<xlioncore::physics::impact>                     m_Impacts;      // this frame's solid hits (TakeImpacts, read once per update)
+
+        void OnPreUpdate(void) noexcept
+        {
+            m_Impacts.resize(256);
+            const int n = xlioncore::physics::TakeImpacts(getGameMgr(), m_Impacts.data(), int(m_Impacts.size()));
+            m_Impacts.resize(std::size_t(std::min(n, 256)));
+        }
 
         void operator()( const xecs::component::entity& Ent, ragdoll& R, const skinned_mesh& Skin, const animation* pAnim, xlioncore::transform& T, const xecs::component::parent* pParent ) noexcept
         {
             auto& GameMgr = getGameMgr();
             const auto* pGame = xlioncore::game::From(GameMgr);
             if (pGame == nullptr) return;
+            // R3b' (G0 stage 2): a solid hit on this entity or on its parent (a player's capsule) becomes this character's Hit: one event per side
+            // of each impact (the impact's id, A or B), pushed away from the other along the contact normal
+            if (R.m_ReactSpeed > 0 && R.m_HitEventId == R.m_LastHitId)
+                for (const auto& I : m_Impacts)
+                {
+                    if (I.m_Speed < R.m_ReactSpeed) continue;
+                    const std::uint64_t Me = Ent.m_Value, Up = pParent ? pParent->m_Value.m_Value : 0;
+                    const int Side = (I.m_A == Me || (Up && I.m_A == Up)) ? 0 : (I.m_B == Me || (Up && I.m_B == Up)) ? 1 : -1;
+                    if (Side < 0) continue;
+                    R.m_HitEventId = I.m_Id * 2 + std::uint64_t(Side); R.m_HitPoint = I.m_Point;
+                    R.m_HitImpulse = I.m_Normal * ((Side == 0 ? -1.0f : 1.0f) * R.m_ImpactGain * I.m_Speed);
+                    std::printf("[Ragdoll] entity 0x%llX: impact %llu at %.1f m/s becomes hit %llu\n", (unsigned long long)Ent.m_Value, (unsigned long long)I.m_Id, I.m_Speed, (unsigned long long)R.m_HitEventId);
+                    std::fflush(stdout);
+                    break;
+                }
             // R3b' slice 1: a new hit (a HitEventId not seen yet) promotes a tracking character to physics; it returns when settled
             const bool bHit = R.m_HitEventId != 0 && R.m_HitEventId != R.m_LastHitId;
             if (bHit && !R.m_bActive && R.m_Tracking > 0) { R.m_bActive = true; R.m_bReaction = true; }
@@ -787,6 +810,7 @@ namespace xlionrender
             std::string Note;
             R.m_pRuntime = xlioncore::physics::ActivateRagdoll(getGameMgr(), GE.m_G.m_Graph, GE.m_Rest, W0, W1, Dt, GE.m_G.m_Filter, Params, &Note);
             if (R.m_pRuntime == nullptr) return Fail("the game has no physics world");
+            if (pParent) xlioncore::physics::RagdollIgnoreEntity(getGameMgr(), *R.m_pRuntime, pParent->m_Value.m_Value);     // (its carrier's body: the same character)
 
             auto& St = m_State[Ent.m_Value]; St = {};
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
