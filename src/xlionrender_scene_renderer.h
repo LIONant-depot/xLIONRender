@@ -454,6 +454,41 @@ namespace xlionrender
         // A Skinned Mesh entity into the scene (pAnim: its Animation; null: the rest pose): its skeleton posed at the clip's time (the Animation's
         // package, else the geometry's own animations), each bone's skinning matrix (its world times its inverse bind pose, as the skin editor's
         // preview) into this frame's bone buffer, its materials as the Mesh's. Not in the GI's geometry (no surfels: it moves): a RECEIVER
+        // KUX1: the segments of the bones the Animation's fields name, in the world, from the pose just made (m_PoseWorlds): the trail's chain, the
+        // springs' and the overlay's bones (each bone to its parent, the whole branch), the aim bone's axis, the copy's link, the offset's chain
+        void SeeBones(const xskeleton::skeleton& Skel, const animation& A, const xmath::fmat4& L2W) noexcept
+        {
+            A.m_bSeeBones = false;        // (asked again by the editor each frame it wants them)
+            if (!A.m_pSeen) A.m_pSeen = std::make_shared<std::vector<animation::seen_segment>>();
+            auto& Out = *A.m_pSeen; Out.clear();
+            const auto Bones = Skel.getBones(); const int n = int(Bones.size());
+            if (n == 0 || int(m_PoseWorlds.size()) != n) return;
+            auto P = [&](int b) { return L2W * m_PoseWorlds[std::size_t(b)].ExtractPosition(); };
+            auto Find = [&](const std::string& Name) { return Name.empty() ? -1 : Skel.findBoneIndex(xstrtool::CRC32(Name)); };
+            auto Under = [&](int b, int Top) { for (; b >= 0; b = Bones[std::size_t(b)].m_iParent) if (b == Top) return true; return false; };
+            auto Branch = [&](int Top, std::uint8_t Kind) { if (Top >= 0) for (int b = 0; b < n; ++b) if (b != Top && Under(b, Top)) Out.push_back({ P(Bones[std::size_t(b)].m_iParent), P(b), Kind }); };
+            auto Chain = [&](int From, int To, std::uint8_t Kind)
+            {
+                if (From < 0 || To < 0 || !Under(To, From)) return;
+                for (int b = To; b != From; b = Bones[std::size_t(b)].m_iParent) Out.push_back({ P(Bones[std::size_t(b)].m_iParent), P(b), Kind });
+            };
+            Chain(Find(A.m_TrailFrom), Find(A.m_TrailTo), 0);
+            Branch(Find(A.m_SpringFrom), 1);
+            Branch(Find(A.m_OverlayFrom), 2);
+            if (const int b = Find(A.m_AimBone); b >= 0)
+            {
+                const auto W = L2W * m_PoseWorlds[std::size_t(b)];
+                const float Len = 0.25f * L2W.ExtractScale().m_Y;
+                Out.push_back({ P(b), P(b) + (W.ExtractRotation().NormalizeSafeCopy() * A.m_AimAxis).NormalizeSafeCopy() * Len, 3 });
+            }
+            if (const int f = Find(A.m_CopyFrom), t = Find(A.m_CopyTo); f >= 0 && t >= 0) Out.push_back({ P(f), P(t), 4 });
+            if (int b = Find(A.m_OffsetBone); b >= 0)
+                for (int k = 1; k < std::max(1, A.m_OffsetSpread) && Bones[std::size_t(b)].m_iParent >= 0; ++k, b = Bones[std::size_t(b)].m_iParent) Out.push_back({ P(Bones[std::size_t(b)].m_iParent), P(b), 5 });
+            if (const int b = Find(A.m_OffsetBone); b >= 0 && A.m_OffsetSpread <= 1) Out.push_back({ P(b), P(b), 5 });       // (one bone: a point)
+            if (Out.size() != m_SeenLast) { m_SeenLast = Out.size(); std::printf("[AnimSee] the selected character's fields name %zu bone segments%c", Out.size(), 10); std::fflush(stdout); }
+        }
+        std::size_t m_SeenLast = ~std::size_t(0);
+
         void AddSkinnedMesh(const skinned_mesh& Skin, const animation* pAnim, const xmath::fmat4& L2W, std::uint64_t Entity, const xlioncore::physics::ragdoll* pRagdoll = nullptr, float Alpha = 1.0f) noexcept
         {
             using namespace xlioncore::resources;
@@ -503,6 +538,7 @@ namespace xlionrender
                 }
             }
             if (pAnim) TraceAnimation(Entity, *pSkel, *pAnim, L2W);
+            if (pAnim && pAnim->m_bSeeBones) SeeBones(*pSkel, *pAnim, L2W);
 
             auto& E = m_Skinned[Entity];
             if (E.m_pGeom != pGeom || E.m_nBones != nBones)

@@ -536,6 +536,13 @@ namespace xlionrender
         float               m_WarpFrom    = 0, m_WarpTo = 0;    // clip seconds
         std::string         m_Stack;                  // KU3: the order its pose fix-ups run in, by name ("Overlay, Warp, ..."); empty: the built-in order
         mutable std::uint64_t m_SkeletonSeen = 0;
+        // KUX1 (the editor): the bones its fields name, as world segments the Level viewport draws over the selected character - asked by the
+        // editor (m_bSeeBones, each frame it is selected), filled by the renderer from the pose it drew. Not saved, not shown
+        struct seen_segment { xmath::fvec3 m_A, m_B; std::uint8_t m_Kind; };       // kind: 0 trail, 1 springs, 2 overlay, 3 aim, 4 copy, 5 offset
+        mutable bool m_bSeeBones = false;
+        // (on the heap behind a shared_ptr, not a std::vector in the component: components are moved as raw memory, which leaves a Debug
+        // vector's iterator proxy behind - the Level tool's range-for over one crashed - and a fixed array overflowed the component size cap)
+        mutable std::shared_ptr<std::vector<seen_segment>> m_pSeen;
         // KN3 (superset: KINEMATION's procedural recoil): a jolt too small for the ragdoll flinches the spine with the push (set by the Ragdoll system)
         std::uint32_t       m_FlinchSerial = 0;       // (runtime: a new value starts a flinch)
         xmath::fvec3        m_FlinchDir{ 0, 0, 0 };   //  the push, world, unit
