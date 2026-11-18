@@ -657,6 +657,7 @@ namespace xlionrender
             int                 m_nTrack = 0;
             float               m_TrackMax = 0;
             float               m_Age = 0, m_HitAt = 0, m_Settled = 0, m_LastE = 1e9f, m_MinE = 1e9f, m_MinAt = 0;
+            std::vector<xmath::fquat> m_BodyQ;  float m_Spin = 0;      // C91: every body's last rotation; the fastest body's turn rate this frame (deg/s)
             float               m_Supported = 0;            // the assistance ledger: seconds its root was held (kinematic, supported tracking)
             bool                m_bForced = false;          //  and a return forced by the time limit    // R3b': time since activation, of the last hit, settled for; the last tracking error
             const xanimation::body_graph* m_pGraph = nullptr;       // (the graph it was activated with: m_Graphs keeps it)
@@ -1024,7 +1025,26 @@ namespace xlionrender
                         // the hit (a running clip never gets under ReturnBelow: its tracking floor is higher)
                         const bool bPlateau = St.m_MinE < 1e8f && St.m_Age - St.m_MinAt > 0.3f && St.m_LastE < 1.25f * St.m_MinE;     // (a measured error first)
                         St.m_Settled = St.m_LastE < R.m_ReturnBelow ? St.m_Settled + pGame->m_Time.m_DeltaTime : bPlateau ? 0.3f : 0.0f;
-                        if (St.m_Settled >= 0.3f || St.m_Age - St.m_HitAt > 2.0f)
+                        // C91: settled also means calm. The pose test alone handed over on a plateau while a limb still whipped through it
+                        // (551-1784 deg/s carried into the animation); real limbs in push recovery turn under 422 deg/s for 95 % of people
+                        // (1260 DeCIMo trials, tools/mocap_limb_spin.py) - the hand-over waits for every body to be that calm (the 2 s
+                        // limit still ends it)
+                        St.m_Spin = 0;
+                        if (St.m_pGraph)
+                        {
+                            const std::size_t nb = St.m_pGraph->m_Bodies.size();
+                            const bool bPrev = St.m_BodyQ.size() == nb && pGame->m_Time.m_DeltaTime > 0;
+                            St.m_BodyQ.resize(nb);
+                            for (std::size_t i = 0; i < nb; ++i)
+                            {
+                                xanimation::rigid F;
+                                if (!xlioncore::physics::RagdollBodyFrame(*R.m_pRuntime, int(i), F)) continue;
+                                if (bPrev) St.m_Spin = std::max(St.m_Spin, 2 * std::acos(std::min(1.0f, std::abs(F.m_Q.Dot(St.m_BodyQ[i])))) * 57.29578f / pGame->m_Time.m_DeltaTime);
+                                St.m_BodyQ[i] = F.m_Q;
+                            }
+                        }
+                        constexpr float CalmDeg = 422.0f;
+                        if ((St.m_Settled >= 0.3f && St.m_Spin < CalmDeg) || St.m_Age - St.m_HitAt > 2.0f)
                         {
                             float Pop = 0;
                             if (St.m_pGraph)
@@ -1153,7 +1173,25 @@ namespace xlionrender
             xanimation::pose Cur = m_P1, Prev = m_P1;       // (the scales: the animation's)
             if (Cur.count() != int(n)) return;
             xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 1.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, Es, Cur);
+            const std::vector<xanimation::rigid> W1 = W;
             xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 0.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, Es, Prev);
+            {   // C91: the fastest-turning bones over the last physics step - world rate, local rate (what the hand-over carries), the parent's world rate
+                const float Inv = 57.29578f / std::max( pGame->m_Time.m_FixedDeltaTime, 1e-4f );
+                auto Ang = []( const xmath::fquat& A, const xmath::fquat& B ) { return 2 * std::acos( std::min( 1.0f, std::abs( A.Dot( B ) ) ) ); };
+                int Top[3] = { -1, -1, -1 }; float TopL[3] = { 0, 0, 0 };
+                for( int b = 0; b < int( n ); ++b )
+                {
+                    const float l = Ang( Cur.m_Rotation[b], Prev.m_Rotation[b] );
+                    for( int k = 0; k < 3; ++k ) if( l > TopL[k] ) { for( int q = 2; q > k; --q ) { TopL[q] = TopL[q - 1]; Top[q] = Top[q - 1]; } TopL[k] = l; Top[k] = b; break; }
+                }
+                for( int k = 0; k < 3 && Top[k] >= 0; ++k )
+                {
+                    const int b = Top[k], p = S.m_Parent[std::size_t( b )];
+                    std::printf( "[HandOverSpin] entity 0x%llX: bone %d (parent %d): local %.0f deg/s, world %.0f deg/s, parent world %.0f deg/s%c", (unsigned long long)Ent.m_Value, b, p,
+                                 TopL[k] * Inv, Ang( W1[std::size_t( b )].m_Q, W[std::size_t( b )].m_Q ) * Inv, p >= 0 ? Ang( W1[std::size_t( p )].m_Q, W[std::size_t( p )].m_Q ) * Inv : 0.0f, 10 );
+                }
+                std::fflush( stdout );
+            }
             pAnimSys->m_Poser.HandOver(Ent.m_Value, pSkel, Cur, Prev, pGame->m_Time.m_FixedDeltaTime, 0.3f);
         }
 
