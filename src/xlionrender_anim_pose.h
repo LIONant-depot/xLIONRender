@@ -22,8 +22,14 @@
 
 namespace xlionrender
 {
+    // KU3: the fix-up stages of a character's pose, and the built-in order they run in (each rule of it was a measured bug when broken:
+    // warping before the feet, the feet before the upper body, lean before the aim, stabilize after it, offset before copy, springs last)
+    enum class fixup : std::uint8_t { OVERLAY, WARP, GROUND, FOOT_LOCK, LEAN, AIM, STABILIZE, BONE_OPS, SPRINGS };
+    inline constexpr std::array<fixup, 9> builtin_stack_v{ fixup::OVERLAY, fixup::WARP, fixup::GROUND, fixup::FOOT_LOCK, fixup::LEAN, fixup::AIM, fixup::STABILIZE, fixup::BONE_OPS, fixup::SPRINGS };
+
     struct anim_poser
     {
+        std::vector<fixup>                              m_Stack;                        // KU3: the order the fix-ups run in (empty: builtin_stack_v)
         xanimation::pose                                m_AnimPose;                     // (scratch: the library's local pose of the character being added)
         xanimation::pose                                m_AnimScratch;                  // (scratch: the unmirrored sample of a mirrored clip)
         const xanimation::pose*                         m_pAnimUsed = nullptr;          // (the pose PoseWithLibrary posed: m_AnimPose or the rest)
@@ -84,83 +90,107 @@ namespace xlionrender
             if (Entity == 0) { xanimation::ComputeBoneWorlds(S.view(), bClip ? m_AnimPose : S.m_Rest, Out); m_pAnimUsed = bClip ? &m_AnimPose : &S.m_Rest; return; }
             if (!bClip) m_AnimPose = S.m_Rest;
             Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0) + std::uint64_t(Jumps) * 0x9E3779B97F4A7C15ull) : 1, &Skel, BlendTime, m_AnimPose);
-            if (bClip && m_pOverlayAnim) ApplyOverlaySlot(Skel, S, *pPkg, Entity, *m_pOverlayAnim);     // (S1: after the blend, before the fix-ups: warping and the feet see the overlaid pose)
+            // KU3 step 1 (areas/animation/plans/fixup_stack_as_data.md): the fix-ups run from an ordered stack - the built-in one is exactly the order
+            // they always ran in (equivalence first); a recipe resource will give another order and several instances (step 2)
+            for (const fixup F : m_Stack.empty() ? std::span<const fixup>(builtin_stack_v) : std::span<const fixup>(m_Stack))
+            {
+                switch (F)
+                {
+                case fixup::OVERLAY:
+                            if (bClip && m_pOverlayAnim) ApplyOverlaySlot(Skel, S, *pPkg, Entity, *m_pOverlayAnim);     // (S1: after the blend, before the fix-ups: warping and the feet see the overlaid pose)
+                    break;
+                case fixup::WARP:
+                            if (bClip && pWarp && pWarp->active()) xanimation::WarpPose(S.view(), S.m_Warp, m_AnimPose, *pWarp);     // (after the blend: the blend's poses stay the clip's own)
+                    break;
+                case fixup::GROUND:
+                            if (bClip && Ground.size() == S.m_Warp.m_Legs.size() && !Ground.empty()) xanimation::FitGround(S.view(), S.m_Warp, m_AnimPose, Ground, S.m_FootHeights);
+                    break;
+                case fixup::FOOT_LOCK:
+                            if (bClip && pLockL2W)                     // foot locking: last, on the pose as drawn (per entity: its pins and when it was last drawn)
+                            {
+                                auto& Tr = m_Tracks[Entity];
+                                const auto Now = std::chrono::steady_clock::now();
+                                const float Dt = Tr.m_LockT.time_since_epoch().count() ? Elapsed(Tr.m_LockT, Now) : 0.0f;
+                                Tr.m_LockT = Now;
+                                // (through a transition's blend a planted foot is held farther: the blend moves the pose's foot between two clips while the body
+                                // goes on, and at the usual 25 cm the lock let go mid-blend - SoccerAnim's feet slid ~125 cm/s around matching jumps)
+                                xanimation::foot_lock_params LockPm; if (Tr.m_In.m_bActive) LockPm.m_MaxPull = 0.6f;
+                                if (m_pSpringAnim && m_pSpringAnim->m_bFootSteps) LockPm.m_StepAt = 0.12f;      // (KS5: model units; Lilly's metres)
+                                // (the clip's own Footstep/Contact events say which feet are down: a foot locks when it lands, however fast the body goes - by
+                                // world speed alone a foot that landed while the body moved never locked; clips without such events keep the speed test)
+                                std::array<std::uint8_t, 8> Down{}; std::size_t nDown = 0;
+                                // (a paused clip is a standing pose: its events say nothing about which feet are down now - the speed test decides; KS5's turn on
+                                // the spot found it: paused on a frame between steps, no foot ever locked)
+                                if (!bMirror && (m_pSpringAnim == nullptr || m_pSpringAnim->m_bPlaying))
+                                {
+                                    const auto Ev = pPkg->getClipEvents(iClip);
+                                    bool bAny = false;
+                                    for (const auto& E : Ev) bAny |= E.m_Kind == xanim_package::event_kind::FOOTSTEP || E.m_Kind == xanim_package::event_kind::CONTACT;
+                                    if (bAny) for (; nDown < S.m_Warp.m_Legs.size() && nDown < Down.size(); ++nDown)
+                                        for (const auto& E : Ev)
+                                            if (E.m_iBone == S.m_Warp.m_Legs[nDown].m_Foot && (E.m_Kind == xanim_package::event_kind::FOOTSTEP || E.m_Kind == xanim_package::event_kind::CONTACT)
+                                                && Time >= E.m_Time && Time <= E.m_Time + E.m_Duration) Down[nDown] = 1;
+                                }
+                                const int nStepsBefore = Tr.m_Lock.m_nSteps;
+                                xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock, LockPm
+                                                    , std::span<const std::uint8_t>(Down.data(), nDown));
+                                if (Tr.m_Lock.m_nSteps != nStepsBefore) { std::printf("[AnimSteps] entity %llu: step %d%c", (unsigned long long)Entity, Tr.m_Lock.m_nSteps, 10); std::fflush(stdout); }
+                            }
+                    break;
+                case fixup::LEAN:
+                            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_LeanAmount > 0) ApplyLeanTo(Skel, S, Entity, *m_pSpringAnim, *pL2W);
+                    break;
+                case fixup::AIM:
+                            if (bClip && pL2W && S.m_LookAt.valid())  // look-at: after the feet (the chain is above the hips), toward a world point in the entity's frame
+                            {
+                                auto& Tr = m_Tracks[Entity];
+                                if (LookAtWeight > 0 || Tr.m_Look.m_W > 0)
+                                {
+                                    const auto Now = std::chrono::steady_clock::now();
+                                    const float Dt = Tr.m_LookT.time_since_epoch().count() ? Elapsed(Tr.m_LookT, Now) : 0.0f;
+                                    Tr.m_LookT = Now;
+                                    const auto Inv = pL2W->InverseSRT();
+                                    // S2: onto another bone (the spine turns it) and/or from angles; the head's chain otherwise
+                                    const auto* pChain = &S.m_LookAt;
+                                    if (m_pSpringAnim && !m_pSpringAnim->m_AimBone.empty())
+                                    {
+                                        if (Tr.m_AimBone != m_pSpringAnim->m_AimBone || (Tr.m_AimAxis - m_pSpringAnim->m_AimAxis).LengthSq() > 0)
+                                        {
+                                            Tr.m_AimBone = m_pSpringAnim->m_AimBone; Tr.m_AimAxis = m_pSpringAnim->m_AimAxis;
+                                            const auto Ro = Skel.getRoles();
+                                            Tr.m_AimChain = xanimation::FindAimChain(S.view(), Ro, S.m_LookAt, S.m_Rest, Skel.findBoneIndex(xstrtool::CRC32(Tr.m_AimBone)), Tr.m_AimAxis);
+                                            std::printf("[AnimAim] entity %llu: aiming %s (axis %.2f %.2f %.2f) with %zu spine bones%s%c", (unsigned long long)Entity, Tr.m_AimBone.c_str(), Tr.m_AimAxis.m_X, Tr.m_AimAxis.m_Y, Tr.m_AimAxis.m_Z
+                                                , Tr.m_AimChain.m_Bones.size(), Tr.m_AimChain.valid() ? "" : ": NO such bone or no spine - the head aims instead", 10);
+                                            std::fflush(stdout);
+                                        }
+                                        if (Tr.m_AimChain.valid()) pChain = &Tr.m_AimChain;
+                                    }
+                                    if (m_pSpringAnim && m_pSpringAnim->m_bLookAngles)
+                                        xanimation::LookAtAngles(S.view(), *pChain, m_AnimPose, m_pSpringAnim->m_LookYaw * 0.017453293f, m_pSpringAnim->m_LookPitch * 0.017453293f, LookAtWeight, Dt, Tr.m_Look);
+                                    else
+                                        xanimation::LookAt(S.view(), *pChain, m_AnimPose, Inv * LookAt, LookAtWeight, Dt, Tr.m_Look);
+                                    if (pChain != &S.m_LookAt && !m_pSpringAnim->m_bLookAngles)      // (S2's measure: how far the aimed axis is from the target, every 120 frames)
+                                    {
+                                        xanimation::details::rigid_worlds Wa; xanimation::details::Worlds(S.view(), m_AnimPose, Wa);
+                                        const auto Ax = (Wa.m_R[std::size_t(pChain->m_Head)] * Tr.m_AimAxis).NormalizeSafeCopy(), To = (Inv * LookAt - Wa.m_P[std::size_t(pChain->m_Head)]).NormalizeSafeCopy();
+                                        Tr.m_AimErr = std::max(Tr.m_AimErr, std::acos(std::clamp(Ax.Dot(To), -1.0f, 1.0f)) * 57.29578f);
+                                        if (++Tr.m_AimN % 120 == 0) { std::printf("[AnimAim] entity %llu: %s points %.1f deg from the target at most over 120 frames%c", (unsigned long long)Entity, Tr.m_AimBone.c_str(), Tr.m_AimErr, 10); std::fflush(stdout); Tr.m_AimErr = 0; }
+                                    }
+                                }
+                            }
+                    break;
+                case fixup::STABILIZE:
+                            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_StabilizeWeight > 0 && S.m_LookAt.valid()) ApplyStabilize(S, Entity, *m_pSpringAnim, *pL2W);     // (KN4: after the aim: it eases what the look-at made)
+                    break;
+                case fixup::BONE_OPS:
+                            if (m_pSpringAnim && (!m_pSpringAnim->m_OffsetBone.empty() || !m_pSpringAnim->m_CopyTo.empty())) ApplyBoneOps(Skel, S, Entity, *m_pSpringAnim);
+                    break;
+                case fixup::SPRINGS:
+                            if (m_pSpringAnim && pL2W && !m_pSpringAnim->m_SpringFrom.empty()) ApplySprings(Skel, S, Entity, *m_pSpringAnim, *pL2W);
+                    break;
+                }
+            }
             m_pOverlayAnim = nullptr;
-            if (bClip && pWarp && pWarp->active()) xanimation::WarpPose(S.view(), S.m_Warp, m_AnimPose, *pWarp);     // (after the blend: the blend's poses stay the clip's own)
-            if (bClip && Ground.size() == S.m_Warp.m_Legs.size() && !Ground.empty()) xanimation::FitGround(S.view(), S.m_Warp, m_AnimPose, Ground, S.m_FootHeights);
-            if (bClip && pLockL2W)                     // foot locking: last, on the pose as drawn (per entity: its pins and when it was last drawn)
-            {
-                auto& Tr = m_Tracks[Entity];
-                const auto Now = std::chrono::steady_clock::now();
-                const float Dt = Tr.m_LockT.time_since_epoch().count() ? Elapsed(Tr.m_LockT, Now) : 0.0f;
-                Tr.m_LockT = Now;
-                // (through a transition's blend a planted foot is held farther: the blend moves the pose's foot between two clips while the body
-                // goes on, and at the usual 25 cm the lock let go mid-blend - SoccerAnim's feet slid ~125 cm/s around matching jumps)
-                xanimation::foot_lock_params LockPm; if (Tr.m_In.m_bActive) LockPm.m_MaxPull = 0.6f;
-                if (m_pSpringAnim && m_pSpringAnim->m_bFootSteps) LockPm.m_StepAt = 0.12f;      // (KS5: model units; Lilly's metres)
-                // (the clip's own Footstep/Contact events say which feet are down: a foot locks when it lands, however fast the body goes - by
-                // world speed alone a foot that landed while the body moved never locked; clips without such events keep the speed test)
-                std::array<std::uint8_t, 8> Down{}; std::size_t nDown = 0;
-                // (a paused clip is a standing pose: its events say nothing about which feet are down now - the speed test decides; KS5's turn on
-                // the spot found it: paused on a frame between steps, no foot ever locked)
-                if (!bMirror && (m_pSpringAnim == nullptr || m_pSpringAnim->m_bPlaying))
-                {
-                    const auto Ev = pPkg->getClipEvents(iClip);
-                    bool bAny = false;
-                    for (const auto& E : Ev) bAny |= E.m_Kind == xanim_package::event_kind::FOOTSTEP || E.m_Kind == xanim_package::event_kind::CONTACT;
-                    if (bAny) for (; nDown < S.m_Warp.m_Legs.size() && nDown < Down.size(); ++nDown)
-                        for (const auto& E : Ev)
-                            if (E.m_iBone == S.m_Warp.m_Legs[nDown].m_Foot && (E.m_Kind == xanim_package::event_kind::FOOTSTEP || E.m_Kind == xanim_package::event_kind::CONTACT)
-                                && Time >= E.m_Time && Time <= E.m_Time + E.m_Duration) Down[nDown] = 1;
-                }
-                const int nStepsBefore = Tr.m_Lock.m_nSteps;
-                xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock, LockPm
-                                    , std::span<const std::uint8_t>(Down.data(), nDown));
-                if (Tr.m_Lock.m_nSteps != nStepsBefore) { std::printf("[AnimSteps] entity %llu: step %d%c", (unsigned long long)Entity, Tr.m_Lock.m_nSteps, 10); std::fflush(stdout); }
-            }
-            // N2 lean, then the aim (an aimed gun stays on target), then S3's offset (a recoil kicks the aim) and copy (the support hand follows the
-            // gun), the springs last (they swing from all of it)
-            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_LeanAmount > 0) ApplyLeanTo(Skel, S, Entity, *m_pSpringAnim, *pL2W);
-            if (bClip && pL2W && S.m_LookAt.valid())  // look-at: after the feet (the chain is above the hips), toward a world point in the entity's frame
-            {
-                auto& Tr = m_Tracks[Entity];
-                if (LookAtWeight > 0 || Tr.m_Look.m_W > 0)
-                {
-                    const auto Now = std::chrono::steady_clock::now();
-                    const float Dt = Tr.m_LookT.time_since_epoch().count() ? Elapsed(Tr.m_LookT, Now) : 0.0f;
-                    Tr.m_LookT = Now;
-                    const auto Inv = pL2W->InverseSRT();
-                    // S2: onto another bone (the spine turns it) and/or from angles; the head's chain otherwise
-                    const auto* pChain = &S.m_LookAt;
-                    if (m_pSpringAnim && !m_pSpringAnim->m_AimBone.empty())
-                    {
-                        if (Tr.m_AimBone != m_pSpringAnim->m_AimBone || (Tr.m_AimAxis - m_pSpringAnim->m_AimAxis).LengthSq() > 0)
-                        {
-                            Tr.m_AimBone = m_pSpringAnim->m_AimBone; Tr.m_AimAxis = m_pSpringAnim->m_AimAxis;
-                            const auto Ro = Skel.getRoles();
-                            Tr.m_AimChain = xanimation::FindAimChain(S.view(), Ro, S.m_LookAt, S.m_Rest, Skel.findBoneIndex(xstrtool::CRC32(Tr.m_AimBone)), Tr.m_AimAxis);
-                            std::printf("[AnimAim] entity %llu: aiming %s (axis %.2f %.2f %.2f) with %zu spine bones%s%c", (unsigned long long)Entity, Tr.m_AimBone.c_str(), Tr.m_AimAxis.m_X, Tr.m_AimAxis.m_Y, Tr.m_AimAxis.m_Z
-                                , Tr.m_AimChain.m_Bones.size(), Tr.m_AimChain.valid() ? "" : ": NO such bone or no spine - the head aims instead", 10);
-                            std::fflush(stdout);
-                        }
-                        if (Tr.m_AimChain.valid()) pChain = &Tr.m_AimChain;
-                    }
-                    if (m_pSpringAnim && m_pSpringAnim->m_bLookAngles)
-                        xanimation::LookAtAngles(S.view(), *pChain, m_AnimPose, m_pSpringAnim->m_LookYaw * 0.017453293f, m_pSpringAnim->m_LookPitch * 0.017453293f, LookAtWeight, Dt, Tr.m_Look);
-                    else
-                        xanimation::LookAt(S.view(), *pChain, m_AnimPose, Inv * LookAt, LookAtWeight, Dt, Tr.m_Look);
-                    if (pChain != &S.m_LookAt && !m_pSpringAnim->m_bLookAngles)      // (S2's measure: how far the aimed axis is from the target, every 120 frames)
-                    {
-                        xanimation::details::rigid_worlds Wa; xanimation::details::Worlds(S.view(), m_AnimPose, Wa);
-                        const auto Ax = (Wa.m_R[std::size_t(pChain->m_Head)] * Tr.m_AimAxis).NormalizeSafeCopy(), To = (Inv * LookAt - Wa.m_P[std::size_t(pChain->m_Head)]).NormalizeSafeCopy();
-                        Tr.m_AimErr = std::max(Tr.m_AimErr, std::acos(std::clamp(Ax.Dot(To), -1.0f, 1.0f)) * 57.29578f);
-                        if (++Tr.m_AimN % 120 == 0) { std::printf("[AnimAim] entity %llu: %s points %.1f deg from the target at most over 120 frames%c", (unsigned long long)Entity, Tr.m_AimBone.c_str(), Tr.m_AimErr, 10); std::fflush(stdout); Tr.m_AimErr = 0; }
-                    }
-                }
-            }
-            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_StabilizeWeight > 0 && S.m_LookAt.valid()) ApplyStabilize(S, Entity, *m_pSpringAnim, *pL2W);     // (KN4: after the aim: it eases what the look-at made)
-            if (m_pSpringAnim && (!m_pSpringAnim->m_OffsetBone.empty() || !m_pSpringAnim->m_CopyTo.empty())) ApplyBoneOps(Skel, S, Entity, *m_pSpringAnim);
-            if (m_pSpringAnim && pL2W && !m_pSpringAnim->m_SpringFrom.empty()) ApplySprings(Skel, S, Entity, *m_pSpringAnim, *pL2W);
             m_pSpringAnim = nullptr;
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
         }
