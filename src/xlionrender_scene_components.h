@@ -565,6 +565,8 @@ namespace xlionrender
         xmath::fvec3        m_OffsetPosition{ 0, 0, 0 };
         float               m_OffsetWeight = 1.0f;
         bool                m_bOffsetModel = false;
+        // KU2 (superset: Unreal's Spline IK): the chain From..To follows the path From has travelled (a snake, a tail, a train of segments)
+        std::string         m_TrailFrom, m_TrailTo;               // empty: off
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
         xmath::fvec3        m_LastWorld {0, 0, 0};  // (FollowParent: the parent's world position at the last update; not saved)
         bool                m_bHasLastWorld = false;
@@ -653,6 +655,10 @@ namespace xlionrender
             , obj_member<"Position", &animation::m_OffsetPosition>
             , obj_member<"Weight", &animation::m_OffsetWeight>
             , obj_member<"Model", &animation::m_bOffsetModel, member_help<"On: in the character's frame (turned about the bone's own position). Off: in the bone's own frame">>
+            >
+        , obj_scope<"Trail"
+            , obj_member<"From", &animation::m_TrailFrom, member_help<"The chain's first bone (a snake's neck, a tail's root): the rest follows the path it has travelled. Empty: off">>
+            , obj_member<"To", &animation::m_TrailTo, member_help<"The chain's last bone (the tail's tip); From must be one of its parents">>
             >
         , obj_scope<"Stabilize"
             , obj_member<"Weight", &animation::m_StabilizeWeight, member_help<"The head keeps its gaze steady while the body bobs and sways (walking, running): its turn in the world follows an eased copy of itself. 1: fully, 0: off">>

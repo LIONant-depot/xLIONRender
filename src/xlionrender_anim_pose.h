@@ -12,6 +12,7 @@
 #include "dependencies/xAnimation/source/motion/xanimation_reflex_pose.h"
 #include "dependencies/xAnimation/source/motion/xanimation_bone_ops.h"
 #include "dependencies/xAnimation/source/motion/xanimation_stabilize.h"
+#include "dependencies/xAnimation/source/ik/xanimation_spline_ik.h"
 #include "dependencies/xstrtool/source/xstrtool.h"       // (the overlay's FromBone by name)
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
 #include "xlionrender_scene_components.h"      // (the Animation component the pose reads)
@@ -25,9 +26,10 @@ namespace xlionrender
 {
     // KU3: the fix-up stages of a character's pose, and the built-in order they run in (each rule of it was a measured bug when broken:
     // warping before the feet, the feet before the upper body, lean before the aim, stabilize after it, offset before copy, springs last)
-    enum class fixup : std::uint8_t { OVERLAY, WARP, GROUND, FOOT_LOCK, LEAN, AIM, STABILIZE, BONE_OPS, SPRINGS };
-    inline constexpr std::array<const char*, 9> fixup_names_v{ "Overlay", "Warp", "Ground", "FootLock", "Lean", "Aim", "Stabilize", "BoneOps", "Springs" };
-    inline constexpr std::array<fixup, 9> builtin_stack_v{ fixup::OVERLAY, fixup::WARP, fixup::GROUND, fixup::FOOT_LOCK, fixup::LEAN, fixup::AIM, fixup::STABILIZE, fixup::BONE_OPS, fixup::SPRINGS };
+    enum class fixup : std::uint8_t { OVERLAY, WARP, GROUND, FOOT_LOCK, LEAN, AIM, STABILIZE, BONE_OPS, SPRINGS, TRAIL };
+    inline constexpr std::array<const char*, 10> fixup_names_v{ "Overlay", "Warp", "Ground", "FootLock", "Lean", "Aim", "Stabilize", "BoneOps", "Springs", "Trail" };
+    // (TRAIL after the feet, before the upper body: a body laid along its path, then aimed and leaned like any other)
+    inline constexpr std::array<fixup, 10> builtin_stack_v{ fixup::OVERLAY, fixup::WARP, fixup::GROUND, fixup::FOOT_LOCK, fixup::TRAIL, fixup::LEAN, fixup::AIM, fixup::STABILIZE, fixup::BONE_OPS, fixup::SPRINGS };
 
     struct anim_poser
     {
@@ -195,6 +197,9 @@ namespace xlionrender
                 case fixup::BONE_OPS:
                             if (m_pSpringAnim && (!m_pSpringAnim->m_OffsetBone.empty() || !m_pSpringAnim->m_CopyTo.empty())) ApplyBoneOps(Skel, S, Entity, *m_pSpringAnim);
                     break;
+                case fixup::TRAIL:
+                            if (m_pSpringAnim && pL2W && !m_pSpringAnim->m_TrailFrom.empty() && !m_pSpringAnim->m_TrailTo.empty()) ApplyTrail(Skel, S, Entity, *m_pSpringAnim, *pL2W);
+                    break;
                 case fixup::SPRINGS:
                             if (m_pSpringAnim && pL2W && !m_pSpringAnim->m_SpringFrom.empty()) ApplySprings(Skel, S, Entity, *m_pSpringAnim, *pL2W);
                     break;
@@ -250,8 +255,8 @@ namespace xlionrender
             {
                 if (Word.empty()) return;
                 int k = -1; for (int i = 0; i < int(fixup_names_v.size()); ++i) if (Lower(fixup_names_v[std::size_t(i)]) == Lower(Word)) k = i;
-                if (k < 0) std::printf("[AnimStack] entity %llu: '%s' is no fix-up (%s, %s, %s, %s, %s, %s, %s, %s, %s): left out%c", (unsigned long long)Entity, Word.c_str()
-                    , fixup_names_v[0], fixup_names_v[1], fixup_names_v[2], fixup_names_v[3], fixup_names_v[4], fixup_names_v[5], fixup_names_v[6], fixup_names_v[7], fixup_names_v[8], 10);
+                if (k < 0) std::printf("[AnimStack] entity %llu: '%s' is no fix-up (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s): left out%c", (unsigned long long)Entity, Word.c_str()
+                    , fixup_names_v[0], fixup_names_v[1], fixup_names_v[2], fixup_names_v[3], fixup_names_v[4], fixup_names_v[5], fixup_names_v[6], fixup_names_v[7], fixup_names_v[8], fixup_names_v[9], 10);
                 else Out.push_back(fixup(k));
                 Word.clear();
             };
@@ -264,7 +269,8 @@ namespace xlionrender
             , { fixup::FOOT_LOCK, fixup::LEAN, "the lean is undone by the feet's reach" }
             , { fixup::LEAN, fixup::AIM, "the lean turns an aimed bone off its target" }
             , { fixup::AIM, fixup::STABILIZE, "the aim moves the head after it was steadied" }
-            , { fixup::BONE_OPS, fixup::SPRINGS, "the springs swing before the copy and offset: a held bone does not follow the swing" } };
+            , { fixup::BONE_OPS, fixup::SPRINGS, "the springs swing before the copy and offset: a held bone does not follow the swing" }
+            , { fixup::TRAIL, fixup::AIM, "the trail lays the body after it was aimed: the aim is lost" } };
             auto At = [&](fixup F) { for (std::size_t i = 0; i < Out.size(); ++i) if (Out[i] == F) return int(i); return -1; };
             for (const auto& R : Rules)
                 if (const int a = At(R.m_A), b = At(R.m_B); a >= 0 && b >= 0 && a > b)
@@ -323,6 +329,54 @@ namespace xlionrender
             {
                 std::printf("[AnimCopy] entity %llu: %s from where it is kept at most %.1f cm over 120 frames (out of reach by %.1f cm)%c", (unsigned long long)Entity, Tr.m_CopyTo.c_str(), 100 * Tr.m_CopyOff, 100 * Tr.m_CopyMiss, 10);
                 std::fflush(stdout); Tr.m_CopyOff = Tr.m_CopyMiss = 0;
+            }
+        }
+
+        // KU2 (superset: Unreal's Spline IK; a snake's slither, a tail following its body; ik/xanimation_spline_ik.h): the chain From..To laid along
+        // the path From has travelled in the world (the trail starts as the pose's own joints: a still body stays as posed); [AnimTrail] says
+        // the chain once and, every 120 frames, how far the joints are from the path
+        void ApplyTrail(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A, const xmath::fmat4& L2W)
+        {
+            auto& Tr = m_Tracks[Entity];
+            if (Tr.m_TrailFrom != A.m_TrailFrom || Tr.m_TrailTo != A.m_TrailTo)
+            {
+                Tr.m_TrailFrom = A.m_TrailFrom; Tr.m_TrailTo = A.m_TrailTo; Tr.m_TrailChain.clear(); Tr.m_Trail.m_Points.clear();
+                const int F = BoneOrSay(Skel, A.m_TrailFrom, Entity, "Trail.From"), T = BoneOrSay(Skel, A.m_TrailTo, Entity, "Trail.To");
+                for (int b = T; b >= 0 && F >= 0; b = S.m_Parent[std::size_t(b)]) { Tr.m_TrailChain.insert(Tr.m_TrailChain.begin(), b); if (b == F) break; }
+                if (Tr.m_TrailChain.empty() || Tr.m_TrailChain.front() != F) Tr.m_TrailChain.clear();
+                std::printf("[AnimTrail] entity %llu: %s..%s, %zu bones%s%c", (unsigned long long)Entity, A.m_TrailFrom.c_str(), A.m_TrailTo.c_str(), Tr.m_TrailChain.size()
+                    , F >= 0 && T >= 0 && Tr.m_TrailChain.size() < 2 ? ": NO chain (From must be an ancestor of To) - off" : "", 10);
+                std::fflush(stdout);
+            }
+            if (Tr.m_TrailChain.size() < 2) return;
+            xanimation::details::rigid_worlds W; xanimation::details::Worlds(S.view(), m_AnimPose, W);
+            float Len = 0;
+            for (std::size_t i = 1; i < Tr.m_TrailChain.size(); ++i) Len += (W.m_P[std::size_t(Tr.m_TrailChain[i])] - W.m_P[std::size_t(Tr.m_TrailChain[i - 1])]).Length();
+            const float Spacing = Len / float(Tr.m_TrailChain.size() - 1) * 0.5f;
+            const auto Head = L2W * W.m_P[std::size_t(Tr.m_TrailChain.front())];
+            if (!Tr.m_Trail.m_Points.empty() && (Head - Tr.m_Trail.m_Points.front()).Length() > Len) Tr.m_Trail.m_Points.clear();     // (a teleport: the body as posed where it lands, not stretched back to where it was)
+            if (Tr.m_Trail.m_Points.empty()) for (const int b : Tr.m_TrailChain) Tr.m_Trail.m_Points.push_back(L2W * W.m_P[std::size_t(b)]);
+            xanimation::UpdateTrail(Tr.m_Trail, Head, Spacing, Len * 1.25f);
+            const auto Inv = L2W.InverseSRT();
+            std::vector<xmath::fvec3> Ctrl; xanimation::TrailControl(Tr.m_Trail, Head, Ctrl);
+            for (auto& C : Ctrl) C = Inv * C;
+            xanimation::SolveSplineIK(S.view(), Tr.m_TrailChain, m_AnimPose, Ctrl);
+            if (++Tr.m_TrailN % 120 == 0)       // the measure: the joints against the trail's polyline, in the model
+            {
+                xanimation::details::Worlds(S.view(), m_AnimPose, W);
+                float Worst = 0;
+                for (const int b : Tr.m_TrailChain)
+                {
+                    float Best = 1e9f;
+                    for (std::size_t k = 0; k + 1 < Ctrl.size(); ++k)
+                    {
+                        const auto D = Ctrl[k + 1] - Ctrl[k]; const float t = std::clamp((W.m_P[std::size_t(b)] - Ctrl[k]).Dot(D) / std::max(D.LengthSq(), 1e-12f), 0.0f, 1.0f);
+                        Best = std::min(Best, (Ctrl[k] + D * t - W.m_P[std::size_t(b)]).Length());
+                    }
+                    Worst = std::max(Worst, Best);
+                }
+                std::printf("[AnimTrail] entity %llu: joints off the path at most %.1f cm of a %.2f body (%zu trail points)%c", (unsigned long long)Entity, 100 * Worst, Len, Tr.m_Trail.m_Points.size(), 10);
+                std::fflush(stdout);
             }
         }
 
@@ -469,6 +523,7 @@ namespace xlionrender
             xanimation::rigid                       m_CopyOffset; xanimation::reflex_rig m_CopyArms;
             int                                     m_CopyN = 0; float m_CopyMiss = 0, m_CopyOff = 0;
             std::string                             m_OffsetBone; int m_iOffset = -1;
+            std::string                             m_TrailFrom, m_TrailTo; std::vector<int> m_TrailChain; xanimation::spline_trail m_Trail; int m_TrailN = 0;      // KU2
             std::string                             m_StackText; std::vector<fixup> m_Stack;       // KU3: its own order, as parsed
             xanimation::stabilize_state             m_Stab;         // KN4: the eased head; the measure (the head's turn rate before and after, squared, summed)
             xmath::fquat                            m_StabPrevIn, m_StabPrevOut; bool m_bStabPrev = false; double m_StabIn = 0, m_StabOut = 0; int m_StabN = 0;
