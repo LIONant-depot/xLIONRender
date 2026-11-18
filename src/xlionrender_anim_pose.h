@@ -552,7 +552,7 @@ namespace xlionrender
             {
                 float Jump = 0;
                 for (int i = 0; i < P.count(); ++i) Jump = std::max(Jump, 2 * std::acos(std::min(1.0f, std::abs(P.m_Rotation[i].Dot(Tr.m_Cur.m_Rotation[i])))));
-                std::printf("[AnimBlend] entity %llu: hand-over from a ragdoll, largest bone turn at the switch %.1f deg (without the blend %.1f deg)\n", (unsigned long long)Entity, Jump * 57.29578f, RawJump * 57.29578f);
+                std::printf("[AnimBlend] entity %llu: hand-over from a ragdoll, largest bone turn at the switch %.1f deg (without the blend %.1f deg; this frame %.3f s, the blend's half-life %.3f s)\n", (unsigned long long)Entity, Jump * 57.29578f, RawJump * 57.29578f, Dt, BlendTime * 0.25f);
                 std::fflush(stdout);
             }
             if (bHad) Tr.m_Prev = Tr.m_Cur; else Tr.m_Prev = P;
