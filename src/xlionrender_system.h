@@ -683,6 +683,7 @@ namespace xlionrender
             auto& GameMgr = getGameMgr();
             const auto* pGame = xlioncore::game::From(GameMgr);
             if (pGame == nullptr) return;
+            if (R.m_bGettingUp && !R.m_bActive && (pAnim == nullptr || !pAnim->m_bOneShot)) R.m_bGettingUp = false;      // (the get-up clip played out)
             // R3b' (G0 stage 2): a solid hit on this entity or on its parent (a player's capsule) becomes this character's Hit: one event per side
             // of each impact (the impact's id, A or B), pushed away from the other along the contact normal
             // The nervous system decides (plan 3.5, contract 5.7; nervous/xanimation_nervous.h): every jolt raises the character's drives (surprise,
@@ -992,7 +993,7 @@ namespace xlionrender
             std::vector<xanimation::rigid> W0, W1;
             if (AnimatedWorlds(Skin, &A, xanimation::rigid{ T.m_Position, T.m_Rotation }, St.m_Scale, 0, W0, W1)) HandOverToAnimation(Ent, R, Skin, T, nullptr, W1);
             A.m_ClipName = Name; A.m_RequestHash = 0; A.m_bOneShot = true; A.m_bPlaying = true;
-            R.m_bActive = false; R.m_bReaction = false;
+            R.m_bActive = false; R.m_bReaction = false; R.m_bGettingUp = true;
             return true;
         }
 

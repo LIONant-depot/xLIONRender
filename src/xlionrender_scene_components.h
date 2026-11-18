@@ -724,6 +724,7 @@ namespace xlionrender
         float                           m_ImpactGain  = 1.0f;       // x the momentum the collision gives the carrier (from both masses), handed to the ragdoll
         std::uint64_t                   m_LastHitId   = 0;          // (runtime)
         bool                            m_bReaction   = false;      // (runtime: active because of a hit; it returns)
+        bool                            m_bGettingUp  = false;      // (runtime: its get-up clip is playing)
         // KUX3 (R66): the nervous system's state, copied by the Ragdoll system each frame (plain numbers and static names: formatted only when read)
         float                           m_NvSurprise = 0, m_NvPain = 0, m_NvFall = 0, m_NvDrop = 0;
         const char*                     m_pNvBody  = "none";        // the whole-body reflex running (nervous reflex_names_v)
@@ -748,6 +749,16 @@ namespace xlionrender
             , obj_member<"ImpactGain", &ragdoll::m_ImpactGain, member_help<"How much of the collision's momentum reaches the body: 1 = the speed change the hit gives this side (from both masses: reduced mass x approach speed / own mass), applied to the whole ragdoll's mass">>
             >
         , obj_member<"Reacting", +[](ragdoll& O, bool bRead, bool& V) { if (bRead) V = O.m_bReaction; }, member_flags<flags::SHOW_READONLY>>
+        , obj_member<"State", +[](ragdoll& O, bool bRead, std::string& V)
+            {
+                if (!bRead) return;
+                // (falling and down from the nervous system's percepts: a tracking ragdoll's - a limp one says Physical)
+                V = !O.m_bActive ? (O.m_bGettingUp ? "Getting up" : "Animated")
+                  : O.m_Tracking > 0 && O.m_NvDrop > 0.5f && O.m_NvFall < 0.15f ? "Down"
+                  : O.m_Tracking > 0 && O.m_NvFall >= 0.3f ? "Falling"
+                  : O.m_bReaction ? "Reacting" : "Physical";
+            }, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>
+            , member_help<"While the game runs, what the body is doing, for gameplay: Animated, Reacting (a hit, it will return), Falling, Down (fallen and still), Getting up (its get-up clip), Physical (active otherwise: limp or tracking)">>
         , obj_member<"Nerves", +[](ragdoll& O, bool bRead, std::string& V) { if (bRead) V = std::format("surprise {:.2f} pain {:.2f} | body: {} | limbs: {} (falling {:.1f} m/s, hips {:.0f} % down)", O.m_NvSurprise, O.m_NvPain, O.m_pNvBody, O.m_pNvLimbs, O.m_NvFall, 100 * O.m_NvDrop); }
             , member_flags<flags::SHOW_READONLY>, member_help<"While the game runs: the nervous system now - its drives, the reflex the whole body runs (the hit reaction) and the one the limbs run (catch fall), with what the limbs perceive">>
         )
