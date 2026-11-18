@@ -526,6 +526,7 @@ namespace xlionrender
         bool                m_bOverlayLoop  = false;
         float               m_OverlayBlendIn = 0.2f, m_OverlayBlendOut = 0.2f, m_OverlaySpeed = 1.0f;
         std::uint32_t       m_OverlayPlay   = 0;      // a new value (re)starts it from its beginning
+        std::uint32_t       m_OvEventPlay = 0; float m_OvEventTime = 0; int m_OvEventClip = -1; bool m_bOvEventOn = false;     // (the overlay's events' clock; not saved)
         // S6 (KINEMATION superset): a warp window - root motion bent so the clip lands the character on a target at a time of the clip
         bool                m_bWarp       = false;
         xmath::fvec3        m_WarpTarget  {0, 0, 0};  // world

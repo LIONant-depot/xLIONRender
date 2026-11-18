@@ -150,6 +150,7 @@ namespace xlionrender
                 if (auto* pGeom = static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, pSkin->m_Geom.m_Instance.m_Value))) Pkg = pGeom->getAnimationRef().m_Instance.m_Value;
             auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
             // a request by name (K1 play): a new name switches the clip (from its start; the renderer eases it in); a one-shot remembers the way back
+            if (pPkg) OverlayEvents(*pPkg, A, pGame->m_Time.m_DeltaTime);     // (the overlay's events, playing or paused below: the overlay has its own clock)
             if (A.m_ClipName.empty()) A.m_RequestHash = 0;     // (cleared: the same name asked again is a new request)
             if (pPkg && !A.m_ClipName.empty())
                 if (const auto H = xstrtool::CRC32(A.m_ClipName); H != A.m_RequestHash)
@@ -580,13 +581,32 @@ namespace xlionrender
         // sound at the foot), counted (m_nEvents, m_LastEvent) and, with XLION_ANIM_EVENTS=1, logged ([AnimEvent]). Mirrored: the mirror bone.
         void FireEvents(const xanim_package::anim_package& Pkg, animation& A, float Before, float Length, const xanimation::mirror_table* pMirror = nullptr) noexcept
         {
-            const auto Ev = Pkg.getClipEvents(A.m_Clip);
+            FireClipEvents(Pkg, A, A.m_Clip, Before, A.m_Time, Length, A.m_bLoop, pMirror);
+        }
+        // S1's overlay (superset: Unreal's montage slot notifies): its clip's events fire as the base clip's do, on its own clock - started by a new
+        // Overlay.Play, at the overlay's speed, once per pass when it loops, until its end otherwise. ponytail: the poser keeps the overlay's blend
+        // clock and this one its events' (both on game time, started by the same Play): one shared clock if they are ever seen to drift
+        void OverlayEvents(const xanim_package::anim_package& Pkg, animation& A, float Dt) noexcept
+        {
+            if (A.m_OverlayPlay != A.m_OvEventPlay) { A.m_OvEventPlay = A.m_OverlayPlay; A.m_OvEventTime = -1e-6f; A.m_bOvEventOn = A.m_OverlayClip >= 0; A.m_OvEventClip = A.m_OverlayClip; }     // (just before 0: an event at the start fires)
+            if (!A.m_bOvEventOn || A.m_OverlayClip != A.m_OvEventClip || A.m_OverlayClip < 0 || A.m_OverlayClip >= int(Pkg.getClips().size())) { A.m_bOvEventOn = false; return; }
+            const auto& C = Pkg.getClips()[std::size_t(A.m_OverlayClip)];
+            const float Len = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 0.0f;
+            if (Len <= 0) { A.m_bOvEventOn = false; return; }
+            const float Before = A.m_OvEventTime;
+            A.m_OvEventTime += Dt * std::max(0.0f, A.m_OverlaySpeed);
+            if (!A.m_bOverlayLoop && A.m_OvEventTime >= Len) { A.m_OvEventTime = Len; A.m_bOvEventOn = false; }
+            FireClipEvents(Pkg, A, A.m_OverlayClip, Before, A.m_OvEventTime, Len, A.m_bOverlayLoop, nullptr);
+        }
+        void FireClipEvents(const xanim_package::anim_package& Pkg, animation& A, int iClip, float Before, float After, float Length, bool bLoop, const xanimation::mirror_table* pMirror) noexcept
+        {
+            const auto Ev = Pkg.getClipEvents(iClip);
             if (Ev.empty()) return;
             thread_local std::vector<xanimation::event_def> Defs; thread_local std::vector<xanimation::event_fire> Fired;
             Defs.clear(); Fired.clear();
             for (std::uint32_t i = 0; i < Ev.size(); ++i) Defs.push_back({ i, Ev[i].m_Time });
             xanimation::event_cursor C; C.Seek(Before);
-            xanimation::Advance(C, xanimation::event_track{ Defs, Length, A.m_bLoop }, A.m_Time, Fired);
+            xanimation::Advance(C, xanimation::event_track{ Defs, Length, bLoop }, After, Fired);
             static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
             for (const auto& F : Fired)
             {
@@ -594,7 +614,7 @@ namespace xlionrender
                 ++A.m_nEvents; A.m_LastEvent = E.m_NameHash;
                 const std::int16_t Bone = (pMirror && E.m_iBone >= 0 && std::size_t(E.m_iBone) < pMirror->m_Bones.size()) ? std::int16_t(pMirror->m_Bones[std::size_t(E.m_iBone)].m_Src) : E.m_iBone;
                 if (A.m_nFired < A.m_Fired.size()) A.m_Fired[A.m_nFired++] = { E.m_NameHash, std::uint8_t(E.m_Kind), Bone, E.m_Time, E.m_Duration };
-                if (bLog) std::printf("[AnimEvent] clip %d at %.3f s: kind %d name %08X bone %d%s\n", A.m_Clip, E.m_Time, int(E.m_Kind), E.m_NameHash, Bone, pMirror ? " (mirrored: the mirror bone)" : "");
+                if (bLog) std::printf("[AnimEvent] clip %d%s at %.3f s: kind %d name %08X bone %d%s\n", iClip, iClip == A.m_Clip ? "" : " (overlay)", E.m_Time, int(E.m_Kind), E.m_NameHash, Bone, pMirror ? " (mirrored: the mirror bone)" : "");
             }
         }
     };
