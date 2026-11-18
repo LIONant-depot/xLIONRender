@@ -25,6 +25,7 @@ namespace xlionrender
     // KU3: the fix-up stages of a character's pose, and the built-in order they run in (each rule of it was a measured bug when broken:
     // warping before the feet, the feet before the upper body, lean before the aim, stabilize after it, offset before copy, springs last)
     enum class fixup : std::uint8_t { OVERLAY, WARP, GROUND, FOOT_LOCK, LEAN, AIM, STABILIZE, BONE_OPS, SPRINGS };
+    inline constexpr std::array<const char*, 9> fixup_names_v{ "Overlay", "Warp", "Ground", "FootLock", "Lean", "Aim", "Stabilize", "BoneOps", "Springs" };
     inline constexpr std::array<fixup, 9> builtin_stack_v{ fixup::OVERLAY, fixup::WARP, fixup::GROUND, fixup::FOOT_LOCK, fixup::LEAN, fixup::AIM, fixup::STABILIZE, fixup::BONE_OPS, fixup::SPRINGS };
 
     struct anim_poser
@@ -63,6 +64,13 @@ namespace xlionrender
             if (bClip && pAnim->m_bFootIK) for (; nGround < pAnim->m_nGround && nGround < Ground.size(); ++nGround)
                 Ground[nGround] = { pAnim->m_Ground[nGround].m_bHit, pAnim->m_Ground[nGround].m_Height, pAnim->m_Ground[nGround].m_Normal };
             m_pOverlayAnim = bClip ? pAnim : nullptr; m_pSpringAnim = pAnim;
+            m_Stack.clear();
+            if (pAnim && !pAnim->m_Stack.empty() && Entity)       // KU3: its own order (parsed when it changes; what it breaks said once)
+            {
+                auto& Tr = m_Tracks[Entity];
+                if (Tr.m_StackText != pAnim->m_Stack) { Tr.m_StackText = pAnim->m_Stack; Tr.m_Stack = ParseStack(pAnim->m_Stack, Entity); }
+                m_Stack = Tr.m_Stack;
+            }
             PoseWithLibrary(Skel, bClip ? pPkg : nullptr, bClip ? pAnim->m_Clip : 0, bClip ? pAnim->m_Time : 0.0f, bClip && pAnim->m_bMirror, Out
                            , pAnim ? Entity : 0, pAnim ? pAnim->m_BlendTime : 0.0f, &Wp, std::span<const xanimation::ground_contact>(Ground.data(), nGround)
                            , pAnim ? pAnim->m_MatchJumps : 0u, bClip && pAnim->m_bFootLock ? &L2W : nullptr
@@ -190,7 +198,7 @@ namespace xlionrender
                     break;
                 }
             }
-            m_pOverlayAnim = nullptr;
+            m_pOverlayAnim = nullptr; m_Stack.clear();
             m_pSpringAnim = nullptr;
             xanimation::ComputeBoneWorlds(S.view(), m_AnimPose, Out); m_pAnimUsed = &m_AnimPose;
         }
@@ -228,6 +236,39 @@ namespace xlionrender
                 std::printf("[AnimSprings] entity %llu: chain of %zu bones from %s, largest swing over the last 120 frames %.1f deg%c", (unsigned long long)Entity, Tr.m_SpringChain.size() + 1, Tr.m_SpringFrom.c_str(), Tr.m_SpringMax, 10);
                 std::fflush(stdout); Tr.m_SpringMax = 0;
             }
+        }
+
+        // KU3: an order by names ("Overlay, Warp, ..." - commas or spaces, any case); an unknown name and an order that breaks a rule of
+        // builtin_stack_v are said ([AnimStack]); the order runs as given (a person may try it)
+        static std::vector<fixup> ParseStack(const std::string& Text, std::uint64_t Entity) noexcept
+        {
+            std::vector<fixup> Out; std::string Word;
+            auto Lower = [](std::string S) { for (auto& c : S) c = char(std::tolower(static_cast<unsigned char>(c))); return S; };
+            auto Take = [&]
+            {
+                if (Word.empty()) return;
+                int k = -1; for (int i = 0; i < int(fixup_names_v.size()); ++i) if (Lower(fixup_names_v[std::size_t(i)]) == Lower(Word)) k = i;
+                if (k < 0) std::printf("[AnimStack] entity %llu: '%s' is no fix-up (%s, %s, %s, %s, %s, %s, %s, %s, %s): left out%c", (unsigned long long)Entity, Word.c_str()
+                    , fixup_names_v[0], fixup_names_v[1], fixup_names_v[2], fixup_names_v[3], fixup_names_v[4], fixup_names_v[5], fixup_names_v[6], fixup_names_v[7], fixup_names_v[8], 10);
+                else Out.push_back(fixup(k));
+                Word.clear();
+            };
+            for (char c : Text) { if (c == ',' || c == ' ' || c == ';') Take(); else Word += c; }
+            Take();
+            struct rule { fixup m_A, m_B; const char* m_pWhy; };
+            static constexpr rule Rules[] =
+            { { fixup::WARP, fixup::FOOT_LOCK, "the warp moves the feet after they were pinned: they slide" }
+            , { fixup::GROUND, fixup::FOOT_LOCK, "the ground fit moves the feet after they were pinned" }
+            , { fixup::FOOT_LOCK, fixup::LEAN, "the lean is undone by the feet's reach" }
+            , { fixup::LEAN, fixup::AIM, "the lean turns an aimed bone off its target" }
+            , { fixup::AIM, fixup::STABILIZE, "the aim moves the head after it was steadied" }
+            , { fixup::BONE_OPS, fixup::SPRINGS, "the springs swing before the copy and offset: a held bone does not follow the swing" } };
+            auto At = [&](fixup F) { for (std::size_t i = 0; i < Out.size(); ++i) if (Out[i] == F) return int(i); return -1; };
+            for (const auto& R : Rules)
+                if (const int a = At(R.m_A), b = At(R.m_B); a >= 0 && b >= 0 && a > b)
+                    std::printf("[AnimStack] entity %llu: %s after %s - %s%c", (unsigned long long)Entity, fixup_names_v[std::size_t(R.m_A)], fixup_names_v[std::size_t(R.m_B)], R.m_pWhy, 10);
+            std::printf("[AnimStack] entity %llu: %zu fix-ups%c", (unsigned long long)Entity, Out.size(), 10); std::fflush(stdout);
+            return Out;
         }
 
         // KUX (R66): a bone named in an Animation field, or a line saying it is not one (the runtime skeleton keeps only the names' hashes:
@@ -407,6 +448,7 @@ namespace xlionrender
             xanimation::rigid                       m_CopyOffset; xanimation::reflex_rig m_CopyArms;
             int                                     m_CopyN = 0; float m_CopyMiss = 0, m_CopyOff = 0;
             std::string                             m_OffsetBone; int m_iOffset = -1;
+            std::string                             m_StackText; std::vector<fixup> m_Stack;       // KU3: its own order, as parsed
             xanimation::stabilize_state             m_Stab;         // KN4: the eased head; the measure (the head's turn rate before and after, squared, summed)
             xmath::fquat                            m_StabPrevIn, m_StabPrevOut; bool m_bStabPrev = false; double m_StabIn = 0, m_StabOut = 0; int m_StabN = 0;
         };
