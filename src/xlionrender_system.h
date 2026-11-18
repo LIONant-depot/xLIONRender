@@ -47,6 +47,7 @@
 #include "dependencies/xLIONCore/src/physics/xlioncore_ragdoll_api.h"
 #include "dependencies/xAnimation/source/nervous/xanimation_nervous.h"
 #include "dependencies/xAnimation/source/motion/xanimation_warp_window.h"
+#include "dependencies/xAnimation/source/motion/xanimation_recovery.h"
 #include "dependencies/xAnimation/source/motion/xanimation_distance_match.h"
 #include "dependencies/xAnimation/source/physical/xanimation_get_up.h"
 #include "dependencies/xAnimation/source/motion/xanimation_reflex_pose.h"
@@ -628,6 +629,7 @@ namespace xlionrender
     {
         constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Ragdoll" };
         ragdoll_system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr) {}
+        std::uint64_t m_nPushes = 0;      // (the inspector's shoves so far: each one's hit id)
 
         struct graph_entry { xragdoll::runtime_graph m_G; std::vector<xanimation::rigid> m_Rest; };
         struct entity_state
@@ -743,6 +745,52 @@ namespace xlionrender
                 }
             }
             // R3b' slice 1: a new hit (a HitEventId not seen yet) promotes a tracking character to physics; it returns when settled
+            if (R.m_Push != R.m_PushSeen)        // (a shove from the inspector: the character's facing and mass make it a hit)
+            {
+                R.m_PushSeen = R.m_Push;
+                float Mass = 60.0f;
+                if (auto* pRag = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(xlioncore::resources::GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value))) Mass = pRag->m_TotalMass;
+                auto Fw = T.m_Rotation * xmath::fvec3(0, 0, 1); Fw.m_Y = 0; Fw = Fw.NormalizeSafeCopy();
+                const float a = R.m_PushDir * 0.017453293f;
+                const auto Dir = (Fw * std::cos(a) + xmath::fvec3(Fw.m_Z, 0, -Fw.m_X) * std::sin(a)).NormalizeSafeCopy();
+                std::printf("[Push] entity 0x%llX: %.2f m/s at %.0f deg (%.0f N s on %.0f kg)%c", (unsigned long long)Ent.m_Value, R.m_PushSpeed, R.m_PushDir, R.m_PushSpeed * Mass, Mass, 10); std::fflush(stdout);
+                bool bAnimated = false;
+                if (R.m_bRecover && pAnim && !R.m_bActive)        // R68: answered by animation (stage 1: a standing character - its feet beside it, its COM above)
+                {
+                    const float S = T.m_Scale.m_Y; const xmath::fvec3 Sd(Fw.m_Z, 0, -Fw.m_X);
+                    const xmath::fvec3 Feet[2] = { T.m_Position + Sd * (0.125f * S), T.m_Position - Sd * (0.125f * S) };
+                    const auto Plan = xanimation::PlanRecovery(T.m_Position + xmath::fvec3(0, 0.95f * S, 0), Dir * R.m_PushSpeed, T.m_Position.m_Y, Feet, xmath::fvec3(0.05f * S, 0, 0.12f * S), Fw, 0.85f * S);
+                    static constexpr const char* Kinds[] = { "sway", "one step", "stagger", "fall" }; static constexpr char Bands[] = { 'F', 'B', 'L', 'R' };
+                    const char Band = Bands[int(Plan.m_Dir)];
+                    std::string Clip;
+                    {   // "F=a,B=b,...": the clip for the band
+                        const auto& L = R.m_RecoverClips; std::size_t i = 0;
+                        while (i < L.size())
+                        {
+                            const auto j = std::min(L.find(',', i), L.size()); const auto e = L.find('=', i);
+                            if (e != std::string::npos && e < j && e > i && std::toupper(static_cast<unsigned char>(L[i])) == Band) { Clip = L.substr(e + 1, j - e - 1); while (!Clip.empty() && Clip.back() == ' ') Clip.pop_back(); }
+                            i = j + 1; while (i < L.size() && L[i] == ' ') ++i;
+                        }
+                    }
+                    const std::uint64_t Pk = pAnim->m_Package.m_Instance.m_Value;
+                    auto* pPkg = Pk ? static_cast<xanim_package::anim_package*>(xlioncore::resources::GetResource(anim_package_type_guid_v.m_Value, Pk)) : nullptr;
+                    const int iClip = pPkg && !Clip.empty() ? pPkg->findClipIndex(xstrtool::CRC32(Clip)) : -1;
+                    if ((Plan.m_Kind == xanimation::recovery_kind::STEP1 || Plan.m_Kind == xanimation::recovery_kind::STAGGER || Plan.m_Kind == xanimation::recovery_kind::SWAY) && iClip >= 0)
+                    {
+                        pAnim->m_ClipName = Clip; pAnim->m_RequestHash = 0; pAnim->m_bOneShot = true; pAnim->m_bPlaying = true;
+                        bAnimated = true;
+                    }
+                    std::printf("[Recover] entity 0x%llX: %s toward %c, %d step(s), land %.2f %.2f; %s%c", (unsigned long long)Ent.m_Value, Kinds[int(Plan.m_Kind)], Band, Plan.m_Steps, Plan.m_Land.m_X, Plan.m_Land.m_Z
+                        , bAnimated ? ("clip '" + Clip + "'").c_str() : Clip.empty() ? "no clip for that direction: the physical hit" : iClip < 0 ? ("no clip '" + Clip + "' in its package: the physical hit").c_str() : "a fall: the physical hit", 10);
+                    std::fflush(stdout);
+                }
+                if (!bAnimated)
+                {
+                    R.m_HitPoint = T.m_Position + xmath::fvec3(0, R.m_PushHeight, 0) - Dir * 0.15f;
+                    R.m_HitImpulse = Dir * (R.m_PushSpeed * Mass);
+                    R.m_HitEventId = 0x7055000000000000ull + ++m_nPushes;
+                }
+            }
             const bool bHit = R.m_HitEventId != 0 && R.m_HitEventId != R.m_LastHitId;
             if (bHit && !R.m_bActive && R.m_Tracking > 0) { R.m_bActive = true; R.m_bReaction = true; }
             if (!R.m_bActive)

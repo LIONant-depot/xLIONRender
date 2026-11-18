@@ -725,6 +725,16 @@ namespace xlionrender
         std::uint64_t                   m_HitEventId  = 0;          // R3b': a new id = a hit (Impulse at Point) on this character: a tracking one is promoted to physics,
         xmath::fvec3                    m_HitPoint    = {};         //  takes it once (the same id again is the same event) and returns to its Animation when settled
         xmath::fvec3                    m_HitImpulse  = {};
+        // push recovery stage 1 (areas/animation/plans/push_recovery_animation_led_2026-11-18.md): a shove a person can give from the
+        // inspector or the console - Direction (deg about up, from the character's facing: 0 = shoved forward from behind, 90 = to its left),
+        // Speed (the speed change it gives the whole body, m/s), Height (above the character's feet, m); a new Push value shoves once
+        float                           m_PushDir     = 0, m_PushSpeed = 0.5f, m_PushHeight = 1.3f;
+        std::uint32_t                   m_Push        = 0, m_PushSeen = 0;
+        // R68 (animation-led recovery, stage 1): Recover on - a shove is planned (xanimation_recovery.h: sway / one step / stagger / fall) and
+        // a step plays the Animation package's recovery clip for its direction (RecoverClips "F=<clip>,B=<clip>,L=<clip>,R=<clip>") instead of a
+        // physical fight; a fall, or no clip for that direction, is the physical hit as before
+        bool                            m_bRecover    = false;
+        std::string                     m_RecoverClips;
         float                           m_ReturnBelow = 15.0f;      // deg: settled when its joints are this close to the Animation (for 0.3 s)
         bool                            m_bReflexes   = true;       // D2: a hit also plays the reflex pose (hands up toward the threat, head away) on what the body tracks
         std::string                     m_GetUpFaceDown, m_GetUpFaceUp;     // KD5: the Animation package's get-up clips by name (empty: it stays down)
@@ -756,6 +766,14 @@ namespace xlionrender
             , obj_member<"GetUpFaceDown", &ragdoll::m_GetUpFaceDown, member_help<"The clip (by name, in the Animation's package) that gets it up when it has fallen face down and come to rest: the character is laid along the body, the ragdoll hands over to the clip (blended) and it plays once. Empty: it stays down">>
             , obj_member<"GetUpFaceUp", &ragdoll::m_GetUpFaceUp, member_help<"The same, fallen on its back">>
             , obj_member<"ImpactGain", &ragdoll::m_ImpactGain, member_help<"How much of the collision's momentum reaches the body: 1 = the speed change the hit gives this side (from both masses: reduced mass x approach speed / own mass), applied to the whole ragdoll's mass">>
+            >
+        , obj_scope<"Push"
+            , obj_member<"Direction", &ragdoll::m_PushDir, member_help<"Degrees about up, from the character's facing: 0 = shoved forward (from behind), 90 = to its left, 180 = backward">>
+            , obj_member<"Speed", &ragdoll::m_PushSpeed, member_help<"m/s: the speed change the shove gives the whole body (0.3 a nudge, 0.5 a firm push, 0.9 a hard shove)">>
+            , obj_member<"Height", &ragdoll::m_PushHeight, member_help<"m above the character's feet where the hand lands (1.3: the chest)">>
+            , obj_member<"Push", &ragdoll::m_Push, member_help<"Change it (any new number) to shove once, in Play">>
+            , obj_member<"Recover", &ragdoll::m_bRecover, member_help<"On: the shove is answered by animation - a calm recovery step from the Animation package (RecoverClips), not the ragdoll fighting to stand; a shove too hard to step out of is still a fall">>
+            , obj_member<"RecoverClips", &ragdoll::m_RecoverClips, member_help<"The recovery clips by the direction she is pushed toward: F=<clip>,B=<clip>,L=<clip>,R=<clip> (any of them; a missing one: the physical hit)">>
             >
         , obj_member<"Reacting", +[](ragdoll& O, bool bRead, bool& V) { if (bRead) V = O.m_bReaction; }, member_flags<flags::SHOW_READONLY>>
         , obj_member<"State", +[](ragdoll& O, bool bRead, std::string& V)
