@@ -881,7 +881,7 @@ namespace xlionrender
                 }
                 if (bGot)
                 {
-                    xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward;
+                    xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward; P.m_GravityFF = R.m_bSupported ? 0.0f : R.m_Balance;
                     if (R.m_bSupported) St.m_Supported += pGame->m_Time.m_DeltaTime;
                     float EW = 0;
                     const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);

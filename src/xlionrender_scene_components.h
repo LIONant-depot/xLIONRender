@@ -721,6 +721,7 @@ namespace xlionrender
         float                           m_Tracking    = 0.0f;       // R1: > 0, the joints pull toward the Animation (the gain); 0, a limp ragdoll
         bool                            m_bSupported  = true;       // R1: tracking, the root body follows the Animation (held up)
         float                           m_FeedForward = 0.3f;
+        float                           m_Balance     = 0.0f;       // R2: unsupported tracking - the joints hold the body up from its feet (gravity feed-forward), times this
         std::uint64_t                   m_HitEventId  = 0;          // R3b': a new id = a hit (Impulse at Point) on this character: a tracking one is promoted to physics,
         xmath::fvec3                    m_HitPoint    = {};         //  takes it once (the same id again is the same event) and returns to its Animation when settled
         xmath::fvec3                    m_HitImpulse  = {};
@@ -744,6 +745,7 @@ namespace xlionrender
         , obj_member<"Tracking", &ragdoll::m_Tracking, member_help<"While Active: 0, a limp ragdoll; above 0, every joint pulls toward the Animation as it plays on (the stiffness in units of the joint's own gravity load: 30 follows closely)">>
         , obj_member<"Supported", &ragdoll::m_bSupported, member_help<"While tracking: the hips follow the Animation (held up). Off: the body must hold itself up, and falls">>
         , obj_member<"FeedForward", &ragdoll::m_FeedForward, member_help<"While tracking: how hard the joints also follow the Animation's own speed (0: the spring alone, which lags)">>
+        , obj_member<"Balance", &ragdoll::m_Balance, member_help<"While tracking unsupported: the joints carry the body's weight down to its feet (each holds what is above it, as muscles do), so it stands by itself. 1: the whole weight, 0: off">>
         , obj_scope<"Hit"
             , obj_member<"EventId", &ragdoll::m_HitEventId, member_help<"A new id is a hit: Impulse (N s) at Point (world). A character with Tracking above 0 becomes physical for it, takes it once (the same id again is the same event: ignored) and returns to its Animation when settled">>
             , obj_member<"Point",   &ragdoll::m_HitPoint>
