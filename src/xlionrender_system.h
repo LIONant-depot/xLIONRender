@@ -630,6 +630,11 @@ namespace xlionrender
         constexpr static auto typedef_v = xecs::system::type::update{ .m_pName = "Ragdoll" };
         ragdoll_system(xecs::game_mgr::instance& GameMgr) noexcept : xecs::system::instance(GameMgr) {}
         std::uint64_t m_nPushes = 0;      // (the inspector's shoves so far: each one's hit id)
+        // v2 recovery, per character (runtime; kept here, not in the Ragdoll component: its layout is shared with code built elsewhere - growing it
+        // blew up every ragdoll's physics in JointTest): the last two takes played (name CRC, top bit mirrored), the pick's seed, and the
+        // Animation's Speed / Mirror before the take, put back at its end
+        struct recover_state { std::uint32_t m_Recent[2] = {}; std::uint32_t m_Seed = 0x9E3779B9u; float m_SpeedWas = 1; bool m_bMirrorWas = false, m_bRestore = false; };
+        std::unordered_map<std::uint64_t, recover_state> m_Recover;
 
         struct graph_entry { xragdoll::runtime_graph m_G; std::vector<xanimation::rigid> m_Rest; };
         struct entity_state
@@ -686,6 +691,7 @@ namespace xlionrender
             const auto* pGame = xlioncore::game::From(GameMgr);
             if (pGame == nullptr) return;
             if (R.m_bGettingUp && !R.m_bActive && (pAnim == nullptr || !pAnim->m_bOneShot)) R.m_bGettingUp = false;      // (the get-up clip played out)
+            if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_bRestore && (pAnim == nullptr || !pAnim->m_bOneShot)) { auto& Rs = It->second; Rs.m_bRestore = false; if (pAnim) { pAnim->m_Speed = Rs.m_SpeedWas; pAnim->m_bMirror = Rs.m_bMirrorWas; } }     // (the recovery take played out)
             // R3b' (G0 stage 2): a solid hit on this entity or on its parent (a player's capsule) becomes this character's Hit: one event per side
             // of each impact (the impact's id, A or B), pushed away from the other along the contact normal
             // The nervous system decides (plan 3.5, contract 5.7; nervous/xanimation_nervous.h): every jolt raises the character's drives (surprise,
@@ -762,32 +768,76 @@ namespace xlionrender
                     const auto Plan = xanimation::PlanRecovery(T.m_Position + xmath::fvec3(0, 0.95f * S, 0), Dir * R.m_PushSpeed, T.m_Position.m_Y, Feet, xmath::fvec3(0.05f * S, 0, 0.12f * S), Fw, 0.85f * S);
                     static constexpr const char* Kinds[] = { "sway", "one step", "stagger", "fall" }; static constexpr char Bands[] = { 'F', 'B', 'L', 'R' };
                     const char Band = Bands[int(Plan.m_Dir)];
-                    std::string Clip;
-                    {   // "F1=a,F2=b,F3=c,B=d,...": the clip for the band and the strength (1 nudge: sway, 2 firm: one step, 3 hard: stagger - Tomas: a
-                        // recovery scales with the push); a key without a digit serves every strength of its band
-                        const char Want = Plan.m_Kind == xanimation::recovery_kind::SWAY ? '1' : Plan.m_Kind == xanimation::recovery_kind::STEP1 ? '2' : '3';
-                        const auto& L = R.m_RecoverClips; std::size_t i = 0; std::string Any;
+                    // v2 stage 1 (push_recovery_v2_continuous_2026-11-18.md; Tomas: a recovery is conditional to the degree of unbalance, and not the
+                    // same animation again and again): every listed take of the push's band, and every take mirrored (L serves R, F a second F), is
+                    // measured by its own root travel; the one nearest the travel this push needs wins - at random among the near-best, never one
+                    // of the last two played
+                    const std::uint64_t Pk = pAnim->m_Package.m_Instance.m_Value;
+                    auto* pPkg = Pk ? static_cast<xanim_package::anim_package*>(xlioncore::resources::GetResource(anim_package_type_guid_v.m_Value, Pk)) : nullptr;
+                    const xmath::fvec3 Lf(Fw.m_Z, 0, -Fw.m_X);
+                    xmath::fvec3 Want(0, 0, 0);       // (the travel needed, her frame: x to her left, z ahead - the step's rest point; a sway: none)
+                    if (Plan.m_Foot >= 0 && Plan.m_Kind != xanimation::recovery_kind::SWAY)
+                    {
+                        const auto& St = Feet[Plan.m_Foot == 0 ? 1 : 0]; const xmath::fvec3 D((Plan.m_Land.m_X + St.m_X) * 0.5f - T.m_Position.m_X, 0, (Plan.m_Land.m_Z + St.m_Z) * 0.5f - T.m_Position.m_Z);
+                        Want = xmath::fvec3(D.Dot(Lf), 0, D.Dot(Fw)) * (1.0f / std::max(S, 1e-3f));
+                    }
+                    auto& Rs = m_Recover[Ent.m_Value];
+                    struct cand { std::string m_Name; int m_iClip; bool m_bMirror; float m_Err; float m_Travel; };
+                    std::vector<cand> Cands;
+                    if (pPkg)
+                    {
+                        const auto& L = R.m_RecoverClips; std::size_t i = 0;
                         while (i < L.size())
                         {
                             const auto j = std::min(L.find(',', i), L.size()); const auto e = L.find('=', i);
-                            if (e != std::string::npos && e < j && e > i && std::toupper(static_cast<unsigned char>(L[i])) == Band)
+                            if (e != std::string::npos && e < j && e > i)
                             {
                                 std::string V = L.substr(e + 1, j - e - 1); while (!V.empty() && V.back() == ' ') V.pop_back();
-                                if (e == i + 1) Any = V; else if (L[i + 1] == Want) Clip = V;
+                                const char K = char(std::toupper(static_cast<unsigned char>(L[i])));
+                                const char Km = K == 'L' ? 'R' : K == 'R' ? 'L' : K;          // (its band mirrored)
+                                const int c = V.empty() ? -1 : pPkg->findClipIndex(xstrtool::CRC32(V));
+                                const auto RM = c >= 0 ? pPkg->getClipRootMotion(c) : std::span<xmath::fvec3>{};
+                                const xmath::fvec3 Tr = RM.size() > 1 ? RM.back() - RM.front() : xmath::fvec3(0, 0, 0);
+                                for (int m = 0; m < 2 && c >= 0; ++m)
+                                {
+                                    if ((m ? Km : K) != Band) continue;
+                                    const xmath::fvec3 Own(m ? -Tr.m_X : Tr.m_X, 0, Tr.m_Z);
+                                    Cands.push_back({ V, c, m == 1, std::hypot(Own.m_X - Want.m_X, Own.m_Z - Want.m_Z), std::hypot(Own.m_X, Own.m_Z) });
+                                }
                             }
                             i = j + 1; while (i < L.size() && L[i] == ' ') ++i;
                         }
-                        if (Clip.empty()) Clip = Any;
                     }
-                    const std::uint64_t Pk = pAnim->m_Package.m_Instance.m_Value;
-                    auto* pPkg = Pk ? static_cast<xanim_package::anim_package*>(xlioncore::resources::GetResource(anim_package_type_guid_v.m_Value, Pk)) : nullptr;
-                    const int iClip = pPkg && !Clip.empty() ? pPkg->findClipIndex(xstrtool::CRC32(Clip)) : -1;
+                    std::string Clip; int iClip = -1; bool bMirror = false; float Own = 0; int nNear = 0;
+                    {
+                        const auto Key = [](const cand& C) { return (std::uint32_t(xstrtool::CRC32(C.m_Name)) & 0x7FFFFFFFu) | (C.m_bMirror ? 0x80000000u : 0u); };
+                        const auto Fresh = [&](const cand& C) { return Key(C) != Rs.m_Recent[0] && Key(C) != Rs.m_Recent[1]; };
+                        float Best = 1e30f;
+                        for (const auto& C : Cands) if (Fresh(C)) Best = std::min(Best, C.m_Err);
+                        const bool bAll = Best >= 1e30f;      // (fewer than three takes: repeats allowed)
+                        if (bAll) for (const auto& C : Cands) Best = std::min(Best, C.m_Err);
+                        std::vector<const cand*> Near;       // ponytail: near-best = within 6 cm of the best fit; tune with the dense ladder (stage 4)
+                        for (const auto& C : Cands) if (C.m_Err <= Best + 0.06f && (bAll || Fresh(C))) Near.push_back(&C);
+                        nNear = int(Near.size());
+                        if (!Near.empty())
+                        {
+                            Rs.m_Seed ^= Rs.m_Seed << 13; Rs.m_Seed ^= Rs.m_Seed >> 17; Rs.m_Seed ^= Rs.m_Seed << 5;
+                            const auto& C = *Near[Rs.m_Seed % Near.size()];
+                            Clip = C.m_Name; iClip = C.m_iClip; bMirror = C.m_bMirror; Own = C.m_Travel;
+                            Rs.m_Recent[1] = Rs.m_Recent[0]; Rs.m_Recent[0] = Key(C);
+                        }
+                    }
                     if ((Plan.m_Kind == xanimation::recovery_kind::STEP1 || Plan.m_Kind == xanimation::recovery_kind::STAGGER || Plan.m_Kind == xanimation::recovery_kind::SWAY) && iClip >= 0)
                     {
-                        pAnim->m_ClipName = Clip; pAnim->m_RequestHash = 0; pAnim->m_bOneShot = true; pAnim->m_bPlaying = true;
+                        if (!Rs.m_bRestore) { Rs.m_SpeedWas = pAnim->m_Speed; Rs.m_bMirrorWas = pAnim->m_bMirror; Rs.m_bRestore = true; }
+                        pAnim->m_ClipName = Clip; pAnim->m_RequestHash = 0; pAnim->m_bOneShot = true; pAnim->m_bPlaying = true; pAnim->m_bMirror = bMirror;
+                        {   // a big imbalance plays a little faster (0.9 calm .. 1.15 past one reach): fast motions are for extreme cases
+                            const float u = std::clamp((Plan.m_Imbalance - 0.7f) / 0.6f, 0.0f, 1.0f);
+                            pAnim->m_Speed = Rs.m_SpeedWas * (0.9f + 0.25f * u * u * (3 - 2 * u));
+                        }
                         bAnimated = true;
                         // the torso gives at the hit (KN3's flinch on the spine chain, over the clip): a small bend with the push, scaled by its speed
-                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.26f, 0.3f * R.m_PushSpeed); ++pAnim->m_FlinchSerial;
+                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.26f, 0.25f * Plan.m_Imbalance); ++pAnim->m_FlinchSerial;
                         // stage 2: aimed - the clip's travel (root motion, from the hips) bent so that by its end the root stands between the stance
                         // foot and the planned landing (the S6 warp window over the whole clip)
                         if (Plan.m_Foot >= 0 && Plan.m_Kind != xanimation::recovery_kind::SWAY)
@@ -801,6 +851,7 @@ namespace xlionrender
                             std::printf("[Recover] entity 0x%llX: aimed - the root to %.2f %.2f by %.2f s (the clip's own travel bent there)%c", (unsigned long long)Ent.m_Value, pAnim->m_WarpTarget.m_X, pAnim->m_WarpTarget.m_Z, pAnim->m_WarpTo, 10); std::fflush(stdout);
                         }
                     }
+                    std::printf("[Recover] entity 0x%llX: imbalance %.2f, travel wanted %.2f -> '%s' (own %.2f, mirrored %d, rate %.2f), %d near of %d takes%c", (unsigned long long)Ent.m_Value, Plan.m_Imbalance, std::hypot(Want.m_X, Want.m_Z), Clip.c_str(), Own, int(bMirror), bAnimated ? pAnim->m_Speed : 0.0f, nNear, int(Cands.size()), 10);
                     std::printf("[Recover] entity 0x%llX: %s toward %c, %d step(s), land %.2f %.2f; %s%c", (unsigned long long)Ent.m_Value, Kinds[int(Plan.m_Kind)], Band, Plan.m_Steps, Plan.m_Land.m_X, Plan.m_Land.m_Z
                         , bAnimated ? ("clip '" + Clip + "'").c_str() : Clip.empty() ? "no clip for that direction: the physical hit" : iClip < 0 ? ("no clip '" + Clip + "' in its package: the physical hit").c_str() : "a fall: the physical hit", 10);
                     std::fflush(stdout);
