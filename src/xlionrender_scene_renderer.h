@@ -461,6 +461,7 @@ namespace xlionrender
             auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
             auto* pSkel = pGeom ? static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
             if (pGeom == nullptr || pSkel == nullptr || pGeom->m_nVertices == 0 || m_pDevice == nullptr) { ++m_Stats.m_Waiting; return; }
+            if (pAnim) pAnim->m_SkeletonSeen = pGeom->getSkeletonRef().m_Instance.m_Value;     // (KUX1: the bone pickers' skeleton)
             const auto Bones  = pSkel->getBones();
             const int  nBones = int(Bones.size());
             if (nBones == 0) { ++m_Stats.m_Waiting; return; }

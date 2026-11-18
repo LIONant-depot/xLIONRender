@@ -533,6 +533,7 @@ namespace xlionrender
         bool                m_bWarpTurn   = false;
         bool                m_bWarpHeight = false;    // off: the height stays the clip's (the ground's)
         float               m_WarpFrom    = 0, m_WarpTo = 0;    // clip seconds
+        mutable std::uint64_t m_SkeletonSeen = 0;             // (runtime: the skeleton its skin was last posed with - the editor's bone pickers list its bones)
         // U1 (superset: Unreal's distance matching): the clip's time from the distance to a point, not from the clock (starts and stops whose
         // feet never slide while the game moves the body)
         bool                m_bDist       = false;
@@ -630,6 +631,8 @@ namespace xlionrender
             , obj_member<"Bone", &animation::m_AimBone, member_help<"The bone that points at the target (a hand holding a gun, a torch): the spine turns it there. Empty: the head (the head, neck and spine turn)">>
             , obj_member<"Axis", &animation::m_AimAxis, member_help<"The direction that points, in the Bone's own frame (a gun's barrel)">>
             >
+        , obj_member<"SkeletonSeen", +[](animation& O, bool bRead, std::uint64_t& V) { if (bRead) V = O.m_SkeletonSeen; }, member_flags<flags::DONT_SHOW, flags::DONT_SAVE>
+            , member_help<"(the editor: the skeleton the bone fields' pickers list)">>
         , obj_scope<"Copy"
             , obj_member<"From", &animation::m_CopyFrom, member_help<"The bone followed (a gun held in one hand)">>
             , obj_member<"To", &animation::m_CopyTo, member_help<"The bone that follows it (the other hand): a hand reaches with its arm, any other bone is moved alone. Empty: off">>
