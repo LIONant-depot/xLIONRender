@@ -49,6 +49,7 @@
 #include "dependencies/xAnimation/source/nervous/xanimation_nervous.h"
 #include "dependencies/xAnimation/source/motion/xanimation_warp_window.h"
 #include "dependencies/xAnimation/source/motion/xanimation_recovery.h"
+#include "xlionrender_recovery_vs.h"
 #include "dependencies/xAnimation/source/motion/xanimation_distance_match.h"
 #include "dependencies/xAnimation/source/physical/xanimation_get_up.h"
 #include "dependencies/xAnimation/source/motion/xanimation_reflex_pose.h"
@@ -773,7 +774,7 @@ namespace xlionrender
                 {
                     const float S = T.m_Scale.m_Y; const xmath::fvec3 Sd(Fw.m_Z, 0, -Fw.m_X);
                     const xmath::fvec3 Feet[2] = { T.m_Position + Sd * (0.125f * S), T.m_Position - Sd * (0.125f * S) };
-                    const auto Plan = xanimation::PlanRecovery(T.m_Position + xmath::fvec3(0, 0.95f * S, 0), Dir * R.m_PushSpeed, T.m_Position.m_Y, Feet, xmath::fvec3(0.05f * S, 0, 0.12f * S), Fw, 0.85f * S);
+                    const auto Plan = xlionrender::RecoveryPlan(Ent.m_Value, T.m_Position + xmath::fvec3(0, 0.95f * S, 0), Dir * R.m_PushSpeed, T.m_Position.m_Y, Feet, xmath::fvec3(0.05f * S, 0, 0.12f * S), Fw, 0.85f * S);      // (xanimation::PlanRecovery, or its Visual Script graph: xlionrender_recovery_vs.h)
                     static constexpr const char* Kinds[] = { "sway", "one step", "stagger", "fall" }; static constexpr char Bands[] = { 'F', 'B', 'L', 'R' };
                     const char Band = Bands[int(Plan.m_Dir)];
                     // v2 stage 1 (push_recovery_v2_continuous_2026-11-18.md; Tomas: a recovery is conditional to the degree of unbalance, and not the
