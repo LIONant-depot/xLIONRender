@@ -691,7 +691,7 @@ namespace xlionrender
             const auto* pGame = xlioncore::game::From(GameMgr);
             if (pGame == nullptr) return;
             if (R.m_bGettingUp && !R.m_bActive && (pAnim == nullptr || !pAnim->m_bOneShot)) R.m_bGettingUp = false;      // (the get-up clip played out)
-            if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_bRestore && (pAnim == nullptr || !pAnim->m_bOneShot)) { auto& Rs = It->second; Rs.m_bRestore = false; if (pAnim) { pAnim->m_Speed = Rs.m_SpeedWas; pAnim->m_bMirror = Rs.m_bMirrorWas; } }     // (the recovery take played out)
+            if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_bRestore && (pAnim == nullptr || !pAnim->m_bOneShot)) { auto& Rs = It->second; Rs.m_bRestore = false; if (pAnim) { pAnim->m_Speed = Rs.m_SpeedWas; pAnim->m_bMirror = Rs.m_bMirrorWas; pAnim->m_RecoverArms = 0; } }     // (the recovery take played out)
             // R3b' (G0 stage 2): a solid hit on this entity or on its parent (a player's capsule) becomes this character's Hit: one event per side
             // of each impact (the impact's id, A or B), pushed away from the other along the contact normal
             // The nervous system decides (plan 3.5, contract 5.7; nervous/xanimation_nervous.h): every jolt raises the character's drives (surprise,
@@ -837,7 +837,7 @@ namespace xlionrender
                         }
                         bAnimated = true;
                         // the torso gives at the hit (KN3's flinch on the spine chain, over the clip): a small bend with the push, scaled by its speed
-                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.26f, 0.25f * Plan.m_Imbalance); ++pAnim->m_FlinchSerial;
+                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.26f, 0.25f * Plan.m_Imbalance); pAnim->m_RecoverArms = xanimation::RecoveryArmsWeight(Plan.m_Imbalance); pAnim->m_RecoverArmRate = xanimation::RecoveryArmRate(Plan.m_Imbalance); pAnim->m_RecoverFall = Dir; ++pAnim->m_FlinchSerial;
                         // stage 2: aimed - the clip's travel (root motion, from the hips) bent so that by its end the root stands between the stance
                         // foot and the planned landing (the S6 warp window over the whole clip)
                         if (Plan.m_Foot >= 0 && Plan.m_Kind != xanimation::recovery_kind::SWAY)

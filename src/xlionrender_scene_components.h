@@ -547,6 +547,11 @@ namespace xlionrender
         std::uint32_t       m_FlinchSerial = 0;       // (runtime: a new value starts a flinch)
         xmath::fvec3        m_FlinchDir{ 0, 0, 0 };   //  the push, world, unit
         float               m_FlinchAngle = 0;        //  radians at its peak             // (runtime: the skeleton its skin was last posed with - the editor's bone pickers list its bones)
+        // push recovery v2 stage 2: balance arms - the arms open by how hard balancing is, under any clip (motion/xanimation_balance_arms.h)
+        float               m_BalanceArms   = 0;      // 0..1 from the game (a rope, a beam, ice): 1 = arms horizontal; the larger of it and a recovery's wins
+        float               m_RecoverArms   = 0;      // (runtime: a recovery's target, set by the Ragdoll system from the imbalance; 0 when it is over)
+        float               m_RecoverArmRate = 2;     // (runtime: rad/s, how fast they may open)
+        xmath::fvec3        m_RecoverFall{ 0, 0, 0 }; // (runtime: the push, world, unit)
         // U1 (superset: Unreal's distance matching): the clip's time from the distance to a point, not from the clock (starts and stops whose
         // feet never slide while the game moves the body)
         bool                m_bDist       = false;
@@ -673,6 +678,9 @@ namespace xlionrender
         , obj_scope<"Stabilize"
             , obj_member<"Weight", &animation::m_StabilizeWeight, member_help<"The head keeps its gaze steady while the body bobs and sways (walking, running): its turn in the world follows an eased copy of itself. 1: fully, 0: off">>
             , obj_member<"Smooth", &animation::m_StabilizeSmooth, member_help<"Seconds: how much the head's motion is eased (turns come through this much later)">>
+            >
+        , obj_scope<"Balance"
+            , obj_member<"Arms", &animation::m_BalanceArms, member_help<"0..1: how hard balancing is here - the arms open outward under any clip (1: horizontal, a rope walker). A push recovery opens them by itself by how far off balance she is; the larger of the two wins. An arm the clip already holds out is left alone">>
             >
         , obj_scope<"Lean"
             , obj_member<"Amount", &animation::m_LeanAmount, member_help<"The spine leans into the body's acceleration as a balancing body does: forward speeding up, back braking, into turns. 1: the physical angle atan(a/g); 0: off">>

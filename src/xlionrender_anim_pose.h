@@ -10,6 +10,7 @@
 #include "dependencies/xAnimation/source/motion/xanimation_springs.h"
 #include "dependencies/xAnimation/source/motion/xanimation_lean.h"
 #include "dependencies/xAnimation/source/motion/xanimation_reflex_pose.h"
+#include "dependencies/xAnimation/source/motion/xanimation_balance_arms.h"
 #include "dependencies/xAnimation/source/motion/xanimation_bone_ops.h"
 #include "dependencies/xAnimation/source/motion/xanimation_stabilize.h"
 #include "dependencies/xAnimation/source/ik/xanimation_spline_ik.h"
@@ -151,6 +152,7 @@ namespace xlionrender
                 case fixup::LEAN:
                             if (m_pSpringAnim && pL2W && m_pSpringAnim->m_LeanAmount > 0) ApplyLeanTo(Skel, S, Entity, *m_pSpringAnim, *pL2W);
                             if (m_pSpringAnim && pL2W && m_pSpringAnim->m_FlinchSerial) ApplyFlinch(Skel, S, Entity, *m_pSpringAnim, *pL2W);       // (KN3: with the lean, the same chain)
+                            if (m_pSpringAnim && pL2W) ApplyArms(Skel, S, Entity, *m_pSpringAnim, *pL2W);       // (v2 stage 2: balance arms, after the spine moved)
                     break;
                 case fixup::AIM:
                             if (bClip && pL2W && S.m_LookAt.valid())  // look-at: after the feet (the chain is above the hips), toward a world point in the entity's frame
@@ -421,6 +423,32 @@ namespace xlionrender
             xanimation::ApplyLean(S.view(), Tr.m_LeanChain, m_AnimPose, Axis, A.m_FlinchAngle * W);
         }
 
+        // Push recovery v2 stage 2 (motion/xanimation_balance_arms.h): the arms open by how hard balancing is - the game's Balance.Arms or a
+        // recovery's target, whichever is larger - eased and rate-capped; the clip's own open arms are left alone
+        void ApplyArms(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A, const xmath::fmat4& L2W)
+        {
+            const float Target = std::clamp(std::max(A.m_BalanceArms, A.m_RecoverArms), 0.0f, 1.0f);
+            auto It = m_Tracks.find(Entity);
+            if (Target <= 0 && (It == m_Tracks.end() || It->second.m_Arms.m_W <= 0)) return;
+            auto& Tr = m_Tracks[Entity];
+            if (Tr.m_pArmsSkel != &Skel) { Tr.m_pArmsSkel = &Skel; const auto Ro = Skel.getRoles(); Tr.m_ArmsRig = int(Ro.size()) == S.view().count() ? xanimation::FindReflexRig(S.view(), Ro) : xanimation::reflex_rig{};
+                if (Tr.m_ArmsRig.m_nArms == 0) { std::printf("[AnimArms] entity %llu: no arms in its skeleton's roles - balance arms off%c", (unsigned long long)Entity, 10); std::fflush(stdout); } }
+            const float Dt = m_GameDt >= 0 ? std::min(m_GameDt, 0.1f) : 1.0f / 60.0f;
+            const float Rate = A.m_RecoverArms > A.m_BalanceArms ? A.m_RecoverArmRate : 1.5f;
+            const float W = xanimation::UpdateBalanceArms(Tr.m_Arms, Target, Dt, Rate);
+            if (W > Tr.m_ArmsPeakW) Tr.m_ArmsPeakW = W;
+            float Out[2] = { 0, 0 }, Add[2] = { 0, 0 };
+            const auto Q = L2W.ExtractRotation().NormalizeSafeCopy();
+            const auto Fall = A.m_RecoverArms > 0 ? Q.ConjugateCopy() * A.m_RecoverFall : xmath::fvec3(0, 0, 0);       // (model space)
+            if (Tr.m_ArmsRig.m_nArms > 0 && xanimation::ApplyBalanceArms(S.view(), Tr.m_ArmsRig, m_AnimPose, W, Fall, Tr.m_Arms.m_Time, {}, Out, Add) > 0)
+                { Tr.m_ArmsPeakDeg = std::max(Tr.m_ArmsPeakDeg, std::max(Out[0], Out[1]) * 57.29578f); Tr.m_ArmsPeakAdd = std::max(Tr.m_ArmsPeakAdd, std::max(Add[0], Add[1]) * 57.29578f); }
+            if (Target <= 0 && W < 0.005f && Tr.m_ArmsPeakW > 0)      // (one opening over: its peak, for the trace and the gates)
+            {
+                std::printf("[AnimArms] entity %llu: arms opened to %.1f deg at most, %.1f deg over the clip (weight %.2f), and came back%c", (unsigned long long)Entity, Tr.m_ArmsPeakDeg, Tr.m_ArmsPeakAdd, Tr.m_ArmsPeakW, 10); std::fflush(stdout);
+                Tr.m_ArmsPeakW = 0; Tr.m_ArmsPeakDeg = 0; Tr.m_ArmsPeakAdd = 0; Tr.m_Arms = {};
+            }
+        }
+
         // N2 (superset: KINEMATION's pivot/lean, Unreal's lean): the spine leans into the body's acceleration (motion/xanimation_lean.h), the body's
         // velocity from its frame's position update to update, in its own frame
         void ApplyLeanTo(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A, const xmath::fmat4& L2W)
@@ -516,6 +544,7 @@ namespace xlionrender
             std::vector<int>                        m_LeanChain;
             float                                   m_LeanMax = 0; int m_LeanN = 0; std::vector<float> m_LeanSeen;
             std::uint32_t                           m_FlinchSerial = 0; float m_FlinchAge = 1e9f;      // KN3
+            xanimation::balance_arms_state          m_Arms; xanimation::reflex_rig m_ArmsRig; const xskeleton::skeleton* m_pArmsSkel = nullptr; float m_ArmsPeakW = 0, m_ArmsPeakDeg = 0, m_ArmsPeakAdd = 0;      // v2 stage 2
             std::string                             m_AimBone; xmath::fvec3 m_AimAxis{ 0, 0, 0 };     // S2: the aim chain for this bone and axis (rebuilt when they change)
             xanimation::look_at_chain               m_AimChain;
             int                                     m_AimN = 0; float m_AimErr = 0;
