@@ -84,6 +84,8 @@ namespace xlionrender
         // over frames instead of piling on one. ponytail: the same entity order every update - past ~6x the budget in characters searching at 10 Hz the
         // last ones would starve; a round-robin start when crowds get there
         int m_Searches = 0, m_SearchWaits = 0;
+        std::unordered_set<std::uint64_t> m_Unposed;     // (the entities already said not posed)
+        static inline bool s_bNoDevice = false;           // E61: registered without the render system (a windowless editor): this system opens the core's resources
         static int SearchBudget(void) noexcept { static const int B = [] { const char* e = std::getenv("XLION_ANIM_SEARCH_BUDGET"); return e && *e ? std::max(1, std::atoi(e)) : 64; }(); return B; }
         void OnPreUpdate(void) noexcept { m_Searches = 0; }
         void OnPostUpdate(void) noexcept
@@ -93,6 +95,7 @@ namespace xlionrender
             if (pGame == nullptr) return;
             XPROFILE_SCOPE("Animation: pose (update)");
             using namespace xlioncore::resources;
+            if (s_bNoDevice) { static xgpu::device s_None; xlioncore::resources::Initialize(s_None, getGameMgr().m_SceneMgr.m_ProjectPath.c_str()); }     // (E61: once - it returns at once after the first)
             xlioncore::PropagateHierarchy(*this);
             ++m_Poser.m_Update; m_Poser.m_GameDt = std::max(0.0f, pGame->m_Time.m_DeltaTime);
             const auto Interpolate = xlioncore::FixedInterpolateOf(getGameMgr());
@@ -104,7 +107,11 @@ namespace xlionrender
                 if (pRagdoll && pRagdoll->m_bActive) return;           // (the renderer poses it from its bodies)
                 auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
                 auto* pSkel = pGeom ? static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
-                if (pGeom == nullptr || pSkel == nullptr || pSkel->getBones().empty()) return;
+                if (pGeom == nullptr || pSkel == nullptr || pSkel->getBones().empty())
+                {   // (said once per entity: a character that never animates says why - E61 found the windowless editor had no skin geometry)
+                    if (m_Unposed.insert(Ent.m_Value).second) { std::printf("[Anim] entity 0x%llX not posed: %s%c", (unsigned long long)Ent.m_Value, pGeom == nullptr ? "its skin geometry is not loaded" : "its skeleton is not loaded", 10); std::fflush(stdout); }
+                    return;
+                }
                 const auto T = xlioncore::WorldOf(Local, pParent, pRender, Interpolate);
                 if (!T.m_Scale.isFinite() || T.m_Scale.m_X == 0.0f || T.m_Scale.m_Y == 0.0f || T.m_Scale.m_Z == 0.0f) return;
                 xmath::fmat4 L2W; L2W.setupSRT(T.m_Scale, T.m_Rotation, T.m_Position);

@@ -22,6 +22,17 @@ void XecsPlugin_RegisterSystems(xecs::game_mgr::instance& GameMgr) noexcept
     GameMgr.RegisterSystems<xlionrender::animation_system, xlionrender::ragdoll_system, xlionrender::system>();
 }
 
+// E61: the systems that need no GPU - animation and ragdoll - for a windowless editor (xLION_Headless) or a server: the same order
+// as above without the render system, so a headless run animates and simulates what a windowed one does
+extern "C" __declspec(dllexport)
+void XLionRender_RegisterCpuSystems(xecs::game_mgr::instance& GameMgr) noexcept
+{
+    GameMgr.m_ComponentMgr.LockComponentTypes();
+    xecs::component::mgr::SyncLocalBitIDs<xlioncore::transform, xlioncore::render_transform, xlioncore::locomotion, xlioncore::no_render_tag, xecs::editor::no_render_tag>();
+    GameMgr.RegisterSystems<xlionrender::animation_system, xlionrender::ragdoll_system>();
+    xlionrender::animation_system::s_bNoDevice = true;     // (it opens the core's resources itself: no render system will)
+}
+
 extern "C" __declspec(dllexport)
 void XScript_GetComponentDisplayInfo(xscript::pfn_component_display_visitor pVisitor, void* pUserData) noexcept
 {
