@@ -441,7 +441,9 @@ namespace xlionrender
             float Out[2] = { 0, 0 }, Add[2] = { 0, 0 };
             const auto Q = L2W.ExtractRotation().NormalizeSafeCopy();
             const auto Fall = A.m_RecoverArms > 0 ? Q.ConjugateCopy() * A.m_RecoverFall : xmath::fvec3(0, 0, 0);       // (model space)
-            if (Tr.m_ArmsRig.m_nArms > 0 && xanimation::ApplyBalanceArms(S.view(), Tr.m_ArmsRig, m_AnimPose, W, Fall, Tr.m_Arms.m_Time, {}, Out, Add) > 0)
+            xanimation::balance_arms_params Pm;
+            if (A.m_RecoverArms <= A.m_BalanceArms) Pm.m_ElbowPerW = 0;     // (the elbows bend in a recovery; a rope walker's arms stay long)
+            if (Tr.m_ArmsRig.m_nArms > 0 && xanimation::ApplyBalanceArms(S.view(), Tr.m_ArmsRig, m_AnimPose, W, Fall, Tr.m_Arms.m_Time, Pm, Out, Add) > 0)
                 { Tr.m_ArmsPeakDeg = std::max(Tr.m_ArmsPeakDeg, std::max(Out[0], Out[1]) * 57.29578f); Tr.m_ArmsPeakAdd = std::max(Tr.m_ArmsPeakAdd, std::max(Add[0], Add[1]) * 57.29578f); }
             if (Target <= 0 && W < 0.005f && Tr.m_ArmsPeakW > 0)      // (one opening over: its peak, for the trace and the gates)
             {

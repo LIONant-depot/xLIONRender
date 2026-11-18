@@ -845,7 +845,7 @@ namespace xlionrender
                         }
                         bAnimated = true;
                         // the torso gives at the hit (KN3's flinch on the spine chain, over the clip): a small bend with the push, scaled by its speed
-                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.26f, 0.25f * Plan.m_Imbalance); pAnim->m_RecoverArms = xanimation::RecoveryArmsWeight(Plan.m_Imbalance); pAnim->m_RecoverArmRate = xanimation::RecoveryArmRate(Plan.m_Imbalance); pAnim->m_RecoverFall = Dir; ++pAnim->m_FlinchSerial;
+                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.45f, 0.157f + 0.30f * Plan.m_Imbalance);   /* recipe v1 (1257 real pushes at the shoulder): the trunk gives 9 + 17 I deg */ pAnim->m_RecoverArms = xanimation::RecoveryArmsWeight(Plan.m_Imbalance); pAnim->m_RecoverArmRate = xanimation::RecoveryArmRate(Plan.m_Imbalance); pAnim->m_RecoverFall = Dir; ++pAnim->m_FlinchSerial;
                         // stage 2: aimed - the clip's travel (root motion, from the hips) bent so that by its end the root stands between the stance
                         // foot and the planned landing (the S6 warp window over the whole clip)
                         if (Plan.m_Foot >= 0 && Plan.m_Kind != xanimation::recovery_kind::SWAY)
