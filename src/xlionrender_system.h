@@ -763,14 +763,21 @@ namespace xlionrender
                     static constexpr const char* Kinds[] = { "sway", "one step", "stagger", "fall" }; static constexpr char Bands[] = { 'F', 'B', 'L', 'R' };
                     const char Band = Bands[int(Plan.m_Dir)];
                     std::string Clip;
-                    {   // "F=a,B=b,...": the clip for the band
-                        const auto& L = R.m_RecoverClips; std::size_t i = 0;
+                    {   // "F1=a,F2=b,F3=c,B=d,...": the clip for the band and the strength (1 nudge: sway, 2 firm: one step, 3 hard: stagger - Tomas: a
+                        // recovery scales with the push); a key without a digit serves every strength of its band
+                        const char Want = Plan.m_Kind == xanimation::recovery_kind::SWAY ? '1' : Plan.m_Kind == xanimation::recovery_kind::STEP1 ? '2' : '3';
+                        const auto& L = R.m_RecoverClips; std::size_t i = 0; std::string Any;
                         while (i < L.size())
                         {
                             const auto j = std::min(L.find(',', i), L.size()); const auto e = L.find('=', i);
-                            if (e != std::string::npos && e < j && e > i && std::toupper(static_cast<unsigned char>(L[i])) == Band) { Clip = L.substr(e + 1, j - e - 1); while (!Clip.empty() && Clip.back() == ' ') Clip.pop_back(); }
+                            if (e != std::string::npos && e < j && e > i && std::toupper(static_cast<unsigned char>(L[i])) == Band)
+                            {
+                                std::string V = L.substr(e + 1, j - e - 1); while (!V.empty() && V.back() == ' ') V.pop_back();
+                                if (e == i + 1) Any = V; else if (L[i + 1] == Want) Clip = V;
+                            }
                             i = j + 1; while (i < L.size() && L[i] == ' ') ++i;
                         }
+                        if (Clip.empty()) Clip = Any;
                     }
                     const std::uint64_t Pk = pAnim->m_Package.m_Instance.m_Value;
                     auto* pPkg = Pk ? static_cast<xanim_package::anim_package*>(xlioncore::resources::GetResource(anim_package_type_guid_v.m_Value, Pk)) : nullptr;
@@ -779,6 +786,20 @@ namespace xlionrender
                     {
                         pAnim->m_ClipName = Clip; pAnim->m_RequestHash = 0; pAnim->m_bOneShot = true; pAnim->m_bPlaying = true;
                         bAnimated = true;
+                        // the torso gives at the hit (KN3's flinch on the spine chain, over the clip): a small bend with the push, scaled by its speed
+                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.26f, 0.3f * R.m_PushSpeed); ++pAnim->m_FlinchSerial;
+                        // stage 2: aimed - the clip's travel (root motion, from the hips) bent so that by its end the root stands between the stance
+                        // foot and the planned landing (the S6 warp window over the whole clip)
+                        if (Plan.m_Foot >= 0 && Plan.m_Kind != xanimation::recovery_kind::SWAY)
+                        {
+                            const auto& C = pPkg->getClips()[std::size_t(iClip)];
+                            const auto& Stance = Feet[Plan.m_Foot == 0 ? 1 : 0];
+                            pAnim->m_bRootMotion = true;
+                            pAnim->m_WarpTarget = xmath::fvec3((Plan.m_Land.m_X + Stance.m_X) * 0.5f, T.m_Position.m_Y, (Plan.m_Land.m_Z + Stance.m_Z) * 0.5f);
+                            pAnim->m_WarpFrom = 0; pAnim->m_WarpTo = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 1.0f;
+                            pAnim->m_bWarpTurn = false; pAnim->m_bWarpHeight = false; pAnim->m_bWarp = true;
+                            std::printf("[Recover] entity 0x%llX: aimed - the root to %.2f %.2f by %.2f s (the clip's own travel bent there)%c", (unsigned long long)Ent.m_Value, pAnim->m_WarpTarget.m_X, pAnim->m_WarpTarget.m_Z, pAnim->m_WarpTo, 10); std::fflush(stdout);
+                        }
                     }
                     std::printf("[Recover] entity 0x%llX: %s toward %c, %d step(s), land %.2f %.2f; %s%c", (unsigned long long)Ent.m_Value, Kinds[int(Plan.m_Kind)], Band, Plan.m_Steps, Plan.m_Land.m_X, Plan.m_Land.m_Z
                         , bAnimated ? ("clip '" + Clip + "'").c_str() : Clip.empty() ? "no clip for that direction: the physical hit" : iClip < 0 ? ("no clip '" + Clip + "' in its package: the physical hit").c_str() : "a fall: the physical hit", 10);

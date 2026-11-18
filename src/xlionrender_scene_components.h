@@ -773,7 +773,7 @@ namespace xlionrender
             , obj_member<"Height", &ragdoll::m_PushHeight, member_help<"m above the character's feet where the hand lands (1.3: the chest)">>
             , obj_member<"Push", &ragdoll::m_Push, member_help<"Change it (any new number) to shove once, in Play">>
             , obj_member<"Recover", &ragdoll::m_bRecover, member_help<"On: the shove is answered by animation - a calm recovery step from the Animation package (RecoverClips), not the ragdoll fighting to stand; a shove too hard to step out of is still a fall">>
-            , obj_member<"RecoverClips", &ragdoll::m_RecoverClips, member_help<"The recovery clips by the direction she is pushed toward: F=<clip>,B=<clip>,L=<clip>,R=<clip> (any of them; a missing one: the physical hit)">>
+            , obj_member<"RecoverClips", &ragdoll::m_RecoverClips, member_help<"The recovery clips by the direction she is pushed toward (F, B, L, R) and the push's strength (1 nudge, 2 firm, 3 hard): F1=<clip>,F2=<clip>,F3=<clip>,B2=<clip>,... A key without a digit (F=<clip>) serves every strength of its direction; a missing one: the physical hit">>
             >
         , obj_member<"Reacting", +[](ragdoll& O, bool bRead, bool& V) { if (bRead) V = O.m_bReaction; }, member_flags<flags::SHOW_READONLY>>
         , obj_member<"State", +[](ragdoll& O, bool bRead, std::string& V)
