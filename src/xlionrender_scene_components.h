@@ -534,7 +534,11 @@ namespace xlionrender
         bool                m_bWarpHeight = false;    // off: the height stays the clip's (the ground's)
         float               m_WarpFrom    = 0, m_WarpTo = 0;    // clip seconds
         std::string         m_Stack;                  // KU3: the order its pose fix-ups run in, by name ("Overlay, Warp, ..."); empty: the built-in order
-        mutable std::uint64_t m_SkeletonSeen = 0;             // (runtime: the skeleton its skin was last posed with - the editor's bone pickers list its bones)
+        mutable std::uint64_t m_SkeletonSeen = 0;
+        // KN3 (superset: KINEMATION's procedural recoil): a jolt too small for the ragdoll flinches the spine with the push (set by the Ragdoll system)
+        std::uint32_t       m_FlinchSerial = 0;       // (runtime: a new value starts a flinch)
+        xmath::fvec3        m_FlinchDir{ 0, 0, 0 };   //  the push, world, unit
+        float               m_FlinchAngle = 0;        //  radians at its peak             // (runtime: the skeleton its skin was last posed with - the editor's bone pickers list its bones)
         // U1 (superset: Unreal's distance matching): the clip's time from the distance to a point, not from the clock (starts and stops whose
         // feet never slide while the game moves the body)
         bool                m_bDist       = false;

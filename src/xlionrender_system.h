@@ -695,6 +695,18 @@ namespace xlionrender
                     std::printf(")%c", 10); std::fflush(stdout);
                 }
                 const bool bReact = D.m_bNew && D.m_Chosen == xanimation::nervous::reflex::HIT_REACTION;
+                // KN3: a jolt the body takes without a reaction (under ReactSpeed, a ball) flinches its spine with the push: 8 deg per m/s, at most 15
+                if (pAnim && pJolt && Jolt > 0.2f && !bReact && !R.m_bActive)
+                {
+                    const float Sg = JoltSide == 0 ? -1.0f : 1.0f;
+                    auto Dir = pJolt->m_Normal * Sg; Dir.m_Y = 0;
+                    if (const float Ln = Dir.Length(); Ln > 1e-4f)
+                    {
+                        pAnim->m_FlinchDir = Dir * (1.0f / Ln); pAnim->m_FlinchAngle = std::min(0.26f, 0.14f * Jolt); ++pAnim->m_FlinchSerial;
+                        std::printf("[Flinch] entity 0x%llX: a %.2f m/s jolt with no hit reaction - the spine flinches %.1f deg with it%c", (unsigned long long)Ent.m_Value, Jolt, pAnim->m_FlinchAngle * 57.29578f, 10);
+                        std::fflush(stdout);
+                    }
+                }
                 Nv.m_Running = D.m_Chosen;
                 R.m_NvSurprise = Nv.m_Drives.m_Value[xanimation::nervous::SURPRISE]; R.m_NvPain = Nv.m_Drives.m_Value[xanimation::nervous::PAIN];
                 R.m_pNvBody = xanimation::nervous::reflex_names_v[int(D.m_Chosen)];

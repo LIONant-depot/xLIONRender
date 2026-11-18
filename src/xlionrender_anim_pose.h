@@ -9,6 +9,7 @@
 #include "dependencies/xAnimation/source/blend/xanimation_overlay.h"
 #include "dependencies/xAnimation/source/motion/xanimation_springs.h"
 #include "dependencies/xAnimation/source/motion/xanimation_lean.h"
+#include "dependencies/xAnimation/source/motion/xanimation_reflex_pose.h"
 #include "dependencies/xAnimation/source/motion/xanimation_bone_ops.h"
 #include "dependencies/xAnimation/source/motion/xanimation_stabilize.h"
 #include "dependencies/xstrtool/source/xstrtool.h"       // (the overlay's FromBone by name)
@@ -147,6 +148,7 @@ namespace xlionrender
                     break;
                 case fixup::LEAN:
                             if (m_pSpringAnim && pL2W && m_pSpringAnim->m_LeanAmount > 0) ApplyLeanTo(Skel, S, Entity, *m_pSpringAnim, *pL2W);
+                            if (m_pSpringAnim && pL2W && m_pSpringAnim->m_FlinchSerial) ApplyFlinch(Skel, S, Entity, *m_pSpringAnim, *pL2W);       // (KN3: with the lean, the same chain)
                     break;
                 case fixup::AIM:
                             if (bClip && pL2W && S.m_LookAt.valid())  // look-at: after the feet (the chain is above the hips), toward a world point in the entity's frame
@@ -347,6 +349,24 @@ namespace xlionrender
             }
         }
 
+        // KN3 (superset: KINEMATION's procedural recoil): a small jolt tilts the spine with the push - fast in, a hold, a slower return (the reflex
+        // envelope), on the lean's chain; no physics
+        void ApplyFlinch(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A, const xmath::fmat4& L2W)
+        {
+            auto& Tr = m_Tracks[Entity];
+            if (Tr.m_pLeanSkel != &Skel) { Tr.m_pLeanSkel = &Skel; const auto Ro = Skel.getRoles(); Tr.m_LeanChain = int(Ro.size()) == S.view().count() ? xanimation::FindLeanChain(S.view(), Ro) : std::vector<int>{}; Tr.m_Lean = {}; Tr.m_bLeanPos = false; }
+            if (Tr.m_LeanChain.empty()) return;
+            if (Tr.m_FlinchSerial != A.m_FlinchSerial) { Tr.m_FlinchSerial = A.m_FlinchSerial; Tr.m_FlinchAge = 0; }
+            xanimation::reflex_pose_params P; P.m_In = 0.06f; P.m_Hold = 0.05f; P.m_Out = 0.35f;
+            const float W = xanimation::ReflexEnvelope(P, Tr.m_FlinchAge);
+            Tr.m_FlinchAge += m_GameDt >= 0 ? std::min(m_GameDt, 0.1f) : 1.0f / 60.0f;
+            if (W <= 0) return;
+            const auto Q = L2W.ExtractRotation().NormalizeSafeCopy();
+            const auto Dir = Q.ConjugateCopy() * A.m_FlinchDir;          // (model space)
+            const auto Axis = xmath::fvec3(0, 1, 0).Cross(Dir).NormalizeSafeCopy();
+            xanimation::ApplyLean(S.view(), Tr.m_LeanChain, m_AnimPose, Axis, A.m_FlinchAngle * W);
+        }
+
         // N2 (superset: KINEMATION's pivot/lean, Unreal's lean): the spine leans into the body's acceleration (motion/xanimation_lean.h), the body's
         // velocity from its frame's position update to update, in its own frame
         void ApplyLeanTo(const xskeleton::skeleton& Skel, const xanimation::skeleton_data& S, std::uint64_t Entity, const animation& A, const xmath::fmat4& L2W)
@@ -441,6 +461,7 @@ namespace xlionrender
             const xskeleton::skeleton*              m_pLeanSkel = nullptr;
             std::vector<int>                        m_LeanChain;
             float                                   m_LeanMax = 0; int m_LeanN = 0; std::vector<float> m_LeanSeen;
+            std::uint32_t                           m_FlinchSerial = 0; float m_FlinchAge = 1e9f;      // KN3
             std::string                             m_AimBone; xmath::fvec3 m_AimAxis{ 0, 0, 0 };     // S2: the aim chain for this bone and axis (rebuilt when they change)
             xanimation::look_at_chain               m_AimChain;
             int                                     m_AimN = 0; float m_AimErr = 0;
