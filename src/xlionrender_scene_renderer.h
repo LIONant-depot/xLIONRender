@@ -613,7 +613,7 @@ namespace xlionrender
         enum class anim_mode { OLD, NEW, CHECK };
         static anim_mode AnimMode() noexcept
         {
-            static const anim_mode M = []{ const char* E = std::getenv("XLION_ANIM"); return !E ? anim_mode::NEW : !std::strcmp(E, "old") ? anim_mode::OLD : !std::strcmp(E, "check") ? anim_mode::CHECK : anim_mode::NEW; }();
+            static const anim_mode M = []{ const char* E = xlionrender::Env("XLION_ANIM"); return !E ? anim_mode::NEW : !std::strcmp(E, "old") ? anim_mode::OLD : !std::strcmp(E, "check") ? anim_mode::CHECK : anim_mode::NEW; }();
             return M;
         }
 
@@ -634,9 +634,9 @@ namespace xlionrender
             if (!m_Trace.m_bTried)
             {
                 m_Trace.m_bTried = true;
-                if (const char* pPath = std::getenv("XLION_ANIM_TRACE"); pPath && *pPath)
+                if (const char* pPath = xlionrender::Env("XLION_ANIM_TRACE"); pPath && *pPath)
                 {
-                    m_Trace.m_pFile = std::fopen(pPath, "w");
+                    m_Trace.m_pFile = xlionrender::Open(pPath, "w");
                     m_Trace.m_T0 = std::chrono::steady_clock::now();
                     if (m_Trace.m_pFile) std::fprintf(m_Trace.m_pFile, "{\"format\":\"xlion.animtrace\",\"version\":1,\"up\":\"+Y\",\"units\":\"m\",\"roles\":[\"none\",\"root\",\"hips\",\"spine\",\"neck\",\"head\",\"clavicle\",\"upperarm\",\"lowerarm\",\"hand\",\"thigh\",\"calf\",\"foot\",\"toe\"]}\n");
                 }

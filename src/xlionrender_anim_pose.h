@@ -16,6 +16,7 @@
 #include "dependencies/xAnimation/source/ik/xanimation_spline_ik.h"
 #include "dependencies/xstrtool/source/xstrtool.h"       // (the overlay's FromBone by name)
 #include "dependencies/xAnimation/source/adapters/xanimation_resources.h"
+#include "xlionrender_env.h"                      // (the environment switches: xlionrender::Env)
 #include "xlionrender_scene_components.h"      // (the Animation component the pose reads)
 #include <array>
 #include <chrono>
@@ -570,7 +571,7 @@ namespace xlionrender
             if (bHad && Tr.m_Source != Source && BlendTime > 0.0f)
             {
                 Tr.m_In.Start(Tr.m_Cur, Tr.m_Prev, P, P, Tr.m_StartDt > 0.0f ? Tr.m_StartDt : Dt, BlendTime * 0.25f);     // (a half-life of a quarter of the blend time: ~94 % gone by its end)
-                static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+                static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) { float W = 0; for (const auto& R : Tr.m_In.m_RotX) W = std::max(W, std::sqrt(R.Dot(R))); std::printf("[AnimBlend] entity %llu: a new source eases in over %.2f s (largest turn to absorb %.1f deg)\n", (unsigned long long)Entity, BlendTime, W * 57.29578f); }
             }
             const bool bHandOver = Tr.m_ForceBlend > 0.0f && bHad;

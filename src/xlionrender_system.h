@@ -16,6 +16,7 @@
 // of Play state (see xlionrender_api.cpp). Editor-created entities only become visible to Search/Foreach
 // after xecs::archetype::mgr::UpdateStructuralChanges() flushes their pending pool append - the host
 // calls that unconditionally each frame too (xlevel_session.h), not just while Playing.
+#include "xlionrender_env.h"          // (the environment switches: xlionrender::Env)
 #include "xlionrender_view.h"
 #include "xlionrender_primitive.h"
 #include "xlionrender_text.h"
@@ -86,7 +87,7 @@ namespace xlionrender
         int m_Searches = 0, m_SearchWaits = 0;
         std::unordered_set<std::uint64_t> m_Unposed;     // (the entities already said not posed)
         static inline bool s_bNoDevice = false;           // E61: registered without the render system (a windowless editor): this system opens the core's resources
-        static int SearchBudget(void) noexcept { static const int B = [] { const char* e = std::getenv("XLION_ANIM_SEARCH_BUDGET"); return e && *e ? std::max(1, std::atoi(e)) : 64; }(); return B; }
+        static int SearchBudget(void) noexcept { static const int B = [] { const char* e = xlionrender::Env("XLION_ANIM_SEARCH_BUDGET"); return e && *e ? std::max(1, std::atoi(e)) : 64; }(); return B; }
         void OnPreUpdate(void) noexcept { m_Searches = 0; }
         void OnPostUpdate(void) noexcept
         {
@@ -399,7 +400,7 @@ namespace xlionrender
             const auto Out = xlioncore::physics::MoveCapsule(getGameMgr(), T.m_Position, A.m_CapsuleRadius, A.m_CapsuleHeight, 0.35f, Step, Planes);
             if (bProbe) return Out;
             std::scoped_lock Lk(m_MoversLock);
-            static const bool bDbg = std::getenv("XLION_ANIM_MOVER_DEBUG") != nullptr;
+            static const bool bDbg = xlionrender::Env("XLION_ANIM_MOVER_DEBUG") != nullptr;
             if (bDbg) std::printf("[AnimMover] %llu at (%.2f %.2f) step (%.3f %.3f) -> (%.3f %.3f), %zu others, %zu planes\n", (unsigned long long)Entity, T.m_Position.m_X, T.m_Position.m_Z, Step.m_X, Step.m_Z, Out.m_X, Out.m_Z, m_Movers.size(), Planes.size());
             m_Movers[Entity] = { T.m_Position + Out, A.m_CapsuleRadius, Now };
             return Out;
@@ -472,8 +473,8 @@ namespace xlionrender
             xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
             xanimation::matching_params Pm;
             {   // (experiments: XLION_ANIM_CLIPCHANGE / XLION_ANIM_MINGAP override the jump cost and the shortest time between jumps)
-                static const float CC = [] { const char* e = std::getenv("XLION_ANIM_CLIPCHANGE"); return e && *e ? float(std::atof(e)) : -1.0f; }();
-                static const float MG = [] { const char* e = std::getenv("XLION_ANIM_MINGAP"); return e && *e ? float(std::atof(e)) : -1.0f; }();
+                static const float CC = [] { const char* e = xlionrender::Env("XLION_ANIM_CLIPCHANGE"); return e && *e ? float(std::atof(e)) : -1.0f; }();
+                static const float MG = [] { const char* e = xlionrender::Env("XLION_ANIM_MINGAP"); return e && *e ? float(std::atof(e)) : -1.0f; }();
                 if (CC >= 0) Pm.m_ClipChange = CC;
                 if (MG >= 0) Pm.m_MinGap = MG;
             }
@@ -482,12 +483,12 @@ namespace xlionrender
             if (St.m_Since == 0) ++m_Searches;
             if (bJumped)
             {
-                static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+                static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s\n", St.m_Jumps, A.m_Clip, A.m_Time, St.m_Clip, St.m_Time);
                 A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_bPlaying = true;
             }
             A.m_MatchSince = St.m_Since; A.m_MatchSinceJump = St.m_SinceJump; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
-            static const bool bDbg = std::getenv("XLION_ANIM_MATCH_DEBUG") != nullptr;      // (each search: the wish and every clip's best cost)
+            static const bool bDbg = xlionrender::Env("XLION_ANIM_MATCH_DEBUG") != nullptr;      // (each search: the wish and every clip's best cost)
             if (bDbg && St.m_Since == 0)
             {
                 std::vector<float> Q(std::size_t(M.m_Db.m_Dim));
@@ -521,7 +522,7 @@ namespace xlionrender
             thread_local xanimation::pose P0, P1, Scratch; thread_local xanimation::details::rigid_worlds W0, W1;
             const float Dt = 1.0f / 60.0f;
             auto Wrap = [&](float t) { return A.m_bLoop ? t - Length * std::floor(t / Length) : std::clamp(t, 0.0f, Length); };
-            static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+            static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
             for (int i = 0; i < A.m_nFired; ++i)
             {
                 const auto& F = A.m_Fired[std::size_t(i)];
@@ -575,7 +576,7 @@ namespace xlionrender
                 G.m_bHit = true;
             }
             A.m_nGround = std::uint8_t(Rig.m_Legs.size());
-            static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+            static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
             if (thread_local int n = 0; bLog && (n++ % 30) == 0)
             {
                 std::printf("[AnimGround] legs %u:", unsigned(A.m_nGround));
@@ -615,7 +616,7 @@ namespace xlionrender
             for (std::uint32_t i = 0; i < Ev.size(); ++i) Defs.push_back({ i, Ev[i].m_Time });
             xanimation::event_cursor C; C.Seek(Before);
             xanimation::Advance(C, xanimation::event_track{ Defs, Length, bLoop }, After, Fired);
-            static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+            static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
             for (const auto& F : Fired)
             {
                 const auto& E = Ev[F.m_Id];
@@ -1234,7 +1235,7 @@ namespace xlionrender
             xlioncore::physics::ragdoll_params Params;
             Params.m_Size = 2 * (pRag->m_Capsule.m_HalfSegment + pRag->m_Capsule.m_Radius) * Scale;
             if (Params.m_Size <= 0.01f) Params.m_Size = 1.7f;
-            if (const char* p = std::getenv("XLION_RAGDOLL_SUBSTEPS"); p && *p) Params.m_SubSteps = std::max(1, std::atoi(p));      // (a narrowing switch)
+            if (const char* p = xlionrender::Env("XLION_RAGDOLL_SUBSTEPS"); p && *p) Params.m_SubSteps = std::max(1, std::atoi(p));      // (a narrowing switch)
             std::string Note;
             R.m_pRuntime = xlioncore::physics::ActivateRagdoll(getGameMgr(), GE.m_G.m_Graph, GE.m_Rest, W0, W1, Dt, GE.m_G.m_Filter, Params, &Note);
             if (R.m_pRuntime == nullptr) return Fail("the game has no physics world");
@@ -1530,7 +1531,7 @@ namespace xlionrender
                     if (Hidden(Ent.m_Value) || !L2WOf(Local, pParent, pRender, L2W)) return;
                     R.AddSkinnedMesh(C, pAnim, L2W, Ent.m_Value, pRagdoll && pRagdoll->m_bActive ? pRagdoll->m_pRuntime : nullptr, Alpha);
                 });
-                static const bool bLog = [] { const char* e = std::getenv("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
+                static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog && R.m_pUpdated && (R.m_pUpdated->m_Update % 300) == 1)      // (K0c: who posed the characters)
                     std::printf("[AnimPose] update %u: %d skinned meshes drawn, %d posed by the Animation system\n", R.m_pUpdated->m_Update, R.m_Stats.m_Meshes, R.m_Stats.m_PosedByUpdate);
             }
