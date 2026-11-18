@@ -298,7 +298,7 @@ namespace xlionrender
             {
                 const auto& R = A.m_OffsetRotation;
                 const auto Q = xanimation::details::AxisAngle(xmath::fvec3(0, 0, 1), R.m_Z * 0.017453293f) * xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), R.m_Y * 0.017453293f) * xanimation::details::AxisAngle(xmath::fvec3(1, 0, 0), R.m_X * 0.017453293f);
-                xanimation::OffsetBone(S.view(), m_AnimPose, Tr.m_iOffset, Q, A.m_OffsetPosition, A.m_OffsetWeight, A.m_bOffsetModel);
+                xanimation::OffsetBone(S.view(), m_AnimPose, Tr.m_iOffset, Q, A.m_OffsetPosition, A.m_OffsetWeight, A.m_bOffsetModel, A.m_OffsetSpread);
             }
             if (Tr.m_CopyFrom != A.m_CopyFrom || Tr.m_CopyTo != A.m_CopyTo)
             {

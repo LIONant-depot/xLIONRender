@@ -566,6 +566,7 @@ namespace xlionrender
         xmath::fvec3        m_OffsetPosition{ 0, 0, 0 };
         float               m_OffsetWeight = 1.0f;
         bool                m_bOffsetModel = false;
+        std::int32_t        m_OffsetSpread = 1;                   // the turn shared by the bone and this many - 1 parents (recoil through the spine)
         // KU2 (superset: Unreal's Spline IK): the chain From..To follows the path From has travelled (a snake, a tail, a train of segments)
         std::string         m_TrailFrom, m_TrailTo;               // empty: off
         xmath::fvec3        m_RootVelOffset {0, 0, 0}; xmath::fvec3 m_RootVelLast {0, 0, 0}; std::uint32_t m_RootVelJumps = 0;     // (RootToVelocity: a jump's velocity change eased as the pose's blend; not saved)
@@ -655,6 +656,7 @@ namespace xlionrender
             , obj_member<"Rotation", &animation::m_OffsetRotation, member_help<"Degrees about X, then Y, then Z (the bone's own axes, or the model's with Model on)">>
             , obj_member<"Position", &animation::m_OffsetPosition>
             , obj_member<"Weight", &animation::m_OffsetWeight>
+            , obj_member<"Spread", &animation::m_OffsetSpread, member_help<"How many bones share the turn: the bone and its parents up the chain, each a part (a recoil through the arm and spine). 1: the bone alone">>
             , obj_member<"Model", &animation::m_bOffsetModel, member_help<"On: in the character's frame (turned about the bone's own position). Off: in the bone's own frame">>
             >
         , obj_scope<"Trail"
