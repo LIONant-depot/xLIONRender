@@ -1051,17 +1051,12 @@ namespace xlionrender
                         std::fflush(stdout); St.m_bFallLogged = true;
                     }
                 }
-                // a balancing body's controller keeps the physics' time (E66, Tomas 2026-11-19: "the steps they take is without them really knowing how...
-                // they always fold down"): this system runs once a FRAME but the physics runs FixedSteps steps of FixedDeltaTime - the balancer's clock (step
-                // times, swing) ran one fixed step per frame, so at 200 fps a 0.14 s step was over in 0.04 s of physics (a scuff) and at 30 fps took twice as long
-                const int nFixed = pGame->m_Time.m_FixedSteps;
-                const bool bBalanceClock = !R.m_bSupported && R.m_Balance > 0;
-                if (bGot && (nFixed > 0 || !bBalanceClock))
+                if (bGot)
                 {
                     xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward; P.m_GravityFF = R.m_bSupported ? 0.0f : R.m_Balance;
                     if (R.m_bSupported) St.m_Supported += pGame->m_Time.m_DeltaTime;
                     float EW = 0;
-                    const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime * float(bBalanceClock ? std::max(nFixed, 1) : 1), P, &EW);
+                    const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);      // (a balancing body's controller runs each physics step in LIONCore: E66)
                     if (E >= 0) { St.m_TrackSum += double(E) * E; St.m_TrackSumW += double(EW) * EW; ++St.m_nTrack; St.m_TrackMax = std::max(St.m_TrackMax, E); }
 
                     // R3b' return to cheap (contract 2.4 demotion): settled = joints within ReturnBelow of the animation for 0.3 s (from 0.3 s
