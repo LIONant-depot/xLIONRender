@@ -72,3 +72,6 @@ dependencies
 
 # Test build tree (Build/test/CMakeLists.txt is tracked)
 Build/test/vs2022/
+# Build trees: generated output (CMake caches, projects, binaries) - only their CMakeLists.txt are tracked
+Build/*/*
+!Build/*/CMakeLists.txt
