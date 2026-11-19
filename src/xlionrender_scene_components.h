@@ -737,6 +737,7 @@ namespace xlionrender
         // inspector or the console - Direction (deg about up, from the character's facing: 0 = shoved forward from behind, 90 = to its left),
         // Speed (the speed change it gives the whole body, m/s), Height (above the character's feet, m); a new Push value shoves once
         float                           m_PushDir     = 0, m_PushSpeed = 0.5f, m_PushHeight = 1.3f;
+        float                           m_PushReaction = 0;     // s (recipe v1 demo): the step clip waits this long after the shove, the flinch at once; 0: steps at once
         std::uint32_t                   m_Push        = 0, m_PushSeen = 0;
         // R68 (animation-led recovery, stage 1): Recover on - a shove is planned (xanimation_recovery.h: sway / one step / stagger / fall) and
         // a step plays the Animation package's recovery clip for its direction (RecoverClips "F=<clip>,B=<clip>,L=<clip>,R=<clip>") instead of a
@@ -778,6 +779,7 @@ namespace xlionrender
         , obj_scope<"Push"
             , obj_member<"Direction", &ragdoll::m_PushDir, member_help<"Degrees about up, from the character's facing: 0 = shoved forward (from behind), 90 = to its left, 180 = backward">>
             , obj_member<"Speed", &ragdoll::m_PushSpeed, member_help<"m/s: the speed change the shove gives the whole body (0.3 a nudge, 0.5 a firm push, 0.9 a hard shove)">>
+            , obj_member<"Reaction", &ragdoll::m_PushReaction, member_help<"s: with Recover, how long the recovery step waits after the shove (the trunk gives at once). Real people step 0.04-0.16 s after a sudden push (push mocap, I 0.45-0.3); 0: at once">>
             , obj_member<"Height", &ragdoll::m_PushHeight, member_help<"m above the character's feet where the hand lands (1.3: the chest)">>
             , obj_member<"Push", &ragdoll::m_Push, member_help<"Change it (any new number) to shove once, in Play">>
             , obj_member<"Recover", &ragdoll::m_bRecover, member_help<"On: the shove is answered by animation - a calm recovery step from the Animation package (RecoverClips), not the ragdoll fighting to stand; a shove too hard to step out of is still a fall">>

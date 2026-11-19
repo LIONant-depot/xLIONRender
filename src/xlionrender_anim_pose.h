@@ -441,7 +441,9 @@ namespace xlionrender
             float Out[2] = { 0, 0 }, Add[2] = { 0, 0 };
             const auto Q = L2W.ExtractRotation().NormalizeSafeCopy();
             const auto Fall = A.m_RecoverArms > 0 ? Q.ConjugateCopy() * A.m_RecoverFall : xmath::fvec3(0, 0, 0);       // (model space)
-            if (Tr.m_ArmsRig.m_nArms > 0 && xanimation::ApplyBalanceArms(S.view(), Tr.m_ArmsRig, m_AnimPose, W, Fall, Tr.m_Arms.m_Time, {}, Out, Add) > 0)
+            xanimation::balance_arms_params Pm;
+            if (A.m_RecoverArms <= A.m_BalanceArms) Pm.m_ElbowPerW = 0;     // (the elbows bend in a recovery; a rope walker's arms stay long)
+            if (Tr.m_ArmsRig.m_nArms > 0 && xanimation::ApplyBalanceArms(S.view(), Tr.m_ArmsRig, m_AnimPose, W, Fall, Tr.m_Arms.m_Time, Pm, Out, Add) > 0)
                 { Tr.m_ArmsPeakDeg = std::max(Tr.m_ArmsPeakDeg, std::max(Out[0], Out[1]) * 57.29578f); Tr.m_ArmsPeakAdd = std::max(Tr.m_ArmsPeakAdd, std::max(Add[0], Add[1]) * 57.29578f); }
             if (Target <= 0 && W < 0.005f && Tr.m_ArmsPeakW > 0)      // (one opening over: its peak, for the trace and the gates)
             {
@@ -580,9 +582,11 @@ namespace xlionrender
             if (bHad) Tr.m_In.Apply(P, Dt); else Tr.m_In.m_bActive = false;
             if (bHandOver)      // (R3b' AN10: how far the first animated pose is from the last ragdoll pose, with the blend and without it)
             {
-                float Jump = 0;
-                for (int i = 0; i < P.count(); ++i) Jump = std::max(Jump, 2 * std::acos(std::min(1.0f, std::abs(P.m_Rotation[i].Dot(Tr.m_Cur.m_Rotation[i])))));
-                std::printf("[AnimBlend] entity %llu: hand-over from a ragdoll, largest bone turn at the switch %.1f deg (without the blend %.1f deg; this frame %.3f s, the blend's half-life %.3f s)\n", (unsigned long long)Entity, Jump * 57.29578f, RawJump * 57.29578f, Dt, BlendTime * 0.25f);
+                float Jump = 0; int iJ = -1;
+                for (int i = 0; i < P.count(); ++i) { const float j = 2 * std::acos(std::min(1.0f, std::abs(P.m_Rotation[i].Dot(Tr.m_Cur.m_Rotation[i])))); if (j > Jump) { Jump = j; iJ = i; } }
+                // C91: which bone, its offset at the switch and the ragdoll's carried turn rate (the inertializer's X and V)
+                const float Xj = iJ >= 0 ? std::sqrt(Tr.m_In.m_RotX[iJ].Dot(Tr.m_In.m_RotX[iJ])) : 0.0f, Vj = iJ >= 0 ? std::sqrt(Tr.m_In.m_RotV[iJ].Dot(Tr.m_In.m_RotV[iJ])) : 0.0f;
+                std::printf("[AnimBlend] entity %llu: hand-over from a ragdoll, largest bone turn at the switch %.1f deg (without the blend %.1f deg; this frame %.3f s, the blend's half-life %.3f s) [bone %d: offset %.1f deg, carried %.0f deg/s, start dt %.4f]\n", (unsigned long long)Entity, Jump * 57.29578f, RawJump * 57.29578f, Dt, BlendTime * 0.25f, iJ, Xj * 57.29578f, Vj * 57.29578f, Tr.m_StartDt);
                 std::fflush(stdout);
             }
             if (bHad) Tr.m_Prev = Tr.m_Cur; else Tr.m_Prev = P;

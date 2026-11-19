@@ -848,12 +848,14 @@ namespace xlionrender
             Setup.m_DepthStencil.m_bDepthWriteEnable = false;
             if( auto Err = Device.Create(m_ToneMapPipeline, Setup); Err ) return Err;
 
-            // Blit: the same fullscreen triangle, alpha blended into whatever pass is current
+            // Blit: the same fullscreen triangle, alpha blended into whatever pass is current. Premultiplied: m_Output is (the tone map's mix
+            // toward a transparent m_Background, and the host's overlays blended over it) - straight alpha took the alpha twice at partial
+            // coverage (a see-through grid over the empty background came out at its alpha squared)
             xgpu::shader Blit;
             if( auto Err = Device.Create(Blit, { .m_Type = xgpu::shader::type::bit::FRAGMENT, .m_Sharer = SPIRV(s_BlitFrag) }); Err ) return Err;
             auto BlitShaders = std::array<const xgpu::shader*, 2>{ &Blit, &Vert };
             auto BlitSamplers = std::array{ xgpu::pipeline::sampler{} };
-            xgpu::pipeline::setup BlitSetup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = BlitShaders, .m_Samplers = BlitSamplers, .m_Blend = xgpu::pipeline::blend::getAlphaOriginal() };
+            xgpu::pipeline::setup BlitSetup{ .m_VertexDescriptor = m_FullscreenVD, .m_Shaders = BlitShaders, .m_Samplers = BlitSamplers, .m_Blend = xgpu::pipeline::blend::getAlphaPreMultiply() };
             BlitSetup.m_Primitive.m_Cull                 = xgpu::pipeline::primitive::cull::NONE;
             BlitSetup.m_DepthStencil.m_bDepthTestEnable  = false;
             BlitSetup.m_DepthStencil.m_bDepthWriteEnable = false;

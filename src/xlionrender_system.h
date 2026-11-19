@@ -642,7 +642,7 @@ namespace xlionrender
         // v2 recovery, per character (runtime; kept here, not in the Ragdoll component: its layout is shared with code built elsewhere - growing it
         // blew up every ragdoll's physics in JointTest): the last two takes played (name CRC, top bit mirrored), the pick's seed, and the
         // Animation's Speed / Mirror before the take, put back at its end
-        struct recover_state { std::uint32_t m_Recent[2] = {}; std::uint32_t m_Seed = 0x9E3779B9u; float m_SpeedWas = 1; bool m_bMirrorWas = false, m_bRestore = false; };
+        struct recover_state { std::uint32_t m_Recent[2] = {}; std::uint32_t m_Seed = 0x9E3779B9u; float m_SpeedWas = 1, m_SpeedGo = 1, m_ReactLeft = 0; bool m_bMirrorWas = false, m_bRestore = false; };
         std::unordered_map<std::uint64_t, recover_state> m_Recover;
 
         struct graph_entry { xragdoll::runtime_graph m_G; std::vector<xanimation::rigid> m_Rest; };
@@ -658,6 +658,7 @@ namespace xlionrender
             int                 m_nTrack = 0;
             float               m_TrackMax = 0;
             float               m_Age = 0, m_HitAt = 0, m_Settled = 0, m_LastE = 1e9f, m_MinE = 1e9f, m_MinAt = 0;
+            std::vector<xmath::fquat> m_BodyQ;  float m_Spin = 0;      // C91: every body's last rotation; the fastest body's turn rate this frame (deg/s)
             float               m_Supported = 0;            // the assistance ledger: seconds its root was held (kinematic, supported tracking)
             bool                m_bForced = false;          //  and a return forced by the time limit    // R3b': time since activation, of the last hit, settled for; the last tracking error
             const xanimation::body_graph* m_pGraph = nullptr;       // (the graph it was activated with: m_Graphs keeps it)
@@ -700,12 +701,16 @@ namespace xlionrender
             const auto* pGame = xlioncore::game::From(GameMgr);
             if (pGame == nullptr) return;
             if (R.m_bGettingUp && !R.m_bActive && (pAnim == nullptr || !pAnim->m_bOneShot)) R.m_bGettingUp = false;      // (the get-up clip played out)
+            if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_ReactLeft > 0 && pAnim)        // (the reaction delay ends: the step plays)
+                if ((It->second.m_ReactLeft -= pGame->m_Time.m_DeltaTime) <= 0) { It->second.m_ReactLeft = 0; pAnim->m_Speed = It->second.m_SpeedGo; }
             if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_bRestore && (pAnim == nullptr || !pAnim->m_bOneShot)) { auto& Rs = It->second; Rs.m_bRestore = false; if (pAnim) { pAnim->m_Speed = Rs.m_SpeedWas; pAnim->m_bMirror = Rs.m_bMirrorWas; pAnim->m_RecoverArms = 0; } }     // (the recovery take played out)
             // R3b' (G0 stage 2): a solid hit on this entity or on its parent (a player's capsule) becomes this character's Hit: one event per side
             // of each impact (the impact's id, A or B), pushed away from the other along the contact normal
             // The nervous system decides (plan 3.5, contract 5.7; nervous/xanimation_nervous.h): every jolt raises the character's drives (surprise,
             // pain), and the hit reaction is a reflex chosen by utility scoring with hysteresis; ReactSpeed sets how big a jolt surprises it enough
             auto& Nv = m_Nerves[Ent.m_Value];
+            // a shove this frame: the inspector's Push, or (Recover on) a solid hit such as a FireBox box - both answered the same way below
+            bool bShove = false; xmath::fvec3 ShoveDir(0, 0, 0), ShovePoint(0, 0, 0), ShoveImpulse(0, 0, 0); float ShoveSpeed = 0; std::uint64_t ShoveId = 0;
             if (R.m_ReactSpeed > 0)
             {
                 xanimation::nervous::drive_params NP; NP.m_SurprisePerMps = 0.5f / R.m_ReactSpeed;
@@ -755,6 +760,12 @@ namespace xlionrender
                     float RagMass = 60.0f;
                     if (auto* pRag = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(xlioncore::resources::GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value))) RagMass = pRag->m_TotalMass;
                     R.m_HitImpulse = I.m_Normal * ((Side == 0 ? -1.0f : 1.0f) * R.m_ImpactGain * RagMass * Dv);
+                    if (auto Hd = xmath::fvec3(R.m_HitImpulse.m_X, 0, R.m_HitImpulse.m_Z); R.m_bRecover && pAnim && !R.m_bActive && Hd.Length() > 1e-4f)
+                    {   // R68 (Tomas 2026-11-19, boxes shot at her): a character that recovers by animation answers a solid hit as it answers Push -
+                        // the hit's horizontal speed change plans the recovery; only a fall (or no take) stays the physical hit
+                        bShove = true; ShoveDir = Hd * (1.0f / Hd.Length()); ShoveSpeed = R.m_ImpactGain * Dv; ShovePoint = R.m_HitPoint; ShoveImpulse = R.m_HitImpulse; ShoveId = R.m_HitEventId;
+                        R.m_HitEventId = R.m_LastHitId;     // (not a physical hit unless the plan says so)
+                    }
                     std::printf("[Ragdoll] entity 0x%llX: impact %llu at %.1f m/s becomes hit %llu (side %c, masses %.0f/%.0f kg: speed change %.2f m/s on its %.0f kg, impulse %.0f N s)\n", (unsigned long long)Ent.m_Value, (unsigned long long)I.m_Id, I.m_Speed, (unsigned long long)R.m_HitEventId, Side == 0 ? 'A' : 'B', I.m_MassA, I.m_MassB, Dv, RagMass, R.m_HitImpulse.Length());
                     std::fflush(stdout);
                 }
@@ -767,14 +778,20 @@ namespace xlionrender
                 if (auto* pRag = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(xlioncore::resources::GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value))) Mass = pRag->m_TotalMass;
                 auto Fw = T.m_Rotation * xmath::fvec3(0, 0, 1); Fw.m_Y = 0; Fw = Fw.NormalizeSafeCopy();
                 const float a = R.m_PushDir * 0.017453293f;
-                const auto Dir = (Fw * std::cos(a) + xmath::fvec3(Fw.m_Z, 0, -Fw.m_X) * std::sin(a)).NormalizeSafeCopy();
+                ShoveDir = (Fw * std::cos(a) + xmath::fvec3(Fw.m_Z, 0, -Fw.m_X) * std::sin(a)).NormalizeSafeCopy(); ShoveSpeed = R.m_PushSpeed; bShove = true;
+                ShovePoint = T.m_Position + xmath::fvec3(0, R.m_PushHeight, 0) - ShoveDir * 0.15f; ShoveImpulse = ShoveDir * (R.m_PushSpeed * Mass); ShoveId = 0x7055000000000000ull + ++m_nPushes;
                 std::printf("[Push] entity 0x%llX: %.2f m/s at %.0f deg (%.0f N s on %.0f kg)%c", (unsigned long long)Ent.m_Value, R.m_PushSpeed, R.m_PushDir, R.m_PushSpeed * Mass, Mass, 10); std::fflush(stdout);
+            }
+            if (bShove)
+            {
+                const auto& Dir = ShoveDir;
+                auto Fw = T.m_Rotation * xmath::fvec3(0, 0, 1); Fw.m_Y = 0; Fw = Fw.NormalizeSafeCopy();
                 bool bAnimated = false;
                 if (R.m_bRecover && pAnim && !R.m_bActive)        // R68: answered by animation (stage 1: a standing character - its feet beside it, its COM above)
                 {
                     const float S = T.m_Scale.m_Y; const xmath::fvec3 Sd(Fw.m_Z, 0, -Fw.m_X);
                     const xmath::fvec3 Feet[2] = { T.m_Position + Sd * (0.125f * S), T.m_Position - Sd * (0.125f * S) };
-                    const auto Plan = xlionrender::RecoveryPlan(Ent.m_Value, T.m_Position + xmath::fvec3(0, 0.95f * S, 0), Dir * R.m_PushSpeed, T.m_Position.m_Y, Feet, xmath::fvec3(0.05f * S, 0, 0.12f * S), Fw, 0.85f * S);      // (xanimation::PlanRecovery, or its Visual Script graph: xlionrender_recovery_vs.h)
+                    const auto Plan = xlionrender::RecoveryPlan(Ent.m_Value, T.m_Position + xmath::fvec3(0, 0.95f * S, 0), Dir * ShoveSpeed, T.m_Position.m_Y, Feet, xmath::fvec3(0.05f * S, 0, 0.12f * S), Fw, 0.85f * S);      // (xanimation::PlanRecovery, or its Visual Script graph: xlionrender_recovery_vs.h)
                     static constexpr const char* Kinds[] = { "sway", "one step", "stagger", "fall" }; static constexpr char Bands[] = { 'F', 'B', 'L', 'R' };
                     const char Band = Bands[int(Plan.m_Dir)];
                     // v2 stage 1 (push_recovery_v2_continuous_2026-11-18.md; Tomas: a recovery is conditional to the degree of unbalance, and not the
@@ -843,10 +860,11 @@ namespace xlionrender
                         {   // a big imbalance plays a little faster (0.9 calm .. 1.15 past one reach): fast motions are for extreme cases
                             const float u = std::clamp((Plan.m_Imbalance - 0.7f) / 0.6f, 0.0f, 1.0f);
                             pAnim->m_Speed = Rs.m_SpeedWas * (0.9f + 0.25f * u * u * (3 - 2 * u));
+                            if (R.m_PushReaction > 0) { Rs.m_SpeedGo = pAnim->m_Speed; Rs.m_ReactLeft = R.m_PushReaction; pAnim->m_Speed = 0; }     // (recipe v1 demo: the step waits, the flinch does not)
                         }
                         bAnimated = true;
                         // the torso gives at the hit (KN3's flinch on the spine chain, over the clip): a small bend with the push, scaled by its speed
-                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.26f, 0.25f * Plan.m_Imbalance); pAnim->m_RecoverArms = xanimation::RecoveryArmsWeight(Plan.m_Imbalance); pAnim->m_RecoverArmRate = xanimation::RecoveryArmRate(Plan.m_Imbalance); pAnim->m_RecoverFall = Dir; ++pAnim->m_FlinchSerial;
+                        pAnim->m_FlinchDir = Dir; pAnim->m_FlinchAngle = std::min(0.45f, 0.157f + 0.30f * Plan.m_Imbalance);   /* recipe v1 (1257 real pushes at the shoulder): the trunk gives 9 + 17 I deg */ pAnim->m_RecoverArms = xanimation::RecoveryArmsWeight(Plan.m_Imbalance); pAnim->m_RecoverArmRate = xanimation::RecoveryArmRate(Plan.m_Imbalance); pAnim->m_RecoverFall = Dir; ++pAnim->m_FlinchSerial;
                         // stage 2: aimed - the clip's travel (root motion, from the hips) bent so that by its end the root stands between the stance
                         // foot and the planned landing (the S6 warp window over the whole clip)
                         if (Plan.m_Foot >= 0 && Plan.m_Kind != xanimation::recovery_kind::SWAY)
@@ -865,12 +883,7 @@ namespace xlionrender
                         , bAnimated ? ("clip '" + Clip + "'").c_str() : Clip.empty() ? "no clip for that direction: the physical hit" : iClip < 0 ? ("no clip '" + Clip + "' in its package: the physical hit").c_str() : "a fall: the physical hit", 10);
                     std::fflush(stdout);
                 }
-                if (!bAnimated)
-                {
-                    R.m_HitPoint = T.m_Position + xmath::fvec3(0, R.m_PushHeight, 0) - Dir * 0.15f;
-                    R.m_HitImpulse = Dir * (R.m_PushSpeed * Mass);
-                    R.m_HitEventId = 0x7055000000000000ull + ++m_nPushes;
-                }
+                if (!bAnimated) { R.m_HitPoint = ShovePoint; R.m_HitImpulse = ShoveImpulse; R.m_HitEventId = ShoveId; }
             }
             const bool bHit = R.m_HitEventId != 0 && R.m_HitEventId != R.m_LastHitId;
             if (bHit && !R.m_bActive && R.m_Tracking > 0) { R.m_bActive = true; R.m_bReaction = true; }
@@ -1025,7 +1038,26 @@ namespace xlionrender
                         // the hit (a running clip never gets under ReturnBelow: its tracking floor is higher)
                         const bool bPlateau = St.m_MinE < 1e8f && St.m_Age - St.m_MinAt > 0.3f && St.m_LastE < 1.25f * St.m_MinE;     // (a measured error first)
                         St.m_Settled = St.m_LastE < R.m_ReturnBelow ? St.m_Settled + pGame->m_Time.m_DeltaTime : bPlateau ? 0.3f : 0.0f;
-                        if (St.m_Settled >= 0.3f || St.m_Age - St.m_HitAt > 2.0f)
+                        // C91: settled also means calm. The pose test alone handed over on a plateau while a limb still whipped through it
+                        // (551-1784 deg/s carried into the animation); real limbs in push recovery turn under 422 deg/s for 95 % of people
+                        // (1260 DeCIMo trials, tools/mocap_limb_spin.py) - the hand-over waits for every body to be that calm (the 2 s
+                        // limit still ends it)
+                        St.m_Spin = 0;
+                        if (St.m_pGraph)
+                        {
+                            const std::size_t nb = St.m_pGraph->m_Bodies.size();
+                            const bool bPrev = St.m_BodyQ.size() == nb && pGame->m_Time.m_DeltaTime > 0;
+                            St.m_BodyQ.resize(nb);
+                            for (std::size_t i = 0; i < nb; ++i)
+                            {
+                                xanimation::rigid F;
+                                if (!xlioncore::physics::RagdollBodyFrame(*R.m_pRuntime, int(i), F)) continue;
+                                if (bPrev) St.m_Spin = std::max(St.m_Spin, 2 * std::acos(std::min(1.0f, std::abs(F.m_Q.Dot(St.m_BodyQ[i])))) * 57.29578f / pGame->m_Time.m_DeltaTime);
+                                St.m_BodyQ[i] = F.m_Q;
+                            }
+                        }
+                        constexpr float CalmDeg = 422.0f;
+                        if ((St.m_Settled >= 0.3f && St.m_Spin < CalmDeg) || St.m_Age - St.m_HitAt > 2.0f)
                         {
                             float Pop = 0;
                             if (St.m_pGraph)
@@ -1154,7 +1186,25 @@ namespace xlionrender
             xanimation::pose Cur = m_P1, Prev = m_P1;       // (the scales: the animation's)
             if (Cur.count() != int(n)) return;
             xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 1.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, Es, Cur);
+            const std::vector<xanimation::rigid> W1 = W;
             xlioncore::physics::PoseRagdoll(*R.m_pRuntime, S.view(), 0.0f, Animated, W); xanimation::LocalFromRigidWorlds(S.view(), W, Sc, E, Es, Prev);
+            {   // C91: the fastest-turning bones over the last physics step - world rate, local rate (what the hand-over carries), the parent's world rate
+                const float Inv = 57.29578f / std::max( pGame->m_Time.m_FixedDeltaTime, 1e-4f );
+                auto Ang = []( const xmath::fquat& A, const xmath::fquat& B ) { return 2 * std::acos( std::min( 1.0f, std::abs( A.Dot( B ) ) ) ); };
+                int Top[3] = { -1, -1, -1 }; float TopL[3] = { 0, 0, 0 };
+                for( int b = 0; b < int( n ); ++b )
+                {
+                    const float l = Ang( Cur.m_Rotation[b], Prev.m_Rotation[b] );
+                    for( int k = 0; k < 3; ++k ) if( l > TopL[k] ) { for( int q = 2; q > k; --q ) { TopL[q] = TopL[q - 1]; Top[q] = Top[q - 1]; } TopL[k] = l; Top[k] = b; break; }
+                }
+                for( int k = 0; k < 3 && Top[k] >= 0; ++k )
+                {
+                    const int b = Top[k], p = S.m_Parent[std::size_t( b )];
+                    std::printf( "[HandOverSpin] entity 0x%llX: bone %d (parent %d): local %.0f deg/s, world %.0f deg/s, parent world %.0f deg/s%c", (unsigned long long)Ent.m_Value, b, p,
+                                 TopL[k] * Inv, Ang( W1[std::size_t( b )].m_Q, W[std::size_t( b )].m_Q ) * Inv, p >= 0 ? Ang( W1[std::size_t( p )].m_Q, W[std::size_t( p )].m_Q ) * Inv : 0.0f, 10 );
+                }
+                std::fflush( stdout );
+            }
             pAnimSys->m_Poser.HandOver(Ent.m_Value, pSkel, Cur, Prev, pGame->m_Time.m_FixedDeltaTime, 0.3f);
         }
 
