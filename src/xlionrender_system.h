@@ -700,7 +700,13 @@ namespace xlionrender
             auto& GameMgr = getGameMgr();
             const auto* pGame = xlioncore::game::From(GameMgr);
             if (pGame == nullptr) return;
-            if (R.m_bGettingUp && !R.m_bActive && (pAnim == nullptr || !pAnim->m_bOneShot)) R.m_bGettingUp = false;      // (the get-up clip played out)
+            if (R.m_bGettingUp && !R.m_bActive && (pAnim == nullptr || !pAnim->m_bOneShot))      // (the get-up clip played out)
+            {
+                R.m_bGettingUp = false;
+                // a body that balances itself (Balance, unsupported tracking) is physical again once it stands (Tomas 2026-11-19: "when she gets up
+                // again her ragdoll/collision seems to be gone")
+                if (R.m_Balance > 0 && !R.m_bSupported && R.m_Tracking > 0) { R.m_bActive = true; std::printf("[GetUp] entity 0x%llX stands: physical again (it balances)%c", (unsigned long long)Ent.m_Value, 10); std::fflush(stdout); }
+            }
             if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_ReactLeft > 0 && pAnim)        // (the reaction delay ends: the step plays)
                 if ((It->second.m_ReactLeft -= pGame->m_Time.m_DeltaTime) <= 0) { It->second.m_ReactLeft = 0; pAnim->m_Speed = It->second.m_SpeedGo; }
             if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_bRestore && (pAnim == nullptr || !pAnim->m_bOneShot)) { auto& Rs = It->second; Rs.m_bRestore = false; if (pAnim) { pAnim->m_Speed = Rs.m_SpeedWas; pAnim->m_bMirror = Rs.m_bMirrorWas; pAnim->m_RecoverArms = 0; } }     // (the recovery take played out)
