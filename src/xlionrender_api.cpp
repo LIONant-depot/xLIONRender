@@ -165,6 +165,13 @@ namespace xlionrender
                 }
                 return static_cast<int>(Text.size());
             }
+            xmath::fvec2  OverlayJitter(const void* pWorld) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                if (!pSystem || !pSystem->m_pScene) return { 0.0f, 0.0f };
+                const auto& J = pSystem->m_pScene->m_View.m_JitterNdc;
+                return { J.m_X, J.m_Y };
+            }
             bool          EditPost(const void* pWorld, const char* pEdit, char* pOut, int Capacity) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);
