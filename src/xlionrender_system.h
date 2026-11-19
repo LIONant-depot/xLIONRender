@@ -708,6 +708,8 @@ namespace xlionrender
             // The nervous system decides (plan 3.5, contract 5.7; nervous/xanimation_nervous.h): every jolt raises the character's drives (surprise,
             // pain), and the hit reaction is a reflex chosen by utility scoring with hysteresis; ReactSpeed sets how big a jolt surprises it enough
             auto& Nv = m_Nerves[Ent.m_Value];
+            // a shove this frame: the inspector's Push, or (Recover on) a solid hit such as a FireBox box - both answered the same way below
+            bool bShove = false; xmath::fvec3 ShoveDir(0, 0, 0), ShovePoint(0, 0, 0), ShoveImpulse(0, 0, 0); float ShoveSpeed = 0; std::uint64_t ShoveId = 0;
             if (R.m_ReactSpeed > 0)
             {
                 xanimation::nervous::drive_params NP; NP.m_SurprisePerMps = 0.5f / R.m_ReactSpeed;
@@ -757,6 +759,12 @@ namespace xlionrender
                     float RagMass = 60.0f;
                     if (auto* pRag = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(xlioncore::resources::GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value))) RagMass = pRag->m_TotalMass;
                     R.m_HitImpulse = I.m_Normal * ((Side == 0 ? -1.0f : 1.0f) * R.m_ImpactGain * RagMass * Dv);
+                    if (auto Hd = xmath::fvec3(R.m_HitImpulse.m_X, 0, R.m_HitImpulse.m_Z); R.m_bRecover && pAnim && !R.m_bActive && Hd.Length() > 1e-4f)
+                    {   // R68 (Tomas 2026-11-19, boxes shot at her): a character that recovers by animation answers a solid hit as it answers Push -
+                        // the hit's horizontal speed change plans the recovery; only a fall (or no take) stays the physical hit
+                        bShove = true; ShoveDir = Hd * (1.0f / Hd.Length()); ShoveSpeed = R.m_ImpactGain * Dv; ShovePoint = R.m_HitPoint; ShoveImpulse = R.m_HitImpulse; ShoveId = R.m_HitEventId;
+                        R.m_HitEventId = R.m_LastHitId;     // (not a physical hit unless the plan says so)
+                    }
                     std::printf("[Ragdoll] entity 0x%llX: impact %llu at %.1f m/s becomes hit %llu (side %c, masses %.0f/%.0f kg: speed change %.2f m/s on its %.0f kg, impulse %.0f N s)\n", (unsigned long long)Ent.m_Value, (unsigned long long)I.m_Id, I.m_Speed, (unsigned long long)R.m_HitEventId, Side == 0 ? 'A' : 'B', I.m_MassA, I.m_MassB, Dv, RagMass, R.m_HitImpulse.Length());
                     std::fflush(stdout);
                 }
@@ -769,14 +777,20 @@ namespace xlionrender
                 if (auto* pRag = R.m_Ragdoll.empty() ? nullptr : static_cast<const xragdoll::ragdoll*>(xlioncore::resources::GetResource(ragdoll_type_guid_v.m_Value, R.m_Ragdoll.m_Instance.m_Value))) Mass = pRag->m_TotalMass;
                 auto Fw = T.m_Rotation * xmath::fvec3(0, 0, 1); Fw.m_Y = 0; Fw = Fw.NormalizeSafeCopy();
                 const float a = R.m_PushDir * 0.017453293f;
-                const auto Dir = (Fw * std::cos(a) + xmath::fvec3(Fw.m_Z, 0, -Fw.m_X) * std::sin(a)).NormalizeSafeCopy();
+                ShoveDir = (Fw * std::cos(a) + xmath::fvec3(Fw.m_Z, 0, -Fw.m_X) * std::sin(a)).NormalizeSafeCopy(); ShoveSpeed = R.m_PushSpeed; bShove = true;
+                ShovePoint = T.m_Position + xmath::fvec3(0, R.m_PushHeight, 0) - ShoveDir * 0.15f; ShoveImpulse = ShoveDir * (R.m_PushSpeed * Mass); ShoveId = 0x7055000000000000ull + ++m_nPushes;
                 std::printf("[Push] entity 0x%llX: %.2f m/s at %.0f deg (%.0f N s on %.0f kg)%c", (unsigned long long)Ent.m_Value, R.m_PushSpeed, R.m_PushDir, R.m_PushSpeed * Mass, Mass, 10); std::fflush(stdout);
+            }
+            if (bShove)
+            {
+                const auto& Dir = ShoveDir;
+                auto Fw = T.m_Rotation * xmath::fvec3(0, 0, 1); Fw.m_Y = 0; Fw = Fw.NormalizeSafeCopy();
                 bool bAnimated = false;
                 if (R.m_bRecover && pAnim && !R.m_bActive)        // R68: answered by animation (stage 1: a standing character - its feet beside it, its COM above)
                 {
                     const float S = T.m_Scale.m_Y; const xmath::fvec3 Sd(Fw.m_Z, 0, -Fw.m_X);
                     const xmath::fvec3 Feet[2] = { T.m_Position + Sd * (0.125f * S), T.m_Position - Sd * (0.125f * S) };
-                    const auto Plan = xanimation::PlanRecovery(T.m_Position + xmath::fvec3(0, 0.95f * S, 0), Dir * R.m_PushSpeed, T.m_Position.m_Y, Feet, xmath::fvec3(0.05f * S, 0, 0.12f * S), Fw, 0.85f * S);
+                    const auto Plan = xanimation::PlanRecovery(T.m_Position + xmath::fvec3(0, 0.95f * S, 0), Dir * ShoveSpeed, T.m_Position.m_Y, Feet, xmath::fvec3(0.05f * S, 0, 0.12f * S), Fw, 0.85f * S);
                     static constexpr const char* Kinds[] = { "sway", "one step", "stagger", "fall" }; static constexpr char Bands[] = { 'F', 'B', 'L', 'R' };
                     const char Band = Bands[int(Plan.m_Dir)];
                     // v2 stage 1 (push_recovery_v2_continuous_2026-11-18.md; Tomas: a recovery is conditional to the degree of unbalance, and not the
@@ -868,12 +882,7 @@ namespace xlionrender
                         , bAnimated ? ("clip '" + Clip + "'").c_str() : Clip.empty() ? "no clip for that direction: the physical hit" : iClip < 0 ? ("no clip '" + Clip + "' in its package: the physical hit").c_str() : "a fall: the physical hit", 10);
                     std::fflush(stdout);
                 }
-                if (!bAnimated)
-                {
-                    R.m_HitPoint = T.m_Position + xmath::fvec3(0, R.m_PushHeight, 0) - Dir * 0.15f;
-                    R.m_HitImpulse = Dir * (R.m_PushSpeed * Mass);
-                    R.m_HitEventId = 0x7055000000000000ull + ++m_nPushes;
-                }
+                if (!bAnimated) { R.m_HitPoint = ShovePoint; R.m_HitImpulse = ShoveImpulse; R.m_HitEventId = ShoveId; }
             }
             const bool bHit = R.m_HitEventId != 0 && R.m_HitEventId != R.m_LastHitId;
             if (bHit && !R.m_bActive && R.m_Tracking > 0) { R.m_bActive = true; R.m_bReaction = true; }
