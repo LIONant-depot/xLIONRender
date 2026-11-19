@@ -595,6 +595,7 @@ namespace xlionrender
         bool                m_bOneShot  = false;    // the requested clip plays once, then the one before it comes back (where it was), both eased in
         bool                m_bFinished = false;    // a one-shot ended THIS frame (the request's result: a game system reads it after the Animation system)
         std::uint32_t       m_RequestHash = 0;      // (the request resolved last; not saved)
+        float               m_RequestStart = 0;     // (a request's start in its clip, s: used once by the next request, then 0; not saved)
         int                 m_ReturnClip = -1;      // (a one-shot's way back; not saved)
         float               m_ReturnTime = 0;
         std::array<animation_fired, 8> m_Fired{};   // the events that fired THIS frame (the Animation system refills it each update; a game system reads it after)

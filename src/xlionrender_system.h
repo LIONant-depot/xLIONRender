@@ -168,7 +168,7 @@ namespace xlionrender
                     if (const int i = pPkg->findClipIndex(H); i >= 0)
                     {
                         if (A.m_bOneShot) { A.m_ReturnClip = A.m_Clip; A.m_ReturnTime = A.m_Time; }
-                        A.m_Clip = i; A.m_Time = 0; A.m_bPlaying = true;
+                        A.m_Clip = i; A.m_Time = A.m_RequestStart; A.m_RequestStart = 0; A.m_bPlaying = true;
                     }
                     else std::printf("[Animation] no clip named '%s' in the package: the request is ignored\n", A.m_ClipName.c_str());
                 }
@@ -641,7 +641,7 @@ namespace xlionrender
         // v2 recovery, per character (runtime; kept here, not in the Ragdoll component: its layout is shared with code built elsewhere - growing it
         // blew up every ragdoll's physics in JointTest): the last two takes played (name CRC, top bit mirrored), the pick's seed, and the
         // Animation's Speed / Mirror before the take, put back at its end
-        struct recover_state { std::uint32_t m_Recent[2] = {}; std::uint32_t m_Seed = 0x9E3779B9u; float m_SpeedWas = 1, m_SpeedGo = 1, m_ReactLeft = 0; bool m_bMirrorWas = false, m_bRestore = false; };
+        struct recover_state { std::uint32_t m_Recent[2] = {}; std::uint32_t m_Seed = 0x9E3779B9u; float m_SpeedWas = 1, m_SpeedGo = 1, m_ReactLeft = 0, m_Start = 0; bool m_bMirrorWas = false, m_bRestore = false; };
         std::unordered_map<std::uint64_t, recover_state> m_Recover;
 
         struct graph_entry { xragdoll::runtime_graph m_G; std::vector<xanimation::rigid> m_Rest; };
@@ -857,6 +857,13 @@ namespace xlionrender
                     {
                         if (!Rs.m_bRestore) { Rs.m_SpeedWas = pAnim->m_Speed; Rs.m_bMirrorWas = pAnim->m_bMirror; Rs.m_bRestore = true; }
                         pAnim->m_ClipName = Clip; pAnim->m_RequestHash = 0; pAnim->m_bOneShot = true; pAnim->m_bPlaying = true; pAnim->m_bMirror = bMirror;
+                        {   // the take starts where its body starts to move (Tomas 2026-11-19: "she gets hit... then her body reacts after a while... like the hit and
+                            // the reaction are not connected" - the takes stand still 0.13-0.4 s before the push shows): the root's first 1.5 cm of travel, less 0.05 s
+                            const auto RM = pPkg->getClipRootMotion(iClip); const auto& C = pPkg->getClips()[std::size_t(iClip)];
+                            float Start = 0;
+                            for (std::size_t f = 1; f < RM.size(); ++f) if (std::hypot(RM[f].m_X - RM[0].m_X, RM[f].m_Z - RM[0].m_Z) > 0.015f) { Start = std::max(0.0f, float(f) / std::max(float(C.m_FPS), 1.0f) - 0.05f); break; }
+                            pAnim->m_RequestStart = Start; Rs.m_Start = Start;
+                        }
                         {   // a big imbalance plays a little faster (0.9 calm .. 1.15 past one reach): fast motions are for extreme cases
                             const float u = std::clamp((Plan.m_Imbalance - 0.7f) / 0.6f, 0.0f, 1.0f);
                             pAnim->m_Speed = Rs.m_SpeedWas * (0.9f + 0.25f * u * u * (3 - 2 * u));
@@ -873,7 +880,7 @@ namespace xlionrender
                             const auto& Stance = Feet[Plan.m_Foot == 0 ? 1 : 0];
                             pAnim->m_bRootMotion = true;
                             pAnim->m_WarpTarget = xmath::fvec3((Plan.m_Land.m_X + Stance.m_X) * 0.5f, T.m_Position.m_Y, (Plan.m_Land.m_Z + Stance.m_Z) * 0.5f);
-                            pAnim->m_WarpFrom = 0; pAnim->m_WarpTo = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 1.0f;
+                            pAnim->m_WarpFrom = Rs.m_Start; pAnim->m_WarpTo = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 1.0f;
                             pAnim->m_bWarpTurn = false; pAnim->m_bWarpHeight = false; pAnim->m_bWarp = true;
                             std::printf("[Recover] entity 0x%llX: aimed - the root to %.2f %.2f by %.2f s (the clip's own travel bent there)%c", (unsigned long long)Ent.m_Value, pAnim->m_WarpTarget.m_X, pAnim->m_WarpTarget.m_Z, pAnim->m_WarpTo, 10); std::fflush(stdout);
                         }
@@ -1044,12 +1051,17 @@ namespace xlionrender
                         std::fflush(stdout); St.m_bFallLogged = true;
                     }
                 }
-                if (bGot)
+                // a balancing body's controller keeps the physics' time (E66, Tomas 2026-11-19: "the steps they take is without them really knowing how...
+                // they always fold down"): this system runs once a FRAME but the physics runs FixedSteps steps of FixedDeltaTime - the balancer's clock (step
+                // times, swing) ran one fixed step per frame, so at 200 fps a 0.14 s step was over in 0.04 s of physics (a scuff) and at 30 fps took twice as long
+                const int nFixed = pGame->m_Time.m_FixedSteps;
+                const bool bBalanceClock = !R.m_bSupported && R.m_Balance > 0;
+                if (bGot && (nFixed > 0 || !bBalanceClock))
                 {
                     xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward; P.m_GravityFF = R.m_bSupported ? 0.0f : R.m_Balance;
                     if (R.m_bSupported) St.m_Supported += pGame->m_Time.m_DeltaTime;
                     float EW = 0;
-                    const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);
+                    const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime * float(bBalanceClock ? std::max(nFixed, 1) : 1), P, &EW);
                     if (E >= 0) { St.m_TrackSum += double(E) * E; St.m_TrackSumW += double(EW) * EW; ++St.m_nTrack; St.m_TrackMax = std::max(St.m_TrackMax, E); }
 
                     // R3b' return to cheap (contract 2.4 demotion): settled = joints within ReturnBelow of the animation for 0.3 s (from 0.3 s
