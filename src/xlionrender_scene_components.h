@@ -726,6 +726,8 @@ namespace xlionrender
         ragdoll_ref                     m_Ragdoll;
         bool                            m_bActive   = false;
         xlioncore::physics::ragdoll*    m_pRuntime  = nullptr;      // (while active: the physics world's; never saved, never shown)
+        xlioncore::physics::ragdoll*    m_pHitShapes = nullptr;     // (while animated with Recover and ReactSpeed: its shapes as kinematic hit shapes; never saved)
+        bool                            m_bHitShapesFailed = false;
         float                           m_Tracking    = 0.0f;       // R1: > 0, the joints pull toward the Animation (the gain); 0, a limp ragdoll
         bool                            m_bSupported  = true;       // R1: tracking, the root body follows the Animation (held up)
         float                           m_FeedForward = 0.3f;

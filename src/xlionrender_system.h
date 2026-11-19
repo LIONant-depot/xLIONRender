@@ -722,7 +722,8 @@ namespace xlionrender
                     if (Side < 0) continue;
                     // the speed change this side gets in a perfectly inelastic hit, mu v / m_own (mu: the reduced mass; a static or kinematic
                     // other: v): a ball barely moves a player
-                    const float Mo = Side == 0 ? I.m_MassA : I.m_MassB, Mt = Side == 0 ? I.m_MassB : I.m_MassA;
+                    const float Mo0 = Side == 0 ? I.m_MassA : I.m_MassB, Mt = Side == 0 ? I.m_MassB : I.m_MassA;
+                    const float Mo = Mo0 > 0 ? Mo0 : R.m_pHitShapes ? 60.0f : 0.0f;      // (its kinematic hit shapes have no mass: the body's, about)
                     const float Dv = Mo <= 0 ? 0.0f : Mt <= 0 ? I.m_Speed : I.m_Speed * Mt / (Mo + Mt);
                     Nv.m_Drives.Impact(NP, Dv);
                     if (Dv > Jolt) { Jolt = Dv; pJolt = &I; JoltSide = Side; }
@@ -900,8 +901,31 @@ namespace xlionrender
                     }
                     xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pRuntime); R.m_pRuntime = nullptr; m_State.erase(Ent.m_Value);
                 }
+                // hit shapes (ragdoll design v2; R68, Tomas 2026-11-19: boxes went through an animated Lilly): a character that answers hits by
+                // animation (Recover, ReactSpeed) keeps its ragdoll's shapes as kinematic bodies on its animated pose, so a box bounces off it
+                // and the hit reaches the recovery above
+                if (R.m_bRecover && R.m_ReactSpeed > 0 && pAnim && !R.m_bHitShapesFailed)
+                {
+                    if (R.m_pHitShapes == nullptr)
+                    {
+                        if (Activate(Ent, R, Skin, pAnim, T, pParent, *pGame))
+                        {
+                            R.m_pHitShapes = R.m_pRuntime; R.m_pRuntime = nullptr; m_State.erase(Ent.m_Value);
+                            xlioncore::physics::MakeRagdollHitShapes(*R.m_pHitShapes, Ent.m_Value);
+                            std::printf("[Ragdoll] entity 0x%llX: hit shapes on (animated; Recover)%c", (unsigned long long)Ent.m_Value, 10); std::fflush(stdout);
+                        }
+                        else R.m_bHitShapesFailed = true;
+                    }
+                    if (R.m_pHitShapes)
+                    {
+                        float Scale = 1; const auto EW = WorldFrame(T, pParent, Scale); std::vector<xanimation::rigid> W0, W1;
+                        if (AnimatedWorlds(Skin, pAnim, EW, Scale, pGame->m_Time.m_FixedDeltaTime, W0, W1)) xlioncore::physics::MoveRagdollHitShapes(*R.m_pHitShapes, W1, pGame->m_Time.m_DeltaTime);
+                    }
+                }
+                else if (R.m_pHitShapes) { xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pHitShapes); R.m_pHitShapes = nullptr; }
                 return;
             }
+            if (R.m_pHitShapes) { xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pHitShapes); R.m_pHitShapes = nullptr; }     // (the real ragdoll takes over)
             if (R.m_pRuntime == nullptr && !Activate(Ent, R, Skin, pAnim, T, pParent, *pGame)) { R.m_bActive = false; return; }
 
             auto& St = m_State[Ent.m_Value];
