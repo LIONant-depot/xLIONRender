@@ -48,6 +48,20 @@ float GridSdArrow(in vec2 p)
     return min(d1, d2);
 }
 
+// One level's lines (cells of size 1): their coverage of this pixel - the editor grid's LinesCoverage (xeditor_tools_grid_frag.glsl):
+// a line thinner than a pixel is drawn a pixel wide at the opacity its width covers; where cells shrink toward a pixel, the mean coverage
+float GridLinesCoverage(in const vec2 UV, in const vec2 Deriv, in const float WidthPx)
+{
+    const vec2 D      = max(Deriv, vec2(1e-6));
+    const vec2 Want   = max(WidthPx, 0.0) * D;
+    const vec2 Drawn  = clamp(Want, D, vec2(0.5));
+    const vec2 Dist   = abs(fract(UV + 0.5) - 0.5);
+    vec2 C = 1.0 - smoothstep(Drawn * 0.5 - D * 0.75, Drawn * 0.5 + D * 0.75, Dist);
+    C *= clamp(Want / Drawn, 0.0, 1.0);
+    C  = mix(C, min(Want, vec2(1.0)), clamp(D * 2.0 - 1.0, 0.0, 1.0));
+    return C.x + C.y - C.x * C.y;
+}
+
 // UV: world XZ; ToFrag: the camera to the fragment (world)
 vec3 GridAlbedo(in const vec2 UV, in const vec3 ToFrag)
 {
@@ -57,17 +71,12 @@ vec3 GridAlbedo(in const vec2 UV, in const vec3 ToFrag)
     const float LogA      = floor(LogLength);
     const float Blend     = fract(LogLength);
     const float ScaleA = pow(kGridMajorDiv, LogA), ScaleB = ScaleA * kGridMajorDiv, ScaleC = ScaleB * kGridMajorDiv;
-    const vec2  GA = 1.0 - abs(fract(UV / ScaleA) * 2.0 - 1.0);
-    const vec2  GB = 1.0 - abs(fract(UV / ScaleB) * 2.0 - 1.0);
-    const vec2  GC = 1.0 - abs(fract(UV / ScaleC) * 2.0 - 1.0);
     const float WA = kGridLineWidth * (1.0 - Blend), WB = mix(kGridMajorLineWidth, kGridLineWidth, Blend), WC = kGridMajorLineWidth * Blend;
     const vec2  dX = dFdx(UV), dY = dFdy(UV);
     const vec2  Len = vec2(length(vec2(dX.x, dY.x)), length(vec2(dX.y, dY.y)));
-    const vec2  LA = 1.0 - smoothstep((WA - 1.5) * Len / ScaleA, (WA + 1.5) * Len / ScaleA, GA);
-    const vec2  LB = 1.0 - smoothstep((WB - 1.5) * Len / ScaleB, (WB + 1.5) * Len / ScaleB, GB);
-    const vec2  LC = 1.0 - smoothstep((WC - 1.5) * Len / ScaleC, (WC + 1.5) * Len / ScaleC, GC);
-    const float Grid = clamp(clamp(LA.x + LA.y, 0.0, 1.0) * clamp(WA, 0.0, 1.0)
-                           + max(clamp(LB.x + LB.y, 0.0, 1.0) * clamp(WB, 0.0, 1.0), clamp(LC.x + LC.y, 0.0, 1.0) * clamp(WC, 0.0, 1.0)), 0.0, 1.0);
+    // the editor grid's line coverage (xeditor_tools_grid_frag.glsl LinesCoverage): no dashes where lines go thinner than a pixel
+    const float Grid = clamp(GridLinesCoverage(UV / ScaleA, Len / ScaleA, WA)
+                           + max(GridLinesCoverage(UV / ScaleB, Len / ScaleB, WB), GridLinesCoverage(UV / ScaleC, Len / ScaleC, WC)), 0.0, 1.0);
     const float AxisZ = 1.0 - smoothstep((WB - 1.5) * Len.x, (WB + 1.5) * Len.x, abs(UV.x));        // the Z axis at x = 0
     const float AxisX = 1.0 - smoothstep((WB - 1.5) * Len.y, (WB + 1.5) * Len.y, abs(UV.y));        // the X axis at z = 0
 
