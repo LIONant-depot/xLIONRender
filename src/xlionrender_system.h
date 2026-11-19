@@ -672,7 +672,7 @@ namespace xlionrender
             const xanimation::skeleton_data* m_pSD = nullptr;       // (its skeleton, as the system keeps it)
             float                         m_HipsUp = -1;            // the hips' height above the stand plane at the switch (its standing height)
             float                         m_DownStill = 0;          // KD5: seconds fallen (hips more than half down) and still
-            bool                          m_bPrevHips = false, m_bFallLogged = false;
+            bool                          m_bPrevHips = false, m_bFallLogged = false, m_bGaveUpLogged = false;
             float                         m_FallW = 0, m_FallWPrev = 0, m_FallAt = -1, m_HandDownAt = -1, m_HeadLow = 1e9f, m_HeadFall = 0, m_HandLow = 1e9f;
         };
         std::unordered_map<const void*, graph_entry>                m_Graphs;       // per Ragdoll resource as loaded
@@ -961,6 +961,9 @@ namespace xlionrender
                 if (St.m_HipsUp < 0) St.m_HipsUp = std::max(Hips.m_Y - St.m_E.m_P.m_Y, 1e-3f);
                 xanimation::nervous::percepts Pc; Pc.m_Support = R.m_bSupported ? 1.0f : 0.0f; Pc.m_Fall = std::max(0.0f, -Vel.m_Y);
                 Pc.m_Drop = std::clamp(1.0f - (Hips.m_Y - St.m_E.m_P.m_Y) / St.m_HipsUp, 0.0f, 1.0f);
+                const bool bGaveUp = xlioncore::physics::RagdollBalanceGaveUp(*R.m_pRuntime);      // (its balance gave the fall up: catch it now - Tomas 2026-11-19)
+                if (bGaveUp && !St.m_bGaveUpLogged) { Pc.m_Fall = std::max(Pc.m_Fall, 1.2f); Pc.m_Drop = std::max(Pc.m_Drop, 0.2f); }      // (once: the catch starts; the real fall then holds it, and her stillness later lets her get up)
+                if (bGaveUp && !St.m_bGaveUpLogged) { St.m_bGaveUpLogged = true; std::printf("[Balance] entity 0x%llX gave the fall up (her centre dropped 15 %%): the fall reflexes take over%c", (unsigned long long)Ent.m_Value, 10); std::fflush(stdout); }
                 static const auto s_Limbs = xanimation::nervous::LimbReflexes();
                 const auto D = xanimation::nervous::Choose(s_Limbs, Nv.m_Drives, Pc, Nv.m_RunningLimbs, ++Nv.m_Tick);
                 if (D.m_bNew)
