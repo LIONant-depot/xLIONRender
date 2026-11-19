@@ -641,7 +641,7 @@ namespace xlionrender
         // v2 recovery, per character (runtime; kept here, not in the Ragdoll component: its layout is shared with code built elsewhere - growing it
         // blew up every ragdoll's physics in JointTest): the last two takes played (name CRC, top bit mirrored), the pick's seed, and the
         // Animation's Speed / Mirror before the take, put back at its end
-        struct recover_state { std::uint32_t m_Recent[2] = {}; std::uint32_t m_Seed = 0x9E3779B9u; float m_SpeedWas = 1; bool m_bMirrorWas = false, m_bRestore = false; };
+        struct recover_state { std::uint32_t m_Recent[2] = {}; std::uint32_t m_Seed = 0x9E3779B9u; float m_SpeedWas = 1, m_SpeedGo = 1, m_ReactLeft = 0; bool m_bMirrorWas = false, m_bRestore = false; };
         std::unordered_map<std::uint64_t, recover_state> m_Recover;
 
         struct graph_entry { xragdoll::runtime_graph m_G; std::vector<xanimation::rigid> m_Rest; };
@@ -700,6 +700,8 @@ namespace xlionrender
             const auto* pGame = xlioncore::game::From(GameMgr);
             if (pGame == nullptr) return;
             if (R.m_bGettingUp && !R.m_bActive && (pAnim == nullptr || !pAnim->m_bOneShot)) R.m_bGettingUp = false;      // (the get-up clip played out)
+            if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_ReactLeft > 0 && pAnim)        // (the reaction delay ends: the step plays)
+                if ((It->second.m_ReactLeft -= pGame->m_Time.m_DeltaTime) <= 0) { It->second.m_ReactLeft = 0; pAnim->m_Speed = It->second.m_SpeedGo; }
             if (auto It = m_Recover.find(Ent.m_Value); It != m_Recover.end() && It->second.m_bRestore && (pAnim == nullptr || !pAnim->m_bOneShot)) { auto& Rs = It->second; Rs.m_bRestore = false; if (pAnim) { pAnim->m_Speed = Rs.m_SpeedWas; pAnim->m_bMirror = Rs.m_bMirrorWas; pAnim->m_RecoverArms = 0; } }     // (the recovery take played out)
             // R3b' (G0 stage 2): a solid hit on this entity or on its parent (a player's capsule) becomes this character's Hit: one event per side
             // of each impact (the impact's id, A or B), pushed away from the other along the contact normal
@@ -843,6 +845,7 @@ namespace xlionrender
                         {   // a big imbalance plays a little faster (0.9 calm .. 1.15 past one reach): fast motions are for extreme cases
                             const float u = std::clamp((Plan.m_Imbalance - 0.7f) / 0.6f, 0.0f, 1.0f);
                             pAnim->m_Speed = Rs.m_SpeedWas * (0.9f + 0.25f * u * u * (3 - 2 * u));
+                            if (R.m_PushReaction > 0) { Rs.m_SpeedGo = pAnim->m_Speed; Rs.m_ReactLeft = R.m_PushReaction; pAnim->m_Speed = 0; }     // (recipe v1 demo: the step waits, the flinch does not)
                         }
                         bAnimated = true;
                         // the torso gives at the hit (KN3's flinch on the spine chain, over the clip): a small bend with the push, scaled by its speed
