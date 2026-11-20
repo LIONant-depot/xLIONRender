@@ -301,7 +301,8 @@ namespace xlionrender
                     Turn = -Turn;                                   // (a vertical mirror turns the other way)
                 }
                 if (Wp.active()) D = xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Wp.m_Angle) * D * Wp.m_Stride;
-                if (!A.m_bRootToVelocity) D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)      // (RootToVelocity: the feet only - the body goes where they go, never faster)
+                static const bool s_NoSlide = [] { const char* e = xlionrender::Env("XLION_ANIM_NOSLIDE"); return e && *e == '1'; }();   // (Tomas 2026-11-20 15:16Z: the intent follows the body, never the body slid to the intent)
+                if (!A.m_bRootToVelocity && !s_NoSlide) D = D + Wp.m_Slide * (pGame->m_Time.m_DeltaTime / std::max(1e-6f, pT->m_Scale.m_X));       // (past the warp's limits: still where the game asks; Move is world units, D is scaled below)      // (RootToVelocity: the feet only - the body goes where they go, never faster)
                 auto WD = pT->m_Rotation * xmath::fvec3(D.m_X * pT->m_Scale.m_X, D.m_Y * pT->m_Scale.m_Y, D.m_Z * pT->m_Scale.m_Z);
                 // S6 warp window: inside Warp.From..To (clip seconds) the root motion is bent so the entity stands on Warp.Target (and faces
                 // Warp.Yaw) when the clip reaches To (motion/xanimation_warp_window.h); a target moved meanwhile is still met
