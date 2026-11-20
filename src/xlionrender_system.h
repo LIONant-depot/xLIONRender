@@ -145,7 +145,7 @@ namespace xlionrender
         }
 
         std::unordered_map<const xskeleton::skeleton*, xanimation::skeleton_data> m_Skeletons;        // (a mirrored clip's root motion: the skeleton's mirror table)
-        struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; };
+        struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; xanimation::vehicle_limits m_Limits; };
         std::unordered_map<const xanim_package::anim_package*, match_db> m_Match;                      // K4: one database per package (ponytail: a reloaded package at the same address keeps its old database until the editor restarts)
 
         void operator()( const xecs::component::entity& Ent, animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT, const xecs::component::parent* pParent ) noexcept
@@ -438,6 +438,8 @@ namespace xlionrender
                     M.m_Clips.push_back(std::move(Mc));
                 }
                 M.m_Db = xanimation::BuildMatchingDb(SD.view(), SD.m_Warp, SD.m_Rest, M.m_Clips);
+                M.m_Limits = xanimation::MeasureVehicleLimits(Pkg);
+                std::printf("[AnimMatch] limits (R114): top speed %.2f m/s, acceleration %.2f m/s2, turn %.0f deg/s\n", M.m_Limits.m_Speed, M.m_Limits.m_Accel, M.m_Limits.m_Turn * 57.29578f);
                 std::printf("[AnimMatch] database: %zu entries of %d floats from %d clips; travel directions (deg@m/s):", M.m_Db.m_Entries.size(), M.m_Db.m_Dim, int(Pkg.m_nClips));
                 for (std::size_t i = 0; i < M.m_Db.m_TravelYaws.size(); ++i) std::printf(" %.0f@%.2f", M.m_Db.m_TravelYaws[i] * 57.29578f, M.m_Db.m_TravelSpeeds[i]);
                 std::printf("\n");
@@ -469,6 +471,10 @@ namespace xlionrender
                 const auto Ah = xanimation::details::TurnY(pT->m_Rotation.ConjugateCopy() * A.m_MoveAhead, -Yaw0);
                 Wish = xmath::fvec3(Ah.m_X, 0, Ah.m_Z);
                 WishNow = xanimation::ReachableWish(M.m_Db, WishNow);
+            }
+            {   // R114 (XLION_ANIM_VEHICLE=1): the request held to what the body can do, from where it goes now - the intent follows the body
+                static const bool s_Vehicle = [] { const char* e = xlionrender::Env("XLION_ANIM_VEHICLE"); return e && *e == '1'; }();
+                if (s_Vehicle) { const auto Sc = pT ? pT->m_Scale.m_X : 1.0f; xanimation::LimitWish(M.m_Limits.m_Speed * xanimation::warp_limits{}.m_MaxStride * Sc, M.m_Limits.m_Accel * Sc, M.m_Limits.m_Turn, WishNow, Wish, YawAsked); }
             }
             Wish = xanimation::ReachableWish(M.m_Db, Wish);        // (toward a direction the clips walk; warping turns them the rest)
             if (!A.m_bFollowParent) WishNow = Wish;
