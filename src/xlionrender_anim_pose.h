@@ -127,7 +127,7 @@ namespace xlionrender
                                 Tr.m_LockT = Now;
                                 // (through a transition's blend a planted foot is held farther: the blend moves the pose's foot between two clips while the body
                                 // goes on, and at the usual 25 cm the lock let go mid-blend - SoccerAnim's feet slid ~125 cm/s around matching jumps)
-                                xanimation::foot_lock_params LockPm; if (Tr.m_In.m_bActive) LockPm.m_MaxPull = 0.6f;
+                                xanimation::foot_lock_params LockPm; if (Tr.m_In.m_bActive) LockPm.m_MaxPull = 0.6f; { static const bool s_Ease = [] { const char* e = xlionrender::Env("XLION_ANIM_EASEENGAGE"); return e && *e == '1'; }(); LockPm.m_bEaseEngage = s_Ease; }   // (E71 experiment)
                                 if (m_pSpringAnim && m_pSpringAnim->m_bFootSteps) LockPm.m_StepAt = 0.12f;      // (KS5: model units; Lilly's metres)
                                 // (the clip's own Footstep/Contact events say which feet are down: a foot locks when it lands, however fast the body goes - by
                                 // world speed alone a foot that landed while the body moved never locked; clips without such events keep the speed test)
