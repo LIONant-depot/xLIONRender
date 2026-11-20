@@ -129,6 +129,7 @@ namespace xlionrender
                                 // goes on, and at the usual 25 cm the lock let go mid-blend - SoccerAnim's feet slid ~125 cm/s around matching jumps)
                                 xanimation::foot_lock_params LockPm; if (Tr.m_In.m_bActive) LockPm.m_MaxPull = 0.6f; { static const bool s_Ease = [] { const char* e = xlionrender::Env("XLION_ANIM_EASEENGAGE"); return e && *e == '1'; }(); LockPm.m_bEaseEngage = s_Ease; }   // (E71 experiment)
                                 if (m_pSpringAnim && m_pSpringAnim->m_bFootSteps) LockPm.m_StepAt = 0.12f;      // (KS5: model units; Lilly's metres)
+                                { static const float s_StepAt = [] { const char* e = xlionrender::Env("XLION_ANIM_STEPAT"); return e && *e ? float(std::atof(e)) : -1.0f; }(); if (s_StepAt >= 0) LockPm.m_StepAt = s_StepAt; }   // (E71: LAFAN1 bench, steps at 0.2 m pull: slide p95 ~3.8 cm)
                                 // (the clip's own Footstep/Contact events say which feet are down: a foot locks when it lands, however fast the body goes - by
                                 // world speed alone a foot that landed while the body moved never locked; clips without such events keep the speed test)
                                 std::array<std::uint8_t, 8> Down{}; std::size_t nDown = 0;
