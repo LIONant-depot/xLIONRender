@@ -478,6 +478,8 @@ namespace xlionrender
                 static const float MG = [] { const char* e = xlionrender::Env("XLION_ANIM_MINGAP"); return e && *e ? float(std::atof(e)) : -1.0f; }();
                 if (CC >= 0) Pm.m_ClipChange = CC;
                 if (MG >= 0) Pm.m_MinGap = MG;
+                static const float ER = [] { const char* e = xlionrender::Env("XLION_ANIM_ENTRYRATIO"); return e && *e ? float(std::atof(e)) : -1.0f; }();   // (E71: the entry check, R112)
+                if (ER >= 0) Pm.m_EntryRatio = ER;
             }
             if (m_Searches >= SearchBudget()) { Pm.m_Interval = 1e9f; ++m_SearchWaits; }       // (over the budget: no search unless the clip is ending)
             const bool bJumped = xanimation::UpdateMatching(M.m_Db, M.m_Clips, St, xanimation::PredictWish(WishNow, Wish, YawAsked), 0, Pm);
