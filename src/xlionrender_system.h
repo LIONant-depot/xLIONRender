@@ -657,6 +657,10 @@ namespace xlionrender
         struct graph_entry { xragdoll::runtime_graph m_G; std::vector<xanimation::rigid> m_Rest; };
         struct entity_state
         {
+            bool                m_bWalkRef = false;     // Walk (gait mode): the entity follows the body - its frame when the gait began
+            float               m_WalkH0 = 0;
+            xmath::fquat        m_WalkRot0;
+            xmath::fvec3        m_WalkOff{ 0, 0, 0 };
             xmath::fvec3        m_Offset;               // entity - hips (x, z) at the switch
             xanimation::rigid   m_E;                    // the entity's frame and scale at the switch: where the tracked animation is played (R1)
             float               m_Scale = 1;
@@ -1082,6 +1086,17 @@ namespace xlionrender
                         if (pAnim->m_Face.m_X != 0 || pAnim->m_Face.m_Z != 0) H = std::atan2(pAnim->m_Face.m_X, pAnim->m_Face.m_Z);
                         else if (pAnim->m_bFaceMove && std::hypot(Vw.m_X, Vw.m_Z) > 0.05f) H = std::atan2(Vw.m_X, Vw.m_Z);
                         xlioncore::physics::RagdollWalk(*R.m_pRuntime, H, Vw);
+                        // R114, the intent follows the body: the entity is carried by the walking body - the hips' x z, the gait's heading - so the
+                        // Animation's Move / FaceMove ask from where she really is (a free-running kinematic character kept turning at its own rate:
+                        // the asked heading ran away from the walked one, wrapped past 180 deg and the turn flipped; she fell in 7-15 s)
+                        float Hg = 0;
+                        if (xlioncore::physics::RagdollWalkHeading(*R.m_pRuntime, Hg))
+                        {
+                            const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P;
+                            if (!St.m_bWalkRef) { St.m_bWalkRef = true; St.m_WalkH0 = Hg; St.m_WalkRot0 = T.m_Rotation; St.m_WalkOff = xmath::fvec3(T.m_Position.m_X - Hips.m_X, 0, T.m_Position.m_Z - Hips.m_Z); }
+                            T.m_Rotation = (xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Hg - St.m_WalkH0) * St.m_WalkRot0).NormalizeCopy();
+                            T.m_Position.m_X = Hips.m_X + St.m_WalkOff.m_X; T.m_Position.m_Z = Hips.m_Z + St.m_WalkOff.m_Z;
+                        }
                     }
                     float EW = 0;
                     const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);      // (a balancing body's controller runs each physics step in LIONCore: E66)
