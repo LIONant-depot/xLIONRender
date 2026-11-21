@@ -733,6 +733,7 @@ namespace xlionrender
         bool                            m_bSupported  = true;       // R1: tracking, the root body follows the Animation (held up)
         float                           m_FeedForward = 0.3f;
         float                           m_Balance     = 0.0f;       // R2: unsupported tracking - the joints hold the body up from its feet (gravity feed-forward), times this
+        bool                            m_bWalk       = false;      // gait mode (2026-11-21): unsupported tracking - the body WALKS by its own steps where the Animation's Move asks (xanimation::gait)
         std::uint64_t                   m_HitEventId  = 0;          // R3b': a new id = a hit (Impulse at Point) on this character: a tracking one is promoted to physics,
         xmath::fvec3                    m_HitPoint    = {};         //  takes it once (the same id again is the same event) and returns to its Animation when settled
         xmath::fvec3                    m_HitImpulse  = {};
@@ -768,6 +769,7 @@ namespace xlionrender
         , obj_member<"Supported", &ragdoll::m_bSupported, member_help<"While tracking: the hips follow the Animation (held up). Off: the body must hold itself up, and falls">>
         , obj_member<"FeedForward", &ragdoll::m_FeedForward, member_help<"While tracking: how hard the joints also follow the Animation's own speed (0: the spring alone, which lags)">>
         , obj_member<"Balance", &ragdoll::m_Balance, member_help<"While tracking unsupported: the joints carry the body's weight down to its feet (each holds what is above it, as muscles do), so it stands by itself. 1: the whole weight, 0: off">>
+        , obj_member<"Walk", &ragdoll::m_bWalk, member_help<"While tracking unsupported: the body walks by its own physical steps where the Animation's Move and Face ask (it places its feet to keep its balance and holds its trunk up), instead of balancing in place. Speed, backward speed, acceleration and turning are held to what the body can do">>
         , obj_scope<"Hit"
             , obj_member<"EventId", &ragdoll::m_HitEventId, member_help<"A new id is a hit: Impulse (N s) at Point (world). A character with Tracking above 0 becomes physical for it, takes it once (the same id again is the same event: ignored) and returns to its Animation when settled">>
             , obj_member<"Point",   &ragdoll::m_HitPoint>

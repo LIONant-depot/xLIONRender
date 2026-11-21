@@ -1074,6 +1074,15 @@ namespace xlionrender
                 {
                     xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward; P.m_GravityFF = R.m_bSupported ? 0.0f : R.m_Balance;
                     if (R.m_bSupported) St.m_Supported += pGame->m_Time.m_DeltaTime;
+                    if (R.m_bWalk && !R.m_bSupported && pAnim)
+                    {   // gait mode: the Animation's request as the walk's - Move (the entity's frame) turned to the world, Face (world) or, with FaceMove,
+                        // the way it moves; neither: NaN, it keeps its own heading. ponytail: Move is not scaled with the entity
+                        const auto Vw = T.m_Rotation * pAnim->m_Move;
+                        float H = std::numeric_limits<float>::quiet_NaN();
+                        if (pAnim->m_Face.m_X != 0 || pAnim->m_Face.m_Z != 0) H = std::atan2(pAnim->m_Face.m_X, pAnim->m_Face.m_Z);
+                        else if (pAnim->m_bFaceMove && std::hypot(Vw.m_X, Vw.m_Z) > 0.05f) H = std::atan2(Vw.m_X, Vw.m_Z);
+                        xlioncore::physics::RagdollWalk(*R.m_pRuntime, H, Vw);
+                    }
                     float EW = 0;
                     const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);      // (a balancing body's controller runs each physics step in LIONCore: E66)
                     if (E >= 0) { St.m_TrackSum += double(E) * E; St.m_TrackSumW += double(EW) * EW; ++St.m_nTrack; St.m_TrackMax = std::max(St.m_TrackMax, E); }
