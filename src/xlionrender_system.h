@@ -1,6 +1,7 @@
 #ifndef XLIONRENDER_SYSTEM_H
 #define XLIONRENDER_SYSTEM_H
 #pragma once
+#include <deque>
 
 // The render system - compiled entirely inside LIONRender.dll (see xlionrender_plugin_entry.cpp, the
 // only place RegisterComponents<primitive>()/RegisterSystems<system>() are called). Same reasoning as
@@ -659,8 +660,9 @@ namespace xlionrender
         struct entity_state
         {
             bool                m_bPoseRefused = false; // (Controller: refused once, said once)
-            xanimation::rigid   m_ClipE;                // (clip tracker: where the reference stands now - the entity at the start, moved by the clip's root motion since)
-            float               m_ClipT = -1;           // (the clip time m_ClipE belongs to; < 0: not started)
+            std::deque<std::pair<float, std::vector<xanimation::rigid>>> m_Lead;     // (clip tracker: the lead - the Animation's world bone frames, by time)
+            float               m_LeadT = 0;
+            std::vector<xanimation::rigid> m_LeadNow;     // (the reference the body is at now: the scorecard's)
             bool                m_bWalkRef = false;     // Walk (gait mode): the entity follows the body - its frame when the gait began
             float               m_WalkH0 = 0;
             xmath::fquat        m_WalkRot0;
@@ -1092,41 +1094,36 @@ namespace xlionrender
                             const auto Key = std::format("controller {:X}", R.m_Controller.m_Instance.m_Value);
                             const xlioncore::physics::pose_reader Read = [pC](const char* pName, std::string& Out) { return pC->Read(pName, Out); };
                             if (pC->Kind() == xlocomotion::controller::kind::CLIP_TRACKER)
-                            {   // the clip tracker: the Animation 1..34 fixed steps ahead of its clock now (the window + the steps this frame may take),
-                                // sampled here - the physics steps read the table. ponytail: 34 pose samples a frame a character; sample on demand if it shows
-                                const float Fx = pGame->m_Time.m_FixedDeltaTime; auto Tab = std::make_shared<std::vector<std::vector<xanimation::rigid>>>(35); std::vector<xanimation::rigid> A0;
-                                // (root motion: the pose is sampled in place and the entity carries the travel - each look-ahead is placed where the
-                                // clip's root motion takes the entity by then. ponytail: the move only, a turning clip's turn and mirroring not yet)
-                                const std::uint64_t PkgId = !pAnim ? 0 : pAnim->m_Package.empty() ? 0 : pAnim->m_Package.m_Instance.m_Value;
-                                auto* pPkg = PkgId && pAnim->m_bRootMotion ? static_cast<xanim_package::anim_package*>(xlioncore::resources::GetResource(xrsc::anim_package_type_guid_v.m_Value, PkgId)) : nullptr;
-                                const bool bRM = pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && pPkg->getClips()[std::size_t(pAnim->m_Clip)].m_RootMotionMode != xanim_package::root_motion_mode::NONE;
-                                const float Len = bRM ? float(pPkg->getClips()[std::size_t(pAnim->m_Clip)].m_nFrames) / float(std::max(1.0f, float(pPkg->getClips()[std::size_t(pAnim->m_Clip)].m_FPS))) : 0.0f;
-                                auto Wrap = [&](float t) { return Len > 0 && pAnim->m_bLoop ? t - Len * std::floor(t / Len) : std::clamp(t, 0.0f, Len); };
-                                auto Travel = [&](float a, float b) { const float wa = Wrap(a), wb = Wrap(b);     // (the clip's move from a to b, across its loop)
-                                    return wb >= wa ? xanimation::RootStep(*pPkg, pAnim->m_Clip, wa, wb).m_Move : xanimation::RootStep(*pPkg, pAnim->m_Clip, wa, Len).m_Move + xanimation::RootStep(*pPkg, pAnim->m_Clip, 0.0f, wb).m_Move; };
-                                // R135, the reference's clock follows the body: the clip time advances by the physics the tracker stepped (not the frame
-                                // clock - a slow frame gives fewer steps than its seconds), and the Animation shows that time
-                                const float Rate = pAnim ? pAnim->m_Speed : 1.0f;
-                                // the ground: the entity stands on it; the clip's soles sit at the bundle's training floor below its origin, so the reference
-                                // is lifted by it - its soles on the ground, as the bench places the floor under them
+                            {   // the clip tracker follows a LEAD (PHC / ProtoMotions' online tracking): the Animation as it plays now - motion matching,
+                                // Move, root motion: the entity's frame NOW, not the switch frame - recorded each frame; the body follows it lead_lag_v
+                                // late, so its window (0.5 s ahead) is frames that already happened. The reference's soles are lifted onto the ground by
+                                // the bundle's training floor (the clip's soles sit there below its origin, as the bench puts the floor under them).
+                                constexpr float lead_lag_v = 0.6f, lead_keep_v = 1.2f;
                                 float BundleFloor = 0; { std::string J; if (pC->Read("policy.json", J)) if (const auto p = J.find("\"floor\":"); p != std::string::npos) BundleFloor = float(std::atof(J.c_str() + p + 8)); }
-                                if (St.m_ClipT < 0 || !xlioncore::physics::RagdollClipTrackStepped(*R.m_pRuntime)) { if (St.m_ClipT < 0) { St.m_ClipE = St.m_E; St.m_ClipE.m_P.m_Y -= BundleFloor * St.m_Scale; St.m_ClipT = pAnim ? pAnim->m_Time : 0.0f; } }
+                                float Sc = 1; auto En = WorldFrame(T, pParent, Sc); En.m_P.m_Y -= BundleFloor * Sc;
+                                std::vector<xanimation::rigid> A0, Now; St.m_LeadT += pGame->m_Time.m_DeltaTime;
+                                if (AnimatedWorlds(Skin, pAnim, En, Sc, pGame->m_Time.m_FixedDeltaTime, A0, Now)) St.m_Lead.push_back({ St.m_LeadT, std::move(Now) });
+                                while (St.m_Lead.size() > 2 && St.m_Lead[1].first < St.m_LeadT - lead_keep_v) St.m_Lead.pop_front();
+                                if (St.m_Lead.empty()) bOk = true;     // (no lead yet: she tracks as before)
                                 else
-                                {
-                                    const float tn = St.m_ClipT + xlioncore::physics::RagdollClipTrackStepped(*R.m_pRuntime) * Rate;
-                                    if (bRM) St.m_ClipE.m_P = St.m_ClipE.m_P + St.m_E.m_Q * (Travel(St.m_ClipT, tn) * St.m_Scale);
-                                    St.m_ClipT = tn;
+                                {   // the reference at (now - lag + s), interpolated between the recorded frames (a slow frame records few)
+                                    auto Lead = std::make_shared<std::deque<std::pair<float, std::vector<xanimation::rigid>>>>(St.m_Lead); const float Base = std::max(St.m_LeadT - lead_lag_v, St.m_Lead.front().first);     // (until the lead is lead_lag_v long she holds its first frame: no other tracking in between)
+                                    bOk = xlioncore::physics::RagdollClipTrack(*R.m_pRuntime, Key.c_str(), &Read, [Lead, Base](float s, std::vector<xanimation::rigid>& Out)
+                                    {
+                                        if (Lead->size() < 2) { Out = Lead->front().second; return true; } const float t = Base + s; std::size_t i = 1; while (i + 1 < Lead->size() && (*Lead)[i].first < t) ++i;
+                                        const auto& [ta, A] = (*Lead)[i - 1]; const auto& [tb, B] = (*Lead)[i];
+                                        const float w = tb > ta ? std::clamp((t - ta) / (tb - ta), 0.0f, 1.0f) : 1.0f; Out.resize(A.size());
+                                        for (std::size_t k = 0; k < A.size() && k < B.size(); ++k)
+                                        {
+                                            Out[k].m_P = A[k].m_P + (B[k].m_P - A[k].m_P) * w;
+                                            auto qb = B[k].m_Q; if (A[k].m_Q.m_X * qb.m_X + A[k].m_Q.m_Y * qb.m_Y + A[k].m_Q.m_Z * qb.m_Z + A[k].m_Q.m_W * qb.m_W < 0) { qb.m_X = -qb.m_X; qb.m_Y = -qb.m_Y; qb.m_Z = -qb.m_Z; qb.m_W = -qb.m_W; }
+                                            xmath::fquat q; q.m_X = A[k].m_Q.m_X + (qb.m_X - A[k].m_Q.m_X) * w; q.m_Y = A[k].m_Q.m_Y + (qb.m_Y - A[k].m_Q.m_Y) * w; q.m_Z = A[k].m_Q.m_Z + (qb.m_Z - A[k].m_Q.m_Z) * w; q.m_W = A[k].m_Q.m_W + (qb.m_W - A[k].m_Q.m_W) * w;
+                                            Out[k].m_Q = q.NormalizeCopy();
+                                        }
+                                        return true;
+                                    }, En.m_P.m_Y + BundleFloor * Sc, &Why);     // (the ground: where the entity stands)
+                                    { std::size_t i = 0; while (i + 1 < Lead->size() && (*Lead)[i + 1].first <= Base) ++i; St.m_LeadNow = (*Lead)[i].second; }     // (the reference she is at now, for the scorecard)
                                 }
-                                if (pAnim) const_cast<animation*>(pAnim)->m_Time = St.m_ClipT;     // ponytail: the Ragdoll system writes the Animation's clock (as PhaseSync its rate)
-                                xanimation::rigid Ei = St.m_ClipE; float tPrev = St.m_ClipT;
-                                for (int i = 1; i < 35; ++i)
-                                {
-                                    m_TimeShift = float(i) * Fx * Rate;
-                                    if (bRM) { const float t = St.m_ClipT + m_TimeShift; Ei.m_P = Ei.m_P + St.m_E.m_Q * (Travel(tPrev, t) * St.m_Scale); tPrev = t; }
-                                    AnimatedWorlds(Skin, pAnim, Ei, St.m_Scale, Fx, A0, (*Tab)[std::size_t(i)]);
-                                }
-                                m_TimeShift = 0;
-                                bOk = xlioncore::physics::RagdollClipTrack(*R.m_pRuntime, Key.c_str(), &Read, [Tab, Fx](float s, std::vector<xanimation::rigid>& Out) { Out = (*Tab)[std::size_t(std::clamp(int(std::lround(s / Fx)), 1, 34))]; return true; }, St.m_E.m_P.m_Y, &Why);
                             }
                             else bOk = xlioncore::physics::RagdollPoseFollow(*R.m_pRuntime, Key.c_str(), &Read, W1, 0.3f, &Why);
                         }
@@ -1171,8 +1168,8 @@ namespace xlionrender
                     }
                     if (xlionrender::Env("XLION_RAGDOLL_BODYERR"))     // (diagnosis: where the distance from the animation lives, per body)
                     {
-                        std::vector<xanimation::rigid> Wc, Wc0; const bool bClip = St.m_ClipT >= 0 && AnimatedWorlds(Skin, pAnim, St.m_ClipE, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, Wc0, Wc);
-                        const auto& WS = bClip ? Wc : W1;     // (a clip tracker's reference travels with the clip; the Animation entity stays put)
+                        const bool bClip = !St.m_LeadNow.empty(); const auto& Wc = St.m_LeadNow;
+                        const auto& WS = bClip ? Wc : W1;     // (a clip tracker: the lead it follows - lag 0.6 s; its frame at the body's time; ponytail: the nearest recorded frame, not interpolated)
                         std::vector<std::pair<int, float>> PB; float Drift = 0; xlioncore::physics::RagdollPoseDistance(*R.m_pRuntime, WS, &PB, &Drift);
                         St.m_DriftSum += Drift; St.m_DriftMax = std::max(St.m_DriftMax, Drift);
                         float Gl = 0, Rr = 0; if (xlioncore::physics::RagdollMpjpe(*R.m_pRuntime, WS, Gl, Rr)) { St.m_GSum += Gl; St.m_RSum += Rr; St.m_GMax = std::max(St.m_GMax, Gl); }
@@ -1246,7 +1243,7 @@ namespace xlionrender
             }
             // the entity follows the hips across the ground
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
-            if (pParent == nullptr) { T.m_Position.m_X = Hips.m_P.m_X + St.m_Offset.m_X; T.m_Position.m_Z = Hips.m_P.m_Z + St.m_Offset.m_Z; }
+            if (pParent == nullptr && St.m_Lead.empty()) { T.m_Position.m_X = Hips.m_P.m_X + St.m_Offset.m_X; T.m_Position.m_Z = Hips.m_P.m_Z + St.m_Offset.m_Z; }
 
             // the gate's numbers over the first 4 s
             if (St.m_bReported) return;
