@@ -662,6 +662,7 @@ namespace xlionrender
             bool                m_bPoseRefused = false; // (Controller: refused once, said once)
             std::deque<std::pair<float, std::vector<xanimation::rigid>>> m_Lead;     // (clip tracker: the lead - the Animation's world bone frames, by time)
             float               m_LeadT = 0;
+            bool                m_bClipFallen = false;     // (clip tracker: fell - off until the ragdoll is activated again)
             std::vector<xanimation::rigid> m_LeadNow;     // (the reference the body is at now: the scorecard's)
             bool                m_bWalkRef = false;     // Walk (gait mode): the entity follows the body - its frame when the gait began
             float               m_WalkH0 = 0;
@@ -1098,6 +1099,13 @@ namespace xlionrender
                                 // Move, root motion: the entity's frame NOW, not the switch frame - recorded each frame; the body follows it lead_lag_v
                                 // late, so its window (0.5 s ahead) is frames that already happened. The reference's soles are lifted onto the ground by
                                 // the bundle's training floor (the clip's soles sit there below its origin, as the bench puts the floor under them).
+                                if (!St.m_bClipFallen && !St.m_Lead.empty() && xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P.m_Y - WorldFrame(T, pParent, St.m_Scale).m_P.m_Y < 0.45f)
+                                {   // a fall (the trainer's rule: hips below 0.45 m): the tracker lets go - she settles, the get-up (Ragdoll Hit/GetUp*) takes over, and
+                                    // the lead starts again from where she stands when the ragdoll is activated next
+                                    St.m_bClipFallen = true; xlioncore::physics::RagdollPoseGoalOff(*R.m_pRuntime); St.m_Lead.clear(); St.m_LeadNow.clear();
+                                    std::printf("[ClipTrack] entity 0x%llX fell: tracker off, get-up\n", (unsigned long long)Ent.m_Value); std::fflush(stdout);
+                                }
+                                if (St.m_bClipFallen) bOk = true; else {
                                 constexpr float lead_lag_v = 0.6f, lead_keep_v = 1.2f;
                                 float BundleFloor = 0; { std::string J; if (pC->Read("policy.json", J)) if (const auto p = J.find("\"floor\":"); p != std::string::npos) BundleFloor = float(std::atof(J.c_str() + p + 8)); }
                                 float Sc = 1; auto En = WorldFrame(T, pParent, Sc); En.m_P.m_Y -= BundleFloor * Sc;
@@ -1123,6 +1131,7 @@ namespace xlionrender
                                         return true;
                                     }, En.m_P.m_Y + BundleFloor * Sc, &Why);     // (the ground: where the entity stands)
                                     { std::size_t i = 0; while (i + 1 < Lead->size() && (*Lead)[i + 1].first <= Base) ++i; St.m_LeadNow = (*Lead)[i].second; }     // (the reference she is at now, for the scorecard)
+                                }
                                 }
                             }
                             else bOk = xlioncore::physics::RagdollPoseFollow(*R.m_pRuntime, Key.c_str(), &Read, W1, 0.3f, &Why);
@@ -1459,6 +1468,7 @@ namespace xlionrender
             auto& St = m_State[Ent.m_Value]; St = {};
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
             St.m_Offset = T.m_Position - Hips.m_P;
+            St.m_Lead.clear(); St.m_LeadT = 0; St.m_LeadNow.clear(); St.m_bClipFallen = false;
             St.m_E = EW; St.m_Scale = Scale; St.m_pGraph = &GE.m_G.m_Graph; St.m_pSD = &S;
             St.m_Sleep = 0.05f * std::sqrt(Params.m_Size / 1.7f);
             xlioncore::physics::ragdoll_stats Stats; xlioncore::physics::RagdollStats(*R.m_pRuntime, Stats);
