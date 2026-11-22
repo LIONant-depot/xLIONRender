@@ -56,6 +56,7 @@
 #include "dependencies/xLIONCore/src/physics/xlioncore_physics_api.h"     // CastRayClosest (the feet's ground, K3)
 #include "dependencies/xstrtool/source/xstrtool.h"           // (a clip requested by name: its hash, as the compiler makes it)
 #include "plugins/xragdoll.plugin/source/xragdoll_body_graph.h"
+#include "plugins/xlocomotion.plugin/source/xlocomotion.h"
 #include <cstring>
 #include <format>
 #include <functional>
@@ -657,6 +658,7 @@ namespace xlionrender
         struct graph_entry { xragdoll::runtime_graph m_G; std::vector<xanimation::rigid> m_Rest; };
         struct entity_state
         {
+            bool                m_bPoseRefused = false; // (Controller: refused once, said once)
             bool                m_bWalkRef = false;     // Walk (gait mode): the entity follows the body - its frame when the gait began
             float               m_WalkH0 = 0;
             xmath::fquat        m_WalkRot0;
@@ -1078,6 +1080,18 @@ namespace xlionrender
                 {
                     xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward; P.m_GravityFF = R.m_bSupported ? 0.0f : R.m_Balance;
                     if (R.m_bSupported) St.m_Supported += pGame->m_Time.m_DeltaTime;
+                    if (!R.m_Controller.empty() && !R.m_bSupported && !St.m_bPoseRefused)
+                    {   // the learned controller (slice 1, R132): the Animation's pose as its goal every 0.3 s; TrackRagdoll then leaves the drives to it
+                        std::string Why; bool bOk = false;
+                        if (auto* pC = static_cast<const xlocomotion::controller*>(xlioncore::resources::GetResource(xrsc::locomotion_controller_type_guid_v.m_Value, R.m_Controller.m_Instance.m_Value)))
+                        {
+                            const auto Key = std::format("controller {:X}", R.m_Controller.m_Instance.m_Value);
+                            const xlioncore::physics::pose_reader Read = [pC](const char* pName, std::string& Out) { return pC->Read(pName, Out); };
+                            bOk = xlioncore::physics::RagdollPoseFollow(*R.m_pRuntime, Key.c_str(), &Read, W1, 0.3f, &Why);
+                        }
+                        else bOk = true;     // (not loaded yet, or not compiled: asked again next frame; meanwhile she tracks as before)
+                        if (!bOk) { St.m_bPoseRefused = true; std::printf("[PoseGoal] entity 0x%llX: off - %s\n", (unsigned long long)Ent.m_Value, Why.c_str()); std::fflush(stdout); }
+                    }
                     if (R.m_bWalk && !R.m_bSupported && pAnim)
                     {   // gait mode: the Animation's request as the walk's - Move (the entity's frame) turned to the world, Face (world) or, with FaceMove,
                         // the way it moves; neither: NaN, it keeps its own heading. ponytail: Move is not scaled with the entity

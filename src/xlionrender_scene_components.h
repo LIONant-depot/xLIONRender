@@ -1,6 +1,7 @@
 #ifndef XLIONRENDER_SCENE_COMPONENTS_H
 #define XLIONRENDER_SCENE_COMPONENTS_H
 #pragma once
+#include "plugins/xlocomotion.plugin/source/xlocomotion_ref.h"
 
 // The components a Level draws with through xlionrender::instance (the forward renderer: shadows, probes, GI): a Mesh and its
 // MeshMaterial, the lights, the Environment. Registered and consumed entirely inside LIONRender.dll, like the Primitive and the Text (xlionrender_plugin_entry.cpp).
@@ -734,6 +735,7 @@ namespace xlionrender
         float                           m_FeedForward = 0.3f;
         float                           m_Balance     = 0.0f;       // R2: unsupported tracking - the joints hold the body up from its feet (gravity feed-forward), times this
         bool                            m_bWalk       = false;      // gait mode (2026-11-21): unsupported tracking - the body WALKS by its own steps where the Animation's Move asks (xanimation::gait)
+        xrsc::locomotion_controller     m_Controller  = {};         // slice 1 (R132): a learned Locomotion Controller - unsupported tracking: it steers the body toward the Animation's pose
         std::uint64_t                   m_HitEventId  = 0;          // R3b': a new id = a hit (Impulse at Point) on this character: a tracking one is promoted to physics,
         xmath::fvec3                    m_HitPoint    = {};         //  takes it once (the same id again is the same event) and returns to its Animation when settled
         xmath::fvec3                    m_HitImpulse  = {};
@@ -770,6 +772,7 @@ namespace xlionrender
         , obj_member<"FeedForward", &ragdoll::m_FeedForward, member_help<"While tracking: how hard the joints also follow the Animation's own speed (0: the spring alone, which lags)">>
         , obj_member<"Balance", &ragdoll::m_Balance, member_help<"While tracking unsupported: the joints carry the body's weight down to its feet (each holds what is above it, as muscles do), so it stands by itself. 1: the whole weight, 0: off">>
         , obj_member<"Walk", &ragdoll::m_bWalk, member_help<"While tracking unsupported: the body walks by its own physical steps where the Animation's Move and Face ask (it places its feet to keep its balance and holds its trunk up), instead of balancing in place. Speed, backward speed, acceleration and turning are held to what the body can do">>
+        , obj_member<"Controller", &ragdoll::m_Controller, member_help<"While tracking unsupported: a LEARNED Locomotion Controller moves the body toward the Animation's pose, renewed every 0.3 s - its Ragdoll must be this one (else it says why and stays off)">>
         , obj_scope<"Hit"
             , obj_member<"EventId", &ragdoll::m_HitEventId, member_help<"A new id is a hit: Impulse (N s) at Point (world). A character with Tracking above 0 becomes physical for it, takes it once (the same id again is the same event: ignored) and returns to its Animation when settled">>
             , obj_member<"Point",   &ragdoll::m_HitPoint>
