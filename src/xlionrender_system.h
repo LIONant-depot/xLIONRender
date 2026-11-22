@@ -659,6 +659,8 @@ namespace xlionrender
         struct entity_state
         {
             bool                m_bPoseRefused = false; // (Controller: refused once, said once)
+            xanimation::rigid   m_ClipE;                // (clip tracker: where the reference stands now - the entity at the start, moved by the clip's root motion since)
+            float               m_ClipT = -1;           // (the clip time m_ClipE belongs to; < 0: not started)
             bool                m_bWalkRef = false;     // Walk (gait mode): the entity follows the body - its frame when the gait began
             float               m_WalkH0 = 0;
             xmath::fquat        m_WalkRot0;
@@ -1089,7 +1091,44 @@ namespace xlionrender
                         {
                             const auto Key = std::format("controller {:X}", R.m_Controller.m_Instance.m_Value);
                             const xlioncore::physics::pose_reader Read = [pC](const char* pName, std::string& Out) { return pC->Read(pName, Out); };
-                            bOk = xlioncore::physics::RagdollPoseFollow(*R.m_pRuntime, Key.c_str(), &Read, W1, 0.3f, &Why);
+                            if (pC->Kind() == xlocomotion::controller::kind::CLIP_TRACKER)
+                            {   // the clip tracker: the Animation 1..34 fixed steps ahead of its clock now (the window + the steps this frame may take),
+                                // sampled here - the physics steps read the table. ponytail: 34 pose samples a frame a character; sample on demand if it shows
+                                const float Fx = pGame->m_Time.m_FixedDeltaTime; auto Tab = std::make_shared<std::vector<std::vector<xanimation::rigid>>>(35); std::vector<xanimation::rigid> A0;
+                                // (root motion: the pose is sampled in place and the entity carries the travel - each look-ahead is placed where the
+                                // clip's root motion takes the entity by then. ponytail: the move only, a turning clip's turn and mirroring not yet)
+                                const std::uint64_t PkgId = !pAnim ? 0 : pAnim->m_Package.empty() ? 0 : pAnim->m_Package.m_Instance.m_Value;
+                                auto* pPkg = PkgId && pAnim->m_bRootMotion ? static_cast<xanim_package::anim_package*>(xlioncore::resources::GetResource(xrsc::anim_package_type_guid_v.m_Value, PkgId)) : nullptr;
+                                const bool bRM = pPkg && pAnim->m_Clip >= 0 && pAnim->m_Clip < int(pPkg->getClips().size()) && pPkg->getClips()[std::size_t(pAnim->m_Clip)].m_RootMotionMode != xanim_package::root_motion_mode::NONE;
+                                const float Len = bRM ? float(pPkg->getClips()[std::size_t(pAnim->m_Clip)].m_nFrames) / float(std::max(1.0f, float(pPkg->getClips()[std::size_t(pAnim->m_Clip)].m_FPS))) : 0.0f;
+                                auto Wrap = [&](float t) { return Len > 0 && pAnim->m_bLoop ? t - Len * std::floor(t / Len) : std::clamp(t, 0.0f, Len); };
+                                auto Travel = [&](float a, float b) { const float wa = Wrap(a), wb = Wrap(b);     // (the clip's move from a to b, across its loop)
+                                    return wb >= wa ? xanimation::RootStep(*pPkg, pAnim->m_Clip, wa, wb).m_Move : xanimation::RootStep(*pPkg, pAnim->m_Clip, wa, Len).m_Move + xanimation::RootStep(*pPkg, pAnim->m_Clip, 0.0f, wb).m_Move; };
+                                // R135, the reference's clock follows the body: the clip time advances by the physics the tracker stepped (not the frame
+                                // clock - a slow frame gives fewer steps than its seconds), and the Animation shows that time
+                                const float Rate = pAnim ? pAnim->m_Speed : 1.0f;
+                                // the ground: the entity stands on it; the clip's soles sit at the bundle's training floor below its origin, so the reference
+                                // is lifted by it - its soles on the ground, as the bench places the floor under them
+                                float BundleFloor = 0; { std::string J; if (pC->Read("policy.json", J)) if (const auto p = J.find("\"floor\":"); p != std::string::npos) BundleFloor = float(std::atof(J.c_str() + p + 8)); }
+                                if (St.m_ClipT < 0 || !xlioncore::physics::RagdollClipTrackStepped(*R.m_pRuntime)) { if (St.m_ClipT < 0) { St.m_ClipE = St.m_E; St.m_ClipE.m_P.m_Y -= BundleFloor * St.m_Scale; St.m_ClipT = pAnim ? pAnim->m_Time : 0.0f; } }
+                                else
+                                {
+                                    const float tn = St.m_ClipT + xlioncore::physics::RagdollClipTrackStepped(*R.m_pRuntime) * Rate;
+                                    if (bRM) St.m_ClipE.m_P = St.m_ClipE.m_P + St.m_E.m_Q * (Travel(St.m_ClipT, tn) * St.m_Scale);
+                                    St.m_ClipT = tn;
+                                }
+                                if (pAnim) const_cast<animation*>(pAnim)->m_Time = St.m_ClipT;     // ponytail: the Ragdoll system writes the Animation's clock (as PhaseSync its rate)
+                                xanimation::rigid Ei = St.m_ClipE; float tPrev = St.m_ClipT;
+                                for (int i = 1; i < 35; ++i)
+                                {
+                                    m_TimeShift = float(i) * Fx * Rate;
+                                    if (bRM) { const float t = St.m_ClipT + m_TimeShift; Ei.m_P = Ei.m_P + St.m_E.m_Q * (Travel(tPrev, t) * St.m_Scale); tPrev = t; }
+                                    AnimatedWorlds(Skin, pAnim, Ei, St.m_Scale, Fx, A0, (*Tab)[std::size_t(i)]);
+                                }
+                                m_TimeShift = 0;
+                                bOk = xlioncore::physics::RagdollClipTrack(*R.m_pRuntime, Key.c_str(), &Read, [Tab, Fx](float s, std::vector<xanimation::rigid>& Out) { Out = (*Tab)[std::size_t(std::clamp(int(std::lround(s / Fx)), 1, 34))]; return true; }, St.m_E.m_P.m_Y, &Why);
+                            }
+                            else bOk = xlioncore::physics::RagdollPoseFollow(*R.m_pRuntime, Key.c_str(), &Read, W1, 0.3f, &Why);
                         }
                         else bOk = true;     // (not loaded yet, or not compiled: asked again next frame; meanwhile she tracks as before)
                         if (!bOk) { St.m_bPoseRefused = true; std::printf("[PoseGoal] entity 0x%llX: off - %s\n", (unsigned long long)Ent.m_Value, Why.c_str()); std::fflush(stdout); }
@@ -1132,9 +1171,11 @@ namespace xlionrender
                     }
                     if (xlionrender::Env("XLION_RAGDOLL_BODYERR"))     // (diagnosis: where the distance from the animation lives, per body)
                     {
-                        std::vector<std::pair<int, float>> PB; float Drift = 0; xlioncore::physics::RagdollPoseDistance(*R.m_pRuntime, W1, &PB, &Drift);
+                        std::vector<xanimation::rigid> Wc, Wc0; const bool bClip = St.m_ClipT >= 0 && AnimatedWorlds(Skin, pAnim, St.m_ClipE, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, Wc0, Wc);
+                        const auto& WS = bClip ? Wc : W1;     // (a clip tracker's reference travels with the clip; the Animation entity stays put)
+                        std::vector<std::pair<int, float>> PB; float Drift = 0; xlioncore::physics::RagdollPoseDistance(*R.m_pRuntime, WS, &PB, &Drift);
                         St.m_DriftSum += Drift; St.m_DriftMax = std::max(St.m_DriftMax, Drift);
-                        float Gl = 0, Rr = 0; if (xlioncore::physics::RagdollMpjpe(*R.m_pRuntime, W1, Gl, Rr)) { St.m_GSum += Gl; St.m_RSum += Rr; St.m_GMax = std::max(St.m_GMax, Gl); }
+                        float Gl = 0, Rr = 0; if (xlioncore::physics::RagdollMpjpe(*R.m_pRuntime, WS, Gl, Rr)) { St.m_GSum += Gl; St.m_RSum += Rr; St.m_GMax = std::max(St.m_GMax, Gl); }
                         if (St.m_BodyErr.size() < PB.size()) St.m_BodyErr.resize(PB.size(), { 0, 0.0 });
                         for (std::size_t i = 0; i < PB.size(); ++i) { St.m_BodyErr[i].first = PB[i].first; St.m_BodyErr[i].second += double(PB[i].second) * PB[i].second; } ++St.m_nBodyErr;
                     }
