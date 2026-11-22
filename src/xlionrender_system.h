@@ -181,7 +181,7 @@ namespace xlionrender
                 return;
             }
             const float Before = A.m_Time;
-            A.m_Time += pGame->m_Time.m_DeltaTime * A.m_Speed;
+            A.m_Time += pGame->m_Time.m_DeltaTime * A.m_Speed * A.m_SyncRate;
             if (pPkg == nullptr || A.m_Clip < 0 || A.m_Clip >= int(pPkg->getClips().size())) return;
             const auto& Clip = pPkg->getClips()[std::size_t(A.m_Clip)];
             const float Length = Clip.m_FPS > 0 ? float(Clip.m_nFrames) / float(Clip.m_FPS) : 0.0f;
@@ -255,7 +255,7 @@ namespace xlionrender
                 if (pSD) { const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip); CV = CV - N * (2.0f * CV.Dot(N)); }
                 Wp = xanimation::WarpFor(CV, A.m_Move);
                 if (const float L = CV.Length(); L > 1e-4f) ClipDir = CV * (1.0f / L);
-                A.m_Time = Before + pGame->m_Time.m_DeltaTime * A.m_Speed * Wp.m_Rate;
+                A.m_Time = Before + pGame->m_Time.m_DeltaTime * A.m_Speed * A.m_SyncRate * Wp.m_Rate;
             }
             // (eased, not snapped: a matching jump changes the clip's travel and with it the angle - up to 90 deg in a frame swung the legs:
             // the AnimDemo pops, seen in the motion trace. The pose and the root motion both take the eased values)
@@ -669,6 +669,7 @@ namespace xlionrender
             float               m_T = 0, m_KE0 = 0, m_Y0 = 0, m_Mass = 0, m_WorstEnergy = 0, m_RestAt = -1, m_Sleep = 0;
             std::vector<float>  m_Anchor;
             bool                m_bReported = false;
+            std::vector<std::pair<int, double>> m_BodyErr; int m_nBodyErr = 0; double m_DriftSum = 0; float m_DriftMax = 0; double m_GSum = 0, m_RSum = 0; float m_GMax = 0;     // (XLION_RAGDOLL_BODYERR: each body's squared error, by bone)
             double              m_TrackSum = 0, m_TrackSumW = 0;    // R1: the joints' (and the bodies' world) rotation from the animation (deg, squared, summed); the joints' worst
             int                 m_nTrack = 0;
             float               m_TrackMax = 0;
@@ -695,6 +696,7 @@ namespace xlionrender
         std::unordered_map<const void*, xanimation::skeleton_data>  m_Skeletons;
         std::unordered_map<std::uint64_t, entity_state>             m_State;
         xanimation::pose                                            m_P0, m_P1;
+        float                                                       m_TimeShift = 0;     // (R135: AnimatedWorlds samples this far from the clock)
         struct reflex_now { xmath::fvec3 m_Threat; float m_Weight = 0, m_WeightPrev = 0; xanimation::reflex_pose_params m_Params; };
         const reflex_now*                                           m_pReflex = nullptr;    // (set around AnimatedWorlds while a reflex pose plays)
         struct reflex_rig_entry { xanimation::reflex_rig m_Rig; bool m_bInit = false; };
@@ -1078,7 +1080,7 @@ namespace xlionrender
                 }
                 if (bGot)
                 {
-                    xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward; P.m_GravityFF = R.m_bSupported ? 0.0f : R.m_Balance;
+                    xlioncore::physics::ragdoll_tracking P; P.m_Gain = R.m_Tracking; P.m_bSupported = R.m_bSupported; P.m_FeedForward = R.m_FeedForward; P.m_GravityFF = R.m_bSupported ? 0.0f : R.m_Balance; P.m_RootAssist = R.m_RootAssist;
                     if (R.m_bSupported) St.m_Supported += pGame->m_Time.m_DeltaTime;
                     if (!R.m_Controller.empty() && !R.m_bSupported && !St.m_bPoseRefused)
                     {   // the learned controller (slice 1, R132): the Animation's pose as its goal every 0.3 s; TrackRagdoll then leaves the drives to it
@@ -1111,6 +1113,30 @@ namespace xlionrender
                             T.m_Rotation = (xanimation::details::AxisAngle(xmath::fvec3(0, 1, 0), Hg - St.m_WalkH0) * St.m_WalkRot0).NormalizeCopy();
                             T.m_Position.m_X = Hips.m_X + St.m_WalkOff.m_X; T.m_Position.m_Z = Hips.m_Z + St.m_WalkOff.m_Z;
                         }
+                    }
+                    if (R.m_bPhaseSync && pAnim && pAnim->m_bPlaying)
+                    {   // R135: the animation time whose pose is nearest the body's (7 tries, +-0.15 s), its lead or lag a rate, pulled back to 1 (0.5 s),
+                        // smoothed (0.2 s); written to the Animation for its next step. ponytail: 7 pose samples a frame a character
+                        float Best = 1e9f, BestD = 0; std::vector<xanimation::rigid> A0, A1;
+                        for (int k = -3; k <= 3; ++k)
+                        {
+                            m_TimeShift = 0.05f * float(k) * pAnim->m_Speed;
+                            if (!AnimatedWorlds(Skin, pAnim, St.m_E, St.m_Scale, pGame->m_Time.m_FixedDeltaTime, A0, A1)) break;
+                            const float d = xlioncore::physics::RagdollPoseDistance(*R.m_pRuntime, A1); if (d < Best) { Best = d; BestD = 0.05f * float(k); }
+                        }
+                        m_TimeShift = 0;
+                        const float Want = std::clamp(1.0f + BestD / 0.5f, 0.5f, 1.5f), Dt = pGame->m_Time.m_DeltaTime;
+                        auto& Rate = const_cast<animation*>(pAnim)->m_SyncRate;     // ponytail: the Ragdoll system writes the Animation's rate (read on its next step)
+                        Rate += (Want - Rate) * std::min(1.0f, Dt / 0.2f);
+                        if (int(St.m_Age) != int(St.m_Age - Dt)) { std::printf("[PhaseSync] entity 0x%llX: body nearest the animation at %+.2f s (%.3f rad), rate %.2f\n", (unsigned long long)Ent.m_Value, BestD, Best, Rate); std::fflush(stdout); }
+                    }
+                    if (xlionrender::Env("XLION_RAGDOLL_BODYERR"))     // (diagnosis: where the distance from the animation lives, per body)
+                    {
+                        std::vector<std::pair<int, float>> PB; float Drift = 0; xlioncore::physics::RagdollPoseDistance(*R.m_pRuntime, W1, &PB, &Drift);
+                        St.m_DriftSum += Drift; St.m_DriftMax = std::max(St.m_DriftMax, Drift);
+                        float Gl = 0, Rr = 0; if (xlioncore::physics::RagdollMpjpe(*R.m_pRuntime, W1, Gl, Rr)) { St.m_GSum += Gl; St.m_RSum += Rr; St.m_GMax = std::max(St.m_GMax, Gl); }
+                        if (St.m_BodyErr.size() < PB.size()) St.m_BodyErr.resize(PB.size(), { 0, 0.0 });
+                        for (std::size_t i = 0; i < PB.size(); ++i) { St.m_BodyErr[i].first = PB[i].first; St.m_BodyErr[i].second += double(PB[i].second) * PB[i].second; } ++St.m_nBodyErr;
                     }
                     float EW = 0;
                     const float E = xlioncore::physics::TrackRagdoll(*R.m_pRuntime, W0, W1, pGame->m_Time.m_FixedDeltaTime, P, &EW);      // (a balancing body's controller runs each physics step in LIONCore: E66)
@@ -1196,15 +1222,28 @@ namespace xlionrender
             const bool bRest = S.m_nAwake == 0 || S.m_MaxSpeed < 2 * St.m_Sleep;
             if (bRest && St.m_RestAt < 0) St.m_RestAt = St.m_T;
             if (!bRest && S.m_MaxSpeed > 4 * St.m_Sleep) St.m_RestAt = -1;
-            if (St.m_T >= 4.0f)
+            static const float s_SummaryS = xlionrender::Env("XLION_RAGDOLL_SUMMARY_S") ? float(std::atof(xlionrender::Env("XLION_RAGDOLL_SUMMARY_S"))) : 4.0f;     // (when the summary and scorecard are printed)
+            if (St.m_T >= s_SummaryS)
             {
                 auto A = St.m_Anchor; std::sort(A.begin(), A.end());
                 std::printf("[Ragdoll] summary entity 0x%llX: anchors p95 %.2f mm max %.2f mm (%zu frames); energy <= %.2f of the bound (KE0 + m g h + 10 %% + 1 J); at rest %s%.2f s; awake %d/%d\n"
                     , (unsigned long long)Ent.m_Value, 1000 * A[std::min(A.size() - 1, A.size() * 95 / 100)], 1000 * A.back(), A.size(), St.m_WorstEnergy
                     , St.m_RestAt < 0 ? "NOT " : "", St.m_RestAt < 0 ? St.m_T : St.m_RestAt, S.m_nAwake, S.m_nBodies);
-                if (St.m_nTrack) std::printf("[Ragdoll] tracking entity 0x%llX: gain %.1f, %s, joints from the animation rms %.2f deg, worst %.2f deg; bodies in the world rms %.2f deg (%d frames)\n"
-                    , (unsigned long long)Ent.m_Value, R.m_Tracking, R.m_bSupported ? "supported" : "unsupported", std::sqrt(St.m_TrackSum / St.m_nTrack), St.m_TrackMax, std::sqrt(St.m_TrackSumW / St.m_nTrack), St.m_nTrack);
+                if (St.m_nTrack) std::printf("[Ragdoll] tracking entity 0x%llX: gain %.1f, %s, joints from the animation rms %.2f deg, worst %.2f deg; bodies in the world rms %.2f deg (%d frames); root assist %.2f, used %.3f x M g\n"
+                    , (unsigned long long)Ent.m_Value, R.m_Tracking, R.m_bSupported ? "supported" : "unsupported", std::sqrt(St.m_TrackSum / St.m_nTrack), St.m_TrackMax, std::sqrt(St.m_TrackSumW / St.m_nTrack), St.m_nTrack
+                    , R.m_RootAssist, R.m_pRuntime ? xlioncore::physics::RagdollRootAssistUsed(*R.m_pRuntime) : 0.0f);
                 std::fflush(stdout);
+                if (St.m_nBodyErr)
+                {
+                    auto V = St.m_BodyErr; std::sort(V.begin(), V.end(), [](auto& a, auto& b) { return a.second > b.second; });
+                    std::printf("[Ragdoll] body error entity 0x%llX (rms deg vs the animation, relative to the hips):", (unsigned long long)Ent.m_Value);
+                    for (const auto& [Bone, S2] : V) std::printf(" bone%d %.1f", Bone, std::sqrt(S2 / St.m_nBodyErr) * 57.29578);
+                    double All = 0; for (const auto& e : V) All += e.second; All = std::sqrt(All / (double(V.size()) * St.m_nBodyErr)) * 57.29578;
+                    std::printf("\n[Ragdoll] scorecard entity 0x%llX: every body %.1f deg rms, worst bone%d %.1f deg; hips drift mean %.2f m, max %.2f m (%d frames); G-MPJPE %.0f mm, MPJPE %.0f mm, worst G %.0f mm - %s (PHC: fails above 500 mm)\n"
+                        , (unsigned long long)Ent.m_Value, All, V.empty() ? -1 : V[0].first, V.empty() ? 0.0 : std::sqrt(V[0].second / St.m_nBodyErr) * 57.29578, St.m_DriftSum / St.m_nBodyErr, St.m_DriftMax, St.m_nBodyErr
+                        , 1000 * St.m_GSum / St.m_nBodyErr, 1000 * St.m_RSum / St.m_nBodyErr, 1000 * St.m_GMax, St.m_GMax > 0.5f ? "FAILED" : "success");
+                    std::fflush(stdout);
+                }
                 St.m_bReported = true;
             }
         }
@@ -1315,7 +1354,7 @@ namespace xlionrender
                 {
                     const auto& C = pPkg->getClips()[std::size_t(pAnim->m_Clip)];
                     const float Len = C.m_FPS > 0 ? float(C.m_nFrames) / float(C.m_FPS) : 0.0f;
-                    float t = pAnim->m_Time - (pAnim->m_bPlaying ? Back * pAnim->m_Speed : 0.0f);
+                    float t = pAnim->m_Time + m_TimeShift - (pAnim->m_bPlaying ? Back * pAnim->m_Speed : 0.0f);     // (m_TimeShift: R135's search around the clock)
                     if (Len > 0) t = pAnim->m_bLoop ? t - Len * std::floor(t / Len) : std::clamp(t, 0.0f, Len);
                     xanimation::pose Scratch;
                     if (xanimation::SampleClip(S, *pPkg, pAnim->m_Clip, t, pAnim->m_bMirror, P, Scratch)) return;

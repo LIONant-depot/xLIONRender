@@ -487,6 +487,7 @@ namespace xlionrender
         int                 m_Clip      = 0;        // ponytail: by index (the compiled clips keep only their names' hashes); by name when a tool lists them
         float               m_Time      = 0;        // seconds into the clip
         float               m_Speed     = 1;
+        float               m_SyncRate  = 1;        // (runtime, R135: the Ragdoll system's phase sync - the clock runs at Speed x this; 1 without it)
         bool                m_bLoop     = true;
         bool                m_bPlaying  = true;
         bool                m_bMirror   = false;    // played left/right mirrored (the skeleton's mirror table: no second clip)
@@ -734,6 +735,8 @@ namespace xlionrender
         bool                            m_bSupported  = true;       // R1: tracking, the root body follows the Animation (held up)
         float                           m_FeedForward = 0.3f;
         float                           m_Balance     = 0.0f;       // R2: unsupported tracking - the joints hold the body up from its feet (gravity feed-forward), times this
+        bool                            m_bPhaseSync  = false;      // R135: the Animation's clock follows the body (speeds up / slows down to where the limbs are, back to normal speed)
+        float                           m_RootAssist  = 0.0f;       // a capped push of the root toward the Animation's root (x body weight; 0: off) - not physical: a measured dial
         bool                            m_bWalk       = false;      // gait mode (2026-11-21): unsupported tracking - the body WALKS by its own steps where the Animation's Move asks (xanimation::gait)
         xrsc::locomotion_controller     m_Controller  = {};         // slice 1 (R132): a learned Locomotion Controller - unsupported tracking: it steers the body toward the Animation's pose
         std::uint64_t                   m_HitEventId  = 0;          // R3b': a new id = a hit (Impulse at Point) on this character: a tracking one is promoted to physics,
@@ -771,6 +774,8 @@ namespace xlionrender
         , obj_member<"Supported", &ragdoll::m_bSupported, member_help<"While tracking: the hips follow the Animation (held up). Off: the body must hold itself up, and falls">>
         , obj_member<"FeedForward", &ragdoll::m_FeedForward, member_help<"While tracking: how hard the joints also follow the Animation's own speed (0: the spring alone, which lags)">>
         , obj_member<"Balance", &ragdoll::m_Balance, member_help<"While tracking unsupported: the joints carry the body's weight down to its feet (each holds what is above it, as muscles do), so it stands by itself. 1: the whole weight, 0: off">>
+        , obj_member<"PhaseSync", &ragdoll::m_bPhaseSync, member_help<"While tracking: the Animation follows the body in time - it slows down when the limbs lag and speeds up when they lead (0.5 to 1.5 times), always pulled back to its normal speed">>
+        , obj_member<"RootAssist", &ragdoll::m_RootAssist, member_help<"While tracking unsupported: an invisible hand pushes the hips toward the Animation's, at most this many times her weight (0: off; 0.1 = 10 %). The limbs then follow the Animation more closely; the feet may slide. Not physical: keep it small">>
         , obj_member<"Walk", &ragdoll::m_bWalk, member_help<"While tracking unsupported: the body walks by its own physical steps where the Animation's Move and Face ask (it places its feet to keep its balance and holds its trunk up), instead of balancing in place. Speed, backward speed, acceleration and turning are held to what the body can do">>
         , obj_member<"Controller", &ragdoll::m_Controller, member_help<"While tracking unsupported: a LEARNED Locomotion Controller moves the body toward the Animation's pose, renewed every 0.3 s - its Ragdoll must be this one (else it says why and stays off)">>
         , obj_scope<"Hit"
