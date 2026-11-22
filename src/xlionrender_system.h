@@ -662,7 +662,9 @@ namespace xlionrender
             bool                m_bPoseRefused = false; // (Controller: refused once, said once)
             std::deque<std::pair<float, std::vector<xanimation::rigid>>> m_Lead;     // (clip tracker: the lead - the Animation's world bone frames, by time)
             float               m_LeadT = 0;
-            bool                m_bClipFallen = false;     // (clip tracker: fell - off until the ragdoll is activated again)
+            bool                m_bClipFallen = false;
+            float               m_LeadBase = 0;          // (the lead time the body is at now)
+            double              m_TimeErrSum = 0; float m_TimeErrMax = 0; int m_nTimeErr = 0, m_nFalls = 0;     // (Tomas 2026-11-23: the timing - |the lead time her body matches best - the lead time she is at|)     // (clip tracker: fell - off until the ragdoll is activated again)
             std::vector<xanimation::rigid> m_LeadNow;     // (the reference the body is at now: the scorecard's)
             bool                m_bWalkRef = false;     // Walk (gait mode): the entity follows the body - its frame when the gait began
             float               m_WalkH0 = 0;
@@ -1102,7 +1104,7 @@ namespace xlionrender
                                 if (!St.m_bClipFallen && !St.m_Lead.empty() && xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P.m_Y - WorldFrame(T, pParent, St.m_Scale).m_P.m_Y < 0.45f)
                                 {   // a fall (the trainer's rule: hips below 0.45 m): the tracker lets go - she settles, the get-up (Ragdoll Hit/GetUp*) takes over, and
                                     // the lead starts again from where she stands when the ragdoll is activated next
-                                    St.m_bClipFallen = true; xlioncore::physics::RagdollPoseGoalOff(*R.m_pRuntime); St.m_Lead.clear(); St.m_LeadNow.clear();
+                                    St.m_bClipFallen = true; ++St.m_nFalls; xlioncore::physics::RagdollPoseGoalOff(*R.m_pRuntime); St.m_Lead.clear(); St.m_LeadNow.clear();
                                     std::printf("[ClipTrack] entity 0x%llX fell: tracker off, get-up\n", (unsigned long long)Ent.m_Value); std::fflush(stdout);
                                 }
                                 if (St.m_bClipFallen) bOk = true; else {
@@ -1115,7 +1117,7 @@ namespace xlionrender
                                 if (St.m_Lead.empty()) bOk = true;     // (no lead yet: she tracks as before)
                                 else
                                 {   // the reference at (now - lag + s), interpolated between the recorded frames (a slow frame records few)
-                                    auto Lead = std::make_shared<std::deque<std::pair<float, std::vector<xanimation::rigid>>>>(St.m_Lead); const float Base = std::max(St.m_LeadT - lead_lag_v, St.m_Lead.front().first);     // (until the lead is lead_lag_v long she holds its first frame: no other tracking in between)
+                                    auto Lead = std::make_shared<std::deque<std::pair<float, std::vector<xanimation::rigid>>>>(St.m_Lead); const float Base = std::max(St.m_LeadT - lead_lag_v, St.m_Lead.front().first); St.m_LeadBase = Base;     // (until the lead is lead_lag_v long she holds its first frame: no other tracking in between)
                                     bOk = xlioncore::physics::RagdollClipTrack(*R.m_pRuntime, Key.c_str(), &Read, [Lead, Base](float s, std::vector<xanimation::rigid>& Out)
                                     {
                                         if (Lead->size() < 2) { Out = Lead->front().second; return true; } const float t = Base + s; std::size_t i = 1; while (i + 1 < Lead->size() && (*Lead)[i].first < t) ++i;
@@ -1178,7 +1180,13 @@ namespace xlionrender
                     if (xlionrender::Env("XLION_RAGDOLL_BODYERR"))     // (diagnosis: where the distance from the animation lives, per body)
                     {
                         const bool bClip = !St.m_LeadNow.empty(); const auto& Wc = St.m_LeadNow;
-                        const auto& WS = bClip ? Wc : W1;     // (a clip tracker: the lead it follows - lag 0.6 s; its frame at the body's time; ponytail: the nearest recorded frame, not interpolated)
+                        const auto& WS = bClip ? Wc : W1;
+                        if (bClip)
+                        {   // the TIMING: the recorded lead frame (within 0.3 s) her body matches best, against the one she is at
+                            float Bd = 1e9f, Bt = 0;
+                            for (const auto& [t, F] : St.m_Lead) if (std::fabs(t - St.m_LeadBase) <= 0.3f) { const float d = xlioncore::physics::RagdollPoseDistance(*R.m_pRuntime, F); if (d < Bd) { Bd = d; Bt = t - St.m_LeadBase; } }
+                            if (Bd < 1e8f) { St.m_TimeErrSum += std::fabs(Bt); St.m_TimeErrMax = std::max(St.m_TimeErrMax, std::fabs(Bt)); ++St.m_nTimeErr; }
+                        }     // (a clip tracker: the lead it follows - lag 0.6 s; its frame at the body's time; ponytail: the nearest recorded frame, not interpolated)
                         std::vector<std::pair<int, float>> PB; float Drift = 0; xlioncore::physics::RagdollPoseDistance(*R.m_pRuntime, WS, &PB, &Drift);
                         St.m_DriftSum += Drift; St.m_DriftMax = std::max(St.m_DriftMax, Drift);
                         float Gl = 0, Rr = 0; if (xlioncore::physics::RagdollMpjpe(*R.m_pRuntime, WS, Gl, Rr)) { St.m_GSum += Gl; St.m_RSum += Rr; St.m_GMax = std::max(St.m_GMax, Gl); }
@@ -1289,6 +1297,7 @@ namespace xlionrender
                     std::printf("\n[Ragdoll] scorecard entity 0x%llX: every body %.1f deg rms, worst bone%d %.1f deg; hips drift mean %.2f m, max %.2f m (%d frames); G-MPJPE %.0f mm, MPJPE %.0f mm, worst G %.0f mm - %s (PHC: fails above 500 mm)\n"
                         , (unsigned long long)Ent.m_Value, All, V.empty() ? -1 : V[0].first, V.empty() ? 0.0 : std::sqrt(V[0].second / St.m_nBodyErr) * 57.29578, St.m_DriftSum / St.m_nBodyErr, St.m_DriftMax, St.m_nBodyErr
                         , 1000 * St.m_GSum / St.m_nBodyErr, 1000 * St.m_RSum / St.m_nBodyErr, 1000 * St.m_GMax, St.m_GMax > 0.5f ? "FAILED" : "success");
+                    if (St.m_nTimeErr) std::printf("[Ragdoll] timing entity 0x%llX: body vs the animation's time mean %.0f ms, max %.0f ms; falls %d\n", (unsigned long long)Ent.m_Value, 1000 * St.m_TimeErrSum / St.m_nTimeErr, 1000 * St.m_TimeErrMax, St.m_nFalls);
                     std::fflush(stdout);
                 }
                 St.m_bReported = true;
@@ -1465,7 +1474,12 @@ namespace xlionrender
             if (R.m_pRuntime == nullptr) return Fail("the game has no physics world");
             if (pParent) xlioncore::physics::RagdollIgnoreEntity(getGameMgr(), *R.m_pRuntime, pParent->m_Value.m_Value);     // (its carrier's body: the same character)
 
-            auto& St = m_State[Ent.m_Value]; St = {};
+            auto& St = m_State[Ent.m_Value];
+            {   // (the scorecard and the summary clock survive a re-activation - a get-up must not erase the fall from the score)
+                auto Keep = std::make_tuple(St.m_BodyErr, St.m_nBodyErr, St.m_DriftSum, St.m_DriftMax, St.m_GSum, St.m_RSum, St.m_GMax, St.m_T, St.m_TimeErrSum, St.m_TimeErrMax, St.m_nTimeErr, St.m_nFalls);
+                St = {};
+                std::tie(St.m_BodyErr, St.m_nBodyErr, St.m_DriftSum, St.m_DriftMax, St.m_GSum, St.m_RSum, St.m_GMax, St.m_T, St.m_TimeErrSum, St.m_TimeErrMax, St.m_nTimeErr, St.m_nFalls) = Keep;
+            }
             const auto Hips = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f);
             St.m_Offset = T.m_Position - Hips.m_P;
             St.m_Lead.clear(); St.m_LeadT = 0; St.m_LeadNow.clear(); St.m_bClipFallen = false;
