@@ -662,7 +662,8 @@ namespace xlionrender
             bool                m_bPoseRefused = false; // (Controller: refused once, said once)
             std::deque<std::pair<float, std::vector<xanimation::rigid>>> m_Lead;     // (clip tracker: the lead - the Animation's world bone frames, by time)
             float               m_LeadT = 0;
-            bool                m_bClipFallen = false;
+            bool                m_bClipFallen = false, m_bBlowLogged = false;
+            float               m_NextTrackLog = 0;      // (clip tracker diagnosis: the next periodic line, s of m_Age)
             float               m_LeadBase = 0;          // (the lead time the body is at now)
             double              m_TimeErrSum = 0; float m_TimeErrMax = 0; int m_nTimeErr = 0, m_nFalls = 0;     // (Tomas 2026-11-23: the timing - |the lead time her body matches best - the lead time she is at|)     // (clip tracker: fell - off until the ragdoll is activated again)
             std::vector<xanimation::rigid> m_LeadNow;     // (the reference the body is at now: the scorecard's)
@@ -937,7 +938,9 @@ namespace xlionrender
                             , It->second.m_bForced ? "; sent back to its animation by the time limit (not settled)" : "");
                         std::fflush(stdout);
                     }
-                    xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pRuntime); R.m_pRuntime = nullptr; m_State.erase(Ent.m_Value);
+                    // (the state is NOT erased: the next Activate resets it but keeps the scorecard, its clock and the falls - erasing it here
+                    // after every get-up made each run's scorecard the last activation only, and "falls" never above 1)
+                    xlioncore::physics::DeactivateRagdoll(GameMgr, R.m_pRuntime); R.m_pRuntime = nullptr;
                 }
                 // hit shapes (ragdoll design v2; R68, Tomas 2026-11-19: boxes went through an animated Lilly): a character that answers hits by
                 // animation (Recover, ReactSpeed) keeps its ragdoll's shapes as kinematic bodies on its animated pose, so a box bounces off it
@@ -1104,8 +1107,13 @@ namespace xlionrender
                                 if (!St.m_bClipFallen && !St.m_Lead.empty() && xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P.m_Y - WorldFrame(T, pParent, St.m_Scale).m_P.m_Y < 0.45f)
                                 {   // a fall (the trainer's rule: hips below 0.45 m): the tracker lets go - she settles, the get-up (Ragdoll Hit/GetUp*) takes over, and
                                     // the lead starts again from where she stands when the ragdoll is activated next
+                                    {   // (when, and where the lead was: Play time, time since the activation, the lead's clip/time, the hips' horizontal offset from the lead's)
+                                        const auto Hp = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P; float Off = -1;
+                                        if (!St.m_LeadNow.empty() && St.m_pGraph && std::size_t(St.m_pGraph->m_Bodies[0].m_Bone) < St.m_LeadNow.size()) { const auto& L = St.m_LeadNow[std::size_t(St.m_pGraph->m_Bodies[0].m_Bone)].m_P; Off = std::hypot(Hp.m_X - L.m_X, Hp.m_Z - L.m_Z); }
+                                        std::printf("[ClipTrack] entity 0x%llX fell: tracker off, get-up; fall %d at play %.2f s, %.2f s after activation, lead clip %d time %.2f, hips-lead offset %.2f m\n", (unsigned long long)Ent.m_Value
+                                            , St.m_nFalls + 1, pGame->m_Time.m_Time, St.m_Age, pAnim ? pAnim->m_Clip : -1, pAnim ? pAnim->m_Time : 0.0f, Off); std::fflush(stdout);
+                                    }
                                     St.m_bClipFallen = true; ++St.m_nFalls; xlioncore::physics::RagdollPoseGoalOff(*R.m_pRuntime); St.m_Lead.clear(); St.m_LeadNow.clear();
-                                    std::printf("[ClipTrack] entity 0x%llX fell: tracker off, get-up\n", (unsigned long long)Ent.m_Value); std::fflush(stdout);
                                 }
                                 if (St.m_bClipFallen) bOk = true; else {
                                 constexpr float lead_lag_v = 0.6f, lead_keep_v = 1.2f;
@@ -1133,6 +1141,17 @@ namespace xlionrender
                                         return true;
                                     }, En.m_P.m_Y + BundleFloor * Sc, &Why);     // (the ground: where the entity stands)
                                     { std::size_t i = 0; while (i + 1 < Lead->size() && (*Lead)[i + 1].first <= Base) ++i; St.m_LeadNow = (*Lead)[i].second; }     // (the reference she is at now, for the scorecard)
+                                    {   // (diagnosis, every 10 s and once at a blow-up - a body faster than 15 m/s: Play time, the lead's clip/time, the hips' offset from the lead)
+                                        xlioncore::physics::ragdoll_stats Sx; xlioncore::physics::RagdollStats(*R.m_pRuntime, Sx); const bool bBlow = Sx.m_MaxSpeed > 15 && !St.m_bBlowLogged;
+                                        if (bBlow || St.m_Age >= St.m_NextTrackLog)
+                                        {
+                                            const auto Hp = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P; float Off = -1;
+                                            if (St.m_pGraph && std::size_t(St.m_pGraph->m_Bodies[0].m_Bone) < St.m_LeadNow.size()) { const auto& L = St.m_LeadNow[std::size_t(St.m_pGraph->m_Bodies[0].m_Bone)].m_P; Off = std::hypot(Hp.m_X - L.m_X, Hp.m_Z - L.m_Z); }
+                                            std::printf("[ClipTrack] entity 0x%llX %s play %.2f s, %.2f s after activation, lead clip %d time %.2f, hips y %.2f, hips-lead offset %.2f m, fastest body %d %.1f m/s\n", (unsigned long long)Ent.m_Value
+                                                , bBlow ? "BLOW-UP" : "tracking", pGame->m_Time.m_Time, St.m_Age, pAnim ? pAnim->m_Clip : -1, pAnim ? pAnim->m_Time : 0.0f, Hp.m_Y, Off, Sx.m_iFastest, Sx.m_MaxSpeed); std::fflush(stdout);
+                                            if (bBlow) St.m_bBlowLogged = true; else St.m_NextTrackLog = St.m_Age + 10;
+                                        }
+                                    }
                                 }
                                 }
                             }
@@ -1177,7 +1196,7 @@ namespace xlionrender
                         Rate += (Want - Rate) * std::min(1.0f, Dt / 0.2f);
                         if (int(St.m_Age) != int(St.m_Age - Dt)) { std::printf("[PhaseSync] entity 0x%llX: body nearest the animation at %+.2f s (%.3f rad), rate %.2f\n", (unsigned long long)Ent.m_Value, BestD, Best, Rate); std::fflush(stdout); }
                     }
-                    if (xlionrender::Env("XLION_RAGDOLL_BODYERR"))     // (diagnosis: where the distance from the animation lives, per body)
+                    if (xlionrender::Env("XLION_RAGDOLL_BODYERR") && !St.m_bClipFallen)     // (diagnosis: where the distance from the animation lives, per body; a fallen clip tracker is not scored - she lies there while the Animation walks on)
                     {
                         const bool bClip = !St.m_LeadNow.empty(); const auto& Wc = St.m_LeadNow;
                         const auto& WS = bClip ? Wc : W1;
