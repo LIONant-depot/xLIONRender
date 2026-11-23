@@ -83,6 +83,10 @@ namespace xlionrender
         // reads it: hierarchy propagated, fixed-step interpolation); the renderer draws that pose (scene_renderer::m_pUpdated) and poses only
         // what this did not (an active ragdoll, a world that does not update). Before: posed per view, per-entity state on the wall clock.
         anim_poser m_Poser;
+        // (Fable 2026-11-23, A/B: XLION_LEAD_DRAWN=1 - an active ragdoll with a Controller is posed too, the drawn pipeline (blend at matching
+        // jumps, warp, foot lock), kept here by entity with the update that posed it: the clip tracker's lead instead of the raw clip sample)
+        std::unordered_map<std::uint64_t, std::pair<std::uint32_t, std::vector<xmath::fmat4>>> m_LeadDrawn;
+        static bool LeadDrawn(void) noexcept { static const bool b = [] { const char* e = xlionrender::Env("XLION_LEAD_DRAWN"); return e && *e == '1'; }(); return b; }
         // K4's budgeted search queue: at most SearchBudget motion matching searches an update (XLION_ANIM_SEARCH_BUDGET, default 64); a character
         // due for a search past it waits for the next update (its clip plays on; one that is ending still searches). A crowd's searches spread
         // over frames instead of piling on one. ponytail: the same entity order every update - past ~6x the budget in characters searching at 10 Hz the
@@ -108,7 +112,8 @@ namespace xlionrender
             Foreach(Search(Query), [&](const xecs::component::entity& Ent, const xlioncore::transform& Local, const skinned_mesh& Skin, const animation& A
                                       , const xecs::component::parent* pParent, const xlioncore::render_transform* pRender, const ragdoll* pRagdoll) noexcept
             {
-                if (pRagdoll && pRagdoll->m_bActive) return;           // (the renderer poses it from its bodies)
+                const bool bLead = pRagdoll && pRagdoll->m_bActive && LeadDrawn() && !pRagdoll->m_Controller.empty();     // (XLION_LEAD_DRAWN: a clip tracker's lead = this drawn pose)
+                if (pRagdoll && pRagdoll->m_bActive && !bLead) return;           // (the renderer poses it from its bodies)
                 auto* pGeom = Skin.m_Geom.empty() ? nullptr : static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, Skin.m_Geom.m_Instance.m_Value));
                 auto* pSkel = pGeom ? static_cast<xskeleton::skeleton*>(GetResource(skeleton_type_guid_v.m_Value, pGeom->getSkeletonRef().m_Instance.m_Value)) : nullptr;
                 if (pGeom == nullptr || pSkel == nullptr || pSkel->getBones().empty())
@@ -122,6 +127,7 @@ namespace xlionrender
                 const std::uint64_t Pkg = A.m_Package.empty() ? pGeom->getAnimationRef().m_Instance.m_Value : A.m_Package.m_Instance.m_Value;
                 auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
                 const bool bClip = pPkg && A.m_Clip >= 0 && A.m_Clip < int(pPkg->getClips().size()) && pPkg->getBoneNameHashes().size() == pSkel->getBones().size();
+                if (bLead) { auto& Ld = m_LeadDrawn[Ent.m_Value]; m_Poser.PoseEntity(*pSkel, pPkg, bClip, &A, L2W, Ent.m_Value, Ld.second); Ld.first = m_Poser.m_Update; return; }     // (kept apart: the renderer draws her bodies)
                 auto& P = m_Poser.m_Posed[Ent.m_Value];
                 m_Poser.PoseEntity(*pSkel, pPkg, bClip, &A, L2W, Ent.m_Value, P.m_Worlds);
                 P.m_Local = *m_Poser.m_pAnimUsed; P.m_Update = m_Poser.m_Update; P.m_pSkel = pSkel;
@@ -664,6 +670,9 @@ namespace xlionrender
             float               m_LeadT = 0;
             bool                m_bClipFallen = false, m_bBlowLogged = false;
             float               m_NextTrackLog = 0;      // (clip tracker diagnosis: the next periodic line, s of m_Age)
+            struct lead_meta { float m_T = 0; int m_Clip = -1; float m_ClipT = 0; std::uint32_t m_Jumps = 0; float m_Stride = 1, m_Angle = 0, m_Dt = 0; };
+            std::deque<lead_meta> m_LeadMeta;     // (XLION_LEAD_DUMP: lead time -> the Animation when recorded: clip/time, matching jumps, warp stride/angle, the frame's DeltaTime)
+            int                 m_DumpSeg = -1, m_DumpN = 0, m_nLeadClamp = 0, m_nLeadDrawn = 0; float m_DumpT = 0;     // (XLION_LEAD_DUMP: this activation's file, rows written, next body time)
             float               m_LeadBase = 0;          // (the lead time the body is at now)
             double              m_TimeErrSum = 0; float m_TimeErrMax = 0; int m_nTimeErr = 0, m_nFalls = 0;     // (Tomas 2026-11-23: the timing - |the lead time her body matches best - the lead time she is at|)     // (clip tracker: fell - off until the ragdoll is activated again)
             std::vector<xanimation::rigid> m_LeadNow;     // (the reference the body is at now: the scorecard's)
@@ -1116,17 +1125,28 @@ namespace xlionrender
                                     St.m_bClipFallen = true; ++St.m_nFalls; xlioncore::physics::RagdollPoseGoalOff(*R.m_pRuntime); St.m_Lead.clear(); St.m_LeadNow.clear();
                                 }
                                 if (St.m_bClipFallen) bOk = true; else {
-                                constexpr float lead_lag_v = 0.6f, lead_keep_v = 1.2f;
+                                static const float lead_lag_v = [] { const char* e = xlionrender::Env("XLION_LEAD_LAG"); return e && *e ? float(std::atof(e)) : 0.6f; }(); const float lead_keep_v = lead_lag_v + 0.6f;     // (XLION_LEAD_LAG: the A/B of the lag margin - the window reaches 0.5 s ahead)
                                 float BundleFloor = 0; { std::string J; if (pC->Read("policy.json", J)) if (const auto p = J.find("\"floor\":"); p != std::string::npos) BundleFloor = float(std::atof(J.c_str() + p + 8)); }
                                 float Sc = 1; auto En = WorldFrame(T, pParent, Sc); En.m_P.m_Y -= BundleFloor * Sc;
                                 std::vector<xanimation::rigid> A0, Now; St.m_LeadT += pGame->m_Time.m_DeltaTime;
-                                if (AnimatedWorlds(Skin, pAnim, En, Sc, pGame->m_Time.m_FixedDeltaTime, A0, Now)) St.m_Lead.push_back({ St.m_LeadT, std::move(Now) });
+                                bool bLeadNow = false;
+                                if (animation_system::LeadDrawn())     // (XLION_LEAD_DRAWN: the drawn pose - model space - in the lowered entity frame)
+                                    if (auto* pAS = findSystem<animation_system>())
+                                        if (const auto It = pAS->m_LeadDrawn.find(Ent.m_Value); It != pAS->m_LeadDrawn.end() && It->second.first == pAS->m_Poser.m_Update && !It->second.second.empty())
+                                        {
+                                            Now.resize(It->second.second.size());
+                                            for (std::size_t b = 0; b < Now.size(); ++b) { const auto& M = It->second.second[b]; Now[b] = xanimation::rigid{ En.m_P + En.m_Q * (M.ExtractPosition() * Sc), (En.m_Q * M.ExtractRotation().NormalizeSafeCopy()).NormalizeCopy() }; }
+                                            bLeadNow = true; ++St.m_nLeadDrawn;
+                                        }
+                                if (!bLeadNow) bLeadNow = AnimatedWorlds(Skin, pAnim, En, Sc, pGame->m_Time.m_FixedDeltaTime, A0, Now);
+                                if (bLeadNow) { St.m_Lead.push_back({ St.m_LeadT, std::move(Now) }); St.m_LeadMeta.push_back({ St.m_LeadT, pAnim ? pAnim->m_Clip : -1, pAnim ? pAnim->m_Time : 0.0f, pAnim ? pAnim->m_MatchJumps : 0u, pAnim ? pAnim->m_WarpStride : 1.0f, pAnim ? pAnim->m_WarpAngle : 0.0f, pGame->m_Time.m_DeltaTime }); }
                                 while (St.m_Lead.size() > 2 && St.m_Lead[1].first < St.m_LeadT - lead_keep_v) St.m_Lead.pop_front();
+                                while (St.m_LeadMeta.size() > 2 && St.m_LeadMeta[1].m_T < St.m_LeadT - lead_keep_v) St.m_LeadMeta.pop_front();
                                 if (St.m_Lead.empty()) bOk = true;     // (no lead yet: she tracks as before)
                                 else
                                 {   // the reference at (now - lag + s), interpolated between the recorded frames (a slow frame records few)
-                                    auto Lead = std::make_shared<std::deque<std::pair<float, std::vector<xanimation::rigid>>>>(St.m_Lead); const float Base = std::max(St.m_LeadT - lead_lag_v, St.m_Lead.front().first); St.m_LeadBase = Base;     // (until the lead is lead_lag_v long she holds its first frame: no other tracking in between)
-                                    bOk = xlioncore::physics::RagdollClipTrack(*R.m_pRuntime, Key.c_str(), &Read, [Lead, Base](float s, std::vector<xanimation::rigid>& Out)
+                                    auto Lead = std::make_shared<std::deque<std::pair<float, std::vector<xanimation::rigid>>>>(St.m_Lead); const float Base = std::max(St.m_LeadT - lead_lag_v, St.m_Lead.front().first); St.m_LeadBase = Base; if (St.m_Lead.size() >= 2 && Base > St.m_Lead.front().first && Base + 0.5f > St.m_Lead.back().first + 1e-4f) ++St.m_nLeadClamp;     // (the window past the last recorded frame: its future clamped to that frame) (until the lead is lead_lag_v long she holds its first frame: no other tracking in between)
+                                    const auto RefAt = [Lead, Base](float s, std::vector<xanimation::rigid>& Out)
                                     {
                                         if (Lead->size() < 2) { Out = Lead->front().second; return true; } const float t = Base + s; std::size_t i = 1; while (i + 1 < Lead->size() && (*Lead)[i].first < t) ++i;
                                         const auto& [ta, A] = (*Lead)[i - 1]; const auto& [tb, B] = (*Lead)[i];
@@ -1139,7 +1159,37 @@ namespace xlionrender
                                             Out[k].m_Q = q.NormalizeCopy();
                                         }
                                         return true;
-                                    }, En.m_P.m_Y + BundleFloor * Sc, &Why);     // (the ground: where the entity stands)
+                                    };
+                                    bOk = xlioncore::physics::RagdollClipTrack(*R.m_pRuntime, Key.c_str(), &Read, RefAt, En.m_P.m_Y + BundleFloor * Sc, &Why);     // (the ground: where the entity stands)
+                                    if (const char* pDump = xlionrender::Env("XLION_LEAD_DUMP"); pDump && *pDump && St.m_pGraph)
+                                    {   // (diagnosis, Fable 2026-11-23: the lead AS PLAY GIVES IT - the reference at the body's time on a 60 Hz grid, body frames, in
+                                        // refexport's ref_<n>.csv layout (y above the clip's origin = the lowered entity frame), one file per tracking segment
+                                        // (activation); meta_<n>.csv: Play time and the Animation clip/time recorded with that lead frame)
+                                        static int s_nSeg = 0; if (St.m_DumpSeg < 0) { St.m_DumpSeg = s_nSeg++; St.m_DumpT = Base; }
+                                        char Fn[700]; std::snprintf(Fn, sizeof Fn, "%s/ref_%d.csv", pDump, St.m_DumpSeg); const bool bNew = St.m_DumpN == 0;
+                                        char Fm[700]; std::snprintf(Fm, sizeof Fm, "%s/meta_%d.csv", pDump, St.m_DumpSeg);
+                                        FILE* f = std::fopen(Fn, bNew ? "w" : "a"); FILE* m = std::fopen(Fm, bNew ? "w" : "a");
+                                        if (f && m)
+                                        {
+                                            if (bNew) { std::fprintf(f, "# %d 60 0 0\n", St.m_DumpSeg); std::fprintf(m, "# t,play_s,clip,clip_t,lead_t,match_jumps,warp_stride,warp_angle,frame_dt\n"); }
+                                            std::vector<xanimation::rigid> Bn;
+                                            for (; St.m_DumpT <= Base + 1e-5f; St.m_DumpT += 1.0f / 60.0f, ++St.m_DumpN)
+                                            {
+                                                RefAt(St.m_DumpT - Base, Bn); const float t = float(St.m_DumpN) / 60.0f;
+                                                std::fprintf(f, "%.4f", t);
+                                                for (const auto& Bd : St.m_pGraph->m_Bodies)
+                                                {
+                                                    if (std::size_t(Bd.m_Bone) >= Bn.size()) { std::fprintf(f, ",0,0,0,1,0,0,0"); continue; }
+                                                    const auto Bo = xanimation::BodyFromBone(Bn[std::size_t(Bd.m_Bone)], Bd);
+                                                    std::fprintf(f, ",%.5f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f", Bo.m_P.m_X, Bo.m_P.m_Y - En.m_P.m_Y, Bo.m_P.m_Z, Bo.m_Q.m_W, Bo.m_Q.m_X, Bo.m_Q.m_Y, Bo.m_Q.m_Z);
+                                                }
+                                                std::fprintf(f, "\n");
+                                                entity_state::lead_meta Mt; for (const auto& x : St.m_LeadMeta) if (x.m_T <= St.m_DumpT + 1e-5f) Mt = x;     // (the Animation when that lead frame was recorded)
+                                                std::fprintf(m, "%.4f,%.3f,%d,%.4f,%.4f,%u,%.4f,%.4f,%.4f\n", t, pGame->m_Time.m_Time - double(St.m_LeadT - St.m_DumpT), Mt.m_Clip, Mt.m_ClipT, St.m_DumpT, Mt.m_Jumps, Mt.m_Stride, Mt.m_Angle, Mt.m_Dt);
+                                            }
+                                        }
+                                        if (f) std::fclose(f); if (m) std::fclose(m);
+                                    }
                                     { std::size_t i = 0; while (i + 1 < Lead->size() && (*Lead)[i + 1].first <= Base) ++i; St.m_LeadNow = (*Lead)[i].second; }     // (the reference she is at now, for the scorecard)
                                     {   // (diagnosis, every 10 s and once at a blow-up - a body faster than 15 m/s: Play time, the lead's clip/time, the hips' offset from the lead)
                                         xlioncore::physics::ragdoll_stats Sx; xlioncore::physics::RagdollStats(*R.m_pRuntime, Sx); const bool bBlow = Sx.m_MaxSpeed > 15 && !St.m_bBlowLogged;
@@ -1147,8 +1197,8 @@ namespace xlionrender
                                         {
                                             const auto Hp = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P; float Off = -1;
                                             if (St.m_pGraph && std::size_t(St.m_pGraph->m_Bodies[0].m_Bone) < St.m_LeadNow.size()) { const auto& L = St.m_LeadNow[std::size_t(St.m_pGraph->m_Bodies[0].m_Bone)].m_P; Off = std::hypot(Hp.m_X - L.m_X, Hp.m_Z - L.m_Z); }
-                                            std::printf("[ClipTrack] entity 0x%llX %s play %.2f s, %.2f s after activation, lead clip %d time %.2f, hips y %.2f, hips-lead offset %.2f m, fastest body %d %.1f m/s\n", (unsigned long long)Ent.m_Value
-                                                , bBlow ? "BLOW-UP" : "tracking", pGame->m_Time.m_Time, St.m_Age, pAnim ? pAnim->m_Clip : -1, pAnim ? pAnim->m_Time : 0.0f, Hp.m_Y, Off, Sx.m_iFastest, Sx.m_MaxSpeed); std::fflush(stdout);
+                                            std::printf("[ClipTrack] entity 0x%llX %s play %.2f s, %.2f s after activation, lead clip %d time %.2f, hips y %.2f, hips-lead offset %.2f m, fastest body %d %.1f m/s, window clamped %d frames, drawn lead frames %d\n", (unsigned long long)Ent.m_Value
+                                                , bBlow ? "BLOW-UP" : "tracking", pGame->m_Time.m_Time, St.m_Age, pAnim ? pAnim->m_Clip : -1, pAnim ? pAnim->m_Time : 0.0f, Hp.m_Y, Off, Sx.m_iFastest, Sx.m_MaxSpeed, St.m_nLeadClamp, St.m_nLeadDrawn); std::fflush(stdout);
                                             if (bBlow) St.m_bBlowLogged = true; else St.m_NextTrackLog = St.m_Age + 10;
                                         }
                                     }
