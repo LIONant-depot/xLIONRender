@@ -243,6 +243,14 @@ namespace xlionrender
             const xmath::fvec3 MoveAsked = A.m_Move;              // (MoveInWorld: turned into the entity's frame for this frame's work, given back after)
             if (A.m_bMoveInWorld && pT) A.m_Move = pT->m_Rotation.ConjugateCopy() * A.m_Move;
             struct restore_move { animation& A; xmath::fvec3 M; ~restore_move() { A.m_Move = M; } } RestoreMove{ A, MoveAsked };
+            if (A.m_bStartStand && pGame)
+            {   // (XLION_LEAD_STARTSTAND, Fable 2026-11-23, R114: a clip tracker activated standing - the move asked builds from rest at the clips'
+                // measured acceleration (MeasureVehicleLimits) for this frame's whole work: matching's wish, the warp, the slide. Matching picks the start)
+                static const float s_StartAcc = [] { const char* e = xlionrender::Env("XLION_LEAD_STARTACCEL"); return e && *e ? float(std::atof(e)) : 0.0f; }();     // (m/s2; unset: the clips' measured limit)
+                float Acc = 5.0f; if (s_StartAcc > 0) Acc = s_StartAcc; else if (pPkg) if (const auto It = m_Match.find(pPkg); It != m_Match.end() && It->second.m_Limits.m_Accel > 0) Acc = It->second.m_Limits.m_Accel;
+                const float Mv = std::hypot(A.m_Move.m_X, A.m_Move.m_Z), Sv = std::min(Mv, A.m_StartVel.m_X + Acc * (pT ? pT->m_Scale.m_X : 1.0f) * pGame->m_Time.m_DeltaTime);
+                A.m_StartVel.m_X = Sv; if (Sv >= Mv) A.m_bStartStand = false; else if (Mv > 1e-6f) A.m_Move = A.m_Move * (Sv / Mv);     // (m_StartVel.m_X: the speed so far)
+            }
             // Collide: the move the world lets through (a probe of the asked move through the mover: into a wall, only its part along it) is what
             // warping and matching fit the clip to - asked as it was, the wall walker kept walking into the wall and her feet slid 115-125 cm/s
             // (motion trace) while the capsule slid along it (as Unreal's anim graph reads the movement component's velocity after collision)
@@ -1197,8 +1205,8 @@ namespace xlionrender
                                         {
                                             const auto Hp = xlioncore::physics::RagdollRootBody(*R.m_pRuntime, 1.0f).m_P; float Off = -1;
                                             if (St.m_pGraph && std::size_t(St.m_pGraph->m_Bodies[0].m_Bone) < St.m_LeadNow.size()) { const auto& L = St.m_LeadNow[std::size_t(St.m_pGraph->m_Bodies[0].m_Bone)].m_P; Off = std::hypot(Hp.m_X - L.m_X, Hp.m_Z - L.m_Z); }
-                                            std::printf("[ClipTrack] entity 0x%llX %s play %.2f s, %.2f s after activation, lead clip %d time %.2f, hips y %.2f, hips-lead offset %.2f m, fastest body %d %.1f m/s, window clamped %d frames, drawn lead frames %d\n", (unsigned long long)Ent.m_Value
-                                                , bBlow ? "BLOW-UP" : "tracking", pGame->m_Time.m_Time, St.m_Age, pAnim ? pAnim->m_Clip : -1, pAnim ? pAnim->m_Time : 0.0f, Hp.m_Y, Off, Sx.m_iFastest, Sx.m_MaxSpeed, St.m_nLeadClamp, St.m_nLeadDrawn); std::fflush(stdout);
+                                            std::printf("[ClipTrack] entity 0x%llX %s play %.2f s, %.2f s after activation, lead clip %d time %.2f, hips y %.2f, hips-lead offset %.2f m, fastest body %d %.1f m/s, window clamped %d frames, drawn lead frames %d, pose distance from the lead %.3f\n", (unsigned long long)Ent.m_Value
+                                                , bBlow ? "BLOW-UP" : "tracking", pGame->m_Time.m_Time, St.m_Age, pAnim ? pAnim->m_Clip : -1, pAnim ? pAnim->m_Time : 0.0f, Hp.m_Y, Off, Sx.m_iFastest, Sx.m_MaxSpeed, St.m_nLeadClamp, St.m_nLeadDrawn, St.m_LeadNow.empty() ? -1.0f : xlioncore::physics::RagdollPoseDistance(*R.m_pRuntime, St.m_LeadNow)); std::fflush(stdout);
                                             if (bBlow) St.m_bBlowLogged = true; else St.m_NextTrackLog = St.m_Age + 10;
                                         }
                                     }
@@ -1503,6 +1511,29 @@ namespace xlionrender
             return true;
         }
 
+        // XLION_LEAD_STARTSTAND (Fable 2026-11-23, R114: ask only what the body can do from where it is): a clip tracker's ragdoll activated - Play
+        // start, after every get-up - starts from rest: its Animation on the package's idle clip (the looped clip whose root moves least) at its
+        // start, matching's velocity-now 0 building up at the measured acceleration (animation_system: m_bStartStand). Not the walk where it was.
+        static bool LeadStartStand(void) noexcept { static const bool b = [] { const char* e = xlionrender::Env("XLION_LEAD_STARTSTAND"); return !(e && *e == '0'); }(); return b; }     // (ON by default since 2026-11-23: fix + this start 0.69 falls per tracked minute vs 1.52 without; XLION_LEAD_STARTSTAND=0 turns it off)
+        void StartStanding( const xecs::component::entity& Ent, animation& A, xgeom_skin::xgpu::geom& Geom ) noexcept
+        {
+            using namespace xlioncore::resources;
+            const std::uint64_t Pkg = A.m_Package.empty() ? Geom.getAnimationRef().m_Instance.m_Value : A.m_Package.m_Instance.m_Value;
+            auto* pPkg = Pkg ? static_cast<xanim_package::anim_package*>(GetResource(anim_package_type_guid_v.m_Value, Pkg)) : nullptr;
+            if (pPkg == nullptr) return;
+            int Idle = -1; float Best = 1e9f;
+            for (int c = 0; c < int(pPkg->getClips().size()); ++c)
+            {
+                const auto& C = pPkg->getClips()[std::size_t(c)]; if (!C.m_bLoop || C.m_FPS <= 0 || C.m_nFrames <= 1) continue;
+                const float L = float(C.m_nFrames) / float(C.m_FPS), Rm = xanimation::RootMotionAt(*pPkg, c, L).Length() / L;
+                if (Rm < Best) { Best = Rm; Idle = c; }
+            }
+            if (Idle < 0) return;
+            A.m_Clip = Idle; A.m_Time = 0; A.m_ClipName.clear(); A.m_bOneShot = false; A.m_ReturnClip = -1; A.m_MatchSinceJump = 0; A.m_MatchSince = 1e9f;
+            A.m_bStartStand = true; A.m_StartVel = xmath::fvec3(0, 0, 0);
+            std::printf("[ClipTrack] entity 0x%llX starts standing: clip %d (root %.2f m/s), the request builds up from rest\n", (unsigned long long)Ent.m_Value, Idle, Best); std::fflush(stdout);
+        }
+
         bool Activate( const xecs::component::entity& Ent, ragdoll& R, const skinned_mesh& Skin, const animation* pAnim, const xlioncore::transform& T, const xecs::component::parent* pParent, const xlioncore::game& Game ) noexcept
         {
             using namespace xlioncore::resources;
@@ -1513,6 +1544,7 @@ namespace xlionrender
             if (pRag == nullptr || pSkel == nullptr) return Fail("its Ragdoll or its Skinned Mesh's skeleton is not loaded");
             const int nB = int(pSkel->getBones().size());
             if (int(pRag->m_nBones) != nB) return Fail("the Ragdoll was made for another skeleton (bone count)");
+            if (LeadStartStand() && !R.m_Controller.empty() && pAnim) StartStanding(Ent, const_cast<animation&>(*pAnim), *pGeom);     // (before the body is made from the pose: she starts standing)
 
             auto& S = m_Skeletons[pSkel];
             if (int(S.m_Parent.size()) != nB) S = xanimation::MakeSkeleton(*pSkel);
