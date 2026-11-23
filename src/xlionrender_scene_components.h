@@ -511,6 +511,8 @@ namespace xlionrender
         std::array<xlioncore::physics::pushed_body, 4> m_Pushed{}; // (not saved)
         std::uint8_t        m_nPushed = 0;
         float               m_MatchSinceJump = 1e9f;    // (matching: seconds since the last jump)
+        bool                m_bStartStand = false;  // (XLION_LEAD_STARTSTAND: started standing by a clip tracker's activation - the request builds up from rest; not saved)
+        xmath::fvec3        m_StartVel {0, 0, 0};   // (X: the speed asked so far while it builds up; not saved)
         bool                m_bFootLock = false;    // a foot that is down and nearly still stays where it landed until it lifts (no slide from warps, blends, matching jumps)
         bool                m_bFootSteps = false;   // KS5: with FootLock, a planted foot pulled or twisted too far steps (turning on the spot) instead of sliding
         bool                m_bFootIK   = false;
