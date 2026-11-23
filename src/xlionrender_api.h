@@ -118,7 +118,7 @@ namespace xlionrender
         // not shimmer) is depth-tested against a depth half a pixel off - xeditor_tools::grid matches it per pixel. Version 19.
         virtual xmath::fvec2  OverlayJitter(const void* pWorld) noexcept = 0;
         // The tone-mapped image as it was just before the overlays of the world's last RenderScene (display-encoded RGBA8, the view's size), for an
-        // overlay to read what it draws over: the grid's lines go dark on light pixels and light on dark ones. Null before the first overlay. Version 20.
+        // overlay to read what it draws over: the grid's lines are what they draw over + a step, wrapped. Null before the first overlay. Version 20.
         virtual const xgpu::texture* OverlaySource(const void* pWorld) noexcept = 0;
     };
 
