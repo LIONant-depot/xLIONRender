@@ -65,6 +65,9 @@ float GridLinesCoverage(in const vec2 UV, in const vec2 Deriv, in const float Wi
 // UV: world XZ; ToFrag: the camera to the fragment (world)
 vec3 GridAlbedo(in const vec2 UV, in const vec3 ToFrag)
 {
+    // The plain ground only (2026-11-23, Tomas: "make the grid standard across all editors"): the lines and the axes are xeditor_tools::grid's,
+    // drawn over the lit image by the editor (they follow what is under them); what follows is kept for a ground with its own lines
+    if (true) return kGridBaseColor.rgb * kGridBaseColor.rgb;
     const float Dist      = max(length(ToFrag), 1e-4);
     const float CosTheta  = pow(abs(ToFrag.y / Dist), kGridFadePower);
     const float LogLength = log(Dist * kGridTanHalfFov) / log(kGridMajorDiv) - kGridBias;
