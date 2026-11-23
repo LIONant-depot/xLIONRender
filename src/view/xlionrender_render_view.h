@@ -39,6 +39,7 @@ namespace xlionrender
         xgpu::renderpass        m_ScenePass;
         xgpu::renderpass        m_OutputPass;
         xgpu::renderpass        m_OverlayPass;          // m_Output + m_Depth, loaded (not cleared): instance::Render's Overlay
+        int                     m_OverlayPhase = 1;     // which overlay pass the host's callback is in: 0 the grid's fill, 1 the rest (it reads m_OverlaySource)
         xgpu::texture           m_OverlaySource;        // a copy of m_Output taken just before the overlays (the grid's lines pick dark or light from what is under them); made on first use
         xgpu::pipeline_instance m_ToneMapInstance;      // samples m_HDR, m_Bloom[0], m_ExposureTex
         // scene::post_settings (xlionrender_post_comp.glsl). ponytail: made with the view, on or off: half a view's RGBA16F and its smaller levels; on demand if views multiply

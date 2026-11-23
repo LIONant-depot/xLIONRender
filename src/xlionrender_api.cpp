@@ -172,6 +172,11 @@ namespace xlionrender
                 const auto& J = pSystem->m_pScene->m_View.m_JitterNdc;
                 return { J.m_X, J.m_Y };
             }
+            int           OverlayPhase(const void* pWorld) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                return (!pSystem || !pSystem->m_pScene) ? 1 : pSystem->m_pScene->m_View.m_OverlayPhase;
+            }
             const xgpu::texture* OverlaySource(const void* pWorld) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);

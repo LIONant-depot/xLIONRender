@@ -120,6 +120,8 @@ namespace xlionrender
         // The tone-mapped image as it was just before the overlays of the world's last RenderScene (display-encoded RGBA8, the view's size), for an
         // overlay to read what it draws over: the grid's lines are what they draw over + a step, wrapped. Null before the first overlay. Version 20.
         virtual const xgpu::texture* OverlaySource(const void* pWorld) noexcept = 0;
+        // The overlay callback runs twice a frame: 0 (draw only the grid's fill), then the copy (OverlaySource), then 1 (everything else). Version 20.
+        virtual int           OverlayPhase(const void* pWorld) noexcept = 0;
     };
 
     constexpr const char* kCreateEditorName = "XLionRender_CreateEditor";

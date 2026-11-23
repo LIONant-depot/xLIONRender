@@ -6213,17 +6213,21 @@ namespace xlionrender
         // Editor overlays over the tone-mapped image, depth-tested against the scene
         if( Overlay )
         {
-            // What the overlays draw over, copied first: a pass cannot sample its own target (the grid's lines read it to stay visible on any colour)
-            if( !View.m_OverlaySource.m_Private )
-                (void)m_Device.Create(View.m_OverlaySource, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: overlay source" });
-            if( View.m_OverlaySource.m_Private ) Window.CopyTexture(View.m_Output, View.m_OverlaySource, View.m_Width, View.m_Height);
-            auto Cmd = Window.StartRenderPass(View.m_OverlayPass);
+            // The editor overlays in two passes over the tone-mapped image (Tomas 2026-11-23): phase 0 (the grid's fill), then a copy of the image
+            // (a pass cannot sample its own target), then phase 1 (the grid's lines and everything else) reading the copy: a line sees exactly
+            // what is under it, the fill included where the fill is drawn. A callback draws only its own phase (View.m_OverlayPhase)
             { auto& G = View.m_Graph; const int S = G.Begin("editor overlays", "Render target: tone-mapped output", false);
               G.Read(S, G.Resource("Textures: *", rg::lifetime::STATIC), rg::usage::SAMPLED);
               G.Read(S, G.Resource("Render target: overlay source", rg::lifetime::FRAME), rg::usage::SAMPLED);
               G.Write(S, G.Resource("Render target: tone-mapped output", rg::lifetime::EXTERNAL), rg::usage::COLOR_ATTACHMENT, rg::policy::PRESERVE);
               G.Write(S, G.Resource("Render target: depth", rg::lifetime::FRAME), rg::usage::DEPTH_ATTACHMENT, rg::policy::PRESERVE); }
-            Overlay(Cmd);
+            View.m_OverlayPhase = 0;
+            { auto Cmd = Window.StartRenderPass(View.m_OverlayPass); Overlay(Cmd); }
+            if( !View.m_OverlaySource.m_Private )
+                (void)m_Device.Create(View.m_OverlaySource, { .m_Format = xgpu::texture::format::R8G8B8A8_UNORM, .m_Width = View.m_Width, .m_Height = View.m_Height, .m_isGamma = false, .m_pName = "Render target: overlay source" });
+            if( View.m_OverlaySource.m_Private ) Window.CopyTexture(View.m_Output, View.m_OverlaySource, View.m_Width, View.m_Height);
+            View.m_OverlayPhase = 1;
+            { auto Cmd = Window.StartRenderPass(View.m_OverlayPass); Overlay(Cmd); }
         }
         {   // (R0b: the frame's declarations dumped - the largest view's: the editor's previews render too)
             static int s_DumpPixels = 0;
