@@ -172,6 +172,13 @@ namespace xlionrender
                 const auto& J = pSystem->m_pScene->m_View.m_JitterNdc;
                 return { J.m_X, J.m_Y };
             }
+            const xgpu::texture* OverlaySource(const void* pWorld) noexcept override
+            {
+                auto* pSystem = FindSystem(pWorld);
+                if (!pSystem || !pSystem->m_pScene) return nullptr;
+                const auto& T = pSystem->m_pScene->m_View.m_OverlaySource;
+                return T.m_Private ? &T : nullptr;
+            }
             bool          EditPost(const void* pWorld, const char* pEdit, char* pOut, int Capacity) noexcept override
             {
                 auto* pSystem = FindSystem(pWorld);

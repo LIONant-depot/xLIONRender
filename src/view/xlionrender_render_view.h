@@ -39,6 +39,7 @@ namespace xlionrender
         xgpu::renderpass        m_ScenePass;
         xgpu::renderpass        m_OutputPass;
         xgpu::renderpass        m_OverlayPass;          // m_Output + m_Depth, loaded (not cleared): instance::Render's Overlay
+        xgpu::texture           m_OverlaySource;        // a copy of m_Output taken just before the overlays (the grid's lines pick dark or light from what is under them); made on first use
         xgpu::pipeline_instance m_ToneMapInstance;      // samples m_HDR, m_Bloom[0], m_ExposureTex
         // scene::post_settings (xlionrender_post_comp.glsl). ponytail: made with the view, on or off: half a view's RGBA16F and its smaller levels; on demand if views multiply
         std::array<xgpu::texture, 6> m_Bloom;           // half the view's size, and half again
@@ -161,6 +162,7 @@ namespace xlionrender
         template< typename T_FN > void ForEachImage( T_FN&& Fn ) noexcept
         {
             Fn("Render target: HDR colour", m_HDR);               Fn("Render target: last frame's HDR", m_HDRPrev);
+            Fn("Render target: overlay source", m_OverlaySource);
             Fn("Render target: depth", m_Depth);                  Fn("Render target: prepass normals", m_GPreNormal);
             Fn("Render target: prepass ids", m_GPreId);           Fn("Render target: tile attributes", m_TileColor);
             Fn("Render target: tile graphs", m_TileGraphDepth);   Fn("Render target: exposure", m_ExposureTex);

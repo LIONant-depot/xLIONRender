@@ -2243,6 +2243,7 @@ namespace xlionrender
         View.m_bHDRPrev = false;
         if( View.m_Depth.m_Private )           m_Device.Destroy(std::move(View.m_Depth));
         if( View.m_Output.m_Private )          m_Device.Destroy(std::move(View.m_Output));
+        if( View.m_OverlaySource.m_Private )   m_Device.Destroy(std::move(View.m_OverlaySource));
         View.m_Width = View.m_Height = 0;
     }
 
