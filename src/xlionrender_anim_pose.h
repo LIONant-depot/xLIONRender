@@ -153,6 +153,25 @@ namespace xlionrender
                                             if (E.m_iBone == S.m_Warp.m_Legs[nDown].m_Foot && (E.m_Kind == xanim_package::event_kind::FOOTSTEP || E.m_Kind == xanim_package::event_kind::CONTACT)
                                                 && Time >= E.m_Time && Time <= E.m_Time + E.m_Duration) Down[nDown] = 1;
                                 }
+                                // (a motion space: a foot is down only when BOTH loops have it down at their phases - one sample planting while the other
+                                // swings slides in the blend, the lock pinned it and let go 26-31 cm off: MM-20)
+                                if (nDown && m_pOverlayAnim && m_pOverlayAnim->m_SpaceB >= 0 && m_pOverlayAnim->m_Clip == iClip && m_pOverlayAnim->m_SpaceB < int(pPkg->getClips().size()))
+                                {
+                                    const auto& Ca = pPkg->getClips()[std::size_t(iClip)]; const auto& Cb = pPkg->getClips()[std::size_t(m_pOverlayAnim->m_SpaceB)];
+                                    const float La = Ca.m_FPS > 0 ? float(Ca.m_nFrames) / float(Ca.m_FPS) : 0.0f, Lb = Cb.m_FPS > 0 ? float(Cb.m_nFrames) / float(Cb.m_FPS) : 0.0f;
+                                    const auto EvB = pPkg->getClipEvents(m_pOverlayAnim->m_SpaceB); bool bAnyB = false;
+                                    for (const auto& E : EvB) bAnyB |= E.m_Kind == xanim_package::event_kind::FOOTSTEP || E.m_Kind == xanim_package::event_kind::CONTACT;
+                                    if (La > 0 && Lb > 0 && bAnyB)
+                                    {
+                                        const float Tb = std::fmod(Time / La * Lb + m_pOverlayAnim->m_SpaceOff + 2 * Lb, Lb);
+                                        for (std::size_t l = 0; l < nDown; ++l)
+                                        {
+                                            bool bB = false;
+                                            for (const auto& E : EvB) if (E.m_iBone == S.m_Warp.m_Legs[l].m_Foot && (E.m_Kind == xanim_package::event_kind::FOOTSTEP || E.m_Kind == xanim_package::event_kind::CONTACT) && Tb >= E.m_Time && Tb <= E.m_Time + E.m_Duration) bB = true;
+                                            Down[l] = Down[l] && bB;
+                                        }
+                                    }
+                                }
                                 const int nStepsBefore = Tr.m_Lock.m_nSteps;
                                 xanimation::LockFeet(S.view(), S.m_Warp, m_AnimPose, pLockL2W->ExtractPosition(), pLockL2W->ExtractRotation().NormalizeSafeCopy(), pLockL2W->ExtractScale(), S.m_FootHeights, Dt, Tr.m_Lock, LockPm
                                                     , std::span<const std::uint8_t>(Down.data(), nDown));
