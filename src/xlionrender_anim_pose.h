@@ -573,6 +573,13 @@ namespace xlionrender
             if (Tr.m_ForceBlend > 0.0f) BlendTime = Tr.m_ForceBlend;          // (a hand-over's own blend: HandOver)
             if (bHad && Tr.m_Source != Source && BlendTime > 0.0f)
             {
+                {   // (the arms - clavicle to the fingers - settle 3x slower than the legs and spine, whose contacts need the short half-life: a jump
+                    // swung the whole arm within 0.05 s, read as a pop - mm_accept stick_taps 7.2 -> 2.4 pops/min, MM-9)
+                    const auto& Sk = *static_cast<const xskeleton::skeleton*>(pSkel); const auto Ro = Sk.getRoles(); const auto Bn = Sk.getBones();
+                    auto& Hs = Tr.m_In.m_HalfScale; Hs.assign(std::size_t(P.count()), 1.0f);
+                    if (Ro.size() == Bn.size() && Bn.size() == Hs.size())
+                        for (int i = 0; i < int(Hs.size()); ++i) for (int j = i; j >= 0; j = Bn[std::size_t(j)].m_iParent) { const int r = int(Ro[std::size_t(j)]); if (r >= 6 && r <= 9) { Hs[std::size_t(i)] = 3.0f; break; } if (r >= 1 && r <= 5) break; }
+                }
                 Tr.m_In.Start(Tr.m_Cur, Tr.m_Prev, P, P, Tr.m_StartDt > 0.0f ? Tr.m_StartDt : Dt, BlendTime * 0.25f);     // (a half-life of a quarter of the blend time: ~94 % gone by its end)
                 static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) { float W = 0; for (const auto& R : Tr.m_In.m_RotX) W = std::max(W, std::sqrt(R.Dot(R))); std::printf("[AnimBlend] entity %llu: a new source eases in over %.2f s (largest turn to absorb %.1f deg)\n", (unsigned long long)Entity, BlendTime, W * 57.29578f); }
