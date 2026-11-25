@@ -495,6 +495,8 @@ namespace xlionrender
             Wish = xanimation::ReachableWish(M.m_Db, Wish);        // (toward a direction the clips walk; warping turns them the rest)
             if (!A.m_bFollowParent) WishNow = Wish;
             xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
+            for (std::size_t g = 0; g < St.m_Played.size(); ++g) St.m_Played[g] = { int(A.m_MatchPlayed[g][0]), A.m_MatchPlayed[g][1], A.m_MatchPlayed[g][2], A.m_MatchPlayed[g][3] };
+            St.m_SegFrom = A.m_MatchSegFrom;
             xanimation::matching_params Pm;
             {   // (experiments: XLION_ANIM_CLIPCHANGE / XLION_ANIM_MINGAP override the jump cost and the shortest time between jumps)
                 static const float CC = [] { const char* e = xlionrender::Env("XLION_ANIM_CLIPCHANGE"); return e && *e ? float(std::atof(e)) : -1.0f; }();
@@ -514,6 +516,8 @@ namespace xlionrender
                 A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_bPlaying = true;
             }
             A.m_MatchSince = St.m_Since; A.m_MatchSinceJump = St.m_SinceJump; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
+            for (std::size_t g = 0; g < St.m_Played.size(); ++g) A.m_MatchPlayed[g] = { float(St.m_Played[g].m_Clip), St.m_Played[g].m_From, St.m_Played[g].m_To, St.m_Played[g].m_Age };
+            A.m_MatchSegFrom = St.m_SegFrom;
             static const bool bDbg = xlionrender::Env("XLION_ANIM_MATCH_DEBUG") != nullptr;      // (each search: the wish and every clip's best cost)
             if (bDbg && St.m_Since == 0)
             {
