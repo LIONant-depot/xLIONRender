@@ -587,6 +587,9 @@ namespace xlionrender
                     auto& Hs = Tr.m_In.m_HalfScale; Hs.assign(std::size_t(P.count()), 1.0f);
                     if (Ro.size() == Bn.size() && Bn.size() == Hs.size())
                         for (int i = 0; i < int(Hs.size()); ++i) for (int j = i; j >= 0; j = Bn[std::size_t(j)].m_iParent) { const int r = int(Ro[std::size_t(j)]); if (r >= 6 && r <= 9) { Hs[std::size_t(i)] = 3.0f; break; } if (r >= 1 && r <= 5) break; }
+                    Tr.m_In.m_HalfBase = Hs; Tr.m_In.m_KeepShort.assign(Hs.size(), 0);      // (MM-22: a bone that must turn far settles slower; the legs keep theirs)
+                    if (Ro.size() == Bn.size() && Bn.size() == Hs.size())
+                        for (int i = 0; i < int(Hs.size()); ++i) for (int j = i; j >= 0; j = Bn[std::size_t(j)].m_iParent) { const int r = int(Ro[std::size_t(j)]); if (r >= 10) { Tr.m_In.m_KeepShort[std::size_t(i)] = 1; break; } if (r >= 1) break; }
                 }
                 Tr.m_In.Start(Tr.m_Cur, Tr.m_Prev, P, P, Tr.m_StartDt > 0.0f ? Tr.m_StartDt : Dt, BlendTime * 0.25f);     // (a half-life of a quarter of the blend time: ~94 % gone by its end)
                 static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
