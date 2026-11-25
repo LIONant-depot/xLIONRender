@@ -153,7 +153,8 @@ namespace xlionrender
         }
 
         std::unordered_map<const xskeleton::skeleton*, xanimation::skeleton_data> m_Skeletons;        // (a mirrored clip's root motion: the skeleton's mirror table)
-        struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; xanimation::vehicle_limits m_Limits; };
+        struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; xanimation::vehicle_limits m_Limits;
+                          int m_nPkg = -1, m_SpA = -1, m_SpB = -1, m_SpN = 0; float m_SpOff = 0; };      // (a motion space: clips SpA..SpB, SpN samples after the package's clips)
         std::unordered_map<const xanim_package::anim_package*, match_db> m_Match;                      // K4: one database per package (ponytail: a reloaded package at the same address keeps its old database until the editor restarts)
 
         void operator()( const xecs::component::entity& Ent, animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT, const xecs::component::parent* pParent ) noexcept
@@ -193,6 +194,22 @@ namespace xlionrender
             const auto& Clip = pPkg->getClips()[std::size_t(A.m_Clip)];
             const float Length = Clip.m_FPS > 0 ? float(Clip.m_nFrames) / float(Clip.m_FPS) : 0.0f;
             if (Length <= 0) return;
+            // phase 2 motion space (A.m_SpaceB >= 0): Clip blended with B at SpaceW at the same phase; B's time from Clip's; the blend's cycle
+            // length is lerped, so Clip's clock runs at Length / that; the weight follows the asked speed (eased 0.3 s)
+            const bool bSpace = A.m_bMatching && !A.m_bOneShot && A.m_SpaceB >= 0 && A.m_SpaceB < int(pPkg->getClips().size()) && A.m_SpaceB != A.m_Clip;
+            if (!bSpace) A.m_SpaceB = -1;
+            const float LenB = bSpace ? [&] { const auto& Cb = pPkg->getClips()[std::size_t(A.m_SpaceB)]; return Cb.m_FPS > 0 ? float(Cb.m_nFrames) / float(Cb.m_FPS) : Length; }() : Length;
+            auto TimeB = [&](float t) { return t / Length * LenB + A.m_SpaceOff; };
+            float SpaceRate = 1.0f;
+            if (bSpace)
+            {
+                const float Va = xanimation::ClipVelocity(*pPkg, A.m_Clip).Length(), Vb = xanimation::ClipVelocity(*pPkg, A.m_SpaceB).Length();
+                const float Asked = std::hypot(A.m_Move.m_X, A.m_Move.m_Z) / std::max(1e-6f, A.m_Speed * (pT ? pT->m_Scale.m_X : 1.0f));
+                const float Wt = std::clamp((Asked - Va) / (std::fabs(Vb - Va) > 1e-3f ? Vb - Va : 1e-3f), 0.0f, 1.0f);
+                A.m_SpaceW += (Wt - A.m_SpaceW) * (1.0f - std::exp(-pGame->m_Time.m_DeltaTime / 0.3f));
+                const float Ls = Length + (LenB - Length) * A.m_SpaceW;
+                SpaceRate = Length / std::max(1e-4f, Ls); A.m_Time = Before + (A.m_Time - Before) * SpaceRate;
+            }
             const xanimation::skeleton_data* pSD = nullptr;        // mirrored: the skeleton's mirror table (events' bones, root motion)
             if (A.m_bMirror && pSkin && !pSkin->m_Geom.empty())
                 if (auto* pGeom = static_cast<xgeom_skin::xgpu::geom*>(GetResource(geom_skin_type_guid_v.m_Value, pSkin->m_Geom.m_Instance.m_Value)))
@@ -266,11 +283,11 @@ namespace xlionrender
             xmath::fvec3 ClipDir(0, 0, 0);                      // (the clip's travel, unit, before the turn: the eased turn is applied to it below)
             if (pT && (A.m_bRootMotion || A.m_bFollowParent) && A.m_Speed > 0 && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE && (A.m_Move.m_X != 0 || A.m_Move.m_Z != 0))
             {
-                auto CV = (A.m_bMatching ? xanimation::ClipVelocityAt(*pPkg, A.m_Clip, Before) : xanimation::ClipVelocity(*pPkg, A.m_Clip)) * (A.m_Speed * pT->m_Scale.m_X);      // (matching: around the frame playing - starts and stops do not walk evenly)      // ponytail: a uniform scale (X) for the clip's world speed
+                auto CV = (A.m_bMatching ? (bSpace ? xanimation::ClipVelocityAt(*pPkg, A.m_Clip, Before) * (1 - A.m_SpaceW) + xanimation::ClipVelocityAt(*pPkg, A.m_SpaceB, TimeB(Before)) * A.m_SpaceW : xanimation::ClipVelocityAt(*pPkg, A.m_Clip, Before)) : xanimation::ClipVelocity(*pPkg, A.m_Clip)) * (A.m_Speed * pT->m_Scale.m_X);      // (matching: around the frame playing - starts and stops do not walk evenly)      // ponytail: a uniform scale (X) for the clip's world speed
                 if (pSD) { const auto N = xanimation::ClipMirrorNormal(*pSD, *pPkg, A.m_Clip); CV = CV - N * (2.0f * CV.Dot(N)); }
                 Wp = xanimation::WarpFor(CV, A.m_Move);
                 if (const float L = CV.Length(); L > 1e-4f) ClipDir = CV * (1.0f / L);
-                A.m_Time = Before + pGame->m_Time.m_DeltaTime * A.m_Speed * A.m_SyncRate * Wp.m_Rate;
+                A.m_Time = Before + pGame->m_Time.m_DeltaTime * A.m_Speed * A.m_SyncRate * Wp.m_Rate * SpaceRate;
             }
             // (eased, not snapped: a matching jump changes the clip's travel and with it the angle - up to 90 deg in a frame swung the legs:
             // the AnimDemo pops, seen in the motion trace. The pose and the root motion both take the eased values)
@@ -308,7 +325,8 @@ namespace xlionrender
             // (its rotation and scale; a child's Transform is its parent's frame); mirrored: reflected through the skeleton's plane
             if (pT && A.m_bRootMotion && Clip.m_RootMotionMode != xanim_package::root_motion_mode::NONE)
             {
-                const auto Step = xanimation::RootStep(*pPkg, A.m_Clip, Before, A.m_bLoop ? A.m_Time : std::clamp(A.m_Time, 0.0f, Length));
+                auto Step = xanimation::RootStep(*pPkg, A.m_Clip, Before, A.m_bLoop ? A.m_Time : std::clamp(A.m_Time, 0.0f, Length));
+                if (bSpace) { const auto Sb = xanimation::RootStep(*pPkg, A.m_SpaceB, TimeB(Before), TimeB(A.m_Time)); Step.m_Move = Step.m_Move + (Sb.m_Move - Step.m_Move) * A.m_SpaceW; Step.m_Turn += (Sb.m_Turn - Step.m_Turn) * A.m_SpaceW; }
                 auto D = Step.m_Move; float Turn = Step.m_Turn;        // (the move in the character's frame now, the turn: a turning clip turns the entity)
                 if (pSD)
                 {
@@ -436,7 +454,7 @@ namespace xlionrender
             auto& SD = m_Skeletons[pSkel]; if (SD.m_Parent.size() != pSkel->getBones().size()) SD = xanimation::MakeSkeleton(*pSkel);
             if (!SD.m_Warp.valid()) return;
             auto& M = m_Match[&Pkg];
-            if (M.m_Clips.size() != std::size_t(Pkg.m_nClips))
+            if (M.m_nPkg != int(Pkg.m_nClips))
             {
                 M.m_Clips.clear();
                 for (int c = 0; c < int(Pkg.m_nClips); ++c)
@@ -452,6 +470,19 @@ namespace xlionrender
                     if (C.m_RootMotionMode != xanim_package::root_motion_mode::NONE) Mc.m_Root = [pPkg = &Pkg, c](float t) { return xanimation::RootMotionAt(*pPkg, c, t); };      // (none: the trajectory from the hips)
                     Mc.m_Turn = [pPkg = &Pkg, c](float t) { return xanimation::RootTurnAt(*pPkg, c, t); };
                     M.m_Clips.push_back(std::move(Mc));
+                }
+                M.m_nPkg = int(Pkg.m_nClips);
+                {   // phase 2 motion space (motion_space_with_matching_2026-11-25.md), first runtime slice: XLION_ANIM_SPACE="a:b:n" (two loops of the package,
+                    // n samples as matching entries); the authored asset comes later
+                    static const char* s_Space = xlionrender::Env("XLION_ANIM_SPACE");
+                    int a = -1, b = -1, n = 0;
+                    if (s_Space && std::sscanf(s_Space, "%d:%d:%d", &a, &b, &n) == 3 && n >= 2 && a >= 0 && b >= 0 && a < M.m_nPkg && b < M.m_nPkg && M.m_Clips[std::size_t(a)].m_bLoop && M.m_Clips[std::size_t(b)].m_bLoop)
+                    {
+                        auto FirstStep = [&](int c) { for (const auto& E : Pkg.getClipEvents(c)) if (E.m_Kind == xanim_package::event_kind::FOOTSTEP && E.m_iBone == SD.m_Warp.m_Legs.front().m_Foot) return E.m_Time; return 0.0f; };
+                        M.m_SpA = a; M.m_SpB = b; M.m_SpN = n; M.m_SpOff = FirstStep(b) - FirstStep(a) * M.m_Clips[std::size_t(b)].m_Length / M.m_Clips[std::size_t(a)].m_Length;
+                        for (int i = 0; i < n; ++i) M.m_Clips.push_back(xanimation::BlendLoops(M.m_Clips[std::size_t(a)], M.m_Clips[std::size_t(b)], float(i) / float(n - 1), M.m_SpOff));
+                        std::printf("[AnimMatch] motion space: clips %d <-> %d, %d samples\n", a, b, n);
+                    }
                 }
                 M.m_Db = xanimation::BuildMatchingDb(SD.view(), SD.m_Warp, SD.m_Rest, M.m_Clips);
                 M.m_Limits = xanimation::MeasureVehicleLimits(Pkg);
@@ -494,7 +525,10 @@ namespace xlionrender
             }
             Wish = xanimation::ReachableWish(M.m_Db, Wish);        // (toward a direction the clips walk; warping turns them the rest)
             if (!A.m_bFollowParent) WishNow = Wish;
-            xanimation::matching_state St; St.m_Clip = A.m_Clip; St.m_Time = A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
+            const bool bInSpace = A.m_SpaceB >= 0 && M.m_SpN > 0 && A.m_Clip == M.m_SpA && A.m_SpaceB == M.m_SpB;
+            const float LsA = M.m_Clips[std::size_t(std::clamp(A.m_Clip, 0, M.m_nPkg - 1))].m_Length;
+            const int iSample = bInSpace ? M.m_nPkg + int(std::lround(A.m_SpaceW * float(M.m_SpN - 1))) : -1;
+            xanimation::matching_state St; St.m_Clip = bInSpace ? iSample : A.m_Clip; St.m_Time = bInSpace ? A.m_Time / std::max(1e-4f, LsA) * M.m_Clips[std::size_t(iSample)].m_Length : A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
             for (std::size_t g = 0; g < St.m_Played.size(); ++g) St.m_Played[g] = { int(A.m_MatchPlayed[g][0]), A.m_MatchPlayed[g][1], A.m_MatchPlayed[g][2], A.m_MatchPlayed[g][3] };
             St.m_SegFrom = A.m_MatchSegFrom;
             xanimation::matching_params Pm;
@@ -513,7 +547,14 @@ namespace xlionrender
             {
                 static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s\n", St.m_Jumps, A.m_Clip, A.m_Time, St.m_Clip, St.m_Time);
-                A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_bPlaying = true;
+                if (St.m_Clip >= M.m_nPkg && M.m_SpN > 0)       // (a space sample: its first loop plays, the second blended at the sample's weight)
+                {
+                    const float W = float(St.m_Clip - M.m_nPkg) / float(M.m_SpN - 1), Ls = M.m_Clips[std::size_t(St.m_Clip)].m_Length;
+                    A.m_Clip = M.m_SpA; A.m_SpaceB = M.m_SpB; A.m_SpaceW = W; A.m_SpaceOff = M.m_SpOff;
+                    A.m_Time = St.m_Time / std::max(1e-4f, Ls) * M.m_Clips[std::size_t(M.m_SpA)].m_Length;
+                }
+                else { A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_SpaceB = -1; }
+                A.m_bPlaying = true;
             }
             A.m_MatchSince = St.m_Since; A.m_MatchSinceJump = St.m_SinceJump; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
             for (std::size_t g = 0; g < St.m_Played.size(); ++g) A.m_MatchPlayed[g] = { float(St.m_Played[g].m_Clip), St.m_Played[g].m_From, St.m_Played[g].m_To, St.m_Played[g].m_Age };

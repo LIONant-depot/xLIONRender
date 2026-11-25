@@ -100,6 +100,14 @@ namespace xlionrender
             if (!bSame) S = xanimation::MakeSkeleton(Skel);
             Out.resize(Bones.size());
             const bool bClip = pPkg && xanimation::SampleClip(S, *pPkg, iClip, Time, bMirror, m_AnimPose, m_AnimScratch);
+            if (bClip && m_pOverlayAnim && m_pOverlayAnim->m_SpaceB >= 0 && m_pOverlayAnim->m_Clip == iClip && m_pOverlayAnim->m_Time == Time && m_pOverlayAnim->m_SpaceB < int(pPkg->getClips().size()))
+            {   // (a motion space: the second loop at the same phase, blended; motion_space_with_matching_2026-11-25.md)
+                const auto& Ca = pPkg->getClips()[std::size_t(iClip)]; const auto& Cb = pPkg->getClips()[std::size_t(m_pOverlayAnim->m_SpaceB)];
+                const float La = Ca.m_FPS > 0 ? float(Ca.m_nFrames) / float(Ca.m_FPS) : 0.0f, Lb = Cb.m_FPS > 0 ? float(Cb.m_nFrames) / float(Cb.m_FPS) : 0.0f;
+                thread_local xanimation::pose Pb, Mix;
+                if (La > 0 && Lb > 0 && xanimation::SampleClip(S, *pPkg, m_pOverlayAnim->m_SpaceB, std::fmod(Time / La * Lb + m_pOverlayAnim->m_SpaceOff + 2 * Lb, Lb), bMirror, Pb, m_AnimScratch))
+                { xanimation::Blend(m_AnimPose, Pb, m_pOverlayAnim->m_SpaceW, Mix); m_AnimPose = Mix; }
+            }
             if (Entity == 0) { xanimation::ComputeBoneWorlds(S.view(), bClip ? m_AnimPose : S.m_Rest, Out); m_pAnimUsed = bClip ? &m_AnimPose : &S.m_Rest; return; }
             if (!bClip) m_AnimPose = S.m_Rest;
             Transition(Entity, bClip ? (std::uint64_t(reinterpret_cast<std::uintptr_t>(pPkg)) * 1000003u + std::uint64_t(iClip) * 2 + (bMirror ? 1 : 0) + std::uint64_t(Jumps) * 0x9E3779B97F4A7C15ull) : 1, &Skel, BlendTime, m_AnimPose);
