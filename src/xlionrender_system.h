@@ -480,7 +480,7 @@ namespace xlionrender
                     {
                         auto FirstStep = [&](int c) { for (const auto& E : Pkg.getClipEvents(c)) if (E.m_Kind == xanim_package::event_kind::FOOTSTEP && E.m_iBone == SD.m_Warp.m_Legs.front().m_Foot) return E.m_Time; return 0.0f; };
                         M.m_SpA = a; M.m_SpB = b; M.m_SpN = n; M.m_SpOff = FirstStep(b) - FirstStep(a) * M.m_Clips[std::size_t(b)].m_Length / M.m_Clips[std::size_t(a)].m_Length;
-                        for (int i = 0; i < n; ++i) M.m_Clips.push_back(xanimation::BlendLoops(M.m_Clips[std::size_t(a)], M.m_Clips[std::size_t(b)], float(i) / float(n - 1), M.m_SpOff));
+                        for (int i = 0; i < n; ++i) M.m_Clips.push_back(xanimation::BlendLoops(M.m_Clips[std::size_t(a)], M.m_Clips[std::size_t(b)], float(i) / float(n - 1), M.m_SpOff)); M.m_Clips.back().m_Group = 1;
                         std::printf("[AnimMatch] motion space: clips %d <-> %d, %d samples\n", a, b, n);
                     }
                 }
