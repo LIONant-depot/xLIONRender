@@ -154,7 +154,8 @@ namespace xlionrender
 
         std::unordered_map<const xskeleton::skeleton*, xanimation::skeleton_data> m_Skeletons;        // (a mirrored clip's root motion: the skeleton's mirror table)
         struct match_db { std::vector<xanimation::matching_clip> m_Clips; xanimation::matching_db m_Db; xanimation::vehicle_limits m_Limits;
-                          int m_nPkg = -1, m_SpA = -1, m_SpB = -1, m_SpN = 0; float m_SpOff = 0; };      // (a motion space: clips SpA..SpB, SpN samples after the package's clips)
+                          int m_nPkg = -1, m_SpA = -1, m_SpB = -1, m_SpN = 0; float m_SpOff = 0;
+                          std::vector<int> m_MirSrc, m_MirOf; };      // (mirrored entries: entry clip -> its source clip; source clip -> its mirrored entry, -1: none)      // (a motion space: clips SpA..SpB, SpN samples after the package's clips)
         std::unordered_map<const xanim_package::anim_package*, match_db> m_Match;                      // K4: one database per package (ponytail: a reloaded package at the same address keeps its old database until the editor restarts)
 
         void operator()( const xecs::component::entity& Ent, animation& A, const skinned_mesh* pSkin, xlioncore::transform* pT, const xecs::component::parent* pParent ) noexcept
@@ -484,6 +485,26 @@ namespace xlionrender
                         std::printf("[AnimMatch] motion space: clips %d <-> %d, %d samples\n", a, b, n);
                     }
                 }
+                {   // the mirror map (Tomas 2026-11-25 20:14Z): every matching clip without a "NoMirror" marker (its Mirrorable tick) also enters the
+                    // database MIRRORED through the skeleton's table - one authored side covers both (mm_accept MM-26). A clip and its mirror share a
+                    // matching group: no jump between them
+                    static const std::uint32_t NoMirror = xstrtool::CRC32("NoMirror");
+                    M.m_MirSrc.assign(M.m_Clips.size(), -1); M.m_MirOf.assign(std::size_t(M.m_nPkg), -1);
+                    if (!SD.m_Mirror.empty())
+                        for (int c = 0; c < M.m_nPkg; ++c)
+                        {
+                            if (M.m_Clips[std::size_t(c)].m_Length <= 0) continue;
+                            bool bNo = false; for (const auto& E : Pkg.getClipEvents(c)) bNo |= E.m_Kind == xanim_package::event_kind::MARKER && E.m_NameHash == NoMirror;
+                            if (bNo) continue;
+                            xanimation::matching_clip Mc = M.m_Clips[std::size_t(c)];
+                            const auto N = xanimation::ClipMirrorNormal(SD, Pkg, c);
+                            Mc.m_Sample = [pPkg = &Pkg, c, pS = &SD](float t, xanimation::pose& P) { xanimation::pose Scr; xanimation::SampleClip(*pS, *pPkg, c, t, true, P, Scr); };
+                            if (M.m_Clips[std::size_t(c)].m_Root) Mc.m_Root = [pPkg = &Pkg, c, N](float t) { const auto Rm = xanimation::RootMotionAt(*pPkg, c, t); return Rm - N * (2.0f * Rm.Dot(N)); };
+                            Mc.m_Turn = [pPkg = &Pkg, c](float t) { return -xanimation::RootTurnAt(*pPkg, c, t); };
+                            Mc.m_Group = 100 + c; M.m_Clips[std::size_t(c)].m_Group = 100 + c;
+                            M.m_MirOf[std::size_t(c)] = int(M.m_Clips.size()); M.m_Clips.push_back(std::move(Mc)); M.m_MirSrc.push_back(c);
+                        }
+                }
                 M.m_Db = xanimation::BuildMatchingDb(SD.view(), SD.m_Warp, SD.m_Rest, M.m_Clips);
                 M.m_Limits = xanimation::MeasureVehicleLimits(Pkg);
                 std::printf("[AnimMatch] limits (R114): top speed %.2f m/s, acceleration %.2f m/s2, turn %.0f deg/s\n", M.m_Limits.m_Speed, M.m_Limits.m_Accel, M.m_Limits.m_Turn * 57.29578f);
@@ -528,7 +549,8 @@ namespace xlionrender
             const bool bInSpace = A.m_SpaceB >= 0 && M.m_SpN > 0 && A.m_Clip == M.m_SpA && A.m_SpaceB == M.m_SpB;
             const float LsA = M.m_Clips[std::size_t(std::clamp(A.m_Clip, 0, M.m_nPkg - 1))].m_Length;
             const int iSample = bInSpace ? M.m_nPkg + int(std::lround(A.m_SpaceW * float(M.m_SpN - 1))) : -1;
-            xanimation::matching_state St; St.m_Clip = bInSpace ? iSample : A.m_Clip; St.m_Time = bInSpace ? A.m_Time / std::max(1e-4f, LsA) * M.m_Clips[std::size_t(iSample)].m_Length : A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
+            const int iMir = !bInSpace && A.m_bMirror && A.m_Clip >= 0 && A.m_Clip < int(M.m_MirOf.size()) ? M.m_MirOf[std::size_t(A.m_Clip)] : -1;     // (playing mirrored: the matcher sees its mirrored entry)
+            xanimation::matching_state St; St.m_Clip = bInSpace ? iSample : iMir >= 0 ? iMir : A.m_Clip; St.m_Time = bInSpace ? A.m_Time / std::max(1e-4f, LsA) * M.m_Clips[std::size_t(iSample)].m_Length : A.m_Time; St.m_Since = A.m_MatchSince + Dt; St.m_SinceJump = A.m_MatchSinceJump + Dt; St.m_Jumps = int(A.m_MatchJumps);
             for (std::size_t g = 0; g < St.m_Played.size(); ++g) St.m_Played[g] = { int(A.m_MatchPlayed[g][0]), A.m_MatchPlayed[g][1], A.m_MatchPlayed[g][2], A.m_MatchPlayed[g][3] };
             St.m_SegFrom = A.m_MatchSegFrom;
             xanimation::matching_params Pm;
@@ -547,13 +569,15 @@ namespace xlionrender
             {
                 static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
                 if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s\n", St.m_Jumps, A.m_Clip, A.m_Time, St.m_Clip, St.m_Time);
-                if (St.m_Clip >= M.m_nPkg && M.m_SpN > 0)       // (a space sample: its first loop plays, the second blended at the sample's weight)
+                if (St.m_Clip < int(M.m_MirSrc.size()) && M.m_MirSrc[std::size_t(St.m_Clip)] >= 0)      // (a mirrored entry: its source clip, played mirrored)
+                { A.m_Clip = M.m_MirSrc[std::size_t(St.m_Clip)]; A.m_Time = St.m_Time; A.m_SpaceB = -1; A.m_bMirror = true; }
+                else if (St.m_Clip >= M.m_nPkg && M.m_SpN > 0)       // (a space sample: its first loop plays, the second blended at the sample's weight)
                 {
                     const float W = float(St.m_Clip - M.m_nPkg) / float(M.m_SpN - 1), Ls = M.m_Clips[std::size_t(St.m_Clip)].m_Length;
-                    A.m_Clip = M.m_SpA; A.m_SpaceB = M.m_SpB; A.m_SpaceW = W; A.m_SpaceOff = M.m_SpOff;
+                    A.m_Clip = M.m_SpA; A.m_SpaceB = M.m_SpB; A.m_SpaceW = W; A.m_SpaceOff = M.m_SpOff; A.m_bMirror = false;
                     A.m_Time = St.m_Time / std::max(1e-4f, Ls) * M.m_Clips[std::size_t(M.m_SpA)].m_Length;
                 }
-                else { A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_SpaceB = -1; }
+                else { A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_SpaceB = -1; A.m_bMirror = false; }
                 A.m_bPlaying = true;
             }
             A.m_MatchSince = St.m_Since; A.m_MatchSinceJump = St.m_SinceJump; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
