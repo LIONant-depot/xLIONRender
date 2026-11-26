@@ -477,7 +477,9 @@ namespace xlionrender
                     // n samples as matching entries); the authored asset comes later
                     static const char* s_Space = xlionrender::Env("XLION_ANIM_SPACE");
                     int a = -1, b = -1, n = 0;
-                    if (s_Space && std::sscanf(s_Space, "%d:%d:%d", &a, &b, &n) == 3 && n >= 2 && a >= 0 && b >= 0 && a < M.m_nPkg && b < M.m_nPkg && M.m_Clips[std::size_t(a)].m_bLoop && M.m_Clips[std::size_t(b)].m_bLoop)
+                    if (!(s_Space && std::sscanf(s_Space, "%d:%d:%d", &a, &b, &n) == 3))      // (the package's own space: a clip's SpaceWith, R165 phase 2; the env still overrides)
+                        for (int c = 0; c < M.m_nPkg && a < 0; ++c) if (const auto& Cl = Pkg.getClips()[std::size_t(c)]; Cl.m_SpaceWith >= 0) { a = c; b = Cl.m_SpaceWith; n = Cl.m_SpaceSamples; }      // ponytail: one space per package (M keeps one); a list when a package needs two
+                    if (n >= 2 && a >= 0 && b >= 0 && a < M.m_nPkg && b < M.m_nPkg && M.m_Clips[std::size_t(a)].m_bLoop && M.m_Clips[std::size_t(b)].m_bLoop)
                     {
                         auto FirstStep = [&](int c) { for (const auto& E : Pkg.getClipEvents(c)) if (E.m_Kind == xanim_package::event_kind::FOOTSTEP && E.m_iBone == SD.m_Warp.m_Legs.front().m_Foot) return E.m_Time; return 0.0f; };
                         M.m_SpA = a; M.m_SpB = b; M.m_SpN = n; M.m_SpOff = FirstStep(b) - FirstStep(a) * M.m_Clips[std::size_t(b)].m_Length / M.m_Clips[std::size_t(a)].m_Length;
