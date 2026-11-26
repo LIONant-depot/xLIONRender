@@ -570,7 +570,7 @@ namespace xlionrender
             if (bJumped)
             {
                 static const bool bLog = [] { const char* e = xlionrender::Env("XLION_ANIM_EVENTS"); return e && *e == '1'; }();
-                if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s\n", St.m_Jumps, A.m_Clip, A.m_Time, St.m_Clip, St.m_Time);
+                const int FromClip = A.m_Clip; const float FromTime = A.m_Time;
                 if (St.m_Clip < int(M.m_MirSrc.size()) && M.m_MirSrc[std::size_t(St.m_Clip)] >= 0)      // (a mirrored entry: its source clip, played mirrored)
                 { A.m_Clip = M.m_MirSrc[std::size_t(St.m_Clip)]; A.m_Time = St.m_Time; A.m_SpaceB = -1; A.m_bMirror = true; }
                 else if (St.m_Clip >= M.m_nPkg && M.m_SpN > 0)       // (a space sample: its first loop plays, the second blended at the sample's weight)
@@ -581,6 +581,8 @@ namespace xlionrender
                 }
                 else { A.m_Clip = St.m_Clip; A.m_Time = St.m_Time; A.m_SpaceB = -1; A.m_bMirror = false; }
                 A.m_bPlaying = true;
+                if (bLog) std::printf("[AnimMatch] jump %d: clip %d at %.2f s -> clip %d at %.2f s%s\n", St.m_Jumps, FromClip, FromTime, St.m_Clip, St.m_Time
+                                     , A.m_SpaceB >= 0 ? std::format(" (motion space: clip {} <-> {} at weight {:.2f})", A.m_Clip, A.m_SpaceB, A.m_SpaceW).c_str() : A.m_bMirror ? " (mirrored)" : "");      // (design item 6: the space and its coordinate inspectable)
             }
             A.m_MatchSince = St.m_Since; A.m_MatchSinceJump = St.m_SinceJump; A.m_MatchJumps = std::uint32_t(St.m_Jumps);
             for (std::size_t g = 0; g < St.m_Played.size(); ++g) A.m_MatchPlayed[g] = { float(St.m_Played[g].m_Clip), St.m_Played[g].m_From, St.m_Played[g].m_To, St.m_Played[g].m_Age };
