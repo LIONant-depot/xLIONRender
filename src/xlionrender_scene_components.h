@@ -612,7 +612,7 @@ namespace xlionrender
         xmath::fvec3        m_InteractAt {0, 0, 0}; // the pivot (world)
         float               m_InteractYaw = 0;      // the pivot's heading, degrees about up (0: +Z)
         std::uint8_t        m_InteractPhase = 0;    // (0 none, 1 approach, 2 take, 3 interaction, 4 done, 5 declined; not saved)
-        std::uint8_t        m_InteractReason = 0;   // (declined: 1 no accepted entry, 2 outside entry tolerance; not saved)
+        std::uint8_t        m_InteractReason = 0;   // (declined: 1 no accepted entry, 2 outside entry tolerance, 3 approach blocked; not saved)
         std::int16_t        m_iInteractEntry = -1;  // (the entry chosen; not saved)
         int                 m_iInteractLoco = -1;   // (the clip locomotion played before the sequence: it comes back after)
         float               m_InteractClock = 0, m_InteractBudget = 0, m_InteractIn = 0;     // (seconds approaching, the most it may take, inside the tolerance)
@@ -635,7 +635,7 @@ namespace xlionrender
         , obj_member<"InteractAt", &animation::m_InteractAt, member_help<"The interaction's pivot in the world (a placed prop's pivot)">>
         , obj_member<"InteractYaw", &animation::m_InteractYaw, member_help<"The pivot's heading, degrees about up (0: +Z)">>
         , obj_member<"InteractPhase", &animation::m_InteractPhase, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"0 none, 1 approach, 2 take, 3 interaction, 4 done, 5 declined">>
-        , obj_member<"InteractReason", &animation::m_InteractReason, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"Declined: 1 no accepted entry, 2 outside entry tolerance">>
+        , obj_member<"InteractReason", &animation::m_InteractReason, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"Declined: 1 no accepted entry, 2 outside entry tolerance, 3 approach blocked">>
         , obj_member<"Finished",  &animation::m_bFinished, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"A one-shot ended this frame">>
         , obj_member<"BlendTime", &animation::m_BlendTime, member_help<"Seconds a change of Clip (or Mirror) eases from the pose shown into the new one, without sampling the old clip (inertialization); 0: a cut">>
         , obj_member<"RootMotion", &animation::m_bRootMotion, member_help<"While the game runs the entity moves where the clip walks (a clip compiled with RootMotion keeps its root in place and stores the walk apart); off: it walks in place">>
