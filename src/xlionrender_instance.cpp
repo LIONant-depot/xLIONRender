@@ -1555,7 +1555,13 @@ namespace xlionrender
         Setup.m_DepthStencil.m_bDepthTestEnable  = S.m_bDepthTest;
         Setup.m_DepthStencil.m_bDepthWriteEnable = S.m_bDepthWrite;
         // The color blends; the alpha (what was drawn: the tone map's coverage) only grows: "over" for translucent, kept for additive
-        if( S.m_Blend == material_state::blend::ALPHA ) { Setup.m_Blend = blend::getAlphaOriginal(); Setup.m_Blend.m_AlphaDstFactor = blend::factor::ONE_MINUS_SRC_ALPHA; }
+        // Translucent: thin glass, dual source - dst x the shader's second output (its transmittance) + its first (the light, already scaled
+        // by the opacity, its specular whole): xmaterial's XMAT_TRANSLUCENT (Output_PBR.glsl). The device's dualSrcBlend: xGPU enables what the GPU has
+        if( S.m_Blend == material_state::blend::ALPHA )
+        {
+            Setup.m_Blend = blend{ .m_bEnable = true, .m_ColorSrcFactor = blend::factor::ONE, .m_ColorDstFactor = blend::factor::SRC1_COLOR
+                                 , .m_AlphaSrcFactor = blend::factor::ONE, .m_AlphaDstFactor = blend::factor::ONE_MINUS_SRC_ALPHA };
+        }
         if( S.m_Blend == material_state::blend::ADD )   { Setup.m_Blend = blend::getAdd(); Setup.m_Blend.m_AlphaSrcFactor = blend::factor::ZERO; Setup.m_Blend.m_AlphaDstFactor = blend::factor::ONE; }
     }
 

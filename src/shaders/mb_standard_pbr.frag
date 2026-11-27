@@ -69,7 +69,7 @@ layout(location = 0) in VaryingFull In;
 layout(location = 14) in vec4 InPrevClip;      // the G-buffer variant: last frame's clip position (the vertex shaders'; w 0: none)
 layout(location = 1) out vec4 OutGMotion;      // its second target: last frame's ndc xy, clip w, 1 (0: the camera's reprojection)
 #endif
-#if !defined(XLION_LDR_OUTPUT) && !defined(XLION_GBUFFER_OUTPUT) && !defined(XLION_TAIL_SCREEN)
+#if !defined(XLION_LDR_OUTPUT) && !defined(XLION_GBUFFER_OUTPUT) && !defined(XLION_TAIL_SCREEN) && !defined(XMAT_TRANSLUCENT)     // (a translucent one blends dual source: one target only)
 // The G-buffer prepass (xLIONRender gi_gbuffer_gather: a masked material's cutout drawn into it): the world normal (octahedral) and the
 // submesh instance (slot + 1, cluster; the compiler's push constants XMAT_PUSH_*) - xlionrender_gprepass_frag.glsl's targets 1 and 2.
 // Elsewhere nothing is attached there: discarded. The graph's cutout calls XLION_GPRE_OUT() before it returns
@@ -432,6 +432,11 @@ void GIPixelGI(in const vec3 inNormal, in const vec3 N, in const vec3 V, in cons
 #endif
 
 //-------------------------------------------------------------------------------------------
+// The specular part of PBRLighting's result (the sun's and the environment's or the flat ambient's): a translucent material keeps it whole
+// while its diffuse is scaled by its opacity (thin glass keeps its highlights: Output_PBR.glsl XMAT_TRANSLUCENT).
+// ponytail: the local lights' specular stays inside the diffuse part (scaled by the opacity); split LocalLights' sum if glass under lamps needs it
+vec3 g_SpecLit = vec3(0.0);
+
 // PBRLighting: 2025-Inspired, Quality/Perf Optimized
 //-------------------------------------------------------------------------------------------
 // Insights from 2020-2025: EON diffuse (energy/reciprocity over Burley; fixes 30% loss/dark edges); multiscatter compensation (UE5/Filament 2020s, neural-validated).
@@ -478,12 +483,14 @@ vec3 PBRLighting
 	vec3	F_grazing			= FresnelSchlick(0.0, F0);
 	vec3	ambientSpec			= F_grazing * UBOLight.AmbientLightColor.rgb * inAO * (1.0 - inRoughness) * 0.04;
 	vec3	ambient				= ambientDiffuse + ambientSpec;
+	g_SpecLit = ambientSpec;
 #ifndef XLION_LDR_OUTPUT
 	g_CapRoughness = inRoughness; g_CapF0 = inF0;
 	if (!TILE_ABLATE(1u)) {
 	GIPixelGI(inNormal, N, V, inAlbedo, inMetalic, inEmissiveColor);
-	ambient *= g_ScreenAO;
+	ambient *= g_ScreenAO; g_SpecLit *= g_ScreenAO;
 	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) ambient = EnvLighting(N, V, NdotV, inAlbedo, F0, UBOLight.EnvParams.z > 1.5 ? fract(UBOLight.EnvParams.z) : max(inRoughness, MIN_ROUGHNESS), inMetalic, inAO * g_ScreenAO);   // the sky probe
+	if (UBOLight.EnvParams.x > 0.5 || UBOLight.ProbeCount.x > 0.5 || g_GI.w > 0.5) g_SpecLit = g_EnvSpecular;
 	}
 #endif
 
@@ -558,6 +565,7 @@ vec3 PBRLighting
 	vec3	lightTint			= BlackbodyTint(UBOLight.LightParams.y); // Apply temperature shift
 	vec3	radiance			= UBOLight.LightColor.rgb * lightTint * att * UBOLight.LightParams.z; // Apply intensity mult
 	vec3	directLighting		= (diffuse + specular) * radiance * NdotL * Shadow;
+	g_SpecLit += specular * radiance * NdotL * Shadow;
 
 	return GIDebugOr(ReflDebugOr(VSMDebugOr(ambient + directLighting + Local + emissive)));     // (the GI's debug and capture outputs last: a capture under the reflection debug view is still the material's)
 }
