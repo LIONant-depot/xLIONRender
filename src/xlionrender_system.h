@@ -258,6 +258,60 @@ namespace xlionrender
                     A.m_MoveAhead = Ahead;
                 }
             }
+            // Smart Primitive step 5: an interaction asked (Interact): an accepted entry chosen, walked to by locomotion (Move/Face, world), its
+            // take then the interaction clip played as one-shots chained through the one-shot's way back; never a snap. ponytail: the nearest entry,
+            // no path or blocker test ("approach blocked" not detected); the take is not warped onto the clip's first frame (the entry tolerance is the error)
+            if (A.m_Interact.empty()) { A.m_InteractHash = 0; A.m_InteractPhase = 0; }
+            else if (pPkg && pT)
+            {
+                const float Dt = pGame->m_Time.m_DeltaTime;
+                const auto Ies = pPkg->getInteractions();
+                if (const auto H = xstrtool::CRC32(A.m_Interact); H != A.m_InteractHash)       // a new request: choose the nearest accepted entry
+                {
+                    A.m_InteractHash = H; A.m_InteractPhase = 5; A.m_InteractReason = 1; A.m_iInteractEntry = -1; A.m_InteractClock = 0; A.m_InteractIn = 0;
+                    const float Py = A.m_InteractYaw * 0.017453293f, c = std::cos(Py), s = std::sin(Py); float Best = 1e30f;
+                    for (int e = 0; e < int(Ies.size()); ++e)
+                    {
+                        const auto& E = Ies[std::size_t(e)];
+                        if (E.m_NameHash != H || E.m_iTake < 0 || E.m_iClip < 0 || E.m_iTake >= int(pPkg->getClips().size()) || E.m_iClip >= int(pPkg->getClips().size())) continue;
+                        const float dx = A.m_InteractAt.m_X + c * E.m_X + s * E.m_Z - pT->m_Position.m_X, dz = A.m_InteractAt.m_Z - s * E.m_X + c * E.m_Z - pT->m_Position.m_Z;
+                        if (const float d = std::hypot(dx, dz); d < Best) { Best = d; A.m_iInteractEntry = std::int16_t(e); }
+                    }
+                    if (A.m_iInteractEntry >= 0) { A.m_InteractPhase = 1; A.m_InteractReason = 0; A.m_InteractBudget = Best / 0.7f + 6.0f; }
+                    std::printf("[Animation] Interact '%s': %s\n", A.m_Interact.c_str(), A.m_iInteractEntry >= 0 ? std::format("entry {} chosen, {:.2f} m away", A.m_iInteractEntry, Best).c_str() : "declined - no accepted entry");
+                }
+                const auto* pE = A.m_iInteractEntry >= 0 && A.m_iInteractEntry < int(Ies.size()) ? &Ies[std::size_t(A.m_iInteractEntry)] : nullptr;
+                if (A.m_InteractPhase == 1 && pE)            // approach: walk to the entry's start, face its heading when near
+                {
+                    const float Py = A.m_InteractYaw * 0.017453293f, c = std::cos(Py), s = std::sin(Py), Hs = Py + pE->m_Yaw * 0.017453293f;
+                    xmath::fvec3 D(A.m_InteractAt.m_X + c * pE->m_X + s * pE->m_Z - pT->m_Position.m_X, 0, A.m_InteractAt.m_Z - s * pE->m_X + c * pE->m_Z - pT->m_Position.m_Z);
+                    const float Dist = D.Length() / std::max(pT->m_Scale.m_X, 1e-6f);
+                    const auto Fw = pT->m_Rotation * xmath::fvec3(0, 0, 1);
+                    float dYaw = std::atan2(Fw.m_X, Fw.m_Z) - Hs; dYaw = std::abs(std::remainder(dYaw, 6.2831853f)) * 57.29578f;
+                    A.m_bMoveInWorld = true;
+                    A.m_Move = Dist > 0.08f ? D * (std::min(1.4f, 1.2f * Dist) / std::max(D.Length(), 1e-6f)) * pT->m_Scale.m_X : xmath::fvec3(0, 0, 0);
+                    if (Dist < 1.0f) { A.m_Face = xmath::fvec3(std::sin(Hs), 0, std::cos(Hs)); A.m_bFaceMove = false; } else { A.m_Face = xmath::fvec3(0, 0, 0); A.m_bFaceMove = true; }
+                    A.m_InteractClock += Dt; A.m_InteractIn = (Dist <= 0.15f && dYaw <= 15.0f) ? A.m_InteractIn + Dt : 0.0f;
+                    if (A.m_InteractIn >= 0.3f)               // settled inside the entry's tolerance: the take, then the interaction (the one-shot's way back)
+                    {
+                        A.m_iInteractLoco = A.m_Clip; A.m_ReturnClip = pE->m_iClip; A.m_ReturnTime = 0;
+                        A.m_Clip = pE->m_iTake; A.m_Time = 0; A.m_bOneShot = true; A.m_bPlaying = true; A.m_SpaceB = -1; A.m_bMirror = false;
+                        A.m_InteractPhase = 2; A.m_Move = xmath::fvec3(0, 0, 0); A.m_Face = xmath::fvec3(0, 0, 0); A.m_bFaceMove = false;
+                        std::printf("[Animation] Interact '%s': at entry %d (%.1f cm, %.1f deg off) - take, then the interaction\n", A.m_Interact.c_str(), int(A.m_iInteractEntry), Dist * 100.0f, dYaw);
+                    }
+                    else if (A.m_InteractClock > A.m_InteractBudget)
+                    {
+                        A.m_InteractPhase = 5; A.m_InteractReason = 2; A.m_Move = xmath::fvec3(0, 0, 0); A.m_Face = xmath::fvec3(0, 0, 0);
+                        std::printf("[Animation] Interact '%s': declined - outside entry tolerance after %.1f s (%.1f cm, %.1f deg off)\n", A.m_Interact.c_str(), A.m_InteractClock, Dist * 100.0f, dYaw);
+                    }
+                }
+                else if (A.m_InteractPhase == 2 || A.m_InteractPhase == 3)
+                {
+                    A.m_bMoveInWorld = true; A.m_Move = xmath::fvec3(0, 0, 0); A.m_Face = xmath::fvec3(0, 0, 0); A.m_bFaceMove = false;
+                    if (!A.m_bOneShot && A.m_InteractPhase == 2) { A.m_ReturnClip = A.m_iInteractLoco; A.m_ReturnTime = 0; A.m_bOneShot = true; A.m_InteractPhase = 3; }     // (the take ended on the interaction's first frame: it plays once, locomotion after)
+                    else if (!A.m_bOneShot && A.m_InteractPhase == 3) { A.m_InteractPhase = 4; std::printf("[Animation] Interact '%s': done\n", A.m_Interact.c_str()); }
+                }
+            }
             const xmath::fvec3 MoveAsked = A.m_Move;              // (MoveInWorld: turned into the entity's frame for this frame's work, given back after)
             if (A.m_bMoveInWorld && pT) A.m_Move = pT->m_Rotation.ConjugateCopy() * A.m_Move;
             struct restore_move { animation& A; xmath::fvec3 M; ~restore_move() { A.m_Move = M; } } RestoreMove{ A, MoveAsked };

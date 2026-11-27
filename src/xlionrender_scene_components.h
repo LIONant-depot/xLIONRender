@@ -606,6 +606,17 @@ namespace xlionrender
         float               m_RequestStart = 0;     // (a request's start in its clip, s: used once by the next request, then 0; not saved)
         int                 m_ReturnClip = -1;      // (a one-shot's way back; not saved)
         float               m_ReturnTime = 0;
+        // Smart Primitive step 5: "use that interaction" - the package's interaction by name, placed at a pivot in the world (a level instance's
+        // Transform: At, Yaw). Locomotion walks to an accepted entry, then its take and the interaction clip play as one committed sequence; never a snap
+        std::string         m_Interact;             // empty: none (clearing it ends the request; a new name is a new request)
+        xmath::fvec3        m_InteractAt {0, 0, 0}; // the pivot (world)
+        float               m_InteractYaw = 0;      // the pivot's heading, degrees about up (0: +Z)
+        std::uint8_t        m_InteractPhase = 0;    // (0 none, 1 approach, 2 take, 3 interaction, 4 done, 5 declined; not saved)
+        std::uint8_t        m_InteractReason = 0;   // (declined: 1 no accepted entry, 2 outside entry tolerance; not saved)
+        std::int16_t        m_iInteractEntry = -1;  // (the entry chosen; not saved)
+        int                 m_iInteractLoco = -1;   // (the clip locomotion played before the sequence: it comes back after)
+        float               m_InteractClock = 0, m_InteractBudget = 0, m_InteractIn = 0;     // (seconds approaching, the most it may take, inside the tolerance)
+        std::uint32_t       m_InteractHash = 0;     // (the request being served)
         std::array<animation_fired, 8> m_Fired{};   // the events that fired THIS frame (the Animation system refills it each update; a game system reads it after)
         std::uint8_t        m_nFired    = 0;        // ponytail: 8 a frame; more in one frame (a long step over a dense clip) are counted in m_nEvents, not listed
 
@@ -620,6 +631,11 @@ namespace xlionrender
         , obj_member<"Mirror",  &animation::m_bMirror, member_help<"Plays the clip mirrored left/right (a left-foot kick becomes a right-foot one) from the skeleton's mirror table: no second clip, no extra memory. A skeleton with no left/right pairs plays it as authored">>
         , obj_member<"ClipName",  &animation::m_ClipName, member_help<"Plays a clip by its name in the package (a game's request: Run, Kick...): Clip follows it; empty: Clip by index. Resolved while the game runs">>
         , obj_member<"OneShot",   &animation::m_bOneShot, member_help<"With ClipName: that clip plays once, then the clip before it comes back where it was (both eased in by BlendTime); Finished says when">>
+        , obj_member<"Interact",  &animation::m_Interact, member_help<"Smart Primitive: an interaction of the package by name (Sit): locomotion (MotionMatching) walks to an accepted entry, then its take and the interaction play once; never a snap. Empty: none">>
+        , obj_member<"InteractAt", &animation::m_InteractAt, member_help<"The interaction's pivot in the world (a placed prop's pivot)">>
+        , obj_member<"InteractYaw", &animation::m_InteractYaw, member_help<"The pivot's heading, degrees about up (0: +Z)">>
+        , obj_member<"InteractPhase", &animation::m_InteractPhase, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"0 none, 1 approach, 2 take, 3 interaction, 4 done, 5 declined">>
+        , obj_member<"InteractReason", &animation::m_InteractReason, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"Declined: 1 no accepted entry, 2 outside entry tolerance">>
         , obj_member<"Finished",  &animation::m_bFinished, member_flags<flags::SHOW_READONLY, flags::DONT_SAVE>, member_help<"A one-shot ended this frame">>
         , obj_member<"BlendTime", &animation::m_BlendTime, member_help<"Seconds a change of Clip (or Mirror) eases from the pose shown into the new one, without sampling the old clip (inertialization); 0: a cut">>
         , obj_member<"RootMotion", &animation::m_bRootMotion, member_help<"While the game runs the entity moves where the clip walks (a clip compiled with RootMotion keeps its root in place and stores the walk apart); off: it walks in place">>
